@@ -1,0 +1,73 @@
+# Dependency updates arrive as PRs to judge on their own merits: merge the
+# green ones. A major that needs code changes is better done as a worked PR
+# of its own; close the Dependabot PR (which ignores that version) once that
+# work is under way. Weekly, Saturdays 04:00 Eastern.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: saturday
+      time: "04:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    # Majors match no group, so each gets a PR of its own.
+    groups:
+      non-major:
+        update-types: [minor, patch]
+
+  - package-ecosystem: swift
+    directory: /native/local-inference
+    schedule:
+      interval: weekly
+      day: saturday
+      time: "04:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: chore
+      include: scope
+    # Majors match no group, so each gets a PR of its own.
+    groups:
+      non-major:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /site
+    schedule:
+      interval: weekly
+      day: saturday
+      time: "04:00"
+      timezone: America/New_York
+    open-pull-requests-limit: 5
+    versioning-strategy: increase
+    commit-message:
+      prefix: chore
+      include: scope
+    # Majors match no group, so each gets a PR of its own.
+    groups:
+      instantdb:
+        patterns: ["@instantdb/*", "instant-cli"]
+      runtime-non-major:
+        dependency-type: production
+        update-types: [minor, patch]
+      dev-non-major:
+        dependency-type: development
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: saturday
+      time: "04:00"
+      timezone: America/New_York
+    commit-message:
+      prefix: chore
+    groups:
+      github-actions:
+        patterns: ["*"]
