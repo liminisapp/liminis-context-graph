@@ -50,7 +50,10 @@ env:
 
 jobs:
   windows:
-    runs-on: windows-latest
+    # WINDOWS_RUNNER (a repo variable) routes this job to the self-hosted Windows runner; unset it
+    # to fall back to windows-latest. Pull requests from forks always run hosted: this repo is
+    # public, and a self-hosted runner would otherwise execute a stranger's code on that machine.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
