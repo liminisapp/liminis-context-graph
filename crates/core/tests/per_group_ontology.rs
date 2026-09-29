@@ -444,6 +444,7 @@ fn ontology_with(mode: OntologyMode, names: &[&str]) -> Ontology {
                 name: n.to_string(),
                 description: None,
                 parent: None,
+                identity: false,
             })
             .collect(),
         relation_types: vec![],

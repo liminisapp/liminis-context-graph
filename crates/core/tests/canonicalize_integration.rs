@@ -44,6 +44,7 @@ fn test_ontology() -> Arc<Ontology> {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
         }],
         ancestor_map: HashMap::new(),
         relation_types: vec![

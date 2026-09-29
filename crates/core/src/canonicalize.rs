@@ -501,6 +501,7 @@ mod tests {
                 name: "Person".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
             }],
             ancestor_map: std::collections::HashMap::new(),
             relation_types: vec![

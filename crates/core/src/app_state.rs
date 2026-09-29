@@ -682,6 +682,7 @@ mod tests {
                     name: n.to_string(),
                     description: None,
                     parent: None,
+                    identity: false,
                 })
                 .collect(),
             relation_types: vec![],
