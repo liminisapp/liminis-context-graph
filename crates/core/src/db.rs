@@ -2246,9 +2246,11 @@ impl<'db> Conn<'db> {
     /// endpoint resolution, which must see the default kind plus the group's identity-bearing
     /// kinds but never asserted kinds it did not create (#615: extraction never touches them).
     ///
-    /// One indexed probe per kind; on a total miss a single group scan (which also self-heals
-    /// rows whose `kind`/`lookup_key` were never written) is filtered to `kinds`, exactly like
-    /// `get_entity_by_name_ci_with_scan_fallback`. Callers treat `len() > 1` as ambiguity.
+    /// One indexed probe per kind; whenever any listed kind's probe missed, a single group scan
+    /// (which also self-heals rows whose `kind`/`lookup_key` were never written) is filtered to
+    /// `kinds` and fills in only the kinds the probes did not resolve. Scanning on a partial
+    /// miss, not just a total one, keeps a NULL-keyed row of one kind from being masked by an
+    /// indexed row of another. Callers treat `len() > 1` as ambiguity.
     pub fn resolve_entities_by_name_in_kinds(
         &self,
         name: &str,
@@ -2267,14 +2269,20 @@ impl<'db> Conn<'db> {
                 }
             }
         }
-        if out.is_empty() {
+        // Scan whenever any requested kind missed its probe, not only on a total miss: a kind
+        // whose same-named row has a NULL/stale `lookup_key` would otherwise be hidden by a
+        // sibling kind's indexed hit, turning an ambiguous name into a silent `Found`.
+        let mut seen_kinds: BTreeSet<String> = out.iter().map(|r| r.kind.clone()).collect();
+        let distinct_kinds: BTreeSet<&String> = kinds.iter().collect();
+        if seen_kinds.len() < distinct_kinds.len() {
             self.record_lookup_key_fallback_scan();
-            let mut seen_kinds = BTreeSet::new();
             for row in self.scan_entities_by_name_ci(name, group_id, None)? {
                 if !kinds.contains(&row.kind) {
                     continue;
                 }
                 self.self_heal_lookup_key(&row);
+                // The scan is ordered `created_at, uuid`: the first row per kind is its winner,
+                // and kinds the probes already resolved keep the probe's row.
                 if seen_kinds.insert(row.kind.clone()) {
                     out.push(row);
                 }

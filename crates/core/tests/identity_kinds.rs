@@ -427,6 +427,73 @@ async fn ambiguous_cross_batch_endpoint_drops_the_edge() {
     assert_eq!(edge_count(&db), 0);
 }
 
+/// A NULL-keyed row of one kind must not be masked by an indexed row of another: the scan runs on
+/// a partial probe miss, so the name stays `Ambiguous` instead of silently binding to the
+/// indexed kind.
+#[tokio::test]
+async fn null_lookup_key_in_one_kind_does_not_mask_ambiguity() {
+    let (db, _d) = make_db();
+    let onto = ontology(OntologyMode::Open, &[("Person", true, None)]);
+    let state = make_state(
+        Arc::clone(&db),
+        None,
+        Some(onto),
+        vec![
+            extraction(
+                vec![ent("Aurora", "Person"), ent("Aurora", "Technology")],
+                vec![],
+            ),
+            extraction(
+                vec![ent("Widget", "Gadget")],
+                vec![edge("Widget", "Aurora")],
+            ),
+        ],
+    );
+    ingest(&state, G, 1).await.unwrap();
+    let kinds = vec!["Entity".to_string(), "Person".to_string()];
+
+    // Sanity: with both keys intact the name resolves to two kinds.
+    {
+        let conn = db.connect().unwrap();
+        let rows = conn
+            .resolve_entities_by_name_in_kinds("Aurora", G, &kinds)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    // Clear the default-kind row's key (failed backfill / raw-Cypher write); Person keeps its.
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher(&format!(
+            "MATCH (e:Entity {{name: 'Aurora', group_id: '{G}', kind: 'Entity'}}) \
+             SET e.lookup_key = NULL"
+        ))
+        .unwrap();
+    }
+    {
+        let conn = db.connect().unwrap();
+        let rows = conn
+            .resolve_entities_by_name_in_kinds("Aurora", G, &kinds)
+            .unwrap();
+        let mut got: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
+        got.sort();
+        assert_eq!(got, vec!["Entity", "Person"], "must stay ambiguous");
+    }
+
+    // End to end: the cross-batch edge to the ambiguous name is dropped, not bound to Person.
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher(&format!(
+            "MATCH (e:Entity {{name: 'Aurora', group_id: '{G}', kind: 'Entity'}}) \
+             SET e.lookup_key = NULL"
+        ))
+        .unwrap();
+    }
+    let r = ingest(&state, G, 2).await.unwrap();
+    assert_eq!(r.edges_dropped_unresolvable, 1);
+    assert_eq!(edge_count(&db), 0);
+}
+
 // ── US2 / SC-006: flagless workspaces are undisturbed ─────────────────────────
 
 #[tokio::test]
