@@ -81,6 +81,27 @@ pub async fn dispatch(
                     ),
                     false,
                 ),
+                // A group's identity-bearing set changed in a way that would reinterpret existing
+                // entities (issue #616, D1). Structured so a client can name the label.
+                Error::IdentitySetChangeRefused {
+                    ref group_id,
+                    ref label,
+                    count,
+                    ..
+                } => (
+                    IpcResponse::err_with_data(
+                        req.id,
+                        -32003,
+                        e.to_string(),
+                        json!({
+                            "reason": "identity_set_change_refused",
+                            "group_id": group_id,
+                            "label": label,
+                            "entity_count": count,
+                        }),
+                    ),
+                    false,
+                ),
                 _ => (IpcResponse::err(req.id, -32000, e.to_string()), false),
             }
         }
