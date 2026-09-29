@@ -162,11 +162,11 @@ async fn test_cross_batch_edge_endpoint_is_resolved_and_persisted() {
     );
 
     let apple = conn
-        .get_entity_by_name_ci("Apple", GROUP_A)
+        .get_entity_by_name_ci("Apple", GROUP_A, "Entity")
         .unwrap()
         .expect("Apple entity must exist");
     let creator_studio = conn
-        .get_entity_by_name_ci("Creator Studio", GROUP_A)
+        .get_entity_by_name_ci("Creator Studio", GROUP_A, "Entity")
         .unwrap()
         .expect("Creator Studio entity must exist");
 
@@ -204,11 +204,11 @@ async fn test_global_fallback_resolution_is_scoped_to_group_id() {
 
     let conn = db.connect().unwrap();
     let apple_a = conn
-        .get_entity_by_name_ci("Apple", GROUP_A)
+        .get_entity_by_name_ci("Apple", GROUP_A, "Entity")
         .unwrap()
         .expect("group A's Apple must exist");
     let apple_b = conn
-        .get_entity_by_name_ci("Apple", GROUP_B)
+        .get_entity_by_name_ci("Apple", GROUP_B, "Entity")
         .unwrap()
         .expect("group B's Apple must exist");
     assert_ne!(
@@ -270,7 +270,7 @@ async fn test_edge_resolves_to_entity_created_via_raw_cypher() {
     );
 
     let apple = conn
-        .get_entity_by_name_ci("Apple", GROUP_A)
+        .get_entity_by_name_ci("Apple", GROUP_A, "Entity")
         .unwrap()
         .expect("'Apple' must be resolvable via the plain lookup too, once self-healed");
     assert_eq!(apple.uuid, "raw-apple");
@@ -475,17 +475,17 @@ async fn test_off_list_endpoint_salvaged_via_name_embedding_similarity() {
 
     let conn = db.connect().unwrap();
     assert!(
-        conn.get_entity_by_name_ci("Global Warming", GROUP_A)
+        conn.get_entity_by_name_ci("Global Warming", GROUP_A, "Entity")
             .unwrap()
             .is_none(),
         "salvage must not create a new entity for the off-list name"
     );
     let climate_change = conn
-        .get_entity_by_name_ci("Climate Change", GROUP_A)
+        .get_entity_by_name_ci("Climate Change", GROUP_A, "Entity")
         .unwrap()
         .expect("Climate Change entity must exist");
     let ocean_acidification = conn
-        .get_entity_by_name_ci("Ocean Acidification", GROUP_A)
+        .get_entity_by_name_ci("Ocean Acidification", GROUP_A, "Entity")
         .unwrap()
         .expect("Ocean Acidification entity must exist");
 

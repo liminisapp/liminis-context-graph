@@ -23,12 +23,50 @@ impl SourceType {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// The default entity kind (issue #615, D1/D2). Every entity written before kinds existed, every
+/// extraction-created entity, and every name-only direct write is this kind.
+pub const DEFAULT_KIND: &str = "Entity";
+
+/// The `lookup_key` field separator (U+001F). A `kind` may not contain it (FR-012), so a key
+/// `group_id ␟ kind ␟ name` stays unambiguous.
+pub const KEY_SEPARATOR: char = '\u{1f}';
+
+/// Validates and normalises a caller-supplied `kind` (issue #615 FR-012): trimmed, non-empty,
+/// no U+001F, case-sensitive. `None` means the default kind [`DEFAULT_KIND`].
+pub fn normalize_kind(kind: Option<&str>) -> Result<String, crate::error::Error> {
+    match kind {
+        None => Ok(DEFAULT_KIND.to_string()),
+        Some(k) => {
+            let t = k.trim();
+            if t.is_empty() || t.contains(KEY_SEPARATOR) {
+                return Err(crate::error::Error::InvalidKind(k.to_string()));
+            }
+            Ok(t.to_string())
+        }
+    }
+}
+
+/// One candidate of an ambiguous name-only resolution (issue #615 FR-006).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KindCandidate {
+    pub uuid: String,
+    pub kind: String,
+}
+
+fn default_kind() -> String {
+    DEFAULT_KIND.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityRow {
     pub uuid: String,
     pub name: String,
     pub group_id: String,
     pub labels: Vec<String>,
+    /// The entity's single identity-bearing kind (issue #615); always one of `labels`. Readers
+    /// map a NULL column to [`DEFAULT_KIND`], so this is never empty on a row read from the db.
+    #[serde(default = "default_kind")]
+    pub kind: String,
     /// LadybugDB TIMESTAMP as "YYYY-MM-DD HH:MM:SS".
     pub created_at: String,
     #[serde(skip)]
@@ -41,6 +79,45 @@ pub struct EntityRow {
     pub source_descriptions: Vec<String>,
     #[serde(skip)]
     pub summary_embedding: Vec<f32>,
+}
+
+impl Default for EntityRow {
+    fn default() -> Self {
+        Self {
+            uuid: String::new(),
+            name: String::new(),
+            group_id: String::new(),
+            labels: Vec::new(),
+            kind: default_kind(),
+            created_at: String::new(),
+            name_embedding: Vec::new(),
+            summary: String::new(),
+            attributes: String::new(),
+            episode_uuids: Vec::new(),
+            source_descriptions: Vec::new(),
+            summary_embedding: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_kind_defaults_trims_and_validates() {
+        assert_eq!(normalize_kind(None).unwrap(), "Entity");
+        assert_eq!(normalize_kind(Some(" Topic ")).unwrap(), "Topic");
+        assert_eq!(normalize_kind(Some("topic")).unwrap(), "topic");
+        assert!(normalize_kind(Some("")).is_err());
+        assert!(normalize_kind(Some("   ")).is_err());
+        assert!(normalize_kind(Some("a\u{1f}b")).is_err());
+    }
+
+    #[test]
+    fn entity_row_default_kind_is_entity() {
+        assert_eq!(EntityRow::default().kind, "Entity");
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -25,6 +25,11 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // so `get_entity_by_name_ci` can be answered by an ART-indexed equality lookup instead of
     // an in-process accelerator (ADR-0038's `NameIndex`, which this column and its index
     // replace) or an unindexed `lower(e.name) = $x` scan.
+    // `kind` (issue #615, ADR-0615) is a third documented divergence from graphiti's
+    // kuzu_driver.py schema, additive like the two above: the single identity-bearing kind of an
+    // entity (default `Entity`), part of `lookup_key`'s composition
+    // (`group_id ␟ kind ␟ lower(name)`). Graphiti-shaped reads/writes never mention it, so they
+    // are unaffected (FR-013).
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Entity (\
          uuid STRING PRIMARY KEY, \
@@ -36,7 +41,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          summary STRING, \
          attributes STRING, \
          summary_embedding FLOAT[{dim}], \
-         lookup_key STRING\
+         lookup_key STRING, \
+         kind STRING\
          )"
     ))?;
     // `attributes` (issue #528) is a deliberate divergence from graphiti's kuzu_driver.py
@@ -331,6 +337,9 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
     // below for how the persisted marker closes that gap without reintroducing an O(N) `Entity`
     // scan on the clean (already-migrated) startup path.
     ensure_lookup_key_backfill(conn);
+    // Seed the known-kinds registry (issue #615) from the migrated data, so broad name
+    // resolution probes every kind an existing database holds from the first request.
+    conn.refresh_known_kinds();
     // Episodic gained `attributes` (issue #528) to hold caller-supplied structured metadata
     // directly on the episode node. Probe first: a fresh DB already has the column from
     // `create_node_tables`, so the ALTER only runs against pre-existing workspaces. Unlike
@@ -407,26 +416,44 @@ pub fn zero_fill_null_episodic_attributes(conn: &Conn<'_>) -> Result<(), Error> 
 /// `build_indices_and_constraints`/`create_entity_lookup_key_index` ever builds the ART index
 /// over the column, so the index is never built while rows are still `NULL`.
 pub fn backfill_entity_lookup_keys(conn: &Conn<'_>) -> Result<(), Error> {
+    // Issue #615 widened this from `lookup_key IS NULL`: an entity with a NULL `kind` is one
+    // written before kinds existed (an upgraded database's rows, an old WAL's records, the #217
+    // corpus), and its key — if it has one at all — is in the old two-field format and must be
+    // recomputed under the new composition. Such rows are all kind `Entity` (D3). A row with a
+    // kind but no key is the original #221 case.
     let rows = conn.query_params(
-        "MATCH (n:Entity) WHERE n.lookup_key IS NULL RETURN n.uuid, n.name, n.group_id",
+        "MATCH (n:Entity) WHERE n.kind IS NULL OR n.lookup_key IS NULL \
+         RETURN n.uuid, n.name, n.group_id, n.kind, n.labels",
         serde_json::json!({}),
     )?;
     for row in rows {
         let uuid = crate::db::value_as_string(&row[0]);
         let name = crate::db::value_as_string(&row[1]);
         let group_id = crate::db::value_as_string(&row[2]);
-        let key = crate::db::compute_lookup_key(&group_id, &name);
+        let kind = crate::db::value_as_kind(&row[3]);
+        let labels = crate::db::value_as_str_list(&row[4]);
+        let key = crate::db::compute_lookup_key(&group_id, &kind, &name);
+        // `kind ∈ labels` (FR-001) is restored here too: a default-kind row already has
+        // `Entity` in its labels (enforce_entity_first), so this only ever touches a row whose
+        // labels were clobbered out-of-band.
+        let labels = crate::db::labels_with_kind(&labels, &kind);
         conn.exec_params(
-            "MATCH (n:Entity {uuid: $uuid}) SET n.lookup_key = $key",
-            serde_json::json!({ "uuid": uuid, "key": key }),
+            "MATCH (n:Entity {uuid: $uuid}) SET n.kind = $kind, n.lookup_key = $key, \
+             n.labels = $labels",
+            serde_json::json!({ "uuid": uuid, "kind": kind, "key": key, "labels": labels }),
         )?;
     }
+    conn.refresh_known_kinds();
     Ok(())
 }
 
 /// Key under which the `lookup_key` backfill's completion state is persisted in `SchemaState`
 /// (see `ensure_lookup_key_backfill`).
-const LOOKUP_KEY_BACKFILL_STATE_KEY: &str = "entity_lookup_key_backfill";
+///
+/// Versioned (issue #615): the original `entity_lookup_key_backfill` marker only proved every
+/// row had *a* key, and old-format keys are non-NULL. Renaming the key forces every database
+/// through the widened backfill (`kind IS NULL OR lookup_key IS NULL`) exactly once.
+const LOOKUP_KEY_BACKFILL_STATE_KEY: &str = "entity_kind_lookup_key_v2";
 
 /// A minimal, generic migration-state marker table: one row per named migration step, keyed by
 /// a stable string identifier. Introduced by issue #221 to close a gap the PR's own human review
@@ -557,6 +584,22 @@ fn ensure_lookup_key_backfill(conn: &Conn<'_>) {
         eprintln!(
             "liminis-context-graph: schema migrate: ensure SchemaState table (non-fatal): {e}"
         );
+    }
+
+    // Entity gained `kind` (issue #615). A fresh DB has the column from `create_node_tables`;
+    // an existing one gets it here, NULL on every row, which the widened backfill below fills
+    // (and re-keys) because the v2 marker cannot yet be `complete`.
+    if conn
+        .raw_query("MATCH (n:Entity) WHERE n.uuid = '_probe_' RETURN n.kind LIMIT 0")
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE Entity ADD kind STRING") {
+            eprintln!(
+                "liminis-context-graph: schema migrate: ALTER TABLE Entity ADD kind STRING (non-fatal): {e}"
+            );
+            conn.mark_lookup_key_migration_failed();
+            return;
+        }
     }
 
     let lookup_key_column_absent = conn

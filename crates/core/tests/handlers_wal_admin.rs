@@ -1950,7 +1950,7 @@ async fn test_raw_cypher_created_entity_is_not_found_by_plain_lookup() {
 
     let conn = db.connect().unwrap();
     assert!(
-        conn.get_entity_by_name_ci("RawEntity", "g")
+        conn.get_entity_by_name_ci("RawEntity", "g", "Entity")
             .unwrap()
             .is_none(),
         "a raw-Cypher-created row has no lookup_key, so the plain indexed lookup must miss \
@@ -1960,14 +1960,14 @@ async fn test_raw_cypher_created_entity_is_not_found_by_plain_lookup() {
     // The endpoint-authority scan fallback (FR-010) still finds it and self-heals the row's
     // lookup_key, so a subsequent plain lookup succeeds.
     assert_eq!(
-        conn.get_entity_by_name_ci_with_scan_fallback("RawEntity", "g")
+        conn.get_entity_by_name_ci_with_scan_fallback("RawEntity", "g", "Entity")
             .unwrap()
             .expect("scan fallback must find the raw-Cypher-created entity")
             .uuid,
         "raw-1"
     );
     assert_eq!(
-        conn.get_entity_by_name_ci("RawEntity", "g")
+        conn.get_entity_by_name_ci("RawEntity", "g", "Entity")
             .unwrap()
             .expect("plain lookup must succeed after the scan fallback self-healed lookup_key")
             .uuid,
@@ -2015,7 +2015,7 @@ async fn test_knowledge_status_surfaces_lookup_key_migration_status_and_fallback
         // simulating the FR-012 failure posture (a failed schema::migrate backfill)
         // independent of this test's own raw_query call.
         assert!(conn
-            .get_entity_by_name_ci_with_scan_fallback("Tracked", "g")
+            .get_entity_by_name_ci_with_scan_fallback("Tracked", "g", "Entity")
             .unwrap()
             .is_some());
         conn.mark_lookup_key_migration_failed();

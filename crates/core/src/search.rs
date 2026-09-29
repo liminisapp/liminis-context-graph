@@ -101,6 +101,21 @@ pub async fn hybrid_entity_search(
     group_ids: Option<Vec<String>>,
     limit: usize,
 ) -> Result<Vec<EntityRow>, Error> {
+    hybrid_entity_search_kind(db, embedder, query, group_ids, limit, None).await
+}
+
+/// [`hybrid_entity_search`] with an optional `kind` filter (issue #615): `Some(kind)` keeps only
+/// entities of that kind, applied to the *whole* fused ranking before truncating to `limit` so a
+/// filtered search still returns up to `limit` matches; `None` is all kinds. Every returned row
+/// carries its `kind`.
+pub async fn hybrid_entity_search_kind(
+    db: Arc<Db>,
+    embedder: Arc<dyn Embedder>,
+    query: &str,
+    group_ids: Option<Vec<String>>,
+    limit: usize,
+    kind: Option<String>,
+) -> Result<Vec<EntityRow>, Error> {
     // Async: embed the query
     let embedding = embedder.embed(query).await?;
 
@@ -126,9 +141,16 @@ pub async fn hybrid_entity_search(
         )?;
 
         let fused_uuids = rrf_fuse(&[&bm25, &vector, &vector_summary]);
-        let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();
-        let rows = conn.get_entities_by_uuids(&top_uuids)?;
-        Ok(order_by_rank(rows, &top_uuids, |e| &e.uuid))
+        let Some(kind) = kind else {
+            let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();
+            let rows = conn.get_entities_by_uuids(&top_uuids)?;
+            return Ok(order_by_rank(rows, &top_uuids, |e| &e.uuid));
+        };
+        let rows = conn.get_entities_by_uuids(&fused_uuids)?;
+        let mut ranked = order_by_rank(rows, &fused_uuids, |e| &e.uuid);
+        ranked.retain(|e| e.kind == kind);
+        ranked.truncate(limit);
+        Ok(ranked)
     })
     .await??;
 

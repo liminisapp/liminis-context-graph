@@ -44,6 +44,12 @@ pub struct CrossGroupPointer {
     pub source_group_id: String,
     /// Normalized name of the endpoint entity in that group.
     pub endpoint_name: String,
+    /// Optional kind assertion (issue #615, D4): when present the pointer resolves within that
+    /// kind only; absent, it resolves across all kinds (and is `Ambiguous` if several match).
+    /// `#[serde(default, skip_serializing_if)]` keeps pre-#615 stored pointers round-tripping
+    /// byte-for-byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_kind: Option<String>,
     /// UUID last resolved to, when `binding_state == Bound`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_uuid: Option<String>,
@@ -186,6 +192,7 @@ mod tests {
 
     fn sample_pointer(name: &str) -> CrossGroupPointer {
         CrossGroupPointer {
+            endpoint_kind: None,
             source_group_id: "source-a".to_string(),
             endpoint_name: name.to_string(),
             resolved_uuid: Some("11111111-1111-1111-1111-111111111111".to_string()),
@@ -267,6 +274,7 @@ mod tests {
     #[test]
     fn unbound_pointer_has_no_resolved_uuid() {
         let ptr = CrossGroupPointer {
+            endpoint_kind: None,
             source_group_id: "source-a".to_string(),
             endpoint_name: "carol".to_string(),
             resolved_uuid: None,

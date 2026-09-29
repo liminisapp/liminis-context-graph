@@ -37,6 +37,12 @@ pub(crate) const VECTOR_PARAM_KEYS: &[&str] = &[
     "summary_embedding",
 ];
 
+/// Derived params never written to the WAL (issue #615, D3; the ADR-0526 rule for derived values).
+/// `lookup_key` is a pure function of `(group_id, kind, name)`, all of which the same record
+/// carries, so [`WalWriter::log_mutation`] strips it and `replay::inject_derived_lookup_key`
+/// recomputes it. A copy found in an older WAL is ignored on replay, never trusted.
+pub(crate) const DERIVED_PARAM_KEYS: &[&str] = &["lookup_key"];
+
 /// One WAL record — five-field JSONL schema matching the Python `graphiti_core/driver/wal.py`.
 /// Fields are declared in `seq, ts, db, cypher, params` order; serde_json preserves
 /// struct field declaration order, matching Python's `json.dumps()` dict insertion order.
@@ -153,7 +159,7 @@ impl WalWriter {
             ts,
             db: database.to_string(),
             cypher: cypher.to_string(),
-            params: strip_vector_params(params),
+            params: strip_derived_params(strip_vector_params(params)),
         };
         self.global_seq += 1;
         self.pending_lines.push(line);
@@ -890,6 +896,20 @@ pub(crate) fn strip_vector_params(params: serde_json::Value) -> serde_json::Valu
     match params {
         serde_json::Value::Object(mut map) => {
             for key in VECTOR_PARAM_KEYS {
+                map.remove(*key);
+            }
+            serde_json::Value::Object(map)
+        }
+        other => other,
+    }
+}
+
+/// Removes every [`DERIVED_PARAM_KEYS`] entry from `params` (issue #615, D3). Same no-op rules as
+/// [`strip_vector_params`].
+pub(crate) fn strip_derived_params(params: serde_json::Value) -> serde_json::Value {
+    match params {
+        serde_json::Value::Object(mut map) => {
+            for key in DERIVED_PARAM_KEYS {
                 map.remove(*key);
             }
             serde_json::Value::Object(map)

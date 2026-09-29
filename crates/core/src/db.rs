@@ -1,8 +1,8 @@
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use lbug::{LogicalType, Value};
 
@@ -42,6 +42,14 @@ pub struct Db {
 pub struct LookupKeyStatus {
     migrated: AtomicBool,
     fallback_scans: AtomicU64,
+    /// Superset registry of the entity kinds this database is known to hold (issue #615), always
+    /// containing the default kind. Broad (kind-less) name resolution probes the `lookup_key`
+    /// ART index once per known kind, so an all-`Entity` database pays exactly the single
+    /// indexed probe it paid before kinds existed. Seeded by `Conn::refresh_known_kinds` (open,
+    /// post-replay backfill funnel) and grown by `insert_entity`; an out-of-band write of a
+    /// brand-new kind is invisible until the next refresh — the same accepted limitation as
+    /// ADR-0221 FR-011.
+    known_kinds: RwLock<BTreeSet<String>>,
 }
 
 impl Default for LookupKeyStatus {
@@ -49,6 +57,7 @@ impl Default for LookupKeyStatus {
         Self {
             migrated: AtomicBool::new(true),
             fallback_scans: AtomicU64::new(0),
+            known_kinds: RwLock::new(BTreeSet::from([crate::types::DEFAULT_KIND.to_string()])),
         }
     }
 }
@@ -580,8 +589,11 @@ impl<'db> Conn<'db> {
     // ── Entity/Episodic insert ─────────────────────────────────────────────────
 
     pub fn insert_entity(&self, row: &EntityRow) -> Result<(), Error> {
-        // Enforce Entity-first label-order invariant (AD-8)
-        let labels = enforce_entity_first(&row.labels);
+        // Kind identity (issue #615): an empty kind (a hand-built row) means the default kind.
+        let kind =
+            crate::types::normalize_kind(Some(row.kind.as_str()).filter(|k| !k.trim().is_empty()))?;
+        // Enforce Entity-first label-order invariant (AD-8), and `kind ∈ labels` (FR-001).
+        let labels = labels_with_kind(&row.labels, &kind);
         // `summary_embedding` is a fixed-size `FLOAT[N]` column, same as `name_embedding` above
         // — a zero-length list fails to bind ("Unsupported casting LIST with incorrect list
         // entry to ARRAY"). Callers that don't compute a real summary embedding (an empty
@@ -593,12 +605,12 @@ impl<'db> Conn<'db> {
         } else {
             row.summary_embedding.clone()
         };
-        let lookup_key = compute_lookup_key(&row.group_id, &row.name);
+        let lookup_key = compute_lookup_key(&row.group_id, &kind, &row.name);
         self.exec_params(
             "CREATE (:Entity {uuid: $uuid, name: $name, group_id: $group_id, \
              labels: $labels, created_at: $created_at, name_embedding: $name_embedding, \
              summary: $summary, attributes: $attributes, \
-             summary_embedding: $summary_embedding, lookup_key: $lookup_key})",
+             summary_embedding: $summary_embedding, kind: $kind, lookup_key: $lookup_key})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -609,9 +621,11 @@ impl<'db> Conn<'db> {
                 "summary": row.summary,
                 "attributes": row.attributes,
                 "summary_embedding": summary_embedding,
+                "kind": kind,
                 "lookup_key": lookup_key,
             }),
         )?;
+        self.register_kind(&kind);
         Ok(())
     }
 
@@ -1302,13 +1316,13 @@ impl<'db> Conn<'db> {
             Some(gids) => (
                 "MATCH (e:Entity) WHERE e.group_id IN $gids \
                  RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes",
+                 e.summary, e.attributes, e.kind",
                 serde_json::json!({ "gids": gids }),
             ),
             None => (
                 "MATCH (e:Entity) \
                  RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes",
+                 e.summary, e.attributes, e.kind",
                 serde_json::json!({}),
             ),
         };
@@ -1323,6 +1337,7 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
                 ..Default::default()
             });
         }
@@ -1583,21 +1598,46 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<EntityRow>, Error> {
-        let (cypher, params) = match group_ids {
-            Some(gids) if !gids.is_empty() => (
-                "MATCH (e:Entity) WHERE e.group_id IN $gids \
-                 RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes ORDER BY e.uuid DESC LIMIT $limit",
-                serde_json::json!({ "gids": gids, "limit": limit as i64 }),
-            ),
-            _ => (
-                "MATCH (e:Entity) \
-                 RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes ORDER BY e.uuid DESC LIMIT $limit",
-                serde_json::json!({ "limit": limit as i64 }),
-            ),
+        self.list_entities_of_kind(group_ids, limit, None)
+    }
+
+    /// [`Self::list_entities`] with an optional `kind` filter (issue #615): `Some(kind)` lists
+    /// only entities of that kind, `None` lists every kind. A NULL `kind` column is a
+    /// not-yet-backfilled default-kind row.
+    pub fn list_entities_of_kind(
+        &self,
+        group_ids: Option<&[&str]>,
+        limit: usize,
+        kind: Option<&str>,
+    ) -> Result<Vec<EntityRow>, Error> {
+        const KIND_PRED: &str = "(e.kind = $kind OR (e.kind IS NULL AND $kind = 'Entity'))";
+        let group_pred = match group_ids {
+            Some(gids) if !gids.is_empty() => Some("e.group_id IN $gids"),
+            _ => None,
         };
-        let result = self.query_params(cypher, params)?;
+        let mut preds: Vec<&str> = Vec::new();
+        preds.extend(group_pred);
+        if kind.is_some() {
+            preds.push(KIND_PRED);
+        }
+        let where_clause = if preds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", preds.join(" AND "))
+        };
+        let cypher = format!(
+            "MATCH (e:Entity) {where_clause}\
+             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+             e.summary, e.attributes, e.kind ORDER BY e.uuid DESC LIMIT $limit"
+        );
+        let mut params = serde_json::json!({ "limit": limit as i64 });
+        if group_pred.is_some() {
+            params["gids"] = serde_json::json!(group_ids);
+        }
+        if let Some(k) = kind {
+            params["kind"] = serde_json::json!(k);
+        }
+        let result = self.query_params(&cypher, params)?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(EntityRow {
@@ -1608,6 +1648,7 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
                 ..Default::default()
             });
         }
@@ -1709,14 +1750,14 @@ impl<'db> Conn<'db> {
                 "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
                  WHERE ep.source_description CONTAINS $src AND e.group_id IN $gids \
                  RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes LIMIT $limit",
+                 e.summary, e.attributes, e.kind LIMIT $limit",
                 serde_json::json!({ "src": source, "gids": gids, "limit": limit as i64 }),
             ),
             _ => (
                 "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
                  WHERE ep.source_description CONTAINS $src \
                  RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes LIMIT $limit",
+                 e.summary, e.attributes, e.kind LIMIT $limit",
                 serde_json::json!({ "src": source, "limit": limit as i64 }),
             ),
         };
@@ -1731,6 +1772,7 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
                 ..Default::default()
             });
         }
@@ -1760,10 +1802,12 @@ impl<'db> Conn<'db> {
         threshold: f32,
     ) -> Result<Option<EntityRow>, Error> {
         let result = self.query_params(
-            "MATCH (e:Entity) WHERE e.group_id = $gid \
+            // Confined to the default kind (issue #615, FR-010) — see
+            // `get_entity_embeddings_by_uuids`.
+            "MATCH (e:Entity) WHERE e.group_id = $gid AND (e.kind IS NULL OR e.kind = $kind) \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.name_embedding, e.summary, e.attributes",
-            serde_json::json!({ "gid": group_id }),
+             e.name_embedding, e.summary, e.attributes, e.kind",
+            serde_json::json!({ "gid": group_id, "kind": crate::types::DEFAULT_KIND }),
         )?;
         let mut best: Option<(f32, EntityRow)> = None;
 
@@ -1790,6 +1834,7 @@ impl<'db> Conn<'db> {
                             name_embedding: stored_embedding,
                             summary: value_as_string(&row[6]),
                             attributes: value_as_string(&row[7]),
+                            kind: value_as_kind(&row[8]),
                             episode_uuids: vec![],
                             source_descriptions: vec![],
                             ..Default::default()
@@ -1824,8 +1869,12 @@ impl<'db> Conn<'db> {
             return Ok(vec![]);
         }
         let result = self.query_params(
-            "MATCH (e:Entity) WHERE e.uuid IN $uuids RETURN e.uuid, e.name_embedding",
-            serde_json::json!({ "uuids": uuids }),
+            // Dedup candidates are confined to the default kind (issue #615, FR-010): a `Merge`
+            // decision appends extracted text to the matched entity, which must never be an
+            // asserted non-`Entity`-kind node. A NULL kind is a not-yet-backfilled default row.
+            "MATCH (e:Entity) WHERE e.uuid IN $uuids AND (e.kind IS NULL OR e.kind = $kind) \
+             RETURN e.uuid, e.name_embedding",
+            serde_json::json!({ "uuids": uuids, "kind": crate::types::DEFAULT_KIND }),
         )?;
         let mut pairs = Vec::new();
         for row in result {
@@ -1888,7 +1937,7 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.name = $name AND e.group_id = $gid \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes LIMIT 1",
+             e.summary, e.attributes, e.kind LIMIT 1",
             serde_json::json!({ "name": name, "gid": group_id }),
         )?;
         if let Some(row) = rows.into_iter().next() {
@@ -1900,6 +1949,7 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
                 ..Default::default()
             }))
         } else {
@@ -1934,12 +1984,13 @@ impl<'db> Conn<'db> {
         &self,
         name: &str,
         group_id: &str,
+        kind: &str,
     ) -> Result<Option<EntityRow>, Error> {
-        let key = compute_lookup_key(group_id, name);
+        let key = compute_lookup_key(group_id, kind, name);
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.lookup_key = $key \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.name_embedding, e.summary, e.attributes \
+             e.name_embedding, e.summary, e.attributes, e.kind \
              ORDER BY e.created_at ASC, e.uuid ASC LIMIT 1",
             serde_json::json!({ "key": key }),
         )?;
@@ -1952,10 +2003,98 @@ impl<'db> Conn<'db> {
             name_embedding: value_as_float_array(&row[5]),
             summary: value_as_string(&row[6]),
             attributes: value_as_string(&row[7]),
+            kind: value_as_kind(&row[8]),
             episode_uuids: vec![],
             source_descriptions: vec![],
             ..Default::default()
         }))
+    }
+
+    /// Records `kind` in the known-kinds registry (issue #615). Superset-only: never removes.
+    pub(crate) fn register_kind(&self, kind: &str) {
+        let mut set = self
+            .lookup_key_status
+            .known_kinds
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        if !set.contains(kind) {
+            set.insert(kind.to_string());
+        }
+    }
+
+    /// Snapshot of the known-kinds registry (always contains the default kind).
+    pub(crate) fn known_kinds(&self) -> Vec<String> {
+        self.lookup_key_status
+            .known_kinds
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Re-seeds the known-kinds registry from the database (`SELECT DISTINCT kind`). Best-effort:
+    /// on a fresh database with no `Entity` table (or before the `kind` column exists) the query
+    /// fails and the registry keeps what it has. Called at open, and from the post-replay
+    /// backfill funnel, so kinds arriving via WAL replay are visible to broad resolution.
+    pub fn refresh_known_kinds(&self) {
+        if let Ok(rows) = self.query_params(
+            "MATCH (e:Entity) RETURN DISTINCT e.kind",
+            serde_json::json!({}),
+        ) {
+            for row in rows {
+                let k = value_as_kind(&row[0]);
+                self.register_kind(&k);
+            }
+        }
+    }
+
+    /// Broad (kind-less) name resolution across **all** kinds (issue #615 D2's read rule): the
+    /// per-kind winner (`created_at ASC, uuid ASC`, as `get_entity_by_name_ci`) for every kind
+    /// holding an entity named `name` in `group_id` — at most one row per kind, ordered
+    /// `created_at ASC, uuid ASC`. One indexed probe per known kind (see `known_kinds`); on a
+    /// total miss it falls back to a group scan — like `get_entity_by_name_ci_with_scan_fallback`
+    /// — which also self-heals rows whose `kind`/`lookup_key` were never written.
+    ///
+    /// `Merged` tombstones are **not** filtered here: a tombstone shares its canonical's key, so
+    /// it can be a kind's winner, and the caller forwards it through `merged_into` exactly as it
+    /// does on the exact-kind path (D5 keeps that chain inside one kind). Callers treat
+    /// `len() > 1` as ambiguity (`Error::AmbiguousEntity`) — never pick one.
+    pub fn resolve_entities_by_name_any_kind(
+        &self,
+        name: &str,
+        group_id: &str,
+    ) -> Result<Vec<EntityRow>, Error> {
+        let mut out: Vec<EntityRow> = Vec::new();
+        for kind in self.known_kinds() {
+            if let Some(row) = self.get_entity_by_name_ci(name, group_id, &kind)? {
+                if row.group_id == group_id
+                    && row.kind == kind
+                    && row.name.trim().to_lowercase() == name.trim().to_lowercase()
+                {
+                    out.push(row);
+                }
+            }
+        }
+        if out.is_empty() {
+            // Total miss: a row may exist under an unregistered kind or with a stale/NULL key.
+            self.record_lookup_key_fallback_scan();
+            let mut seen_kinds = BTreeSet::new();
+            for row in self.scan_entities_by_name_ci(name, group_id, None)? {
+                self.self_heal_lookup_key(&row);
+                self.register_kind(&row.kind);
+                // The scan is ordered `created_at, uuid`: the first row per kind is its winner.
+                if seen_kinds.insert(row.kind.clone()) {
+                    out.push(row);
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.uuid.cmp(&b.uuid))
+        });
+        Ok(out)
     }
 
     /// Case-insensitive, whitespace-normalised name lookup for the endpoint-authority call
@@ -1990,43 +2129,55 @@ impl<'db> Conn<'db> {
         &self,
         name: &str,
         group_id: &str,
+        kind: &str,
     ) -> Result<Option<EntityRow>, Error> {
-        if let Some(row) = self.get_entity_by_name_ci(name, group_id)? {
+        if let Some(row) = self.get_entity_by_name_ci(name, group_id, kind)? {
             if row.group_id == group_id
+                && row.kind == kind
                 && row.name.trim().to_lowercase() == name.trim().to_lowercase()
             {
                 return Ok(Some(row));
             }
-            // The indexed hit's lookup_key matched, but the row's live name/group_id no
+            // The indexed hit's lookup_key matched, but the row's live name/group_id/kind no
             // longer does — a stale (non-NULL) key from an out-of-band rename. Treat this
             // exactly like a miss: fall through to the scan below, which reflects live data.
         }
         self.record_lookup_key_fallback_scan();
-        let scanned = self.scan_entity_by_name_ci(name, group_id)?;
+        let scanned = self
+            .scan_entities_by_name_ci(name, group_id, Some(kind))?
+            .into_iter()
+            .next();
         if let Some(ref row) = scanned {
-            let key = compute_lookup_key(&row.group_id, &row.name);
-            // The scan read and this SET are two independent statements, not one transaction —
-            // a concurrent update_entity_core rename between them would already have persisted
-            // its own correct lookup_key for the new name. Scoping the SET to the exact
-            // name/group_id this scan observed makes it a no-op in that case (0 rows matched)
-            // instead of clobbering the fresher value with one derived from stale data.
-            if let Err(e) = self.exec_params(
-                "MATCH (e:Entity {uuid: $uuid, name: $expected_name, group_id: $expected_group_id}) \
-                 SET e.lookup_key = $key",
-                serde_json::json!({
-                    "uuid": row.uuid,
-                    "expected_name": row.name,
-                    "expected_group_id": row.group_id,
-                    "key": key,
-                }),
-            ) {
-                eprintln!(
-                    "liminis-context-graph: lookup_key self-heal failed for uuid={} (non-fatal): {e}",
-                    row.uuid
-                );
-            }
+            self.self_heal_lookup_key(row);
         }
         Ok(scanned)
+    }
+
+    /// Repairs a row's `kind` and `lookup_key` after a fallback scan found it (non-fatal).
+    ///
+    /// The scan read and this SET are two independent statements, not one transaction — a
+    /// concurrent update_entity_core rename between them would already have persisted its own
+    /// correct lookup_key for the new name. Scoping the SET to the exact name/group_id this scan
+    /// observed makes it a no-op in that case (0 rows matched) instead of clobbering the fresher
+    /// value with one derived from stale data.
+    fn self_heal_lookup_key(&self, row: &EntityRow) {
+        let key = compute_lookup_key(&row.group_id, &row.kind, &row.name);
+        if let Err(e) = self.exec_params(
+            "MATCH (e:Entity {uuid: $uuid, name: $expected_name, group_id: $expected_group_id}) \
+             SET e.kind = $kind, e.lookup_key = $key",
+            serde_json::json!({
+                "uuid": row.uuid,
+                "expected_name": row.name,
+                "expected_group_id": row.group_id,
+                "kind": row.kind,
+                "key": key,
+            }),
+        ) {
+            eprintln!(
+                "liminis-context-graph: lookup_key self-heal failed for uuid={} (non-fatal): {e}",
+                row.uuid
+            );
+        }
     }
 
     /// Bounded (to one group), full scan backing `get_entity_by_name_ci_with_scan_fallback`'s
@@ -2065,28 +2216,34 @@ impl<'db> Conn<'db> {
     /// the indexed path's single atomic `ORDER BY ... LIMIT 1` query — this loop reproduces that
     /// same "next surviving candidate" behavior across two statements instead of getting it for
     /// free from one.
-    fn scan_entity_by_name_ci(
+    fn scan_entities_by_name_ci(
         &self,
         name: &str,
         group_id: &str,
-    ) -> Result<Option<EntityRow>, Error> {
+        kind: Option<&str>,
+    ) -> Result<Vec<EntityRow>, Error> {
         let lower_name = name.trim().to_lowercase();
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.group_id = $gid \
-             RETURN e.uuid, e.name, e.group_id, e.created_at \
+             RETURN e.uuid, e.name, e.group_id, e.created_at, e.kind \
              ORDER BY e.created_at ASC, e.uuid ASC",
             serde_json::json!({ "gid": group_id }),
         )?;
-        for row in rows
-            .into_iter()
-            .filter(|row| value_as_string(&row[1]).trim().to_lowercase() == lower_name)
-        {
+        let mut out = Vec::new();
+        for row in rows.into_iter().filter(|row| {
+            value_as_string(&row[1]).trim().to_lowercase() == lower_name
+                && kind.is_none_or(|k| value_as_kind(&row[4]) == k)
+        }) {
             let uuid = value_as_string(&row[0]);
             if let Some(entity) = self.get_entity_by_uuid(&uuid)? {
-                return Ok(Some(entity));
+                out.push(entity);
+                if kind.is_some() {
+                    // Exact-kind: the first surviving candidate wins (see doc above).
+                    break;
+                }
             }
         }
-        Ok(None)
+        Ok(out)
     }
 
     /// Whether the one-shot `lookup_key` backfill migration (`schema::migrate`) completed
@@ -2161,20 +2318,25 @@ impl<'db> Conn<'db> {
     /// needs for ambiguity detection: a name shared by a canonical and its own merged-away
     /// aliases must resolve `Bound` to the canonical, not `Ambiguous` (issue #369 User Story 2
     /// AC 4) — counting tombstones as distinct candidates would contradict that.
+    ///
+    /// `kind` (issue #615): `Some(k)` counts only kind `k` (an exact-kind ambiguity check, so
+    /// same-kind duplicates still count as ambiguous), `None` counts across all kinds.
     pub fn count_active_entities_by_name_ci(
         &self,
         name: &str,
         group_id: &str,
+        kind: Option<&str>,
     ) -> Result<usize, Error> {
         let lower_name = name.trim().to_lowercase();
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE lower(e.name) = $lower_name AND e.group_id = $gid \
-             RETURN e.labels",
+             RETURN e.labels, e.kind",
             serde_json::json!({ "lower_name": lower_name, "gid": group_id }),
         )?;
         Ok(rows
             .into_iter()
             .filter(|row| !value_as_str_list(&row[0]).contains(&"Merged".to_string()))
+            .filter(|row| kind.is_none_or(|k| value_as_kind(&row[1]) == k))
             .count())
     }
 
@@ -2183,7 +2345,7 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (e:Entity {uuid: $uuid}) \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.name_embedding, e.summary, e.attributes",
+             e.name_embedding, e.summary, e.attributes, e.kind",
             serde_json::json!({ "uuid": uuid }),
         )?;
         if let Some(row) = rows.into_iter().next() {
@@ -2196,6 +2358,7 @@ impl<'db> Conn<'db> {
                 name_embedding: value_as_float_array(&row[5]),
                 summary: value_as_string(&row[6]),
                 attributes: value_as_string(&row[7]),
+                kind: value_as_kind(&row[8]),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
                 ..Default::default()
@@ -2213,7 +2376,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(
             "MATCH (e:Entity) WHERE e.uuid IN $uuids \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes",
+             e.summary, e.attributes, e.kind",
             serde_json::json!({ "uuids": uuids }),
         )?;
         let mut rows = Vec::new();
@@ -2226,6 +2389,7 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
                 ..Default::default()
             });
         }
@@ -2236,19 +2400,27 @@ impl<'db> Conn<'db> {
     /// `created_at ASC, uuid ASC`. Unlike `get_entity_by_name`, this method has no `LIMIT 1`
     /// and returns every matching node — used by `merge_entities` for canonical selection
     /// and alias expansion.
+    ///
+    /// `kind` (issue #615): `Some(k)` restricts to kind `k`; `None` returns every kind — callers
+    /// that must not cross kinds (merge, D5) inspect each row's `kind`.
     pub fn get_entities_by_name_all(
         &self,
         name: &str,
         group_id: &str,
+        kind: Option<&str>,
     ) -> Result<Vec<EntityRow>, Error> {
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.name = $name AND e.group_id = $gid \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes ORDER BY e.created_at ASC, e.uuid ASC",
+             e.summary, e.attributes, e.kind ORDER BY e.created_at ASC, e.uuid ASC",
             serde_json::json!({ "name": name, "gid": group_id }),
         )?;
         let mut result = Vec::new();
         for row in rows {
+            let row_kind = value_as_kind(&row[7]);
+            if kind.is_some_and(|k| row_kind != k) {
+                continue;
+            }
             result.push(EntityRow {
                 uuid: value_as_string(&row[0]),
                 name: value_as_string(&row[1]),
@@ -2257,6 +2429,7 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: row_kind,
                 ..Default::default()
             });
         }
@@ -2713,6 +2886,17 @@ impl<'db> Conn<'db> {
         Ok(edges)
     }
 
+    /// The kind of the Entity with `uuid` (issue #615), or `None` if no such entity exists. A NULL
+    /// column reads as the default kind. A single point lookup, for label rewriters that must
+    /// preserve `kind ∈ labels` (FR-001) without loading the whole row.
+    pub fn get_entity_kind(&self, uuid: &str) -> Result<Option<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (e:Entity {uuid: $uuid}) RETURN e.kind",
+            serde_json::json!({ "uuid": uuid }),
+        )?;
+        Ok(rows.into_iter().next().map(|r| value_as_kind(&r[0])))
+    }
+
     /// Updates the labels array on the Entity with the given UUID.
     pub fn update_entity_labels(&self, uuid: &str, labels: &[String]) -> Result<(), Error> {
         self.exec_params(
@@ -2759,14 +2943,22 @@ impl<'db> Conn<'db> {
         summary: &str,
         attributes: &str,
     ) -> Result<(), Error> {
-        let labels = enforce_entity_first(labels);
-        let lookup_key = compute_lookup_key(&existing.group_id, new_name);
+        // Kind is immutable (issue #615): the row's own kind is preserved in `labels` whatever
+        // the caller passed, and `group_id`/`kind` are re-SET to their current values purely so
+        // this record carries every input `lookup_key` derives from — replay recomputes the key
+        // from the record (D3) rather than trusting a stored copy.
+        let kind = normalize_row_kind(&existing.kind);
+        let labels = labels_with_kind(labels, &kind);
+        let lookup_key = compute_lookup_key(&existing.group_id, &kind, new_name);
         self.exec_params(
             "MATCH (e:Entity {uuid: $uuid}) SET e.name = $name, e.labels = $labels, \
-             e.summary = $summary, e.attributes = $attributes, e.lookup_key = $lookup_key",
+             e.summary = $summary, e.attributes = $attributes, e.group_id = $group_id, \
+             e.kind = $kind, e.lookup_key = $lookup_key",
             serde_json::json!({
                 "uuid": existing.uuid,
                 "name": new_name,
+                "group_id": existing.group_id,
+                "kind": kind,
                 "labels": labels,
                 "summary": summary,
                 "attributes": attributes,
@@ -2812,7 +3004,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(
             "MATCH (e:Entity) WHERE e.group_id = $gid AND size(e.labels) = 1 AND 'Entity' IN e.labels \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes ORDER BY e.uuid SKIP $offset LIMIT $limit",
+             e.summary, e.attributes, e.kind ORDER BY e.uuid SKIP $offset LIMIT $limit",
             serde_json::json!({ "gid": group_id, "offset": offset as i64, "limit": limit as i64 }),
         )?;
         let mut rows = Vec::new();
@@ -2825,6 +3017,7 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
                 ..Default::default()
             });
         }
@@ -2844,7 +3037,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(
             "MATCH (e:Entity) WHERE e.group_id = $gid AND size(e.labels) >= 2 AND 'Entity' IN e.labels \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes ORDER BY e.uuid SKIP $offset LIMIT $limit",
+             e.summary, e.attributes, e.kind ORDER BY e.uuid SKIP $offset LIMIT $limit",
             serde_json::json!({ "gid": group_id, "offset": offset as i64, "limit": limit as i64 }),
         )?;
         let mut rows = Vec::new();
@@ -2857,6 +3050,7 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
                 ..Default::default()
             });
         }
@@ -2884,7 +3078,7 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Entity) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
-                 n.name_embedding, n.summary, n.attributes, n.summary_embedding \
+                 n.name_embedding, n.summary, n.attributes, n.summary_embedding, n.kind \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -2892,7 +3086,7 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Entity) \
                  RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
-                 n.name_embedding, n.summary, n.attributes, n.summary_embedding \
+                 n.name_embedding, n.summary, n.attributes, n.summary_embedding, n.kind \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -3166,7 +3360,7 @@ impl<'db> Conn<'db> {
     pub fn search_entities(&self, name_prefix: &str) -> Result<Vec<EntityRow>, Error> {
         let result = self.query_params(
             "MATCH (e:Entity) WHERE e.name STARTS WITH $prefix \
-             RETURN e.uuid, e.name, e.group_id, e.summary, e.attributes",
+             RETURN e.uuid, e.name, e.group_id, e.summary, e.attributes, e.kind",
             serde_json::json!({ "prefix": name_prefix }),
         )?;
         let mut rows = Vec::new();
@@ -3177,6 +3371,7 @@ impl<'db> Conn<'db> {
                 group_id: value_as_string(&row[2]),
                 summary: value_as_string(&row[3]),
                 attributes: value_as_string(&row[4]),
+                kind: value_as_kind(&row[5]),
                 ..Default::default()
             });
         }
@@ -3537,21 +3732,60 @@ pub(crate) fn normalize_ts_str_for_dump(s: &str) -> String {
 }
 
 /// Computes the composite key materialized in `Entity.lookup_key` and used by every
-/// `get_entity_by_name_ci*` query and write path (issue #221 FR-001/FR-003): `group_id`,
-/// a `\x1f` (unit separator) delimiter, and `name` trimmed and lowercased.
+/// `get_entity_by_name_ci*` query and write path (issue #221 FR-001/FR-003, extended by issue
+/// #615 FR-002): `group_id`, a `\x1f` (unit separator), `kind` verbatim (case-sensitive; a
+/// validated kind never contains `\x1f`, see `types::normalize_kind`), a second `\x1f`, and
+/// `name` trimmed and lowercased.
 ///
 /// Always computed in Rust — including by `schema::backfill_entity_lookup_keys`'s one-shot
-/// migration backfill — never via Cypher `lower()`. `str::to_lowercase()` does full Unicode
-/// case-folding; there's no guarantee lbug's Cypher `lower()` folds identically for non-ASCII
-/// names, so computing the key in exactly one place for every writer (create, update, and
-/// backfill alike) is what guarantees two equal `(group_id, name)` pairs always produce the
-/// same key, regardless of which path wrote the row.
+/// migration backfill and replay's `inject_derived_lookup_key` — never via Cypher `lower()`.
+/// `str::to_lowercase()` does full Unicode case-folding; there's no guarantee lbug's Cypher
+/// `lower()` folds identically for non-ASCII names, so computing the key in exactly one place for
+/// every writer (create, update, backfill and replay alike) is what guarantees two equal
+/// `(group_id, kind, name)` triples always produce the same key, regardless of which path wrote
+/// the row.
 ///
 /// `\x1f` is a non-printable control character vanishingly unlikely to appear in an
 /// LLM-extracted entity name or an operator-supplied `group_id`, but this is a collision
-/// assumption, not a mechanical guarantee — see ADR-0221.
-pub(crate) fn compute_lookup_key(group_id: &str, name: &str) -> String {
-    format!("{group_id}\u{1f}{}", name.trim().to_lowercase())
+/// assumption, not a mechanical guarantee — see ADR-0221. Kinds are the exception: FR-012
+/// rejects a `kind` containing it.
+pub(crate) fn compute_lookup_key(group_id: &str, kind: &str, name: &str) -> String {
+    format!(
+        "{group_id}{sep}{kind}{sep}{}",
+        name.trim().to_lowercase(),
+        sep = crate::types::KEY_SEPARATOR
+    )
+}
+
+/// Reads an `Entity.kind` column value, mapping NULL/empty (a row written before kinds existed,
+/// or replayed from an old WAL, that the backfill has not reached yet) to the default kind so
+/// readers never observe a missing kind (issue #615).
+pub(crate) fn value_as_kind(v: &lbug::Value) -> String {
+    let k = value_as_string(v);
+    if k.trim().is_empty() {
+        crate::types::DEFAULT_KIND.to_string()
+    } else {
+        k
+    }
+}
+
+/// `labels` with `Entity` first (AD-8) and `kind` guaranteed present after it (issue #615
+/// FR-001). Idempotent.
+pub(crate) fn labels_with_kind(labels: &[String], kind: &str) -> Vec<String> {
+    let mut out = enforce_entity_first(labels);
+    if !out.iter().any(|l| l == kind) {
+        out.push(kind.to_string());
+    }
+    out
+}
+
+/// A row's kind as stored: empty (a hand-built `EntityRow`) means the default kind.
+pub(crate) fn normalize_row_kind(kind: &str) -> String {
+    if kind.trim().is_empty() {
+        crate::types::DEFAULT_KIND.to_string()
+    } else {
+        kind.trim().to_string()
+    }
 }
 
 fn enforce_entity_first(labels: &[String]) -> Vec<String> {

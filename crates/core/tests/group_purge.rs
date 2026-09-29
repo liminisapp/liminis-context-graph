@@ -411,6 +411,7 @@ async fn purge_preserves_foreign_relates_to_node_and_leaves_pointer_unbound() {
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(alice.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_A.to_string(),
                     endpoint_name: "Bob".to_string(),
                 },
@@ -568,6 +569,7 @@ async fn dry_run_mutates_nothing_and_matches_a_following_real_purge() {
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(alice.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_A.to_string(),
                     endpoint_name: "Bob".to_string(),
                 },
@@ -837,6 +839,7 @@ async fn purge_excludes_unbound_impact_when_owning_group_is_itself_purged() {
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(layer_entity.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_B.to_string(),
                     endpoint_name: "Bob".to_string(),
                 },
@@ -904,7 +907,7 @@ fn purged_entity_name_no_longer_resolves_via_lookup_key() {
     let alice = make_entity("Indexed Alice", GROUP_A, TS);
     conn.insert_entity(&alice).unwrap();
     assert!(
-        conn.get_entity_by_name_ci("Indexed Alice", GROUP_A)
+        conn.get_entity_by_name_ci("Indexed Alice", GROUP_A, "Entity")
             .unwrap()
             .is_some(),
         "lookup_key should resolve the entity before purge"
@@ -914,7 +917,7 @@ fn purged_entity_name_no_longer_resolves_via_lookup_key() {
     assert_eq!(counts.groups[0].entities, 1);
 
     assert!(
-        conn.get_entity_by_name_ci("Indexed Alice", GROUP_A)
+        conn.get_entity_by_name_ci("Indexed Alice", GROUP_A, "Entity")
             .unwrap()
             .is_none(),
         "lookup_key must not resolve a purged entity's name"
@@ -1073,6 +1076,7 @@ async fn delete_by_group_attributes_deletions_and_forced_rebind_to_their_own_gro
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(alice.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_A.to_string(),
                     endpoint_name: "Bob".to_string(),
                 },
@@ -1250,6 +1254,7 @@ async fn purge_multi_group_attributes_owner_purged_edge_to_owning_groups_stream(
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(owner.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_B.to_string(),
                     endpoint_name: "Bob".to_string(),
                 },
@@ -1380,6 +1385,7 @@ async fn clear_group_for_rebuild_routes_forced_rebind_to_owning_group_not_defaul
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(alice.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_A.to_string(),
                     endpoint_name: "A-Seed".to_string(),
                 },

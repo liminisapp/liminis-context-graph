@@ -240,7 +240,7 @@ fn migrate_adds_and_backfills_entity_lookup_key_on_existing_db() {
 
     // Subsequent lookups use the backfilled column.
     assert_eq!(
-        conn.get_entity_by_name_ci("Alice", "g1")
+        conn.get_entity_by_name_ci("Alice", "g1", "Entity")
             .unwrap()
             .unwrap()
             .uuid,
