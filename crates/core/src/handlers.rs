@@ -1743,11 +1743,15 @@ async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Resul
         // A purged group holds no entities any more, so its identity-bearing-set stamp
         // (issue #616) describes nothing and would only be left behind as an orphan sidecar.
         // A later flag change on the emptied group is then checked against the empty set and
-        // accepted, which is correct: there is nothing to reinterpret.
+        // accepted, which is correct: there is nothing to reinterpret. The cached ontology entry
+        // is dropped too, so the group's next ingest re-resolves and rewrites the stamp;
+        // otherwise new identity-kind entities would exist with no stamp and the next restart
+        // would refuse the group though its ontology never changed.
         if !dry_run {
             if let Some(root) = state_c.workspace_root.as_deref() {
                 for gid in &gid_refs {
                     crate::identity_stamp::remove_stamp(root, gid);
+                    state_c.invalidate_group_ontology(gid);
                 }
             }
         }
@@ -1869,6 +1873,9 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
     if !preserve_wal {
         if let Some(root) = state.workspace_root.as_deref() {
             crate::identity_stamp::remove_all_stamps(root);
+            // Drop every cached ontology entry so each group re-resolves (and re-stamps) on its
+            // next ingest instead of serving a stale `Resolved` entry with no stamp on disk.
+            state.invalidate_all_group_ontologies();
         }
     }
 

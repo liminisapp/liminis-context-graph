@@ -625,6 +625,69 @@ async fn delete_by_group_removes_only_the_purged_groups_stamp() {
     );
 }
 
+/// Purging a group deletes its stamp; the cached ontology entry must be dropped with it so the
+/// re-ingest re-stamps. Otherwise the stamp stays absent while `Person` entities accumulate and
+/// the next restart falsely refuses the group though its ontology never changed.
+#[tokio::test]
+async fn purge_then_reingest_then_restart_does_not_falsely_refuse() {
+    let (db, _d) = make_db();
+    let root = TempDir::new().unwrap();
+    let onto = || ontology(OntologyMode::Open, &[("Person", true, None)]);
+    let extractions = || {
+        vec![
+            extraction(vec![ent("Ada", "Person")], vec![]),
+            extraction(vec![ent("Bea", "Person")], vec![]),
+        ]
+    };
+    let state = make_state(
+        Arc::clone(&db),
+        Some(root.path()),
+        Some(onto()),
+        extractions(),
+    );
+    ingest(&state, G, 1).await.unwrap();
+
+    let v = serde_json::to_value(
+        handlers::dispatch(
+            IpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(1),
+                method: "knowledge_delete_by_group".into(),
+                params: json!({"group_ids": [G], "confirm": true}),
+            },
+            Arc::clone(&state),
+            None,
+        )
+        .await,
+    )
+    .unwrap();
+    assert!(v.get("error").is_none(), "{v}");
+    assert!(!identity_stamp::stamp_path(root.path(), G).unwrap().exists());
+
+    // Re-ingest in the same process: creates a kind-`Person` entity and must re-stamp.
+    ingest(&state, G, 2).await.unwrap();
+    assert_eq!(
+        identity_stamp::read_stamp(root.path(), G)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec!["Person"],
+        "re-ingest after a purge must re-record the stamp"
+    );
+
+    // Restart: a fresh process with the unchanged ontology still resolves the group.
+    let restarted = make_state(
+        Arc::clone(&db),
+        Some(root.path()),
+        Some(onto()),
+        extractions(),
+    );
+    restarted
+        .check_identity(G)
+        .expect("unchanged ontology must not be refused after a restart");
+    assert!(restarted.group_identity_refusal(G).is_none());
+}
+
 #[tokio::test]
 async fn adding_flag_on_carried_label_is_refused_without_modifying_data() {
     let (db, _d) = make_db();

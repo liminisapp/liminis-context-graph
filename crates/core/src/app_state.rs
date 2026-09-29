@@ -680,6 +680,28 @@ impl AppState {
         }
     }
 
+    /// Drops `group_id`'s cached ontology entry so its next `resolve_ontology` re-runs the
+    /// first-resolution path, including the D1 identity-set check (issue #616).
+    ///
+    /// Must follow any deletion of the group's identity stamp (`knowledge_delete_by_group`,
+    /// `knowledge_clear_all`): the stamp is otherwise only written on first resolution, so a
+    /// cached entry would keep serving `Ok` while new identity-kind entities were created with no
+    /// stamp on disk — and the next restart would refuse the group though its ontology never
+    /// changed. Re-resolving with no carriers writes the stamp, keeping a single stamp writer.
+    /// Also resets the group's cached drift status, which re-derives from the drift sidecar.
+    pub fn invalidate_group_ontology(&self, group_id: &str) {
+        if let Ok(mut guard) = self.group_ontologies.lock() {
+            guard.remove(group_id);
+        }
+    }
+
+    /// [`Self::invalidate_group_ontology`] for every cached group (`knowledge_clear_all`).
+    pub fn invalidate_all_group_ontologies(&self) {
+        if let Ok(mut guard) = self.group_ontologies.lock() {
+            guard.clear();
+        }
+    }
+
     /// Locks `wal_writers`, lazily creating `group_id`'s writer (and its WAL directory) on
     /// first use if it doesn't already exist (issue #378 FR-003), and hands the caller mutable
     /// access to it via `f`.
