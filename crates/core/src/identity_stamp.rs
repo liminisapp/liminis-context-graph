@@ -112,7 +112,7 @@ pub fn write_stamp(
     Ok(())
 }
 
-/// Removes a group's stamp (clear-all / group clear). Missing is fine.
+/// Removes a group's stamp (`knowledge_delete_by_group`). Missing is fine.
 pub fn remove_stamp(workspace_root: &Path, group_id: &str) {
     if let Ok(path) = stamp_path(workspace_root, group_id) {
         let _ = std::fs::remove_file(path);

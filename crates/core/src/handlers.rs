@@ -1740,6 +1740,17 @@ async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Resul
         let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
         let ts = chrono::Utc::now().to_rfc3339();
         let (counts, grouped) = group_purge::purge_groups(&conn, &gid_refs, &ts, dry_run)?;
+        // A purged group holds no entities any more, so its identity-bearing-set stamp
+        // (issue #616) describes nothing and would only be left behind as an orphan sidecar.
+        // A later flag change on the emptied group is then checked against the empty set and
+        // accepted, which is correct: there is nothing to reinterpret.
+        if !dry_run {
+            if let Some(root) = state_c.workspace_root.as_deref() {
+                for gid in &gid_refs {
+                    crate::identity_stamp::remove_stamp(root, gid);
+                }
+            }
+        }
         // Each purged group's own deletions, and any forced-rebind write on a foreign "owning"
         // group's RelatesToNode_ rows (ADR-0361), are already bucketed by the group whose data
         // they actually modify (issue #385 / ADR-0385) — flush each bucket to its own group's

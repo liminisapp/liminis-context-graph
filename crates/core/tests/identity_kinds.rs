@@ -500,6 +500,65 @@ async fn flag_on_unused_type_is_accepted_and_takes_effect() {
 }
 
 #[tokio::test]
+async fn delete_by_group_removes_only_the_purged_groups_stamp() {
+    let (db, _d) = make_db();
+    let root = TempDir::new().unwrap();
+    let state = make_state(
+        Arc::clone(&db),
+        Some(root.path()),
+        Some(ontology(OntologyMode::Open, &[("Person", true, None)])),
+        vec![extraction(vec![ent("Ada", "Person")], vec![])],
+    );
+    ingest(&state, G, 1).await.unwrap();
+    ingest(&state, "other-group", 1).await.unwrap();
+    assert!(!identity_stamp::read_stamp(root.path(), G)
+        .unwrap()
+        .is_empty());
+    assert!(!identity_stamp::read_stamp(root.path(), "other-group")
+        .unwrap()
+        .is_empty());
+
+    let purge = |dry_run: bool| {
+        let state = Arc::clone(&state);
+        async move {
+            let v = serde_json::to_value(
+                handlers::dispatch(
+                    IpcRequest {
+                        jsonrpc: "2.0".into(),
+                        id: json!(1),
+                        method: "knowledge_delete_by_group".into(),
+                        params: json!({"group_ids": [G], "confirm": true, "dry_run": dry_run}),
+                    },
+                    state,
+                    None,
+                )
+                .await,
+            )
+            .unwrap();
+            assert!(v.get("error").is_none(), "{v}");
+        }
+    };
+
+    // A dry run purges nothing, so it must not touch the stamp.
+    purge(true).await;
+    assert!(!identity_stamp::read_stamp(root.path(), G)
+        .unwrap()
+        .is_empty());
+
+    purge(false).await;
+    assert!(identity_stamp::read_stamp(root.path(), G)
+        .unwrap()
+        .is_empty());
+    assert!(!identity_stamp::stamp_path(root.path(), G).unwrap().exists());
+    assert!(
+        !identity_stamp::read_stamp(root.path(), "other-group")
+            .unwrap()
+            .is_empty(),
+        "another group's stamp must survive"
+    );
+}
+
+#[tokio::test]
 async fn adding_flag_on_carried_label_is_refused_without_modifying_data() {
     let (db, _d) = make_db();
     let root = TempDir::new().unwrap();
