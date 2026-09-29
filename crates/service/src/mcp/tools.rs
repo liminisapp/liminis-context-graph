@@ -787,7 +787,7 @@ pub fn registry() -> Vec<ToolSpec> {
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "The entity's name (required)."},
-                        "kind": {"type": "string", "description": "Optional entity kind (identity-bearing, immutable; non-empty, no U+001F). Omitted: acts on the default kind \"Entity\" only."},
+                        "kind": {"type": "string", "description": "Optional entity kind (identity-bearing, immutable; non-empty, no U+001F, not the reserved label \"Merged\"). Omitted: acts on the default kind \"Entity\" only."},
                         "entity_uuid": {"type": "string", "description": "Optional: update this exact entity by UUID (strict group-scoped lookup, no create fallback) instead of resolving by name."},
                         "group_id": {"type": "string", "default": "liminis"},
                         "labels": {"type": "array", "items": {"type": "string"}, "default": ["Entity"], "description": "Defaults to [\"Entity\"] when omitted or empty."},

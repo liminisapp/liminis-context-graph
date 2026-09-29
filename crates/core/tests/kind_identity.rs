@@ -355,7 +355,15 @@ async fn rename_guard_is_kind_scoped_and_entity_uuid_kind_is_immutable() {
 async fn invalid_kinds_are_rejected() {
     let (db, _dir) = make_db();
     let state = make_state(Arc::clone(&db), None);
-    for bad in [json!(""), json!("   "), json!("a\u{1f}b"), json!(7)] {
+    // `Merged` is the tombstone marker label: a live entity of that kind would be unresolvable.
+    for bad in [
+        json!(""),
+        json!("   "),
+        json!("a\u{1f}b"),
+        json!("Merged"),
+        json!(" Merged "),
+        json!(7),
+    ] {
         let v = call(
             "knowledge_assert_entity",
             json!({"name": "x", "kind": bad}),

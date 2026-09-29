@@ -89,9 +89,12 @@ pub enum Error {
     #[error("WAL stream generation unknown: {0}")]
     WalGenerationUnknown(String),
 
-    /// A caller-supplied entity `kind` is empty/whitespace-only or contains the key separator
-    /// U+001F (issue #615, FR-012).
-    #[error("invalid kind {0:?}: must be non-empty and must not contain U+001F")]
+    /// A caller-supplied entity `kind` is empty/whitespace-only, contains the key separator
+    /// U+001F (issue #615, FR-012), or is a reserved structural label (`Merged`).
+    #[error(
+        "invalid kind {0:?}: must be non-empty, must not contain U+001F, and must not be the \
+         reserved label \"Merged\""
+    )]
     InvalidKind(String),
 
     /// A name-only resolution matched more than one kind (issue #615, D2/FR-006). Never resolved

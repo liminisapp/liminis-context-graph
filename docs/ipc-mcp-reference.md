@@ -348,8 +348,8 @@ Entity identity is `(group_id, kind, name)` (issue #615,
 entity (`Topic`, `KnowledgeChannel`, `Team`, …). It is stored in `Entity.kind`, is always one of the
 entity's `labels` (appended after `Entity`), and is immutable. The default kind is exactly
 `Entity`; every entity written before kinds existed, and every extraction-created entity, is that
-kind. A `kind` is trimmed, case-sensitive, non-empty, and must not contain U+001F, else the call
-fails with a validation error. Every entity node in a response carries a `kind` field. So
+kind. A `kind` is trimmed, case-sensitive, non-empty, must not contain U+001F, and must not be the
+reserved structural label `Merged`, else the call fails with a validation error. Every entity node in a response carries a `kind` field. So
 `Topic "adr"` and `KnowledgeChannel "adr"` are two distinct entities that coexist in one group.
 
 **Omitted `kind`: reads are broad, writes are scoped** (the rule `group_ids` already follows):

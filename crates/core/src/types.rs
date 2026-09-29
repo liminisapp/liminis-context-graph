@@ -31,14 +31,20 @@ pub const DEFAULT_KIND: &str = "Entity";
 /// `group_id ␟ kind ␟ name` stays unambiguous.
 pub const KEY_SEPARATOR: char = '\u{1f}';
 
+/// Labels the code treats as structural markers on an `Entity` row. A kind is always added to
+/// `labels`, so a kind equal to one of these would masquerade as the marker: `Merged` makes a live
+/// entity look like a merge tombstone (unresolvable by name, skipped by counts and merges).
+const RESERVED_KINDS: &[&str] = &["Merged"];
+
 /// Validates and normalises a caller-supplied `kind` (issue #615 FR-012): trimmed, non-empty,
-/// no U+001F, case-sensitive. `None` means the default kind [`DEFAULT_KIND`].
+/// no U+001F, not a reserved structural label, case-sensitive. `None` means the default kind
+/// [`DEFAULT_KIND`].
 pub fn normalize_kind(kind: Option<&str>) -> Result<String, crate::error::Error> {
     match kind {
         None => Ok(DEFAULT_KIND.to_string()),
         Some(k) => {
             let t = k.trim();
-            if t.is_empty() || t.contains(KEY_SEPARATOR) {
+            if t.is_empty() || t.contains(KEY_SEPARATOR) || RESERVED_KINDS.contains(&t) {
                 return Err(crate::error::Error::InvalidKind(k.to_string()));
             }
             Ok(t.to_string())
@@ -112,6 +118,9 @@ mod kind_tests {
         assert!(normalize_kind(Some("")).is_err());
         assert!(normalize_kind(Some("   ")).is_err());
         assert!(normalize_kind(Some("a\u{1f}b")).is_err());
+        assert!(normalize_kind(Some("Merged")).is_err());
+        assert!(normalize_kind(Some(" Merged ")).is_err());
+        assert!(normalize_kind(Some("merged")).is_ok());
     }
 
     #[test]
