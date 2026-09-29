@@ -433,9 +433,11 @@ pub fn backfill_entity_lookup_keys(conn: &Conn<'_>) -> Result<(), Error> {
         let kind = crate::db::value_as_kind(&row[3]);
         let labels = crate::db::value_as_str_list(&row[4]);
         let key = crate::db::compute_lookup_key(&group_id, &kind, &name);
-        // `kind ∈ labels` (FR-001) is restored here too: a default-kind row already has
-        // `Entity` in its labels (enforce_entity_first), so this only ever touches a row whose
-        // labels were clobbered out-of-band.
+        // `kind ∈ labels` (FR-001) is restored here too. The label *set* only changes for a row
+        // whose labels were clobbered out-of-band, but `labels_with_kind` also moves `Entity` to
+        // the front (enforce_entity_first), so rows written by older lcg versions with `Entity`
+        // later in the list (e.g. `[Object, Entity]`) are reordered to `[Entity, Object]`. On a
+        // real 0.14.x notebook that was 144 of 198 entities; harmless for set-semantics readers.
         let labels = crate::db::labels_with_kind(&labels, &kind);
         conn.exec_params(
             "MATCH (n:Entity {uuid: $uuid}) SET n.kind = $kind, n.lookup_key = $key, \
