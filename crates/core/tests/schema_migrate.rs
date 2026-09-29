@@ -234,9 +234,16 @@ fn migrate_adds_and_backfills_entity_lookup_key_on_existing_db() {
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(
-        rows[0][0], "g1\u{1f}alice",
+        rows[0][0], "g1\u{1f}Entity\u{1f}alice",
         "pre-existing row's lookup_key must be backfilled from its group_id/name, not left NULL"
     );
+
+    // The pre-#615 row also gets `kind` = "Entity" (issue #615): the v2 backfill fills the new
+    // column and re-keys the old two-field key under the kind-scoped composition.
+    let kinds = conn
+        .cypher_query("MATCH (n:Entity {uuid:'en1'}) RETURN n.kind")
+        .unwrap();
+    assert_eq!(kinds, vec![vec!["Entity".to_string()]]);
 
     // Subsequent lookups use the backfilled column.
     assert_eq!(
@@ -263,7 +270,7 @@ fn migrate_adds_and_backfills_entity_lookup_key_on_existing_db() {
     // ART-indexed access path here too, not just on a DB created post-#221.
     conn.create_entity_lookup_key_index().unwrap();
     let plan = conn
-        .cypher_query("EXPLAIN MATCH (e:Entity) WHERE e.lookup_key = 'g1\u{1f}alice' RETURN e.uuid")
+        .cypher_query("EXPLAIN MATCH (e:Entity) WHERE e.lookup_key = 'g1\u{1f}Entity\u{1f}alice' RETURN e.uuid")
         .unwrap();
     let plan_text = plan.into_iter().flatten().collect::<Vec<_>>().join("\n");
     assert!(
@@ -349,7 +356,7 @@ fn migrate_retries_lookup_key_backfill_after_a_prior_failure() {
         .unwrap();
     assert_eq!(
         rows,
-        vec![vec!["g1\u{1f}alice".to_string()]],
+        vec![vec!["g1\u{1f}Entity\u{1f}alice".to_string()]],
         "the retried backfill must actually populate lookup_key, not just flip the status flag"
     );
 }
