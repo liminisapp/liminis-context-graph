@@ -1418,19 +1418,31 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let gid_filter = match group_ids {
-            Some(_) => "WHERE node.group_id IN $gids",
-            None => "",
-        };
+        self.fts_search_entities_kind(query, group_ids, None, limit)
+    }
+
+    /// [`Self::fts_search_entities`] with an optional `kind` predicate (issue #615) applied
+    /// inside the query, before `LIMIT`, so the candidate pool is already kind-filtered.
+    pub fn fts_search_entities_kind(
+        &self,
+        query: &str,
+        group_ids: Option<&[&str]>,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let filter = entity_search_filter(group_ids.is_some(), kind.is_some());
         let cypher = format!(
             "CALL QUERY_FTS_INDEX('Entity', 'node_name_and_summary', $q) \
-             WITH node, score {gid_filter} \
+             WITH node, score {filter} \
              RETURN node.uuid, score \
              ORDER BY score DESC LIMIT $limit"
         );
         let mut params = serde_json::json!({ "q": query, "limit": limit as i64 });
         if let Some(gids) = group_ids {
             params["gids"] = serde_json::json!(gids);
+        }
+        if let Some(kind) = kind {
+            params["kind"] = serde_json::json!(kind);
         }
         self.collect_uuid_score_pairs(&cypher, params)
     }
@@ -1470,19 +1482,56 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let gid_filter = match group_ids {
-            Some(_) => "WHERE node.group_id IN $gids",
-            None => "",
-        };
+        self.vector_search_entities_kind(embedding, group_ids, None, limit)
+    }
+
+    /// [`Self::vector_search_entities`] with an optional `kind` predicate (issue #615). The
+    /// predicate runs after the ANN probe, so when it is set the probe's `k` is oversampled
+    /// ([`KIND_ANN_OVERSAMPLE`]) to keep a rare kind from being crowded out of the pool.
+    pub fn vector_search_entities_kind(
+        &self,
+        embedding: &[f32],
+        group_ids: Option<&[&str]>,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        self.vector_index_search_kind(
+            "entity_name_embedding_idx",
+            embedding,
+            group_ids,
+            kind,
+            limit,
+        )
+    }
+
+    /// Shared body of the two Entity vector searches: probe `index`, then filter by group/kind.
+    fn vector_index_search_kind(
+        &self,
+        index: &str,
+        embedding: &[f32],
+        group_ids: Option<&[&str]>,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let filter = entity_search_filter(group_ids.is_some(), kind.is_some());
         let cypher = format!(
-            "CALL QUERY_VECTOR_INDEX('Entity', 'entity_name_embedding_idx', $emb, $limit) \
-             WITH node, distance {gid_filter} \
+            "CALL QUERY_VECTOR_INDEX('Entity', '{index}', $emb, $k) \
+             WITH node, distance {filter} \
              RETURN node.uuid, distance \
              ORDER BY distance ASC LIMIT $limit"
         );
-        let mut params = serde_json::json!({ "emb": embedding, "limit": limit as i64 });
+        let k = if kind.is_some() {
+            limit.saturating_mul(KIND_ANN_OVERSAMPLE)
+        } else {
+            limit
+        };
+        let mut params =
+            serde_json::json!({ "emb": embedding, "k": k as i64, "limit": limit as i64 });
         if let Some(gids) = group_ids {
             params["gids"] = serde_json::json!(gids);
+        }
+        if let Some(kind) = kind {
+            params["kind"] = serde_json::json!(kind);
         }
         self.collect_uuid_score_pairs(&cypher, params)
     }
@@ -1500,21 +1549,25 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let gid_filter = match group_ids {
-            Some(_) => "WHERE node.group_id IN $gids",
-            None => "",
-        };
-        let cypher = format!(
-            "CALL QUERY_VECTOR_INDEX('Entity', 'entity_summary_embedding_idx', $emb, $limit) \
-             WITH node, distance {gid_filter} \
-             RETURN node.uuid, distance \
-             ORDER BY distance ASC LIMIT $limit"
-        );
-        let mut params = serde_json::json!({ "emb": embedding, "limit": limit as i64 });
-        if let Some(gids) = group_ids {
-            params["gids"] = serde_json::json!(gids);
-        }
-        self.collect_uuid_score_pairs(&cypher, params)
+        self.vector_search_entities_by_summary_kind(embedding, group_ids, None, limit)
+    }
+
+    /// [`Self::vector_search_entities_by_summary`] with an optional `kind` predicate (issue
+    /// #615); see [`Self::vector_search_entities_kind`].
+    pub fn vector_search_entities_by_summary_kind(
+        &self,
+        embedding: &[f32],
+        group_ids: Option<&[&str]>,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        self.vector_index_search_kind(
+            "entity_summary_embedding_idx",
+            embedding,
+            group_ids,
+            kind,
+            limit,
+        )
     }
 
     /// HNSW vector search on RelatesToNode_ (facts); returns (uuid, distance) pairs.
@@ -3755,6 +3808,31 @@ pub(crate) fn compute_lookup_key(group_id: &str, kind: &str, name: &str) -> Stri
         name.trim().to_lowercase(),
         sep = crate::types::KEY_SEPARATOR
     )
+}
+
+/// ANN-probe oversampling factor when a `kind` predicate is applied after the vector index probe
+/// (issue #615): the probe returns its top-`k` nearest rows *before* the predicate runs, so a
+/// rare kind would otherwise be crowded out of the candidate pool by nearer rows of other kinds.
+const KIND_ANN_OVERSAMPLE: usize = 10;
+
+/// `WHERE` clause for the Entity search queries: optional group filter and optional kind filter
+/// (issue #615). A NULL `kind` column is the default kind, matching [`value_as_kind`]'s
+/// read-side mapping.
+fn entity_search_filter(has_groups: bool, has_kind: bool) -> String {
+    let mut conds = Vec::new();
+    if has_groups {
+        conds.push("node.group_id IN $gids");
+    }
+    if has_kind {
+        conds.push(
+            "(node.kind = $kind OR ((node.kind IS NULL OR node.kind = '') AND $kind = 'Entity'))",
+        );
+    }
+    if conds.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conds.join(" AND "))
+    }
 }
 
 /// Reads an `Entity.kind` column value, mapping NULL/empty (a row written before kinds existed,

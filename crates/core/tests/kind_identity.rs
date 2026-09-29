@@ -370,6 +370,48 @@ async fn invalid_kinds_are_rejected() {
     assert_eq!(nodes_named(&db, "x")[0].kind, "Topic");
 }
 
+/// The `kind` filter on `find_entities` is pushed into each candidate query, so a matching
+/// entity is found even when far more numerous rows of another kind fill the `limit * 3`
+/// candidate pools (review finding on #617).
+#[tokio::test]
+async fn find_entities_kind_filter_is_not_crowded_out_by_other_kinds() {
+    let (db, _dir) = make_db();
+    {
+        let conn = db.connect().unwrap();
+        for i in 0..40 {
+            conn.insert_entity(&entity(
+                &format!("e{i}"),
+                &format!("Apple {i}"),
+                "Entity",
+                G,
+                "2026-01-01 00:00:00",
+            ))
+            .unwrap();
+        }
+        let mut company = entity("c1", "Apple Inc", "Company", G, "2026-01-02 00:00:00");
+        company.summary = "Company".to_string();
+        conn.insert_entity(&company).unwrap();
+        conn.build_indices_and_constraints().unwrap();
+    }
+    let state = make_state(Arc::clone(&db), None);
+    let v = call(
+        "knowledge_find_entities",
+        json!({"query": "Apple", "group_ids": [G], "num_results": 2, "kind": "Company"}),
+        &state,
+    )
+    .await;
+    assert!(v.get("error").is_none(), "{v}");
+    let nodes = v["result"]["nodes"].as_array().expect("nodes array");
+    assert!(
+        nodes.iter().any(|n| n["uuid"] == "c1"),
+        "the Company must be found: {v}"
+    );
+    assert!(
+        nodes.iter().all(|n| n["kind"] == "Company"),
+        "only Company rows may be returned: {v}"
+    );
+}
+
 // ── SC-005 / D3: WAL ──────────────────────────────────────────────────────────
 
 fn wal_text(dir: &std::path::Path) -> String {

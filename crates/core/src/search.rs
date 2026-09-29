@@ -105,9 +105,10 @@ pub async fn hybrid_entity_search(
 }
 
 /// [`hybrid_entity_search`] with an optional `kind` filter (issue #615): `Some(kind)` keeps only
-/// entities of that kind, applied to the *whole* fused ranking before truncating to `limit` so a
-/// filtered search still returns up to `limit` matches; `None` is all kinds. Every returned row
-/// carries its `kind`.
+/// entities of that kind; `None` is all kinds. The kind predicate is pushed into each candidate
+/// query (BM25, name-vector, summary-vector) so the pools are already kind-filtered before the
+/// `limit * 3` cap, and a matching entity is not crowded out by more numerous rows of other kinds.
+/// Every returned row carries its `kind`.
 pub async fn hybrid_entity_search_kind(
     db: Arc<Db>,
     embedder: Arc<dyn Embedder>,
@@ -126,31 +127,35 @@ pub async fn hybrid_entity_search_kind(
         let gid_refs: Option<Vec<&str>> = group_ids
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
+        let kind_ref = kind.as_deref();
         let candidate_limit = limit * 3;
 
-        let bm25 = conn.fts_search_entities(&query_owned, gid_refs.as_deref(), candidate_limit)?;
-        let vector =
-            conn.vector_search_entities(&embedding, gid_refs.as_deref(), candidate_limit)?;
+        let bm25 = conn.fts_search_entities_kind(
+            &query_owned,
+            gid_refs.as_deref(),
+            kind_ref,
+            candidate_limit,
+        )?;
+        let vector = conn.vector_search_entities_kind(
+            &embedding,
+            gid_refs.as_deref(),
+            kind_ref,
+            candidate_limit,
+        )?;
         // Third RRF input (issue #470): summary-vector matches, so a query that paraphrases an
         // entity's `summary` — sharing no vocabulary with it (no FTS match) and no similarity to
         // `name` (no name-vector match) — is still retrieved via meaning-based similarity.
-        let vector_summary = conn.vector_search_entities_by_summary(
+        let vector_summary = conn.vector_search_entities_by_summary_kind(
             &embedding,
             gid_refs.as_deref(),
+            kind_ref,
             candidate_limit,
         )?;
 
         let fused_uuids = rrf_fuse(&[&bm25, &vector, &vector_summary]);
-        let Some(kind) = kind else {
-            let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();
-            let rows = conn.get_entities_by_uuids(&top_uuids)?;
-            return Ok(order_by_rank(rows, &top_uuids, |e| &e.uuid));
-        };
-        let rows = conn.get_entities_by_uuids(&fused_uuids)?;
-        let mut ranked = order_by_rank(rows, &fused_uuids, |e| &e.uuid);
-        ranked.retain(|e| e.kind == kind);
-        ranked.truncate(limit);
-        Ok(ranked)
+        let top_uuids: Vec<String> = fused_uuids.into_iter().take(limit).collect();
+        let rows = conn.get_entities_by_uuids(&top_uuids)?;
+        Ok(order_by_rank(rows, &top_uuids, |e| &e.uuid))
     })
     .await??;
 
