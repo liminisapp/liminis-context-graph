@@ -69,13 +69,15 @@ fn insert_entity_is_immediately_lookupable_by_name() {
         .unwrap();
 
     let found = conn
-        .get_entity_by_name_ci("  ALICE  ", GROUP)
+        .get_entity_by_name_ci("  ALICE  ", GROUP, "Entity")
         .unwrap()
         .expect("case/whitespace-insensitive lookup must find the inserted entity");
     assert_eq!(found.uuid, "u1");
 
     assert!(
-        conn.get_entity_by_name_ci("Bob", GROUP).unwrap().is_none(),
+        conn.get_entity_by_name_ci("Bob", GROUP, "Entity")
+            .unwrap()
+            .is_none(),
         "a name that was never inserted must miss"
     );
 }
@@ -97,14 +99,14 @@ fn lookup_is_scoped_to_group_id() {
     .unwrap();
 
     assert_eq!(
-        conn.get_entity_by_name_ci("Alice", GROUP)
+        conn.get_entity_by_name_ci("Alice", GROUP, "Entity")
             .unwrap()
             .unwrap()
             .uuid,
         "g1-alice"
     );
     assert_eq!(
-        conn.get_entity_by_name_ci("Alice", "other-group")
+        conn.get_entity_by_name_ci("Alice", "other-group", "Entity")
             .unwrap()
             .unwrap()
             .uuid,
@@ -123,7 +125,7 @@ fn update_entity_core_rename_updates_lookup_key() {
     let existing = make_entity("u1", "OldName", "2026-01-01 00:00:00");
     conn.insert_entity(&existing).unwrap();
     assert!(conn
-        .get_entity_by_name_ci("OldName", GROUP)
+        .get_entity_by_name_ci("OldName", GROUP, "Entity")
         .unwrap()
         .is_some());
 
@@ -131,13 +133,13 @@ fn update_entity_core_rename_updates_lookup_key() {
         .unwrap();
 
     assert!(
-        conn.get_entity_by_name_ci("OldName", GROUP)
+        conn.get_entity_by_name_ci("OldName", GROUP, "Entity")
             .unwrap()
             .is_none(),
         "the old name's lookup_key must no longer resolve after a rename"
     );
     assert_eq!(
-        conn.get_entity_by_name_ci("NewName", GROUP)
+        conn.get_entity_by_name_ci("NewName", GROUP, "Entity")
             .unwrap()
             .expect("the new name must resolve immediately")
             .uuid,
@@ -166,7 +168,7 @@ fn merge_entities_created_at_update_reorders_winner() {
     ))
     .unwrap();
     assert_eq!(
-        conn.get_entity_by_name_ci("Brett", GROUP)
+        conn.get_entity_by_name_ci("Brett", GROUP, "Entity")
             .unwrap()
             .unwrap()
             .uuid,
@@ -187,7 +189,7 @@ fn merge_entities_created_at_update_reorders_winner() {
     // update_entity_created_at's reorder, and that a lookup for a name whose current winner is
     // NOT a tombstone still resolves correctly post-merge.
     let found = conn
-        .get_entity_by_name_ci("Brett", GROUP)
+        .get_entity_by_name_ci("Brett", GROUP, "Entity")
         .unwrap()
         .expect("Brett must still resolve after merge");
     assert_eq!(
@@ -216,7 +218,7 @@ fn lookup_resolves_to_a_merged_tombstoned_winner() {
     conn.insert_entity(&make_entity("zzz-canonical", "Dana", "2026-01-01 00:00:00"))
         .unwrap();
     assert_eq!(
-        conn.get_entity_by_name_ci("Dana", GROUP)
+        conn.get_entity_by_name_ci("Dana", GROUP, "Entity")
             .unwrap()
             .unwrap()
             .uuid,
@@ -244,7 +246,7 @@ fn lookup_resolves_to_a_merged_tombstoned_winner() {
     );
 
     let found = conn
-        .get_entity_by_name_ci("Dana", GROUP)
+        .get_entity_by_name_ci("Dana", GROUP, "Entity")
         .unwrap()
         .expect("a name whose winner is Merged-tombstoned must still resolve");
     assert_eq!(
@@ -287,14 +289,14 @@ corrections:
     );
 
     assert_eq!(
-        conn.get_entity_by_name_ci("Robert", GROUP)
+        conn.get_entity_by_name_ci("Robert", GROUP, "Entity")
             .unwrap()
             .unwrap()
             .uuid,
         "canonical"
     );
     assert_eq!(
-        conn.get_entity_by_name_ci("Bob", GROUP)
+        conn.get_entity_by_name_ci("Bob", GROUP, "Entity")
             .unwrap()
             .unwrap()
             .uuid,
@@ -314,7 +316,7 @@ fn stale_entry_after_out_of_band_delete_degrades_to_miss() {
     conn.insert_entity(&make_entity("gone", "Ghost", "2026-01-01 00:00:00"))
         .unwrap();
     assert!(conn
-        .get_entity_by_name_ci("Ghost", GROUP)
+        .get_entity_by_name_ci("Ghost", GROUP, "Entity")
         .unwrap()
         .is_some());
 
@@ -322,7 +324,7 @@ fn stale_entry_after_out_of_band_delete_degrades_to_miss() {
         .unwrap();
 
     assert!(
-        conn.get_entity_by_name_ci("Ghost", GROUP)
+        conn.get_entity_by_name_ci("Ghost", GROUP, "Entity")
             .unwrap()
             .is_none(),
         "a deleted entity must never be returned as if it were still valid"
@@ -336,7 +338,7 @@ fn fresh_db_has_no_entities_lookupable() {
     let conn = db.connect().unwrap();
 
     assert!(conn
-        .get_entity_by_name_ci("Anything", GROUP)
+        .get_entity_by_name_ci("Anything", GROUP, "Entity")
         .unwrap()
         .is_none());
 }
@@ -355,7 +357,7 @@ fn deleting_the_winner_falls_through_to_the_next_same_named_row() {
     conn.insert_entity(&make_entity("runner-up", "Dana", "2026-02-01 00:00:00"))
         .unwrap();
     assert_eq!(
-        conn.get_entity_by_name_ci("Dana", GROUP)
+        conn.get_entity_by_name_ci("Dana", GROUP, "Entity")
             .unwrap()
             .unwrap()
             .uuid,
@@ -366,7 +368,7 @@ fn deleting_the_winner_falls_through_to_the_next_same_named_row() {
         .unwrap();
 
     let found = conn
-        .get_entity_by_name_ci("Dana", GROUP)
+        .get_entity_by_name_ci("Dana", GROUP, "Entity")
         .unwrap()
         .expect("the surviving same-named candidate must still resolve");
     assert_eq!(found.uuid, "runner-up");
@@ -393,7 +395,7 @@ fn wal_replay_leaves_lookup_key_null_until_explicit_backfill() {
         .unwrap();
     assert_eq!(conn.count_nodes("Entity").unwrap(), 1);
     assert!(
-        conn.get_entity_by_name_ci("Replayed", GROUP)
+        conn.get_entity_by_name_ci("Replayed", GROUP, "Entity")
             .unwrap()
             .is_none(),
         "replay must not silently populate lookup_key — it executes raw Cypher templates and \
@@ -402,7 +404,7 @@ fn wal_replay_leaves_lookup_key_null_until_explicit_backfill() {
 
     schema::backfill_entity_lookup_keys(&conn).unwrap();
     assert_eq!(
-        conn.get_entity_by_name_ci("Replayed", GROUP)
+        conn.get_entity_by_name_ci("Replayed", GROUP, "Entity")
             .unwrap()
             .unwrap()
             .uuid,
@@ -459,7 +461,7 @@ fn open_or_rebuild_backfills_lookup_key_from_replayed_wal() {
     let conn = db.connect().unwrap();
 
     assert_eq!(
-        conn.get_entity_by_name_ci("Rebuilt", GROUP)
+        conn.get_entity_by_name_ci("Rebuilt", GROUP, "Entity")
             .unwrap()
             .unwrap()
             .uuid,
@@ -474,7 +476,7 @@ fn open_or_rebuild_backfills_lookup_key_from_replayed_wal() {
     // schema_migrate.rs) was built to close. Asserting the marker here confirms this call site
     // now goes through the same persisting path, not just that the in-process flag is healthy.
     let status = conn
-        .cypher_query("MATCH (s:SchemaState {key: 'entity_lookup_key_backfill'}) RETURN s.status")
+        .cypher_query("MATCH (s:SchemaState {key: 'entity_kind_lookup_key_v2'}) RETURN s.status")
         .unwrap();
     assert_eq!(
         status,
@@ -516,14 +518,14 @@ fn scan_fallback_resolves_and_self_heals_a_row_with_no_lookup_key() {
 
     // The plain, index-only lookup misses — replay bypassed insert_entity and no backfill ran.
     assert!(conn
-        .get_entity_by_name_ci("ReplayedTwo", GROUP)
+        .get_entity_by_name_ci("ReplayedTwo", GROUP, "Entity")
         .unwrap()
         .is_none());
 
     // The endpoint-authority scan-fallback lookup must resolve the entity regardless of the
     // migration-failed state (User Story 3 #3 / FR-010).
     let found = conn
-        .get_entity_by_name_ci_with_scan_fallback("ReplayedTwo", GROUP)
+        .get_entity_by_name_ci_with_scan_fallback("ReplayedTwo", GROUP, "Entity")
         .unwrap()
         .expect("scan fallback must resolve the replayed entity despite the missing lookup_key");
     assert_eq!(found.uuid, "replayed-2");
@@ -536,7 +538,7 @@ fn scan_fallback_resolves_and_self_heals_a_row_with_no_lookup_key() {
     // Self-healing: the scan hit above must have written lookup_key, so a second lookup
     // resolves via the plain index-only path with no additional scan.
     assert!(conn
-        .get_entity_by_name_ci("ReplayedTwo", GROUP)
+        .get_entity_by_name_ci("ReplayedTwo", GROUP, "Entity")
         .unwrap()
         .is_some());
     assert_eq!(
@@ -568,7 +570,7 @@ fn scan_fallback_matches_a_stored_name_with_incidental_whitespace() {
     .unwrap();
 
     let found = conn
-        .get_entity_by_name_ci_with_scan_fallback("Whitespace Co", GROUP)
+        .get_entity_by_name_ci_with_scan_fallback("Whitespace Co", GROUP, "Entity")
         .unwrap()
         .expect(
             "the scan fallback must match a stored name with incidental whitespace against a \
@@ -609,7 +611,7 @@ fn scan_fallback_falls_through_when_the_winning_candidate_is_gone() {
         .unwrap();
 
     let found = conn
-        .get_entity_by_name_ci_with_scan_fallback("Dana", GROUP)
+        .get_entity_by_name_ci_with_scan_fallback("Dana", GROUP, "Entity")
         .unwrap()
         .expect("the surviving same-named candidate must still resolve via the scan fallback");
     assert_eq!(found.uuid, "newer");

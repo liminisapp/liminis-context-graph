@@ -345,6 +345,17 @@ learn a given rebuild's backfill outcome directly from its own result, without a
 `knowledge_status` call; use `name_index_trusted` (below) for the current global/cumulative
 backfill health, independent of any specific rebuild.
 
+**Key format and the kind migration (issue #615).** `Entity.lookup_key` is `group_id ␟ kind ␟
+lower(trim(name))` (U+001F separators; `kind` defaults to `Entity`), so same-named entities of
+different kinds coexist ([ADR-0615](adr/0615-kind-scoped-entity-identity.md)). It is a *derived*
+value: it is stripped from every WAL record at write time and recomputed on replay, and any
+`lookup_key` in an older WAL is ignored. On the first start after upgrading, `schema::migrate` adds
+`Entity.kind`, and a one-time backfill (persisted under the `SchemaState` key
+`entity_kind_lookup_key_v2`) sets every existing row's kind to `Entity` and re-keys it — an O(N)
+pass, one statement per row. The post-replay backfill after every rebuild/recovery covers
+`kind IS NULL OR lookup_key IS NULL`. **Downgrade is unsupported:** a pre-#615 binary cannot replay
+a WAL written after this change.
+
 **`name_index_trusted`** (boolean) and **`name_index_fallback_scans`** (integer) — field names
 kept for wire compatibility, but re-backed by the `Entity.lookup_key` secondary ART index
 ([ADR-0221](adr/0221-secondary-art-index-for-entity-name-lookup.md), which supersedes the

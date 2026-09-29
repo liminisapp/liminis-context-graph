@@ -1108,7 +1108,7 @@ async fn strict_mode_entity_type_reclassifies_not_drops() {
 
     let conn = db.connect().unwrap();
     let acme = conn
-        .get_entity_by_name_ci("Acme Corp", "grp")
+        .get_entity_by_name_ci("Acme Corp", "grp", "Entity")
         .unwrap()
         .expect("Acme Corp must be persisted");
     assert!(
@@ -1129,7 +1129,7 @@ async fn strict_mode_entity_type_reclassifies_not_drops() {
     );
 
     let alice = conn
-        .get_entity_by_name_ci("Alice", "grp")
+        .get_entity_by_name_ci("Alice", "grp", "Entity")
         .unwrap()
         .expect("Alice must be persisted");
     assert!(
@@ -1372,7 +1372,7 @@ async fn strict_mode_empty_entity_type_resolves_as_plain_entity() {
     let conn = db.connect().unwrap();
     for name in ["Mystery", "AlsoMystery"] {
         let row = conn
-            .get_entity_by_name_ci(name, "grp")
+            .get_entity_by_name_ci(name, "grp", "Entity")
             .unwrap()
             .unwrap_or_else(|| panic!("{name} must be persisted"));
         assert_eq!(
@@ -1593,7 +1593,7 @@ async fn strict_mode_entity_type_case_variant_of_entity_not_leaked_into_labels()
 
     let conn = db.connect().unwrap();
     let mystery = conn
-        .get_entity_by_name_ci("Mystery", "grp")
+        .get_entity_by_name_ci("Mystery", "grp", "Entity")
         .unwrap()
         .expect("Mystery must be persisted");
     assert_eq!(

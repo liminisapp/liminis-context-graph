@@ -101,6 +101,25 @@ pub async fn hybrid_entity_search(
     group_ids: Option<Vec<String>>,
     limit: usize,
 ) -> Result<Vec<EntityRow>, Error> {
+    hybrid_entity_search_kind(db, embedder, query, group_ids, limit, None).await
+}
+
+/// [`hybrid_entity_search`] with an optional `kind` filter (issue #615): `Some(kind)` keeps only
+/// entities of that kind; `None` is all kinds. The kind predicate is pushed into each candidate
+/// query (BM25, name-vector, summary-vector) before the `limit * 3` cap. For BM25 the predicate
+/// runs inside the FTS query, so a matching entity is not crowded out by rows of other kinds.
+/// For the two vector queries it runs after the nearest-neighbour probe, whose size is
+/// oversampled ([`crate::db`]'s `KIND_ANN_OVERSAMPLE`); that mitigates but does not guarantee
+/// recall of a rare kind ranked below the oversampled probe. Every returned row carries its
+/// `kind`.
+pub async fn hybrid_entity_search_kind(
+    db: Arc<Db>,
+    embedder: Arc<dyn Embedder>,
+    query: &str,
+    group_ids: Option<Vec<String>>,
+    limit: usize,
+    kind: Option<String>,
+) -> Result<Vec<EntityRow>, Error> {
     // Async: embed the query
     let embedding = embedder.embed(query).await?;
 
@@ -111,17 +130,28 @@ pub async fn hybrid_entity_search(
         let gid_refs: Option<Vec<&str>> = group_ids
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
+        let kind_ref = kind.as_deref();
         let candidate_limit = limit * 3;
 
-        let bm25 = conn.fts_search_entities(&query_owned, gid_refs.as_deref(), candidate_limit)?;
-        let vector =
-            conn.vector_search_entities(&embedding, gid_refs.as_deref(), candidate_limit)?;
+        let bm25 = conn.fts_search_entities_kind(
+            &query_owned,
+            gid_refs.as_deref(),
+            kind_ref,
+            candidate_limit,
+        )?;
+        let vector = conn.vector_search_entities_kind(
+            &embedding,
+            gid_refs.as_deref(),
+            kind_ref,
+            candidate_limit,
+        )?;
         // Third RRF input (issue #470): summary-vector matches, so a query that paraphrases an
         // entity's `summary` — sharing no vocabulary with it (no FTS match) and no similarity to
         // `name` (no name-vector match) — is still retrieved via meaning-based similarity.
-        let vector_summary = conn.vector_search_entities_by_summary(
+        let vector_summary = conn.vector_search_entities_by_summary_kind(
             &embedding,
             gid_refs.as_deref(),
+            kind_ref,
             candidate_limit,
         )?;
 

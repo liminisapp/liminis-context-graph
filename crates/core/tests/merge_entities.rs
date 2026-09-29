@@ -69,7 +69,7 @@ fn make_edge_in_group(
 /// Returns the number of entities with the given name that are NOT merged.
 fn count_active_entities_named(db: &Db, name: &str) -> usize {
     let conn = db.connect().unwrap();
-    conn.get_entities_by_name_all(name, "liminis")
+    conn.get_entities_by_name_all(name, "liminis", None)
         .unwrap()
         .into_iter()
         .filter(|e| !e.labels.contains(&"Merged".to_string()))
@@ -127,7 +127,7 @@ fn test_merge_by_name_all_identical() {
 
     // Canonical has edges (at least 4 — one per alias, plus potential dedup)
     let canonical = conn
-        .get_entities_by_name_all("Brett", "liminis")
+        .get_entities_by_name_all("Brett", "liminis", None)
         .unwrap()
         .into_iter()
         .find(|e| !e.labels.contains(&"Merged".to_string()))
@@ -1001,7 +1001,7 @@ fn test_merge_with_timestamp_edges() {
 
     // Canonical has the rewritten edges with correct timestamps
     let canonical = conn
-        .get_entities_by_name_all("Casey", "liminis")
+        .get_entities_by_name_all("Casey", "liminis", None)
         .unwrap()
         .into_iter()
         .find(|e| !e.labels.contains(&"Merged".to_string()))

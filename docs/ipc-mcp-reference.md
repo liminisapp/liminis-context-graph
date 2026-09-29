@@ -42,11 +42,11 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (45)
+## IPC methods (46)
 
-The socket dispatch handles **45 methods**: 44 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **46 methods**: 45 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (45) and the MCP tool registry (44, below) differ by exactly one — `health_check` is
+surface (46) and the MCP tool registry (45, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -55,7 +55,7 @@ not exposed as an MCP tool.
 | Status | `knowledge_status`, `knowledge_rebuild_status` |
 | Ingestion | `knowledge_process_chunk`, `knowledge_add_episode` |
 | Direct assertion | `knowledge_assert_entity`, `knowledge_assert_relationship` |
-| Search | `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
+| Search | `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_delete_by_group`, `knowledge_clear_all` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
@@ -175,7 +175,7 @@ union of all active scopes.
 
 | Scope | Methods |
 |-------|---------|
-| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
+| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
 | `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings` |
@@ -294,10 +294,11 @@ round-trip through `knowledge_process_chunk`'s LLM-driven extraction. Use `proce
 you have unstructured text and want the graph populated by extraction; use the assert tools when
 you already know exactly which entity or edge you want to write.
 
-**`knowledge_assert_entity`** accepts `name` (required), `entity_uuid` (optional), `labels`,
-`summary`, `attributes`, and `group_id` (default `liminis`).
+**`knowledge_assert_entity`** accepts `name` (required), `entity_uuid` (optional), `kind`
+(optional, see [Entity kinds](#entity-kinds-kind-identity)), `labels`, `summary`, `attributes`, and
+`group_id` (default `liminis`).
 
-- **Upsert identity is `(name, group_id)`**, unless `entity_uuid` is supplied. `entity_uuid`, when
+- **Upsert identity is `(group_id, kind, name)`** (kind defaults to `Entity`), unless `entity_uuid` is supplied. `entity_uuid`, when
   given, is a **strict, group-scoped lookup** — the call fails if no entity with that UUID exists
   in `group_id`; there is no create-under-this-UUID fallback (ADR-0379 Decision 3). A caller
   cannot mint an entity at a UUID of its own choosing.
@@ -317,7 +318,8 @@ you already know exactly which entity or edge you want to write.
   entity is deleted and recreated. There is currently no supported way to refresh it in place.
 
 **`knowledge_assert_relationship`** accepts `source_name`, `target_name`, `predicate` (all
-required), `fact` (optional — auto-derived as `"{source_name} {predicate} {target_name}"` if
+required), `source_kind` / `target_kind` (optional, see
+[Entity kinds](#entity-kinds-kind-identity)), `fact` (optional — auto-derived as `"{source_name} {predicate} {target_name}"` if
 omitted), `attributes`, `relation_type`, `valid_at`, and `group_id` (default `liminis`).
 
 - **Upsert identity is `(source_node_uuid, predicate, target_node_uuid, group_id)`**, resolved via
@@ -338,6 +340,39 @@ omitted), `attributes`, `relation_type`, `valid_at`, and `group_id` (default `li
 
 See [ADR-0379](adr/0379-direct-assertion-conventions.md) for the full rationale behind these
 upsert and embedding decisions.
+
+### Entity kinds (`kind` identity)
+
+Entity identity is `(group_id, kind, name)` (issue #615,
+[ADR-0615](adr/0615-kind-scoped-entity-identity.md)). `kind` is a single string classifying an
+entity (`Topic`, `KnowledgeChannel`, `Team`, …). It is stored in `Entity.kind`, is always one of the
+entity's `labels` (appended after `Entity`), and is immutable. The default kind is exactly
+`Entity`; every entity written before kinds existed, and every extraction-created entity, is that
+kind. A `kind` is trimmed, case-sensitive, non-empty, must not contain U+001F, and must not be the
+reserved structural label `Merged`, else the call fails with a validation error. Every entity node in a response carries a `kind` field. So
+`Topic "adr"` and `KnowledgeChannel "adr"` are two distinct entities that coexist in one group.
+
+**Omitted `kind`: reads are broad, writes are scoped** (the rule `group_ids` already follows):
+
+| Operation | `kind` given | `kind` omitted |
+|-----------|--------------|----------------|
+| `knowledge_assert_entity` (write) | resolves/creates exactly that kind | acts on the default kind `Entity` **only** — never touches another kind's same-named node |
+| `knowledge_assert_relationship` endpoints (existing entities) | that endpoint resolves exactly within the kind | spans all kinds; more than one matching kind is an ambiguity error |
+| `knowledge_resolve_entity` (`name`, `group_id`, `kind?`) | exact lookup, never ambiguous | spans all kinds; one match resolves, several is an ambiguity error, none returns `{found: false}` |
+| `knowledge_find_entities`, `knowledge_list_entities` | only that kind | all kinds, each node carrying its `kind` (multi-row reads never pick one, so never ambiguous) |
+| `knowledge_add_cross_group_edge` `source_kind`/`target_kind` (foreign endpoints only) | pointer pinned to that kind (`endpoint_kind`) | pointer resolves across all kinds; `ambiguous` once a second kind shares the name |
+| `knowledge_merge_entities` `kind` | restricts `canonical_name`/`alias_names` | those names span all kinds; a multi-kind `canonical_name` is an ambiguity error |
+
+**Ambiguity error.** A name-only resolution that matches more than one kind fails with JSON-RPC
+error code **`-32002`**; `error.data` is `{"reason": "ambiguous_entity", "name", "group_id",
+"candidates": [{"uuid", "kind"}, …]}`. It never picks a candidate. Retry with an explicit `kind`.
+
+**Merges never cross kinds.** `knowledge_merge_entities` refuses the *whole call* (`dry_run`
+included, nothing modified) if the canonical and any alias differ in kind, with an error naming the
+kinds; `merge_all_by_name` is limited to the canonical's own kind.
+
+**Extraction stays in the `Entity` namespace.** `knowledge_add_episode`/`knowledge_process_chunk`
+create and merge only kind-`Entity` entities and never merge into an asserted non-`Entity` node.
 
 ### Relation typing (`canonicalize_relations`, `backfill_relation_types`, `reprocess_relation_types`)
 
@@ -462,7 +497,12 @@ completely unaffected: pointers only ever exist on edges created through this to
   `get_entity_by_name_ci_with_scan_fallback` uses for extraction-time endpoint resolution, per
   [ADR-0283](adr/0283-name-index-scan-fallback-for-endpoint-authority.md)), and the edge carries
   a `cross_group_pointers.{src,dst}` object recording the assertion (`source_group_id`,
-  `endpoint_name`) and the resolution cache (`resolved_uuid`, `bound_at_seq`, `binding_state`).
+  `endpoint_name`, plus an optional `endpoint_kind`) and the resolution cache (`resolved_uuid`,
+  `bound_at_seq`, `binding_state`). Top-level `source_kind` / `target_kind` (issue #615) pin a
+  foreign endpoint to an entity kind: a kind-pinned pointer resolves within that kind only and stays
+  `bound` when a same-named entity of another kind appears; a kind-less pointer resolves across all
+  kinds and becomes `ambiguous` (no hop) once a second kind shares the name. A kind on a `{uuid}`
+  endpoint is rejected. If a pinned kind no longer exists the pointer is `unbound`.
 - **A foreign endpoint that doesn't currently resolve is `unbound`, not dropped.** Unlike
   ordinary extraction (which hard-drops an unresolvable endpoint at commit — see
   [ADR-0051](adr/0051-edge-endpoint-salvage-and-deferred-drop.md)), the edge is still created;

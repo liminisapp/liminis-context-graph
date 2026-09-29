@@ -1,5 +1,7 @@
 # ADR-0526: Vectors Are a Local Cache — Stop Writing Them to the WAL, Ignore Them on Replay
 
+> **Extended by ADR-0615 (issue #615):** `lookup_key` is a second derived value handled the same way — stripped at `log_mutation` (`wal::DERIVED_PARAM_KEYS`) and recomputed on replay (`replay::inject_derived_lookup_key`), any stored copy ignored.
+
 **Status**: Accepted
 **Date**: 2026-09-01
 **Issue**: #526

@@ -60,6 +60,27 @@ pub async fn dispatch(
                     ),
                     false,
                 ),
+                // A name-only resolution that matched several kinds (issue #615, D2/FR-006): a
+                // distinct code with the candidates as structured data, so a caller can retry
+                // with an explicit `kind` instead of parsing the message.
+                Error::AmbiguousEntity {
+                    ref name,
+                    ref group_id,
+                    ref candidates,
+                } => (
+                    IpcResponse::err_with_data(
+                        req.id,
+                        -32002,
+                        e.to_string(),
+                        json!({
+                            "reason": "ambiguous_entity",
+                            "name": name,
+                            "group_id": group_id,
+                            "candidates": candidates,
+                        }),
+                    ),
+                    false,
+                ),
                 _ => (IpcResponse::err(req.id, -32000, e.to_string()), false),
             }
         }
@@ -117,6 +138,7 @@ async fn handle(
         "knowledge_process_chunk" => handle_knowledge_process_chunk(req, state).await,
         "knowledge_add_episode" => handle_add_episode(req, state).await,
         "knowledge_find_entities" => handle_find_entities(req, state).await,
+        "knowledge_resolve_entity" => handle_resolve_entity(req, state).await,
         "knowledge_find_relationships" => handle_find_relationships(req, state).await,
         "knowledge_get_episodes" => handle_get_episodes(req, state).await,
         "knowledge_delete_episode" => handle_delete_episode(req, state).await,
@@ -995,18 +1017,70 @@ async fn handle_knowledge_process_chunk(
 
 // ── Search handlers — no lock (hot read path, never blocked by writes) ────────
 
+/// `knowledge_resolve_entity` (issue #615, FR-005/FR-006): resolves one entity by
+/// `(group_id, name[, kind])`. With `kind` it is an exact, indexed lookup that never reports
+/// ambiguity across kinds. Without one it spans **all** kinds (D2's read rule) and fails with
+/// `Error::AmbiguousEntity` listing each candidate's kind and uuid when more than one kind
+/// matches — never a silent pick. A `Merged` tombstone is followed to its canonical, as in
+/// `knowledge_assert_relationship`. Returns `{"found": false, "node": null}` on no match.
+async fn handle_resolve_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let name = p["name"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| Error::Ipc("name is required".to_string()))?
+        .to_string();
+    let group_id = p["group_id"]
+        .as_str()
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
+    let kind = optional_kind_param(&p["kind"])?;
+
+    let db = load_db(&state)?;
+    let _guard = state.write_lock.read().await;
+    let resolved = tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        assert::resolve_entity_by_name(
+            &conn,
+            &group_id,
+            &name,
+            assert::KindScope::for_read(kind.as_deref()),
+        )
+    })
+    .await??;
+    drop(_guard);
+
+    Ok(match resolved {
+        assert::Resolved::Existing(e) => json!({ "found": true, "node": *e }),
+        assert::Resolved::NotFound => json!({ "found": false, "node": Value::Null }),
+    })
+}
+
+/// Parses an optional `kind` param (issue #615): absent/null ⇒ `None`; otherwise validated and
+/// normalised (FR-012). A non-string value is a validation error, not "omitted".
+fn optional_kind_param(v: &Value) -> Result<Option<String>, Error> {
+    if v.is_null() {
+        return Ok(None);
+    }
+    crate::types::normalize_kind(Some(v.as_str().unwrap_or(""))).map(Some)
+}
+
 async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let query = p["query"].as_str().unwrap_or("").to_string();
     let group_ids = extract_optional_group_ids_preserve_empty(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
+    // Optional kind filter (issue #615): omitted ⇒ all kinds (D2's read rule). Multi-row, so
+    // there is nothing to be ambiguous about — every candidate is returned with its own `kind`.
+    let kind = optional_kind_param(&p["kind"])?;
 
-    let result = search::hybrid_entity_search(
+    let result = search::hybrid_entity_search_kind(
         load_db(&state)?,
         Arc::clone(&state.embedder),
         &query,
         group_ids.clone(),
         limit,
+        kind.clone(),
     )
     .await;
 
@@ -1015,12 +1089,13 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
         Err(e) if is_missing_index_error(&e) => {
             if !state.indices_built.load(Ordering::Acquire) {
                 build_indices_once(&state).await?;
-                search::hybrid_entity_search(
+                search::hybrid_entity_search_kind(
                     load_db(&state)?,
                     Arc::clone(&state.embedder),
                     &query,
                     group_ids,
                     limit,
+                    kind,
                 )
                 .await
                 .map_err(|e2| {
@@ -1328,6 +1403,8 @@ async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     }
     let num_results = num_results_raw as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
+    // Optional kind filter (issue #615): omitted ⇒ all kinds.
+    let kind = optional_kind_param(&p["kind"])?;
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
@@ -1338,7 +1415,7 @@ async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
         let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
-        let mut nodes = conn.list_entities(gid_slice, num_results)?;
+        let mut nodes = conn.list_entities_of_kind(gid_slice, num_results, kind.as_deref())?;
         let uuid_owned: Vec<String> = nodes.iter().map(|n| n.uuid.clone()).collect();
         let uuid_refs: Vec<&str> = uuid_owned.iter().map(String::as_str).collect();
         let mut ep_info = conn
@@ -3458,6 +3535,13 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
             })
             .unwrap_or_default(),
         merge_all_by_name: p["merge_all_by_name"].as_bool().unwrap_or(false),
+        kind: if p["kind"].is_null() {
+            None
+        } else {
+            Some(crate::types::normalize_kind(Some(
+                p["kind"].as_str().unwrap_or(""),
+            ))?)
+        },
         group_id: p["group_id"]
             .as_str()
             .unwrap_or(DEFAULT_GROUP_ID)
@@ -3524,15 +3608,25 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
 /// Parses one `EndpointSpec` from its JSON wire shape: `{"uuid": "..."}` for an endpoint
 /// already known to live in the edge's own `group_id`, or `{"source_group_id": "...",
 /// "endpoint_name": "..."}` for a foreign endpoint to be resolved (issue #369 FR-002).
-fn parse_endpoint_spec(v: &Value) -> Result<EndpointSpec, Error> {
+///
+/// `kind` is the top-level `source_kind`/`target_kind` (issue #615, D4): an optional kind
+/// assertion that applies to foreign endpoints only — supplying one for a `{uuid}` endpoint is a
+/// validation error (a uuid already identifies one entity, so a kind would assert nothing).
+fn parse_endpoint_spec(v: &Value, kind: Option<String>) -> Result<EndpointSpec, Error> {
     let uuid = v["uuid"].as_str();
     let source_group_id = v["source_group_id"].as_str();
     let endpoint_name = v["endpoint_name"].as_str();
     match (uuid, source_group_id, endpoint_name) {
+        (Some(_), None, None) if kind.is_some() => Err(Error::Ipc(
+            "source_kind/target_kind apply only to a foreign endpoint \
+             ({source_group_id, endpoint_name}), not a {uuid} endpoint"
+                .to_string(),
+        )),
         (Some(uuid), None, None) => Ok(EndpointSpec::Uuid(uuid.to_string())),
         (None, Some(source_group_id), Some(endpoint_name)) => Ok(EndpointSpec::Foreign {
             source_group_id: source_group_id.to_string(),
             endpoint_name: endpoint_name.to_string(),
+            kind,
         }),
         // A request mixing 'uuid' with 'source_group_id'/'endpoint_name' is rejected rather
         // than silently preferring 'uuid' and discarding the foreign pointer fields — an
@@ -3563,8 +3657,14 @@ async fn handle_add_cross_group_edge(
     let fact = p["fact"].as_str().unwrap_or("").to_string();
     let valid_at = p["valid_at"].as_str().map(|s| s.to_string());
     let relation_type = p["relation_type"].as_str().map(|s| s.to_string());
-    let source = parse_endpoint_spec(&p["source"])?;
-    let target = parse_endpoint_spec(&p["target"])?;
+    let opt_kind = |key: &str| -> Result<Option<String>, Error> {
+        if p[key].is_null() {
+            return Ok(None);
+        }
+        crate::types::normalize_kind(Some(p[key].as_str().unwrap_or(""))).map(Some)
+    };
+    let source = parse_endpoint_spec(&p["source"], opt_kind("source_kind")?)?;
+    let target = parse_endpoint_spec(&p["target"], opt_kind("target_kind")?)?;
 
     let fact_embedding = state.embedder.embed(&fact).await?;
 
@@ -3679,14 +3779,29 @@ fn resolve_and_update_entity(
     gid_wal: &str,
     entity_uuid: Option<&str>,
     name: &str,
+    kind: &str,
+    kind_explicit: bool,
     labels: &[String],
     summary: &str,
     attributes: &str,
 ) -> Result<Option<String>, Error> {
     let resolved = if let Some(eu) = entity_uuid {
-        Some(assert::resolve_entity_by_uuid(conn, group_id, eu)?)
+        let e = assert::resolve_entity_by_uuid(conn, group_id, eu)?;
+        // Kind is immutable (issue #615): an explicitly supplied `kind` must match the entity
+        // `entity_uuid` resolved. An omitted kind on a uuid-addressed call asserts nothing.
+        if kind_explicit && e.kind != kind {
+            return Err(Error::Ipc(format!(
+                "entity_uuid '{eu}' is kind '{}', but kind '{kind}' was supplied: an entity's \
+                 kind is immutable — assert a new entity of kind '{kind}' instead",
+                e.kind
+            )));
+        }
+        Some(e)
     } else {
-        match assert::resolve_entity_by_name(conn, group_id, name)? {
+        // Writes are kind-scoped (issue #615 D2): a name-only assert means the default kind and
+        // can never reach into another kind's node.
+        match assert::resolve_entity_by_name(conn, group_id, name, assert::KindScope::Exact(kind))?
+        {
             assert::Resolved::Existing(existing) => Some(*existing),
             assert::Resolved::NotFound => None,
         }
@@ -3710,12 +3825,14 @@ fn resolve_and_update_entity(
     // On the post-embed pass, this check runs against whatever exists *now*, so a collision that
     // only came into being during the dropped-lock window (issue #543 edge case) is still caught.
     if existing.name.trim().to_lowercase() != name.trim().to_lowercase()
-        && conn.count_active_entities_by_name_ci(name, group_id)? > 0
+        && conn.count_active_entities_by_name_ci(name, group_id, Some(&existing.kind))? > 0
     {
+        // Kind-scoped (issue #615): a rename collides only with an active entity of the same
+        // kind; an equal name under another kind is a different identity.
         return Err(Error::Ipc(format!(
-            "cannot rename entity '{}' to '{name}': an active entity in group \
+            "cannot rename entity '{}' to '{name}': an active entity of kind '{}' in group \
              '{group_id}' already uses that name",
-            existing.uuid
+            existing.uuid, existing.kind
         )));
     }
     conn.update_entity_core(&existing, name, labels, summary, attributes)?;
@@ -3768,6 +3885,15 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
         .unwrap_or_else(|| vec!["Entity".to_string()]);
     let summary = p["summary"].as_str().unwrap_or("").to_string();
     let attributes = attributes_param_to_string(&p["attributes"]);
+    // `kind` (issue #615, FR-003/FR-012): omitted ⇒ the default kind `Entity` — a write only ever
+    // acts on one kind (D2). A supplied kind is validated and, if absent from `labels`, appended
+    // by `labels_with_kind` (after `Entity`) on both the create and the update path.
+    let kind_explicit = !p["kind"].is_null();
+    let kind = crate::types::normalize_kind(p["kind"].as_str().or(if kind_explicit {
+        Some("")
+    } else {
+        None
+    }))?;
 
     let db = load_db(&state)?;
     let gid_wal = group_id.clone();
@@ -3782,6 +3908,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
         let gid1 = gid_wal.clone();
         let group_id1 = group_id.clone();
         let name1 = name.clone();
+        let kind1 = kind.clone();
         let labels1 = labels.clone();
         let summary1 = summary.clone();
         let attributes1 = attributes.clone();
@@ -3795,6 +3922,8 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                 &gid1,
                 entity_uuid1.as_deref(),
                 &name1,
+                &kind1,
+                kind_explicit,
                 &labels1,
                 &summary1,
                 &attributes1,
@@ -3841,6 +3970,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
             let gid2 = gid_wal.clone();
             let group_id2 = group_id.clone();
             let name2 = name.clone();
+            let kind2 = kind.clone();
             let labels2 = labels.clone();
             let summary2 = summary.clone();
             let attributes2 = attributes.clone();
@@ -3853,6 +3983,8 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                     &gid2,
                     None,
                     &name2,
+                    &kind2,
+                    kind_explicit,
                     &labels2,
                     &summary2,
                     &attributes2,
@@ -3868,6 +4000,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                     name: name2,
                     group_id: group_id2,
                     labels: labels2,
+                    kind: kind2,
                     created_at: ts,
                     name_embedding,
                     summary: summary2,
@@ -4026,6 +4159,18 @@ async fn handle_assert_relationship(
         Some(raw) => Some(db::validate_and_normalize_valid_at(raw)?),
         None => None,
     };
+    // Endpoint kinds (issue #615, FR-004). Endpoints are always *existing* entities here
+    // (`assert_relationship` never creates one), so this is D2's read rule: a supplied kind
+    // resolves exactly; an omitted kind spans all kinds and a multi-kind match is an ambiguity
+    // error, never a silent pick.
+    let parse_kind = |key: &str| -> Result<Option<String>, Error> {
+        if p[key].is_null() {
+            return Ok(None);
+        }
+        crate::types::normalize_kind(Some(p[key].as_str().unwrap_or(""))).map(Some)
+    };
+    let source_kind = parse_kind("source_kind")?;
+    let target_kind = parse_kind("target_kind")?;
 
     let db = load_db(&state)?;
     let gid_wal = group_id.clone();
@@ -4054,6 +4199,8 @@ async fn handle_assert_relationship(
         let group_id1 = group_id.clone();
         let source_name1 = source_name.clone();
         let target_name1 = target_name.clone();
+        let source_kind1 = source_kind.clone();
+        let target_kind1 = target_kind.clone();
         let predicate1 = predicate.clone();
         let fact1 = fact.clone();
         let valid_at1 = valid_at.clone();
@@ -4062,8 +4209,13 @@ async fn handle_assert_relationship(
         tokio::task::spawn_blocking(move || {
             let conn = db1.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
 
-            let resolve_or_err = |n: &str| -> Result<EntityRow, Error> {
-                match assert::resolve_entity_by_name(&conn, &group_id1, n)? {
+            let resolve_or_err = |n: &str, kind: &Option<String>| -> Result<EntityRow, Error> {
+                match assert::resolve_entity_by_name(
+                    &conn,
+                    &group_id1,
+                    n,
+                    assert::KindScope::for_read(kind.as_deref()),
+                )? {
                     assert::Resolved::Existing(existing) => Ok(*existing),
                     assert::Resolved::NotFound => Err(Error::Ipc(format!(
                         "'{n}' does not exist in group '{group_id1}' — \
@@ -4073,8 +4225,8 @@ async fn handle_assert_relationship(
                     ))),
                 }
             };
-            let source = resolve_or_err(&source_name1)?;
-            let target = resolve_or_err(&target_name1)?;
+            let source = resolve_or_err(&source_name1, &source_kind1)?;
+            let target = resolve_or_err(&target_name1, &target_kind1)?;
 
             let (existing, source_uuid, target_uuid) = resolve_and_update_edge(
                 &conn,
@@ -4519,6 +4671,8 @@ async fn handle_reprocess_entity_types(
                     expected.extend(ancestors.iter().cloned());
                 }
                 expected.push(entity_type.to_string());
+                // Preserve the entity's kind (issue #615, FR-001) — it may not be an ontology type.
+                let expected = db::labels_with_kind(&expected, &entity.kind);
                 let mut current = entity.labels.clone();
                 current.sort_unstable();
                 let mut exp_sorted = expected.clone();

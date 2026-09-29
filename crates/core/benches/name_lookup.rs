@@ -57,7 +57,9 @@ fn bench_name_lookup_art_indexed_10k(c: &mut Criterion) {
     c.bench_function("name_lookup_art_indexed_10k_hit", |b| {
         b.iter(|| {
             let conn = db.connect().unwrap();
-            let _ = conn.get_entity_by_name_ci("Entity 9999", "bench").unwrap();
+            let _ = conn
+                .get_entity_by_name_ci("Entity 9999", "bench", "Entity")
+                .unwrap();
         });
     });
 
@@ -65,7 +67,7 @@ fn bench_name_lookup_art_indexed_10k(c: &mut Criterion) {
         b.iter(|| {
             let conn = db.connect().unwrap();
             let _ = conn
-                .get_entity_by_name_ci("No Such Entity", "bench")
+                .get_entity_by_name_ci("No Such Entity", "bench", "Entity")
                 .unwrap();
         });
     });
@@ -107,7 +109,7 @@ fn bench_name_lookup_scan_fallback_10k(c: &mut Criterion) {
             |()| {
                 let conn = db.connect().unwrap();
                 let _ = conn
-                    .get_entity_by_name_ci_with_scan_fallback("Entity 9999", "bench")
+                    .get_entity_by_name_ci_with_scan_fallback("Entity 9999", "bench", "Entity")
                     .unwrap();
             },
             BatchSize::PerIteration,
@@ -120,7 +122,7 @@ fn bench_name_lookup_scan_fallback_10k(c: &mut Criterion) {
         b.iter(|| {
             let conn = db.connect().unwrap();
             let _ = conn
-                .get_entity_by_name_ci_with_scan_fallback("No Such Entity", "bench")
+                .get_entity_by_name_ci_with_scan_fallback("No Such Entity", "bench", "Entity")
                 .unwrap();
         });
     });

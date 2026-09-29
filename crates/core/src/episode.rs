@@ -151,7 +151,9 @@ async fn resolve_phase_b(
         for (i, name) in entity_names.iter().enumerate() {
             let trimmed = name.trim();
             // Name-first resolution: case-insensitive exact match short-circuits embedding lookup.
-            if let Some(existing) = conn.get_entity_by_name_ci(trimmed, &group_id)? {
+            if let Some(existing) =
+                conn.get_entity_by_name_ci(trimmed, &group_id, crate::types::DEFAULT_KIND)?
+            {
                 out.push(PhaseBResult::NameMatch { existing });
                 continue;
             }
@@ -610,6 +612,10 @@ pub async fn add_episode(
                     uuid: uuid::Uuid::new_v4().to_string(),
                     name: extracted.name.clone(),
                     group_id: gid_owned.clone(),
+                    // Extraction is confined to the default-kind namespace (issue #615,
+                    // FR-010): it neither merges into nor creates a non-`Entity` kind.
+                    // Ontology-driven kinds are a separate phase.
+                    kind: crate::types::DEFAULT_KIND.to_string(),
                     labels: {
                         let mut labels = vec!["Entity".to_string()];
                         if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
@@ -802,7 +808,11 @@ pub async fn add_episode(
                 return Ok(cached.clone());
             }
             let uuid = conn
-                .get_entity_by_name_ci_with_scan_fallback(raw_name, &gid_owned)?
+                .get_entity_by_name_ci_with_scan_fallback(
+                    raw_name,
+                    &gid_owned,
+                    crate::types::DEFAULT_KIND,
+                )?
                 .map(|existing| existing.uuid);
             scan_cache.insert(key, uuid.clone());
             Ok(uuid)

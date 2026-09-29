@@ -27,7 +27,7 @@ const ENTITY_CYPHER: &str = "\
     SET n.name = $name, n.group_id = $group_id, n.labels = $labels, \
     n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, \
     n.summary = $summary, n.attributes = $attributes, \
-    n.summary_embedding = $summary_embedding";
+    n.summary_embedding = $summary_embedding, n.kind = $kind";
 
 const EPISODIC_CYPHER: &str = "\
     MERGE (n:Episodic {uuid: $uuid}) \
@@ -151,7 +151,7 @@ fn dump_entity_nodes(
             writer.with_chunk(|w| {
                 for row in &rows {
                     // cols: [uuid, name, group_id, labels, created_at, name_embedding, summary,
-                    // attributes, summary_embedding]
+                    // attributes, summary_embedding, kind]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -170,6 +170,10 @@ fn dump_entity_nodes(
                     // since binding a genuine zero-length list against a fixed-size `FLOAT[dim]`
                     // column fails at bind time ("Unsupported casting LIST ... to ARRAY").
                     let summary_embedding = value_as_float_array(&row[8]);
+                    // kind (issue #615): dumped so compaction / dump→replay does not flatten
+                    // every entity to the default kind. `lookup_key` is deliberately not dumped
+                    // (derived — the post-replay backfill recomputes it from group_id/kind/name).
+                    let kind = crate::db::value_as_kind(&row[9]);
                     let summary_embedding = if summary_embedding.is_empty() {
                         vec![0.0f32; embedding.len()]
                     } else {
@@ -185,6 +189,7 @@ fn dump_entity_nodes(
                         "summary": summary,
                         "attributes": attributes,
                         "summary_embedding": float_slice_to_json(&summary_embedding),
+                        "kind": kind,
                     });
                     w.log_mutation(ENTITY_CYPHER, params, "")?;
                 }

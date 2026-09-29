@@ -155,7 +155,7 @@ async fn per_group_ontology_governs_extraction_for_that_group_only() {
     let conn = db.connect().unwrap();
 
     let catalog_acme = conn
-        .get_entity_by_name_ci("Acme Corp", "catalog")
+        .get_entity_by_name_ci("Acme Corp", "catalog", "Entity")
         .unwrap()
         .expect("Acme Corp must be persisted in group catalog");
     assert!(
@@ -165,7 +165,7 @@ async fn per_group_ontology_governs_extraction_for_that_group_only() {
     );
 
     let content_acme = conn
-        .get_entity_by_name_ci("Acme Corp", "content")
+        .get_entity_by_name_ci("Acme Corp", "content", "Entity")
         .unwrap()
         .expect("Acme Corp must be persisted in group content");
     assert!(

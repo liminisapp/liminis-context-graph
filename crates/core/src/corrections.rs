@@ -90,6 +90,10 @@ pub struct MergeEntitiesParams {
     pub alias_uuids: Vec<String>,
     pub alias_names: Vec<String>,
     pub merge_all_by_name: bool,
+    /// Optional kind (issue #615, D5). Disambiguates `canonical_name` / `alias_names`: `Some(k)`
+    /// restricts those name lookups to kind `k`; `None` spans every kind, and a `canonical_name`
+    /// matching several kinds is an ambiguity error. Merges never cross kinds either way.
+    pub kind: Option<String>,
     pub group_id: String,
     pub dry_run: bool,
 }
@@ -521,12 +525,18 @@ fn apply_same_as(
     }
 
     for alias_name in aliases {
-        // Find alias entity by name in same group as canonical
+        // Find alias entity by name in same group *and kind* as canonical — merges never cross
+        // kinds (issue #615, D5), so a same-named entity of another kind is not an alias
+        // candidate. The earliest match wins (`created_at ASC, uuid ASC`), deterministically.
         let alias_entity = conn
-            .get_entity_by_name(alias_name, &canonical_group)?
+            .get_entities_by_name_all(alias_name, &canonical_group, Some(&canonical_entity.kind))?
+            .into_iter()
+            .next()
             .ok_or_else(|| {
                 Error::Ipc(format!(
-                    "alias entity '{alias_name}' not found in group '{canonical_group}'"
+                    "alias entity '{alias_name}' of kind '{}' not found in group \
+                     '{canonical_group}' (merges never cross kinds)",
+                    canonical_entity.kind
                 ))
             })?;
         let alias_uuid = alias_entity.uuid.clone();
@@ -657,10 +667,21 @@ fn resolve_canonical(conn: &Conn, entry: &CorrectionEntry) -> Result<EntityRow, 
     if let Some(ref name) = entry.canonical {
         // Try the first group found for this entity name using search_entities
         let candidates = conn.search_entities(name)?;
-        return candidates
-            .into_iter()
-            .find(|e| e.name == *name)
-            .ok_or_else(|| Error::Ipc(format!("canonical entity '{name}' not found in graph")));
+        let mut exact: Vec<EntityRow> =
+            candidates.into_iter().filter(|e| e.name == *name).collect();
+        if exact.is_empty() {
+            return Err(Error::Ipc(format!(
+                "canonical entity '{name}' not found in graph"
+            )));
+        }
+        // A name shared by several kinds in the first match's group is ambiguous (issue #615,
+        // D2's read rule) — refuse rather than pick one; `canonical_uuid` disambiguates.
+        let first_group = exact[0].group_id.clone();
+        exact.retain(|e| e.group_id == first_group);
+        if exact.iter().any(|e| e.kind != exact[0].kind) {
+            return Err(crate::assert::ambiguity_error(name, &first_group, exact));
+        }
+        return Ok(exact.remove(0));
     }
 
     Err(Error::Ipc(
@@ -706,6 +727,11 @@ pub fn apply_entity_type_labels(
             labels.extend(ancestors.iter().cloned());
         }
         labels.push(entity_type.clone());
+        // This restamp derives labels from the ontology alone; an entity's kind may be a
+        // non-ontology label (issue #615), which must survive — `kind ∈ labels` (FR-001).
+        if let Some(kind) = conn.get_entity_kind(uuid)? {
+            labels = crate::db::labels_with_kind(&labels, &kind);
+        }
         conn.update_entity_labels(uuid, &labels)?;
         count += 1;
     }
@@ -971,12 +997,24 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
         },
         None => {
             let name = params.canonical_name.as_deref().unwrap();
-            match conn.get_entities_by_name_all(name, group_id) {
+            match conn.get_entities_by_name_all(name, group_id, params.kind.as_deref()) {
                 Ok(mut rows) => {
                     // Skip already-merged entities — canonical must be active (FR-003).
                     // A previous UUID-based merge may have left the chronologically-earliest
                     // entity marked as merged; we want the earliest *active* entity.
                     rows.retain(|r| !r.labels.contains(&"Merged".to_string()));
+                    // A kind-less canonical name matching several kinds is ambiguous (issue
+                    // #615 D2's read rule) — never pick the earliest across kinds.
+                    if rows.iter().any(|r| r.kind != rows[0].kind) {
+                        return MergeEntitiesResult {
+                            success: false,
+                            errors: vec![
+                                crate::assert::ambiguity_error(name, group_id, rows).to_string()
+                                    + " — pass `kind` to select one",
+                            ],
+                            ..Default::default()
+                        };
+                    }
                     if rows.is_empty() {
                         return MergeEntitiesResult {
                             success: false,
@@ -1077,7 +1115,7 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
 
     // From explicit names
     for alias_name in &params.alias_names {
-        match conn.get_entities_by_name_all(alias_name, group_id) {
+        match conn.get_entities_by_name_all(alias_name, group_id, params.kind.as_deref()) {
             Ok(rows) => {
                 if rows.is_empty() {
                     errors.push(format!(
@@ -1097,7 +1135,9 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
     // From merge_all_by_name: all same-name entities in same group except the canonical
     if params.merge_all_by_name {
         let name = canonical.name.as_str();
-        match conn.get_entities_by_name_all(name, group_id) {
+        // Limited to the canonical's own kind (issue #615, D5): a same-named entity of another
+        // kind is a different identity, not a duplicate to sweep.
+        match conn.get_entities_by_name_all(name, group_id, Some(&canonical.kind)) {
             Ok(rows) => {
                 for row in rows {
                     if row.uuid != canonical_uuid {
@@ -1106,6 +1146,38 @@ pub fn merge_entities(conn: &Conn, params: &MergeEntitiesParams, ts: &str) -> Me
                 }
             }
             Err(e) => errors.push(format!("merge_all_by_name lookup failed: {e}")),
+        }
+    }
+
+    // Merges never cross kinds (issue #615, D5): a pointer's kind assertion must survive
+    // `follow_merged_into_chain`, so the whole call is refused — before any mutation, in dry-run
+    // too — if the canonical and any alias differ in kind. Refusing the whole call (rather than
+    // skipping the offending aliases) keeps a partial merge from being silently reported.
+    {
+        let mut kinds: Vec<&str> = vec![canonical.kind.as_str()];
+        for a in alias_map.values() {
+            if !kinds.contains(&a.kind.as_str()) {
+                kinds.push(a.kind.as_str());
+            }
+        }
+        if kinds.len() > 1 {
+            errors.push(format!(
+                "refusing to merge entities of different kinds: canonical {} is kind '{}', \
+                 aliases include kind(s) {} — merges never cross kinds; nothing was modified",
+                canonical.uuid,
+                canonical.kind,
+                kinds[1..]
+                    .iter()
+                    .map(|k| format!("'{k}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            return MergeEntitiesResult {
+                success: false,
+                canonical_uuid: canonical.uuid.clone(),
+                errors,
+                ..Default::default()
+            };
         }
     }
 

@@ -33,6 +33,10 @@ pub enum EndpointSpec {
     Foreign {
         source_group_id: String,
         endpoint_name: String,
+        /// Optional kind assertion (issue #615, D4): `Some` pins the pointer to that kind so it
+        /// stays `Bound` when a same-named entity of another kind appears; `None` resolves
+        /// across all kinds and turns `Ambiguous` once a second kind shares the name.
+        kind: Option<String>,
     },
 }
 
@@ -82,12 +86,44 @@ pub fn resolve_endpoint(
     source_group_id: &str,
     endpoint_name: &str,
 ) -> Result<(BindingState, Option<String>), Error> {
-    let Some(winner) =
-        conn.get_entity_by_name_ci_with_scan_fallback(endpoint_name, source_group_id)?
-    else {
+    resolve_endpoint_kind(conn, source_group_id, endpoint_name, None)
+}
+
+/// [`resolve_endpoint`] with an optional kind assertion (issue #615, D4).
+///
+/// - `Some(kind)`: an exact-kind resolution. A missing entity of that kind is `Unbound` (whatever
+///   other kinds share the name); several *active* same-kind entities are still `Ambiguous`.
+/// - `None`: spans all kinds (D2's read rule). More than one matching kind is `Ambiguous` — the
+///   pointer has no hop until it is re-created with a kind, which is correct but must be
+///   surfaced rather than discovered.
+///
+/// The `Merged` chain walk is unchanged: D5 keeps a merge inside one kind, so a kind assertion
+/// still holds after following it.
+pub fn resolve_endpoint_kind(
+    conn: &Conn,
+    source_group_id: &str,
+    endpoint_name: &str,
+    kind: Option<&str>,
+) -> Result<(BindingState, Option<String>), Error> {
+    let winner = match kind {
+        Some(k) => {
+            conn.get_entity_by_name_ci_with_scan_fallback(endpoint_name, source_group_id, k)?
+        }
+        None => {
+            let mut winners =
+                conn.resolve_entities_by_name_any_kind(endpoint_name, source_group_id)?;
+            if winners.len() > 1 {
+                return Ok((BindingState::Ambiguous, None));
+            }
+            winners.pop()
+        }
+    };
+    let Some(winner) = winner else {
         return Ok((BindingState::Unbound, None));
     };
-    if conn.count_active_entities_by_name_ci(endpoint_name, source_group_id)? > 1 {
+    if conn.count_active_entities_by_name_ci(endpoint_name, source_group_id, Some(&winner.kind))?
+        > 1
+    {
         return Ok((BindingState::Ambiguous, None));
     }
     if !winner.labels.contains(&"Merged".to_string()) {
@@ -165,6 +201,7 @@ fn resolve_side(
         EndpointSpec::Foreign {
             source_group_id,
             endpoint_name,
+            kind,
         } => {
             if source_group_id.trim().is_empty() || endpoint_name.trim().is_empty() {
                 return Err(Error::Ipc(
@@ -174,7 +211,16 @@ fn resolve_side(
                 ));
             }
             let normalized_name = normalize_name(endpoint_name);
-            let (state, resolved_uuid) = resolve_endpoint(conn, source_group_id, &normalized_name)?;
+            let endpoint_kind = kind
+                .as_deref()
+                .map(|k| crate::types::normalize_kind(Some(k)))
+                .transpose()?;
+            let (state, resolved_uuid) = resolve_endpoint_kind(
+                conn,
+                source_group_id,
+                &normalized_name,
+                endpoint_kind.as_deref(),
+            )?;
             // The staleness signal is source_group_id's own applied position (issue #378
             // FR-011) — a single edge's two endpoints can point into two different foreign
             // groups, so this must be looked up per endpoint, not shared across both.
@@ -182,6 +228,7 @@ fn resolve_side(
             let ptr = CrossGroupPointer {
                 source_group_id: source_group_id.clone(),
                 endpoint_name: normalized_name,
+                endpoint_kind,
                 resolved_uuid: resolved_uuid.clone(),
                 bound_at_seq: applied_seq,
                 binding_state: state,
@@ -379,8 +426,12 @@ fn rebind_pointers_impl(
                 }
             }
             counts.checked += 1;
-            let (new_state, new_uuid) =
-                resolve_endpoint(conn, source_group_id, &existing.endpoint_name)?;
+            let (new_state, new_uuid) = resolve_endpoint_kind(
+                conn,
+                source_group_id,
+                &existing.endpoint_name,
+                existing.endpoint_kind.as_deref(),
+            )?;
             resolutions.push(SideResolution {
                 side,
                 existing,
@@ -488,6 +539,7 @@ fn rebind_pointers_impl(
                 CrossGroupPointer {
                     source_group_id: r.existing.source_group_id.clone(),
                     endpoint_name: r.existing.endpoint_name.clone(),
+                    endpoint_kind: r.existing.endpoint_kind.clone(),
                     resolved_uuid: r.new_uuid.clone(),
                     bound_at_seq: current_seq,
                     binding_state: r.new_state,

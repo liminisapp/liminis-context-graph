@@ -55,6 +55,10 @@ fn storage_v42_database_opens_and_migrates_with_correct_reads() {
          opening it (the first step of in-place migration) is expected to be automatic",
     );
     let conn = db.connect().unwrap();
+    // A pre-#615 database has no `Entity.kind`; `schema::migrate` (run by `init_schema` on every
+    // real open) adds and backfills it, and every entity reader selects it. The dimension only
+    // matters if `summary_embedding` were absent, which this fixture's schema already has.
+    lcg_core::schema::migrate(&conn, 4);
 
     let alice = conn
         .get_entity_by_uuid("v42-fixture-entity-alice")

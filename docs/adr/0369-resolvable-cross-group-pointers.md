@@ -1,5 +1,7 @@
 # ADR-0369: Resolvable Semantic Pointers for Cross-Group Edges
 
+> **Amended by ADR-0615 (issue #615):** a pointer may carry an optional `endpoint_kind` (and `knowledge_add_cross_group_edge` accepts `source_kind`/`target_kind`). A kind-less pointer resolves across all kinds and is `ambiguous` once two kinds share the name; a kind-pinned pointer resolves within its kind. Merges never cross kinds, so a `Merged` chain stays inside one kind.
+
 **Status**: Accepted
 **Date**: 2026-08-11
 **Issue**: #369

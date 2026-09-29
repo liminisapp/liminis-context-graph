@@ -88,6 +88,30 @@ pub enum Error {
     /// bypasses this check (Out of Scope).
     #[error("WAL stream generation unknown: {0}")]
     WalGenerationUnknown(String),
+
+    /// A caller-supplied entity `kind` is empty/whitespace-only, contains the key separator
+    /// U+001F (issue #615, FR-012), or is a reserved structural label (`Merged`).
+    #[error(
+        "invalid kind {0:?}: must be non-empty, must not contain U+001F, and must not be the \
+         reserved label \"Merged\""
+    )]
+    InvalidKind(String),
+
+    /// A name-only resolution matched more than one kind (issue #615, D2/FR-006). Never resolved
+    /// by picking a candidate; `candidates` lists every match's kind and uuid.
+    #[error("ambiguous entity {name:?} in group {group_id:?}: {}", format_candidates(.candidates))]
+    AmbiguousEntity {
+        name: String,
+        group_id: String,
+        candidates: Vec<crate::types::KindCandidate>,
+    },
+}
+
+fn format_candidates(c: &[crate::types::KindCandidate]) -> String {
+    c.iter()
+        .map(|k| format!("{} ({})", k.kind, k.uuid))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl From<tokio::task::JoinError> for Error {
