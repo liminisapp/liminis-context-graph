@@ -106,9 +106,12 @@ pub async fn hybrid_entity_search(
 
 /// [`hybrid_entity_search`] with an optional `kind` filter (issue #615): `Some(kind)` keeps only
 /// entities of that kind; `None` is all kinds. The kind predicate is pushed into each candidate
-/// query (BM25, name-vector, summary-vector) so the pools are already kind-filtered before the
-/// `limit * 3` cap, and a matching entity is not crowded out by more numerous rows of other kinds.
-/// Every returned row carries its `kind`.
+/// query (BM25, name-vector, summary-vector) before the `limit * 3` cap. For BM25 the predicate
+/// runs inside the FTS query, so a matching entity is not crowded out by rows of other kinds.
+/// For the two vector queries it runs after the nearest-neighbour probe, whose size is
+/// oversampled ([`crate::db`]'s `KIND_ANN_OVERSAMPLE`); that mitigates but does not guarantee
+/// recall of a rare kind ranked below the oversampled probe. Every returned row carries its
+/// `kind`.
 pub async fn hybrid_entity_search_kind(
     db: Arc<Db>,
     embedder: Arc<dyn Embedder>,

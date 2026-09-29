@@ -1402,6 +1402,118 @@ fn ambiguous_edge_excluded_from_two_hop_read_paths_without_erroring() {
     assert!(conn.get_edges_for_entity(&alice.uuid).unwrap().is_empty());
 }
 
+/// SC-006 (issue #615, D4): a kind-less pointer binds while the source group holds a single
+/// `KnowledgeChannel "adr"`, flips to `ambiguous` on rebind once `Topic "adr"` appears (and drops
+/// out of two-hop reads), while a pointer pinned with `endpoint_kind` stays bound to the channel.
+#[test]
+fn kindless_pointer_flips_to_ambiguous_when_second_kind_appears_but_pinned_pointer_stays_bound() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let make_of_kind = |name: &str, kind: &str| {
+        let mut e = make_entity(name, GROUP_A, TS);
+        e.kind = kind.to_string();
+        e.labels = vec!["Entity".to_string(), kind.to_string()];
+        e
+    };
+    let foreign_edge = |source_uuid: &str, kind: Option<&str>| {
+        cross_group::create_cross_group_edge(
+            &conn,
+            CreateCrossGroupEdgeParams {
+                name: "COVERS".to_string(),
+                source: EndpointSpec::Uuid(source_uuid.to_string()),
+                target: EndpointSpec::Foreign {
+                    kind: kind.map(str::to_string),
+                    source_group_id: GROUP_A.to_string(),
+                    endpoint_name: "adr".to_string(),
+                },
+                group_id: GROUP_LAYER.to_string(),
+                fact: "layer covers adr".to_string(),
+                fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                valid_at: None,
+                relation_type: None,
+            },
+            TS,
+        )
+        .unwrap()
+    };
+    let dst_pointer = |attributes: &str| {
+        pointer::read_pointers(attributes)
+            .get(EndpointSide::Dst)
+            .unwrap()
+            .clone()
+    };
+
+    let layer_src = make_entity("Layer", GROUP_LAYER, TS);
+    conn.insert_entity(&layer_src).unwrap();
+    let channel = make_of_kind("adr", "KnowledgeChannel");
+    conn.insert_entity(&channel).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None, None).unwrap();
+
+    // Step 1: only the channel exists. Both pointers bind to it.
+    let kindless = foreign_edge(&layer_src.uuid, None);
+    let pinned = foreign_edge(&layer_src.uuid, Some("KnowledgeChannel"));
+    let kindless_ptr = dst_pointer(&kindless.attributes);
+    assert_eq!(kindless_ptr.binding_state, BindingState::Bound);
+    assert_eq!(kindless_ptr.endpoint_kind, None);
+    assert_eq!(kindless_ptr.resolved_uuid, Some(channel.uuid.clone()));
+    let pinned_ptr = dst_pointer(&pinned.attributes);
+    assert_eq!(pinned_ptr.binding_state, BindingState::Bound);
+    assert_eq!(
+        pinned_ptr.endpoint_kind.as_deref(),
+        Some("KnowledgeChannel")
+    );
+    assert_eq!(pinned_ptr.resolved_uuid, Some(channel.uuid.clone()));
+    let before = conn.count_cross_group_pointers().unwrap();
+    assert_eq!((before.bound, before.ambiguous), (2, 0));
+
+    // Step 2: a second kind of the same name appears in the source group; rebind.
+    let topic = make_of_kind("adr", "Topic");
+    conn.insert_entity(&topic).unwrap();
+    conn.set_wal_position(GROUP_A, 2, None, None).unwrap();
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.checked, 2);
+    assert_eq!(counts.ambiguous, 1);
+
+    let after_kindless = conn
+        .get_relates_to_by_uuids(std::slice::from_ref(&kindless.uuid))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(
+        dst_pointer(&after_kindless.attributes).binding_state,
+        BindingState::Ambiguous
+    );
+    // The ambiguous layer edge drops out of two-hop reads.
+    assert!(conn.get_edge_by_uuid(&kindless.uuid).unwrap().is_none());
+
+    // `knowledge_status`'s counts rise by exactly one ambiguous pointer.
+    let after = conn.count_cross_group_pointers().unwrap();
+    assert_eq!(after.ambiguous, before.ambiguous + 1);
+    assert_eq!(after.bound, before.bound - 1);
+
+    // Step 3: the kind-pinned pointer is still bound, to the channel, and still readable.
+    let after_pinned = conn
+        .get_relates_to_by_uuids(std::slice::from_ref(&pinned.uuid))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    let ptr = dst_pointer(&after_pinned.attributes);
+    assert_eq!(ptr.binding_state, BindingState::Bound);
+    assert_eq!(ptr.resolved_uuid, Some(channel.uuid.clone()));
+    assert_eq!(after_pinned.target_node_uuid, channel.uuid);
+    assert!(conn.get_edge_by_uuid(&pinned.uuid).unwrap().is_some());
+
+    // A pointer pinned to the other kind binds to the Topic, not the channel.
+    let topic_edge = foreign_edge(&layer_src.uuid, Some("Topic"));
+    let topic_ptr = dst_pointer(&topic_edge.attributes);
+    assert_eq!(topic_ptr.binding_state, BindingState::Bound);
+    assert_eq!(topic_ptr.resolved_uuid, Some(topic.uuid.clone()));
+}
+
 #[test]
 fn count_cross_group_pointers_reports_correct_state_counts() {
     let dir = TempDir::new().unwrap();
