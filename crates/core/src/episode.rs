@@ -1152,6 +1152,7 @@ mod tests {
             db,
             "test-group".to_string(),
             vec!["Someone".to_string()],
+            vec![crate::types::DEFAULT_KIND.to_string()],
             vec![wrong_dim_embedding],
             true, // use_hybrid
         )
