@@ -23,7 +23,7 @@ use lcg_core::{
     types::{ExtractedEdge, ExtractedEntity, ExtractionResult, SourceType},
     EntityRow,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -704,4 +704,110 @@ async fn stamp_survives_when_sets_are_unchanged_across_restarts() {
         .filter(|e| e.name == "Ada")
         .collect();
     assert_eq!(rows.len(), 1);
+}
+
+// ── US4 / SC-005: reprocess never changes kind ────────────────────────────────
+
+/// Extractor whose `classify_entities` assigns every entity the same type.
+struct ClassifyAs(&'static str);
+
+impl lcg_core::extractor::Extractor for ClassifyAs {
+    fn extract<'a>(
+        &'a self,
+        _opts: lcg_core::extractor::ExtractOptions<'a>,
+    ) -> futures::future::BoxFuture<'a, Result<lcg_core::types::ExtractionOutcome, Error>> {
+        Box::pin(async { Ok(ExtractionResult::default().into()) })
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+        _allowed_types: Option<&'a [String]>,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<String>, Error>> {
+        let n = entities.len();
+        let t = self.0.to_string();
+        Box::pin(async move { Ok(vec![t; n]) })
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> futures::future::BoxFuture<'a, Result<Vec<String>, Error>> {
+        let n = edges.len();
+        Box::pin(async move { Ok(vec![String::new(); n]) })
+    }
+}
+
+async fn reprocess(state: &Arc<AppState>, dry_run: bool) -> serde_json::Value {
+    let v = serde_json::to_value(
+        handlers::dispatch(
+            IpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(1),
+                method: "knowledge_reprocess_entity_types".into(),
+                params: json!({"group_id": G, "scope": "all", "dry_run": dry_run}),
+            },
+            Arc::clone(state),
+            None,
+        )
+        .await,
+    )
+    .unwrap();
+    assert!(v.get("error").is_none(), "{v}");
+    v["result"].clone()
+}
+
+#[tokio::test]
+async fn reprocess_never_changes_kind_and_reports_disagreement() {
+    let (db, _d) = make_db();
+    let root = TempDir::new().unwrap();
+    let onto = || {
+        ontology(
+            OntologyMode::Open,
+            &[("Person", true, None), ("Organization", true, None)],
+        )
+    };
+    let seed = make_state(
+        Arc::clone(&db),
+        Some(root.path()),
+        Some(onto()),
+        vec![extraction(vec![ent("Aurora", "Person")], vec![])],
+    );
+    ingest(&seed, G, 1).await.unwrap();
+
+    // Reclassification lands on the *other* identity-bearing type.
+    let state = {
+        let s = make_state(Arc::clone(&db), Some(root.path()), Some(onto()), vec![]);
+        let mut inner = Arc::try_unwrap(s).ok().unwrap();
+        inner.extractor = Arc::new(ClassifyAs("Organization"));
+        Arc::new(inner)
+    };
+
+    let dry = reprocess(&state, true).await;
+    assert_eq!(
+        dry["kind_disagreements"].as_array().unwrap().len(),
+        1,
+        "{dry}"
+    );
+    assert_eq!(dry["kind_disagreements"][0]["kind"], "Person");
+    assert_eq!(
+        dry["kind_disagreements"][0]["classified_type"],
+        "Organization"
+    );
+
+    let first = reprocess(&state, false).await;
+    assert_eq!(first["reclassified_count"], 1, "{first}");
+    assert_eq!(first["kind_disagreements"].as_array().unwrap().len(), 1);
+    let row = aurora_rows(&db).remove(0);
+    assert_eq!(row.kind, "Person", "kind must never change: {row:?}");
+    assert!(row.labels.contains(&"Person".to_string()), "{row:?}");
+    assert!(row.labels.contains(&"Organization".to_string()), "{row:?}");
+
+    // Idempotent: the second run has nothing to reclassify, but still reports the disagreement.
+    let second = reprocess(&state, false).await;
+    assert_eq!(second["reclassified_count"], 0, "{second}");
+    assert_eq!(second["unchanged_count"], 1, "{second}");
+    assert_eq!(second["kind_disagreements"].as_array().unwrap().len(), 1);
+    assert_eq!(aurora_rows(&db)[0].kind, "Person");
 }

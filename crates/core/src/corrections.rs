@@ -804,6 +804,44 @@ pub(crate) fn find_leaf_type(
     }
 }
 
+/// [`find_leaf_type`] for an entity whose `kind` may be an identity-bearing type (issue #616,
+/// D3). The kind label is immutable and never re-derived, so once reclassification adds a
+/// different type beside it (`[Entity, Organization, Person]` for kind `Person`) the label set
+/// has two independent leaves and plain `find_leaf_type` returns `None` — re-planning that entity
+/// on every run. When the plain answer is `None` and `kind` is not the default, retry with the
+/// kind label and its ancestors set aside, so the classified type is the leaf that is not the
+/// kind. When the kind is the only specific label the plain answer already is the kind.
+pub(crate) fn find_leaf_type_with_kind(
+    labels: &[String],
+    ancestor_map: &HashMap<String, Vec<String>>,
+    kind: &str,
+) -> Option<String> {
+    if let Some(leaf) = find_leaf_type(labels, ancestor_map) {
+        return Some(leaf);
+    }
+    if kind == crate::types::DEFAULT_KIND {
+        return None;
+    }
+    let rest = labels_without_kind(labels, ancestor_map, kind);
+    find_leaf_type(&rest, ancestor_map)
+}
+
+/// `labels` minus the `kind` label and the kind's declared ancestors (issue #616).
+pub(crate) fn labels_without_kind(
+    labels: &[String],
+    ancestor_map: &HashMap<String, Vec<String>>,
+    kind: &str,
+) -> Vec<String> {
+    let ancestors = ancestor_map.get(kind);
+    labels
+        .iter()
+        .filter(|l| {
+            l.as_str() != kind && !ancestors.is_some_and(|a| a.iter().any(|x| x == l.as_str()))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Returns `true` if any non-`Entity` label on the entity is absent from the declared ontology.
 ///
 /// An entity is off-ontology if even one of its specific labels (including ancestor labels
@@ -1498,6 +1536,40 @@ mod tests {
         assert_eq!(
             find_leaf_type(&labels(&["Entity", "Council"]), &map),
             Some("Council".to_string())
+        );
+    }
+
+    #[test]
+    fn find_leaf_type_with_kind_ignores_the_kind_label_beside_a_reclassification() {
+        let map = make_ancestor_map(&[("Person", &[]), ("Organization", &[])]);
+        let l = labels(&["Entity", "Organization", "Person"]);
+        // Plain: two independent leaves.
+        assert_eq!(find_leaf_type(&l, &map), None);
+        // Kind-aware: the classification is the leaf that is not the kind.
+        assert_eq!(
+            find_leaf_type_with_kind(&l, &map, "Person"),
+            Some("Organization".to_string())
+        );
+        // Kind alone: the kind is the classification.
+        assert_eq!(
+            find_leaf_type_with_kind(&labels(&["Entity", "Person"]), &map, "Person"),
+            Some("Person".to_string())
+        );
+        // Default kind: unchanged behaviour.
+        assert_eq!(find_leaf_type_with_kind(&l, &map, "Entity"), None);
+    }
+
+    #[test]
+    fn find_leaf_type_with_kind_sets_aside_kind_ancestors_too() {
+        let map = make_ancestor_map(&[
+            ("Document", &[]),
+            ("Rfc", &["Document"]),
+            ("Organization", &[]),
+        ]);
+        let l = labels(&["Entity", "Document", "Rfc", "Organization"]);
+        assert_eq!(
+            find_leaf_type_with_kind(&l, &map, "Rfc"),
+            Some("Organization".to_string())
         );
     }
 

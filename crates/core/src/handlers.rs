@@ -4577,13 +4577,25 @@ async fn handle_reprocess_entity_types(
     let mut plan: Vec<serde_json::Value> = Vec::new();
     let mut updates: Vec<(String, String)> = Vec::new();
     let mut unchanged_count: usize = 0;
+    // Entities whose fresh classification disagrees with their identity-bearing kind (issue #616,
+    // D3). Report-only: kind is immutable, so a merge-or-split decision is left to a person.
+    let mut kind_disagreements: Vec<serde_json::Value> = Vec::new();
     for (entity, assigned_type) in entities.iter().zip(types.iter()) {
         if assigned_type.is_empty() {
             // LLM returned no assignment (FR-010): leave unchanged.
             unchanged_count += 1;
             continue;
         }
-        let current_leaf = corrections::find_leaf_type(&entity.labels, &ancestor_map);
+        if entity.kind != crate::types::DEFAULT_KIND && assigned_type.as_str() != entity.kind {
+            kind_disagreements.push(json!({
+                "entity_id": entity.uuid,
+                "entity_name": entity.name,
+                "kind": entity.kind,
+                "classified_type": assigned_type,
+            }));
+        }
+        let current_leaf =
+            corrections::find_leaf_type_with_kind(&entity.labels, &ancestor_map, &entity.kind);
         if current_leaf.as_deref() == Some(assigned_type.as_str()) {
             // Already has the correct type (FR-009): no write needed.
             unchanged_count += 1;
@@ -4602,6 +4614,7 @@ async fn handle_reprocess_entity_types(
         return Ok(json!({
             "would_reclassify_count": plan.len(),
             "plan": plan,
+            "kind_disagreements": kind_disagreements,
         }));
     }
 
@@ -4706,6 +4719,37 @@ async fn handle_reprocess_entity_types(
                             })
                     })
                     .collect();
+                // The kind label is immutable (issue #616): beside a reclassification it makes
+                // two independent leaves. Set it (and its ancestors) aside and judge the rest.
+                let without_kind: Vec<String>;
+                let leaf_types: Vec<&str> =
+                    if leaf_types.len() != 1 && entity.kind != crate::types::DEFAULT_KIND {
+                        without_kind = corrections::labels_without_kind(
+                            &entity.labels,
+                            &ancestor_map_d,
+                            &entity.kind,
+                        );
+                        let specific: Vec<&str> = without_kind
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|l| *l != "Entity")
+                            .collect();
+                        specific
+                            .iter()
+                            .copied()
+                            .filter(|&t| {
+                                ancestor_map_d.contains_key(t)
+                                    && !specific.iter().any(|&other| {
+                                        t != other
+                                            && ancestor_map_d.get(other).is_some_and(|anc| {
+                                                anc.iter().any(|a| a.as_str() == t)
+                                            })
+                                    })
+                            })
+                            .collect()
+                    } else {
+                        leaf_types
+                    };
                 if leaf_types.len() != 1 {
                     continue;
                 }
@@ -4740,6 +4784,7 @@ async fn handle_reprocess_entity_types(
         "reclassified_count": reclassified,
         "unchanged_count": unchanged_count,
         "restamped_count": restamped,
+        "kind_disagreements": kind_disagreements,
         "group_id": group_id,
     }))
 }
