@@ -661,21 +661,41 @@ impl AppState {
     ///   drift cache as a side effect for a group nothing has genuinely resolved yet (FR-007;
     ///   regression-tested by `per_group_ontology.rs`'s
     ///   `wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache`).
+    ///
+    /// The `Resolving` upsert also runs the D1 identity-set check (issue #616): the entry it
+    /// caches is the one the racing first resolution's own insert will then back off from, so an
+    /// entry without the check would drop that resolution's refusal and let ingest proceed under
+    /// a changed identity set until restart. The check reads the DB and stamp file, so it runs
+    /// with the cache lock released. If it cannot run (DB unreadable) the slot stays `Resolving`
+    /// — nothing is cached and the next resolve re-checks.
     pub fn clear_group_drift(&self, group_id: &str, ontology: Option<Arc<Ontology>>) {
-        if let Ok(mut guard) = self.group_ontologies.lock() {
+        let mut identity: Option<(Option<IdentityRefusal>, Option<String>)> = None;
+        loop {
+            let Ok(mut guard) = self.group_ontologies.lock() else {
+                return;
+            };
             match guard.get_mut(group_id) {
                 Some(GroupOntologyCacheState::Resolved(e)) => {
                     e.drift = GroupDriftStatus::default();
+                    return;
                 }
-                Some(slot @ GroupOntologyCacheState::Resolving) => {
-                    *slot = GroupOntologyCacheState::Resolved(GroupOntologyEntry {
-                        ontology,
-                        drift: GroupDriftStatus::default(),
-                        identity_refusal: None,
-                        identity_unchecked: None,
-                    });
-                }
-                None => {}
+                Some(slot @ GroupOntologyCacheState::Resolving) => match identity.take() {
+                    Some((identity_refusal, None)) => {
+                        *slot = GroupOntologyCacheState::Resolved(GroupOntologyEntry {
+                            ontology,
+                            drift: GroupDriftStatus::default(),
+                            identity_refusal,
+                            identity_unchecked: None,
+                        });
+                        return;
+                    }
+                    Some((_, Some(_))) => return,
+                    None => {
+                        drop(guard);
+                        identity = Some(self.check_identity_set(group_id, ontology.as_deref()));
+                    }
+                },
+                None => return,
             }
         }
     }

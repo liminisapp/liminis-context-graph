@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwapOption;
 use lcg_core::{
-    app_state::{AppState, OntologyDriftState},
+    app_state::{AppState, GroupOntologyCacheState, OntologyDriftState},
     db::Db,
     dedup_adapter::PassthroughDedupAdapter,
     embedder::MockEmbedder,
@@ -686,6 +686,41 @@ async fn purge_then_reingest_then_restart_does_not_falsely_refuse() {
         .check_identity(G)
         .expect("unchanged ontology must not be refused after a restart");
     assert!(restarted.group_identity_refusal(G).is_none());
+}
+
+/// A remediation's `clear_group_drift` landing on a `Resolving` slot (issue #495) upserts the
+/// entry the racing first resolution then backs off from. That entry must carry the D1 check, or
+/// the resolution's refusal is dropped and ingest proceeds under a changed identity set.
+#[tokio::test]
+async fn clear_group_drift_racing_first_resolution_keeps_the_refusal() {
+    let (db, _d) = make_db();
+    let root = TempDir::new().unwrap();
+    let s1 = make_state(
+        Arc::clone(&db),
+        Some(root.path()),
+        Some(ontology(OntologyMode::Open, &[("Person", false, None)])),
+        vec![extraction(vec![ent("Ada", "Person")], vec![])],
+    );
+    ingest(&s1, G, 1).await.unwrap();
+
+    // Restart with `Person` newly flagged: the change must be refused (a carrier exists).
+    let onto = ontology(OntologyMode::Open, &[("Person", true, None)]);
+    let s2 = make_state(
+        Arc::clone(&db),
+        Some(root.path()),
+        Some(onto.clone()),
+        vec![extraction(vec![ent("Cy", "Person")], vec![])],
+    );
+    // Simulate the race: a first resolution has marked the group `Resolving`, and a
+    // remediation's `clear_group_drift` lands before that resolution inserts its own entry.
+    s2.group_ontologies
+        .lock()
+        .unwrap()
+        .insert(G.to_string(), GroupOntologyCacheState::Resolving);
+    s2.clear_group_drift(G, Some(Arc::new(onto)));
+
+    let (group, label, count) = refused(ingest(&s2, G, 2).await);
+    assert_eq!((group.as_str(), label.as_str(), count), (G, "Person", 1));
 }
 
 #[tokio::test]
