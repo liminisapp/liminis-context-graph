@@ -18,6 +18,16 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- **Ontology-driven kind assignment** ([ADR-0616](docs/adr/0616-ontology-driven-kind-assignment.md),
+  #616, follows #615). An entity type marked `identity: true` in the ontology is assigned as the
+  `kind` of entities extracted with that primary type, so `Person "Aurora"` and `Technology
+  "Aurora"` stay distinct; unflagged types (and every existing ontology) merge by name exactly as
+  before. Per group, the identity-bearing set is recorded in `.lcg/identity-set/<group>.json`, and
+  a change that would reinterpret existing entities (flag added or removed for a type the group
+  already holds) is refused for that group's `knowledge_add_episode` with JSON-RPC `-32003` —
+  restore the set or re-ingest from source. `knowledge_reprocess_entity_types` never changes kind
+  and reports `kind_disagreements`; `knowledge_status` gains `group_identity_refusals`.
+  Edge endpoints whose name is ambiguous across kinds are dropped rather than guessed.
 - **Kind-scoped entity identity** ([ADR-0615](docs/adr/0615-kind-scoped-entity-identity.md), #615,
   implements #614). Same-named entities of different kinds now coexist instead of the second
   `knowledge_assert_entity` overwriting the first. `knowledge_assert_entity` takes `kind`

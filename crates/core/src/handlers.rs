@@ -81,6 +81,27 @@ pub async fn dispatch(
                     ),
                     false,
                 ),
+                // A group's identity-bearing set changed in a way that would reinterpret existing
+                // entities (issue #616, D1). Structured so a client can name the label.
+                Error::IdentitySetChangeRefused {
+                    ref group_id,
+                    ref label,
+                    count,
+                    ..
+                } => (
+                    IpcResponse::err_with_data(
+                        req.id,
+                        -32003,
+                        e.to_string(),
+                        json!({
+                            "reason": "identity_set_change_refused",
+                            "group_id": group_id,
+                            "label": label,
+                            "entity_count": count,
+                        }),
+                    ),
+                    false,
+                ),
                 _ => (IpcResponse::err(req.id, -32000, e.to_string()), false),
             }
         }
@@ -390,6 +411,11 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "recovery_available": recovery_available,
             "ontology": ontology_summary,
             "group_ontology_drift": group_ontology_drift,
+            "group_identity_refusals": state
+                .all_group_identity_refusals()
+                .into_iter()
+                .map(|(group_id, message)| json!({"group_id": group_id, "message": message}))
+                .collect::<Vec<_>>(),
             "indices_built": state.indices_built.load(Ordering::Acquire),
             "name_index_trusted": null,
             "name_index_fallback_scans": null,
@@ -702,6 +728,15 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     };
     result["ontology"] = ontology_summary;
     result["group_ontology_drift"] = group_ontology_drift;
+    // Per-group identity-bearing-set refusals (issue #616, D1): only groups whose ontology
+    // change was refused appear; absent means no refusal (or not yet resolved this process).
+    result["group_identity_refusals"] = Value::Array(
+        state
+            .all_group_identity_refusals()
+            .into_iter()
+            .map(|(group_id, message)| json!({"group_id": group_id, "message": message}))
+            .collect(),
+    );
     Ok(result)
 }
 
@@ -1705,6 +1740,21 @@ async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Resul
         let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
         let ts = chrono::Utc::now().to_rfc3339();
         let (counts, grouped) = group_purge::purge_groups(&conn, &gid_refs, &ts, dry_run)?;
+        // A purged group holds no entities any more, so its identity-bearing-set stamp
+        // (issue #616) describes nothing and would only be left behind as an orphan sidecar.
+        // A later flag change on the emptied group is then checked against the empty set and
+        // accepted, which is correct: there is nothing to reinterpret. The cached ontology entry
+        // is dropped too, so the group's next ingest re-resolves and rewrites the stamp;
+        // otherwise new identity-kind entities would exist with no stamp and the next restart
+        // would refuse the group though its ontology never changed.
+        if !dry_run {
+            if let Some(root) = state_c.workspace_root.as_deref() {
+                for gid in &gid_refs {
+                    crate::identity_stamp::remove_stamp(root, gid);
+                    state_c.invalidate_group_ontology(gid);
+                }
+            }
+        }
         // Each purged group's own deletions, and any forced-rebind write on a foreign "owning"
         // group's RelatesToNode_ rows (ADR-0361), are already bucketed by the group whose data
         // they actually modify (issue #385 / ADR-0385) — flush each bucket to its own group's
@@ -1816,6 +1866,18 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
         Ok(())
     })
     .await??;
+
+    // The identity-bearing-set stamps (issue #616) describe entities that no longer exist once
+    // the WAL is gone too. With `preserve_wal` they are kept: a rebuild restores each entity's
+    // own kind, and the stamp is what still records which set those kinds were created under.
+    if !preserve_wal {
+        if let Some(root) = state.workspace_root.as_deref() {
+            crate::identity_stamp::remove_all_stamps(root);
+            // Drop every cached ontology entry so each group re-resolves (and re-stamps) on its
+            // next ingest instead of serving a stale `Resolved` entry with no stamp on disk.
+            state.invalidate_all_group_ontologies();
+        }
+    }
 
     // Phase 2: create fresh DB and initialize schema
     let db_path_reinit = db_path.clone();
@@ -4533,13 +4595,25 @@ async fn handle_reprocess_entity_types(
     let mut plan: Vec<serde_json::Value> = Vec::new();
     let mut updates: Vec<(String, String)> = Vec::new();
     let mut unchanged_count: usize = 0;
+    // Entities whose fresh classification disagrees with their identity-bearing kind (issue #616,
+    // D3). Report-only: kind is immutable, so a merge-or-split decision is left to a person.
+    let mut kind_disagreements: Vec<serde_json::Value> = Vec::new();
     for (entity, assigned_type) in entities.iter().zip(types.iter()) {
         if assigned_type.is_empty() {
             // LLM returned no assignment (FR-010): leave unchanged.
             unchanged_count += 1;
             continue;
         }
-        let current_leaf = corrections::find_leaf_type(&entity.labels, &ancestor_map);
+        if entity.kind != crate::types::DEFAULT_KIND && assigned_type.as_str() != entity.kind {
+            kind_disagreements.push(json!({
+                "entity_id": entity.uuid,
+                "entity_name": entity.name,
+                "kind": entity.kind,
+                "classified_type": assigned_type,
+            }));
+        }
+        let current_leaf =
+            corrections::find_leaf_type_with_kind(&entity.labels, &ancestor_map, &entity.kind);
         if current_leaf.as_deref() == Some(assigned_type.as_str()) {
             // Already has the correct type (FR-009): no write needed.
             unchanged_count += 1;
@@ -4558,6 +4632,7 @@ async fn handle_reprocess_entity_types(
         return Ok(json!({
             "would_reclassify_count": plan.len(),
             "plan": plan,
+            "kind_disagreements": kind_disagreements,
         }));
     }
 
@@ -4662,6 +4737,37 @@ async fn handle_reprocess_entity_types(
                             })
                     })
                     .collect();
+                // The kind label is immutable (issue #616): beside a reclassification it makes
+                // two independent leaves. Set it (and its ancestors) aside and judge the rest.
+                let without_kind: Vec<String>;
+                let leaf_types: Vec<&str> =
+                    if leaf_types.len() != 1 && entity.kind != crate::types::DEFAULT_KIND {
+                        without_kind = corrections::labels_without_kind(
+                            &entity.labels,
+                            &ancestor_map_d,
+                            &entity.kind,
+                        );
+                        let specific: Vec<&str> = without_kind
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|l| *l != "Entity")
+                            .collect();
+                        specific
+                            .iter()
+                            .copied()
+                            .filter(|&t| {
+                                ancestor_map_d.contains_key(t)
+                                    && !specific.iter().any(|&other| {
+                                        t != other
+                                            && ancestor_map_d.get(other).is_some_and(|anc| {
+                                                anc.iter().any(|a| a.as_str() == t)
+                                            })
+                                    })
+                            })
+                            .collect()
+                    } else {
+                        leaf_types
+                    };
                 if leaf_types.len() != 1 {
                     continue;
                 }
@@ -4696,6 +4802,7 @@ async fn handle_reprocess_entity_types(
         "reclassified_count": reclassified,
         "unchanged_count": unchanged_count,
         "restamped_count": restamped,
+        "kind_disagreements": kind_disagreements,
         "group_id": group_id,
     }))
 }

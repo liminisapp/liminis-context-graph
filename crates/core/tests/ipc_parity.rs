@@ -720,6 +720,7 @@ fn make_person_ontology() -> Arc<Ontology> {
         name: "Person".to_string(),
         description: None,
         parent: None,
+        identity: false,
     }];
     let ancestor_map = std::collections::HashMap::from([("Person".to_string(), vec![])]);
     Arc::new(Ontology {
@@ -3732,6 +3733,7 @@ async fn parity_canonicalize_no_deletion_of_arrow_edges() {
             name: "Entity".to_string(),
             description: None,
             parent: None,
+            identity: false,
         }],
         relation_types: vec![RelationTypeDef {
             name: "AFFILIATED_WITH".to_string(),
@@ -3797,6 +3799,7 @@ async fn parity_canonicalize_relations_shape() {
             name: "Entity".to_string(),
             description: None,
             parent: None,
+            identity: false,
         }],
         relation_types: vec![RelationTypeDef {
             name: "RELATES_TO".to_string(),

@@ -21,6 +21,9 @@ Everything the service manages lives under `.lcg/` in the workspace:
 ├── ontology-hash.json       # workspace-level ontology drift sidecar (issue #83)
 ├── ontology-hash/            # per-group ontology drift sidecars (issue #451)
 │   └── <group_id>.json      #   one file per group_id, drift state for its resolved ontology
+├── identity-set/             # per-group identity-bearing type stamps (issue #616)
+│   └── <group_id>.json      #   which entity types were `identity: true` when the group's
+│                            #   entities were extracted; only written once a group uses the flag
 └── service.sock            # JSON-RPC 2.0 endpoint while the service runs
 ```
 

@@ -105,6 +105,17 @@ pub enum Error {
         group_id: String,
         candidates: Vec<crate::types::KindCandidate>,
     },
+
+    /// A group's ontology changes the identity-bearing type set in a way that would
+    /// reinterpret existing entities (issue #616, D1). Refused rather than guessed at; the
+    /// remedy is restoring the recorded set or re-ingesting the group from source.
+    #[error("{message}")]
+    IdentitySetChangeRefused {
+        group_id: String,
+        label: String,
+        count: usize,
+        message: String,
+    },
 }
 
 fn format_candidates(c: &[crate::types::KindCandidate]) -> String {

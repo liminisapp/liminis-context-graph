@@ -1258,6 +1258,27 @@ impl<'db> Conn<'db> {
         self.count_by_group_ids("RelatesToNode_", "rn", group_ids)
     }
 
+    /// Counts `Entity` nodes in `group_id` whose full `labels` list carries `label` (issue #616,
+    /// D1). Deliberately the full list — ancestor labels and the kind label included — because
+    /// D1 asks whether any existing node would be reinterpreted. A group-scoped scan, not an
+    /// indexed lookup; callers run it only when a group's identity-bearing set actually differs
+    /// from its recorded one.
+    pub fn count_entities_carrying_label(&self, group_id: &str, label: &str) -> Result<u64, Error> {
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE e.group_id = $gid AND $label IN e.labels RETURN count(*)",
+            serde_json::json!({ "gid": group_id, "label": label }),
+        )?;
+        for row in rows {
+            match &row[0] {
+                lbug::Value::Int64(n) => return Ok(*n as u64),
+                lbug::Value::UInt64(n) => return Ok(*n),
+                lbug::Value::Int32(n) => return Ok(*n as u64),
+                _ => {}
+            }
+        }
+        Ok(0)
+    }
+
     fn count_by_group_ids(&self, label: &str, var: &str, group_ids: &[&str]) -> Result<u64, Error> {
         let sql = format!("MATCH ({var}:{label}) WHERE {var}.group_id IN $gids RETURN count(*)");
         let rows = self.query_params(&sql, serde_json::json!({ "gids": group_ids }))?;
@@ -1847,20 +1868,38 @@ impl<'db> Conn<'db> {
         Ok(pairs)
     }
 
-    /// Brute-force cosine similarity to find the best-matching Entity in a group (AD-4).
+    /// Brute-force cosine similarity to find the best-matching Entity in a group (AD-4),
+    /// confined to the default kind (issue #615, FR-010).
     pub fn brute_force_similar_entity(
         &self,
         name_embedding: &[f32],
         group_id: &str,
         threshold: f32,
     ) -> Result<Option<EntityRow>, Error> {
+        self.brute_force_similar_entity_kind(
+            name_embedding,
+            group_id,
+            threshold,
+            crate::types::DEFAULT_KIND,
+        )
+    }
+
+    /// [`Self::brute_force_similar_entity`] confined to `kind` (issue #616): dedup never
+    /// compares across kinds, so an identity-bearing kind only ever merges into its own kind.
+    pub fn brute_force_similar_entity_kind(
+        &self,
+        name_embedding: &[f32],
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<Option<EntityRow>, Error> {
         let result = self.query_params(
-            // Confined to the default kind (issue #615, FR-010) — see
-            // `get_entity_embeddings_by_uuids`.
-            "MATCH (e:Entity) WHERE e.group_id = $gid AND (e.kind IS NULL OR e.kind = $kind) \
+            // Confined to one kind (issue #615, FR-010; #616) — see
+            // `get_entity_embeddings_by_uuids_kind`. A NULL kind is a default-kind row.
+            "MATCH (e:Entity) WHERE e.group_id = $gid AND (e.kind = $kind OR ((e.kind IS NULL OR e.kind = '') AND $kind = 'Entity')) \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
              e.name_embedding, e.summary, e.attributes, e.kind",
-            serde_json::json!({ "gid": group_id, "kind": crate::types::DEFAULT_KIND }),
+            serde_json::json!({ "gid": group_id, "kind": kind }),
         )?;
         let mut best: Option<(f32, EntityRow)> = None;
 
@@ -1918,16 +1957,27 @@ impl<'db> Conn<'db> {
         &self,
         uuids: &[String],
     ) -> Result<Vec<(String, Vec<f32>)>, Error> {
+        self.get_entity_embeddings_by_uuids_kind(uuids, crate::types::DEFAULT_KIND)
+    }
+
+    /// [`Self::get_entity_embeddings_by_uuids`] confined to `kind` (issue #616).
+    pub fn get_entity_embeddings_by_uuids_kind(
+        &self,
+        uuids: &[String],
+        kind: &str,
+    ) -> Result<Vec<(String, Vec<f32>)>, Error> {
         if uuids.is_empty() {
             return Ok(vec![]);
         }
         let result = self.query_params(
-            // Dedup candidates are confined to the default kind (issue #615, FR-010): a `Merge`
-            // decision appends extracted text to the matched entity, which must never be an
-            // asserted non-`Entity`-kind node. A NULL kind is a not-yet-backfilled default row.
-            "MATCH (e:Entity) WHERE e.uuid IN $uuids AND (e.kind IS NULL OR e.kind = $kind) \
+            // Dedup candidates are confined to one kind (issue #615, FR-010; #616): a `Merge`
+            // decision appends extracted text to the matched entity, which must never be a node
+            // of another kind (e.g. an asserted non-`Entity`-kind node, or a differently-kinded
+            // identity-bearing one). A NULL kind is a not-yet-backfilled default row.
+            "MATCH (e:Entity) WHERE e.uuid IN $uuids \
+             AND (e.kind = $kind OR ((e.kind IS NULL OR e.kind = '') AND $kind = 'Entity')) \
              RETURN e.uuid, e.name_embedding",
-            serde_json::json!({ "uuids": uuids, "kind": crate::types::DEFAULT_KIND }),
+            serde_json::json!({ "uuids": uuids, "kind": kind }),
         )?;
         let mut pairs = Vec::new();
         for row in result {
@@ -1951,15 +2001,55 @@ impl<'db> Conn<'db> {
         group_id: &str,
         threshold: f32,
     ) -> Result<Option<EntityRow>, Error> {
+        self.hybrid_dedup_similar_entity_kind(
+            name_embedding,
+            entity_name,
+            group_id,
+            threshold,
+            crate::types::DEFAULT_KIND,
+        )
+    }
+
+    /// [`Self::hybrid_dedup_similar_entity`] confined to `kind` (issue #616). For the default
+    /// kind the candidate searches are unchanged (group-scoped, kind filtered afterwards in
+    /// `get_entity_embeddings_by_uuids_kind`), so flagless groups behave exactly as before. For
+    /// an identity-bearing kind the searches themselves are kind-filtered, so its entities are
+    /// not crowded out of the 200-candidate window by the (usually far more numerous) default
+    /// kind.
+    pub fn hybrid_dedup_similar_entity_kind(
+        &self,
+        name_embedding: &[f32],
+        entity_name: &str,
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<Option<EntityRow>, Error> {
         const CANDIDATE_K: usize = 200;
 
-        let vector_candidates =
-            self.vector_search_entities(name_embedding, Some(&[group_id]), CANDIDATE_K)?;
-        let bm25_candidates =
-            self.fts_search_entities(entity_name, Some(&[group_id]), CANDIDATE_K)?;
+        let (vector_candidates, bm25_candidates) = if kind == crate::types::DEFAULT_KIND {
+            (
+                self.vector_search_entities(name_embedding, Some(&[group_id]), CANDIDATE_K)?,
+                self.fts_search_entities(entity_name, Some(&[group_id]), CANDIDATE_K)?,
+            )
+        } else {
+            (
+                self.vector_search_entities_kind(
+                    name_embedding,
+                    Some(&[group_id]),
+                    Some(kind),
+                    CANDIDATE_K,
+                )?,
+                self.fts_search_entities_kind(
+                    entity_name,
+                    Some(&[group_id]),
+                    Some(kind),
+                    CANDIDATE_K,
+                )?,
+            )
+        };
         let fused_uuids = crate::search::rrf_fuse(&[&bm25_candidates, &vector_candidates]);
 
-        let candidate_embeddings = self.get_entity_embeddings_by_uuids(&fused_uuids)?;
+        let candidate_embeddings = self.get_entity_embeddings_by_uuids_kind(&fused_uuids, kind)?;
 
         let mut best: Option<(f32, String)> = None;
         for (uuid, emb) in candidate_embeddings {
@@ -2137,6 +2227,62 @@ impl<'db> Conn<'db> {
                 self.self_heal_lookup_key(&row);
                 self.register_kind(&row.kind);
                 // The scan is ordered `created_at, uuid`: the first row per kind is its winner.
+                if seen_kinds.insert(row.kind.clone()) {
+                    out.push(row);
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.uuid.cmp(&b.uuid))
+        });
+        Ok(out)
+    }
+
+    /// Name resolution confined to `kinds` (issue #616): the per-kind winner (as
+    /// `get_entity_by_name_ci`) for every listed kind holding an entity named `name` in
+    /// `group_id`, ordered `created_at ASC, uuid ASC`. Used by extraction's cross-batch edge
+    /// endpoint resolution, which must see the default kind plus the group's identity-bearing
+    /// kinds but never asserted kinds it did not create (#615: extraction never touches them).
+    ///
+    /// One indexed probe per kind; whenever any listed kind's probe missed, a single group scan
+    /// (which also self-heals rows whose `kind`/`lookup_key` were never written) is filtered to
+    /// `kinds` and fills in only the kinds the probes did not resolve. Scanning on a partial
+    /// miss, not just a total one, keeps a NULL-keyed row of one kind from being masked by an
+    /// indexed row of another. Callers treat `len() > 1` as ambiguity.
+    pub fn resolve_entities_by_name_in_kinds(
+        &self,
+        name: &str,
+        group_id: &str,
+        kinds: &[String],
+    ) -> Result<Vec<EntityRow>, Error> {
+        let wanted = name.trim().to_lowercase();
+        let mut out: Vec<EntityRow> = Vec::new();
+        for kind in kinds {
+            if let Some(row) = self.get_entity_by_name_ci(name, group_id, kind)? {
+                if row.group_id == group_id
+                    && &row.kind == kind
+                    && row.name.trim().to_lowercase() == wanted
+                {
+                    out.push(row);
+                }
+            }
+        }
+        // Scan whenever any requested kind missed its probe, not only on a total miss: a kind
+        // whose same-named row has a NULL/stale `lookup_key` would otherwise be hidden by a
+        // sibling kind's indexed hit, turning an ambiguous name into a silent `Found`.
+        let mut seen_kinds: BTreeSet<String> = out.iter().map(|r| r.kind.clone()).collect();
+        let distinct_kinds: BTreeSet<&String> = kinds.iter().collect();
+        if seen_kinds.len() < distinct_kinds.len() {
+            self.record_lookup_key_fallback_scan();
+            for row in self.scan_entities_by_name_ci(name, group_id, None)? {
+                if !kinds.contains(&row.kind) {
+                    continue;
+                }
+                self.self_heal_lookup_key(&row);
+                // The scan is ordered `created_at, uuid`: the first row per kind is its winner,
+                // and kinds the probes already resolved keep the probe's row.
                 if seen_kinds.insert(row.kind.clone()) {
                     out.push(row);
                 }

@@ -500,6 +500,7 @@ mod tests {
                 name: "Person".to_string(),
                 description: Some("A human being".to_string()),
                 parent: None,
+                identity: false,
             }],
             relation_types: vec![],
             ancestor_map: std::collections::HashMap::new(),

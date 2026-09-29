@@ -1088,8 +1088,18 @@ error code **`-32002`**; `error.data` is `{"reason": "ambiguous_entity", "name",
 included, nothing modified) if the canonical and any alias differ in kind, with an error naming the
 kinds; `merge_all_by_name` is limited to the canonical's own kind.
 
-**Extraction stays in the `Entity` namespace.** `knowledge_add_episode`/`knowledge_process_chunk`
-create and merge only kind-`Entity` entities and never merge into an asserted non-`Entity` node.
+**Extraction and kinds.** `knowledge_add_episode`/`knowledge_process_chunk` create kind-`Entity`
+entities, except that an entity whose primary type the ontology marks `identity: true` is created
+with that type as its `kind` and resolves only within it (see
+[Identity-bearing types](ontology.md#identity-bearing-types)). Extraction never merges into an
+asserted kind it did not create. For a group whose identity-bearing set changed in a way that would
+reinterpret existing entities, `knowledge_add_episode` fails with JSON-RPC error code **`-32003`**;
+`error.data` is `{"reason": "identity_set_change_refused", "group_id", "label", "entity_count"}`, and
+`knowledge_status` lists the group under `group_identity_refusals`. Nothing is modified; restore
+the recorded set (and restart) or re-ingest the group from source.
+`knowledge_reprocess_entity_types` never changes an entity's kind and adds an additive
+`kind_disagreements` array (`entity_id`, `entity_name`, `kind`, `classified_type`) — report-only —
+to both its dry-run plan and its result.
 
 ### Relation typing (`canonicalize_relations`, `backfill_relation_types`, `reprocess_relation_types`)
 
@@ -1781,10 +1791,10 @@ pick up a changed file.
 **Direct-assert is unaffected.** `knowledge_assert_entity`/`knowledge_assert_relationship` accept
 arbitrary `labels` regardless of any per-group or workspace ontology — per-group resolution only
 governs *extraction-guided* groups (`knowledge_add_episode` and the maintenance operations above).
-An entity's `kind` (issue #615) is part of its identity, not its ontology type: extraction always
-creates kind `Entity` (ontology-driven kinds are a separate, future phase), while direct-assert may
-give an entity any `kind`. The ontology restamp/reprocess operations rewrite type labels but
-preserve the entity's kind in its `labels`.
+An entity's `kind` (issue #615) is part of its identity, not its ontology type: extraction creates
+kind `Entity` unless the ontology marks the entity's type [identity-bearing](#identity-bearing-types)
+(issue #616), while direct-assert may give an entity any `kind`. The ontology restamp/reprocess
+operations rewrite type labels but preserve the entity's kind in its `labels`.
 
 **`canonicalize_relations`** resolves and applies the target group's own ontology, scoped to the
 `group_id` the call already requires. **`backfill_relation_types`** is ontology-independent — it
@@ -1893,6 +1903,88 @@ The optional `parent: <TypeName>` field on an entity type declares a single-pare
 - **Flat ontologies unaffected**: types without `parent` fields behave exactly as before — `["Entity", <SpecificType>]`.
 - **Drift detection**: adding, removing, or changing a `parent` changes the ontology content hash, which triggers a `drifted: true` status in `knowledge_status`. Run `knowledge_reprocess_entity_types` to propagate new hierarchy to existing nodes.
 
+### Identity-bearing types
+
+By default extraction merges same-named entities by name, whatever type the model gave them: a
+`Person "Aurora"` and a `Technology "Aurora"` become one node. Mark a type `identity: true` to
+make it part of the entity's identity instead:
+
+```yaml
+entity_types:
+  - name: Person
+    identity: true         # optional; absent means false
+  - name: Organization
+    identity: true
+  - name: Technology       # not identity-bearing: keeps merging by name
+```
+
+An entity whose **primary extracted type** is identity-bearing is created with `kind` set to that
+type ([ADR-0615](adr/0615-kind-scoped-entity-identity.md) makes kind part of identity,
+`(group_id, kind, name)`), so `Person "Aurora"` and `Technology "Aurora"` are two entities:
+kind `Person`, and kind `Entity` carrying the `Technology` label. A second `Person "Aurora"` in a
+later chunk resolves to the same kind-`Person` node, and a `Person` is never merged into an
+existing `Entity`-kind "Aurora" (or the reverse). Everything not identity-bearing behaves exactly
+as before, and an ontology with no `identity` keys is unchanged.
+
+**Which types to flag.** Only stable, well-defined types whose extracted typing is consistent —
+typically `Person` and `Organization`. Extracted typing is inconsistent for fuzzier types (the
+same "Aurora" may be `Technology` in one chunk and `Product` in another); flag such a type and one
+thing splits into several nodes. Leave those unflagged.
+
+**Rules.**
+
+- Kind comes from the entity's *primary* type alone. It is never inherited through `parent`: with
+  `Document` identity-bearing and `Rfc` (parent `Document`) not, an `Rfc` gets kind `Entity`
+  (labels `Entity`, `Document`, `Rfc`). The result never depends on label or declaration order.
+- The flag is matched against the normalized (PascalCase) type name, like every other type match.
+  An undeclared type (open mode) or `Unclassified` (strict mode) is never identity-bearing.
+  `Merged` and `Unclassified` cannot be flagged.
+- Asserted entities (`knowledge_assert_entity`) are unaffected: they use the caller's `kind`.
+- **Edges name endpoints by name only.** If one batch contains the same name under two kinds, or a
+  name from an earlier chunk resolves to more than one kind, that endpoint is ambiguous and the
+  edge is dropped (counted in `edges_dropped_unresolvable`) rather than guessed at.
+- `knowledge_reprocess_entity_types` never changes an entity's kind, and never removes it from
+  `labels`. When a fresh classification disagrees with an entity's identity-bearing kind it
+  reports the entity in a `kind_disagreements` array (`entity_id`, `entity_name`, `kind`,
+  `classified_type`) and acts on nothing; deciding to merge or split is left to a person.
+
+**Evaluated at extraction time only.** Identity is decided once, when an entity is created, and
+never inferred afterwards. A WAL rebuild cannot apply a flag retroactively: replay re-executes
+each record's stored `kind` mechanically and never calls the extractor, so flipping a flag and
+rebuilding yields exactly the same graph. Nor can kind be re-derived from stored labels — if
+"Aurora" was extracted as `Person` in one chunk and `Technology` in another, name-merging already
+folded them into one node, and lcg cannot tell whether that was one thing typed inconsistently or
+two things wrongly merged.
+
+**Changing the flag is refused when it would reinterpret existing data.** lcg records, per group,
+which types were identity-bearing (`.lcg/identity-set/<group_id>.json`, outside the WAL and the
+DB, so it survives a clear or a rebuild-from-WAL). When a group's ontology first resolves in a
+process, its identity-bearing set is compared with the record:
+
+- A difference that touches only types no existing entity in the group carries **is accepted**;
+  the record is updated and it takes effect for later extractions.
+- Adding or removing the flag for a type existing entities already carry (their full `labels`,
+  including ancestor labels and the kind label — so flagging `Document` is refused while any `Rfc`
+  entity carries the `Document` label) **is refused**. `knowledge_add_episode` for that group fails
+  with JSON-RPC error `-32003` (`error.data.reason = "identity_set_change_refused"`, plus
+  `group_id`, `label`, `entity_count`), and the group appears in `knowledge_status`'s
+  `group_identity_refusals`:
+
+  ```text
+  identity-bearing set change refused for group "content": adding the `identity` flag for type
+  "Person" would reinterpret 12 existing entities carrying that label. Identity is decided once,
+  at creation, and never inferred afterwards. Restore the group's previously recorded
+  identity-bearing set, or re-ingest the group from source.
+  ```
+
+A refusal modifies no data and affects only the offending group — reads, reprocessing, other
+groups and service startup are unaffected. It holds for the life of the process; restoring the
+recorded set and restarting the service loads the group normally. The remedy for a change you
+really want is to re-ingest the group from source (lcg does not automate this).
+
+Because the flag is part of the ontology content hash, adding one also raises the ordinary
+[drift](#drift-detection) warning; that warning is separate from, and weaker than, this refusal.
+
 See [`docs/examples/ontology.example.yaml`](https://github.com/verveguy/liminis-context-graph/blob/main/docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
 
 ## Modes
@@ -1921,7 +2013,8 @@ The `knowledge_status` IPC response always includes an `ontology` field (workspa
   "group_ontology_drift": [
     { "group_id": "catalog", "drifted": true, "drift_summary": "entity types added: [Equipment]" },
     { "group_id": "content", "drifted": false, "drift_summary": null }
-  ]
+  ],
+  "group_identity_refusals": []
 }
 ```
 
@@ -1934,6 +2027,10 @@ least once in the current process** — a group not yet used has no entry at all
 timing. A single-ontology workspace (no `.lcg/ontology/` directory) behaves identically: the array
 is empty until a group is used, then contains that group only, and the `ontology` field's shape
 and values are unaffected either way.
+
+`group_identity_refusals` lists `{group_id, message}` for each group whose identity-bearing-set
+change was refused this process (see [Identity-bearing types](#identity-bearing-types)); it is empty
+when nothing was refused.
 
 The response also includes an `indices_built` boolean, a `name_index_trusted` boolean, and a
 `name_index_fallback_scans` integer — these describe search-index and name-lookup health rather
@@ -1962,6 +2059,9 @@ Everything the service manages lives under `.lcg/` in the workspace:
 ├── ontology-hash.json       # workspace-level ontology drift sidecar (issue #83)
 ├── ontology-hash/            # per-group ontology drift sidecars (issue #451)
 │   └── <group_id>.json      #   one file per group_id, drift state for its resolved ontology
+├── identity-set/             # per-group identity-bearing type stamps (issue #616)
+│   └── <group_id>.json      #   which entity types were `identity: true` when the group's
+│                            #   entities were extracted; only written once a group uses the flag
 └── service.sock            # JSON-RPC 2.0 endpoint while the service runs
 ```
 
@@ -3874,6 +3974,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0577](0577-strip-wal-embeddings.md) | `knowledge_strip_wal_embeddings` — Two-Pass In-Place Stripping of Pre-0.14 WAL Vectors | 2026-09-09 |
 | [0581](0581-windows-static-openssl.md) | Link OpenSSL Statically on Windows | 2026-09-15 |
 | [0615](0615-kind-scoped-entity-identity.md) | Kind-Scoped Entity Identity — `Entity.kind` and `lookup_key = group_id ␟ kind ␟ name` | 2026-09-29 |
+| [0616](0616-ontology-driven-kind-assignment.md) | Ontology-Driven Kind Assignment — identity-bearing entity types during extraction | 2026-09-29 |
 
 ## Historical numbering
 

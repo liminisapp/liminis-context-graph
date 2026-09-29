@@ -15,6 +15,7 @@ use crate::{
     env::lcg_env_var,
     error::Error,
     extractor::Extractor,
+    identity_stamp::{self, IdentityRefusal},
     ontology::{load_ontology, Ontology},
     ontology_sidecar,
     rebuild_job::RebuildJob,
@@ -46,6 +47,13 @@ pub struct GroupDriftStatus {
 pub struct GroupOntologyEntry {
     pub ontology: Option<Arc<Ontology>>,
     pub drift: GroupDriftStatus,
+    /// Set when the group's resolved identity-bearing set differs from its recorded one in a way
+    /// that would reinterpret existing entities (issue #616, D1). Enforced at `add_episode` via
+    /// [`AppState::check_identity`]; reads and other groups are unaffected.
+    pub identity_refusal: Option<IdentityRefusal>,
+    /// The identity-set sets differ but the check could not run (DB unreadable). Such an entry is
+    /// never cached, so the check re-runs on the next resolve instead of silently accepting.
+    pub identity_unchecked: Option<String>,
 }
 
 /// `AppState::group_ontologies`'s value type (issue #495). A group's first `resolve_ontology`
@@ -325,6 +333,11 @@ impl AppState {
 
         let (resolved, entry) = self.compute_group_ontology_entry(group_id);
         let drift = entry.drift.clone();
+        if entry.identity_unchecked.is_some() {
+            // The identity-set check could not run (issue #616): don't cache, so the next
+            // resolve re-checks rather than silently accepting a flag change.
+            return resolved;
+        }
         // Only warn if this thread's (possibly stale) computation actually won the race and
         // became the cached state (issue #495): if a concurrent remediation's `clear_group_drift`
         // got there first, `entry` is discarded below and the group is not actually drifted, so
@@ -396,14 +409,131 @@ impl AppState {
         // computation is actually drifted-and-cached depends on whether it wins the
         // insert-if-not-resolved race in `resolve_ontology`, which isn't known yet here.
 
+        let (identity_refusal, identity_unchecked) =
+            self.check_identity_set(group_id, resolved.as_deref());
+
         let entry = GroupOntologyEntry {
             ontology: resolved.clone(),
             drift: GroupDriftStatus {
                 drifted,
                 drift_summary,
             },
+            identity_refusal,
+            identity_unchecked,
         };
         (resolved, entry)
+    }
+
+    /// The D1 guard (issue #616, FR-005): compares the resolved ontology's identity-bearing set
+    /// with the group's recorded stamp. Returns `(refusal, unchecked)`.
+    ///
+    /// - Sets equal → nothing happens (no file is written for a flagless workspace).
+    /// - Sets differ → each changed label is counted with one group-scoped `labels` query. Any
+    ///   carrier refuses (the stamp is left untouched); otherwise the stamp is rewritten.
+    /// - Sets differ but the DB or stamp cannot be read → `unchecked`, so the caller does not
+    ///   cache the entry and the check re-runs rather than silently accepting a flip.
+    ///
+    /// Skipped entirely when no `workspace_root` is configured (nowhere to record a stamp).
+    fn check_identity_set(
+        &self,
+        group_id: &str,
+        resolved: Option<&Ontology>,
+    ) -> (Option<IdentityRefusal>, Option<String>) {
+        let Some(root) = self.workspace_root.as_deref() else {
+            return (None, None);
+        };
+        let current = resolved.map(|o| o.identity_set()).unwrap_or_default();
+        let recorded = match identity_stamp::read_stamp(root, group_id) {
+            Ok(r) => r,
+            Err(e) => return (None, Some(e)),
+        };
+        let changed = identity_stamp::changed_labels(&recorded, &current);
+        if changed.is_empty() {
+            return (None, None);
+        }
+        let db_opt = self.db.load_full();
+        let conn = match db_opt.as_ref().map(|d| d.connect()) {
+            Some(Ok(c)) => c,
+            Some(Err(e)) => return (None, Some(format!("cannot open DB connection: {e}"))),
+            None => return (None, Some("DB unavailable".to_string())),
+        };
+        match identity_stamp::check_identity_change(&changed, |label| {
+            conn.count_entities_carrying_label(group_id, label)
+                .map(|n| n as usize)
+        }) {
+            Err(e) => (None, Some(format!("cannot count entities: {e}"))),
+            Ok(Some(refusal)) => {
+                eprintln!(
+                    "liminis-context-graph: ontology: {}",
+                    refusal.message(group_id)
+                );
+                (Some(refusal), None)
+            }
+            Ok(None) => {
+                if let Err(e) = identity_stamp::write_stamp(root, group_id, &current) {
+                    // The change was accepted but could not be recorded: treat as unchecked so
+                    // the next resolve retries rather than proceeding with an unrecorded set.
+                    return (None, Some(format!("cannot record identity stamp: {e}")));
+                }
+                (None, None)
+            }
+        }
+    }
+
+    /// Enforces D1 for `group_id` (issue #616): `Ok` unless the group's identity-bearing set
+    /// change was refused (or could not be checked because the DB is unavailable). Called at the
+    /// top of `add_episode`, the only extraction entry. Other groups, reads and reprocessing are
+    /// unaffected; a refusal holds for the life of the process (ontology reload is restart-only).
+    pub fn check_identity(&self, group_id: &str) -> Result<(), crate::error::Error> {
+        let _ = self.resolve_ontology(group_id);
+        if let Ok(guard) = self.group_ontologies.lock() {
+            if let Some(GroupOntologyCacheState::Resolved(e)) = guard.get(group_id) {
+                return match &e.identity_refusal {
+                    Some(r) => Err(r.clone().into_error(group_id)),
+                    None => Ok(()),
+                };
+            }
+        }
+        // Not cached: the check could not run. Retry once, and surface the reason if it still
+        // cannot.
+        let resolved = self.load_resolved_ontology(group_id);
+        match self.check_identity_set(group_id, resolved.as_deref()) {
+            (Some(r), _) => Err(r.into_error(group_id)),
+            (None, Some(reason)) => Err(crate::error::Error::DbUnavailable(format!(
+                "cannot verify identity-bearing set for group {group_id:?}: {reason}"
+            ))),
+            (None, None) => Ok(()),
+        }
+    }
+
+    /// Returns `group_id`'s cached identity-set refusal message, if any (for `knowledge_status`).
+    pub fn group_identity_refusal(&self, group_id: &str) -> Option<String> {
+        match self.group_ontologies.lock().ok()?.get(group_id)? {
+            GroupOntologyCacheState::Resolved(e) => {
+                e.identity_refusal.as_ref().map(|r| r.message(group_id))
+            }
+            GroupOntologyCacheState::Resolving => None,
+        }
+    }
+
+    /// Every group's cached identity-set refusal, `(group_id, message)`, from the in-memory
+    /// cache only.
+    pub fn all_group_identity_refusals(&self) -> Vec<(String, String)> {
+        self.group_ontologies
+            .lock()
+            .map(|guard| {
+                guard
+                    .iter()
+                    .filter_map(|(gid, state)| match state {
+                        GroupOntologyCacheState::Resolved(e) => e
+                            .identity_refusal
+                            .as_ref()
+                            .map(|r| (gid.clone(), r.message(gid))),
+                        GroupOntologyCacheState::Resolving => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Inserts `entry` for `group_id` unless it's already `Resolved` (issue #495), returning
@@ -531,20 +661,64 @@ impl AppState {
     ///   drift cache as a side effect for a group nothing has genuinely resolved yet (FR-007;
     ///   regression-tested by `per_group_ontology.rs`'s
     ///   `wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache`).
+    ///
+    /// The `Resolving` upsert also runs the D1 identity-set check (issue #616): the entry it
+    /// caches is the one the racing first resolution's own insert will then back off from, so an
+    /// entry without the check would drop that resolution's refusal and let ingest proceed under
+    /// a changed identity set until restart. The check reads the DB and stamp file, so it runs
+    /// with the cache lock released. If it cannot run (DB unreadable) the slot stays `Resolving`
+    /// — nothing is cached and the next resolve re-checks.
     pub fn clear_group_drift(&self, group_id: &str, ontology: Option<Arc<Ontology>>) {
-        if let Ok(mut guard) = self.group_ontologies.lock() {
+        let mut identity: Option<(Option<IdentityRefusal>, Option<String>)> = None;
+        loop {
+            let Ok(mut guard) = self.group_ontologies.lock() else {
+                return;
+            };
             match guard.get_mut(group_id) {
                 Some(GroupOntologyCacheState::Resolved(e)) => {
                     e.drift = GroupDriftStatus::default();
+                    return;
                 }
-                Some(slot @ GroupOntologyCacheState::Resolving) => {
-                    *slot = GroupOntologyCacheState::Resolved(GroupOntologyEntry {
-                        ontology,
-                        drift: GroupDriftStatus::default(),
-                    });
-                }
-                None => {}
+                Some(slot @ GroupOntologyCacheState::Resolving) => match identity.take() {
+                    Some((identity_refusal, None)) => {
+                        *slot = GroupOntologyCacheState::Resolved(GroupOntologyEntry {
+                            ontology,
+                            drift: GroupDriftStatus::default(),
+                            identity_refusal,
+                            identity_unchecked: None,
+                        });
+                        return;
+                    }
+                    Some((_, Some(_))) => return,
+                    None => {
+                        drop(guard);
+                        identity = Some(self.check_identity_set(group_id, ontology.as_deref()));
+                    }
+                },
+                None => return,
             }
+        }
+    }
+
+    /// Drops `group_id`'s cached ontology entry so its next `resolve_ontology` re-runs the
+    /// first-resolution path, including the D1 identity-set check (issue #616).
+    ///
+    /// Must follow any deletion of the group's identity stamp (`knowledge_delete_by_group`,
+    /// `knowledge_clear_all`): the stamp is otherwise only written on first resolution, so a
+    /// cached entry would keep serving `Ok` while new identity-kind entities were created with no
+    /// stamp on disk — and the next restart would refuse the group though its ontology never
+    /// changed. Re-resolving with no carriers writes the stamp, keeping a single stamp writer.
+    /// Also resets the group's cached drift status, which re-derives from the drift sidecar.
+    pub fn invalidate_group_ontology(&self, group_id: &str) {
+        if let Ok(mut guard) = self.group_ontologies.lock() {
+            guard.remove(group_id);
+        }
+    }
+
+    /// [`Self::invalidate_group_ontology`] for every cached group (`knowledge_clear_all`).
+    pub fn invalidate_all_group_ontologies(&self) {
+        if let Ok(mut guard) = self.group_ontologies.lock() {
+            guard.clear();
         }
     }
 
@@ -682,6 +856,7 @@ mod tests {
                     name: n.to_string(),
                     description: None,
                     parent: None,
+                    identity: false,
                 })
                 .collect(),
             relation_types: vec![],
