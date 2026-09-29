@@ -13,8 +13,10 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 - **First start migrates entities (issue #615).** `Entity` gains a `kind` column and `lookup_key`
   becomes `group_id ␟ kind ␟ lower(name)`. A one-time backfill sets every existing entity to kind
-  `Entity` and re-keys it (O(N), automatic). **Downgrade is unsupported:** a pre-#615 binary cannot
-  replay a WAL written after this change (`lookup_key` is no longer written to the WAL).
+  `Entity` and re-keys it (O(N), automatic). It also normalizes `labels` to put `Entity` first
+  (e.g. `[Object, Entity]` → `[Entity, Object]`); the label set is unchanged. **Downgrade is
+  unsupported:** a pre-#615 binary cannot replay a WAL written after this change (`lookup_key` is
+  no longer written to the WAL).
 
 ### Added
 
