@@ -41,6 +41,11 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Changed
 
+- **lbug 0.20.3 → 0.21.0, with version-matched `v0.21.0` extensions** (#619). Upstream's 2026-09-29
+  republish of the `v0.20.0` extensions left 0.20.3 with no safe Windows fts pairing (see ADR-0593
+  addendum). 0.21.0 extensions are published per-version and pinned in `LBUG_EXTENSION_HASHES`.
+  Storage version stays 47: **no database migration.**
+
 - `lookup_key` is a derived value: stripped from WAL records on write, recomputed on replay; a
   literal `lookup_key` in an older WAL is ignored. Old WALs replay as kind `Entity`.
 

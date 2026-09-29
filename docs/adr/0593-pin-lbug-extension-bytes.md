@@ -143,3 +143,18 @@ computed sizes matched the previously-recorded sizes exactly.
 - **Vendor/mirror the extension CDN, or pin per-patch upstream artifacts.** Out of scope for this
   repo — the per-patch-artifact fix belongs upstream (LadybugDB/ladybug#971); this ADR pins what
   this repo receives, not how upstream publishes.
+
+## Addendum (2026-09-29): the republish happened; lbug 0.21.0
+
+At 2026-09-29 00:03 UTC upstream republished every `v0.20.0` extension. The `win_amd64` bytes now
+embed `0.20.4`, and the 0.20.2-era bytes behind the 0.20.3 verification are no longer served. The
+pin caught this on its first CI run: the release builds for #597 failed at staging with a sha256 mismatch.
+Against a 0.20.3 core, the new `v0.20.0` Windows fts crashed in 4 of 5 row-asserting runs
+(`0xC0000409` at `CALL CREATE_FTS_INDEX`). Vector was 20/20 clean.
+
+Issue #619 moves the core to lbug 0.21.0. Its extensions live at their own `v0.21.0` path and embed
+`0.21.0`, so for the first time core and extensions are **matched per version** rather than
+compatible by schedule. Pins were regenerated from origin (cache-busted fetch and edge fetch agreed).
+They were verified against a 0.21.0 core: macOS arm64 full lcg suite, and Windows 11 vector 45/45
+and fts 10/10 row-asserting runs. 0.21.0 keeps storage version 47, so there's no migration from 0.20.x.
+The mechanism in this ADR is unchanged. A future republish of `v0.21.0` fails the build the same way.
