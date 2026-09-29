@@ -39,11 +39,19 @@ fn group_ids_prop() -> Value {
     })
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (42 total),
+fn kind_filter_prop() -> Value {
+    json!({
+        "type": "string",
+        "description": "Optional entity kind filter (issue #615). Omitted: all kinds are \
+                         returned (reads are broad). Given: only entities of that kind."
+    })
+}
+
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (45 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
-        // ── read (14) ──────────────────────────────────────────────────────────────
+        // ── read (15) ──────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_status",
             description: "Get knowledge graph status: entity/episode/relationship counts, \
@@ -68,7 +76,13 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_find_entities",
-            description: "Hybrid (full-text + vector) search for entities matching a query.",
+            description: "Hybrid (full-text + vector) search for entities matching a query. \
+                           Every returned node carries its `kind` (issue #615). `kind` is an \
+                           optional filter: omitted, the search spans ALL kinds and returns \
+                           same-named entities of different kinds as separate nodes (a multi-row \
+                           read never picks one and never errors on ambiguity — use \
+                           `knowledge_resolve_entity` when exactly one entity is needed); given, \
+                           only entities of that kind are returned.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -76,12 +90,38 @@ pub fn registry() -> Vec<ToolSpec> {
                     "properties": {
                         "query": {"type": "string", "description": "Search text."},
                         "group_ids": group_ids_prop(),
+                        "kind": kind_filter_prop(),
                         "num_results": {
                             "type": "integer", "minimum": 1, "default": 10,
                             "description": "Maximum number of entities to return."
                         }
                     },
                     "required": ["query"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_resolve_entity",
+            description: "Resolve ONE entity by `(group_id, name[, kind])` (issue #615) — exact, \
+                           case-insensitive, whitespace-normalized name match, following a \
+                           Merged tombstone to its canonical. With `kind`, the lookup is exact \
+                           and can never be ambiguous. WITHOUT `kind` it spans ALL kinds (reads \
+                           are broad): if exactly one kind has an entity of that name it is \
+                           returned; if more than one does, the call fails with JSON-RPC error \
+                           code -32002 (`error.data.reason` = \"ambiguous_entity\", \
+                           `error.data.candidates` = [{uuid, kind}, ...]) — it never silently \
+                           picks one. Returns `{found, node}`; `found` is false (node null) when \
+                           nothing matches.",
+            scope: Scope::Read,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Entity name (required)."},
+                        "group_id": {"type": "string", "default": "liminis"},
+                        "kind": {"type": "string", "description": "Optional kind for an exact lookup. Omitted: spans all kinds and errors (-32002) if more than one kind matches."}
+                    },
+                    "required": ["name"]
                 })
             },
         },
@@ -210,7 +250,10 @@ pub fn registry() -> Vec<ToolSpec> {
             description: "List entity nodes, optionally scoped to specific group IDs, with \
                            episode provenance attached. Does not include episode `attributes` \
                            (issue #528) — this path surfaces only entity-scoped provenance, \
-                           never a full episode object.",
+                           never a full episode object. Every returned node carries its `kind` \
+                           (issue #615); `kind` is an optional filter — omitted, ALL kinds are \
+                           listed (same-named entities of different kinds appear as separate \
+                           nodes); given, only that kind.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -220,7 +263,8 @@ pub fn registry() -> Vec<ToolSpec> {
                             "type": "integer", "minimum": 1, "default": 500,
                             "description": "Maximum number of entities to return."
                         },
-                        "group_ids": group_ids_prop()
+                        "group_ids": group_ids_prop(),
+                        "kind": kind_filter_prop()
                     }
                 })
             },
@@ -476,7 +520,13 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_merge_entities",
             description: "Merge one or more alias entities into a canonical entity, rewriting \
-                           and deduplicating their edges.",
+                           and deduplicating their edges. Merges never cross kinds (issue \
+                           #615): if the canonical and any alias differ in `kind` the WHOLE call \
+                           is refused with an error naming the kinds (dry_run included) and \
+                           nothing is modified. `kind` optionally disambiguates \
+                           `canonical_name`/`alias_names`; omitted, those names span all kinds \
+                           and a `canonical_name` matching several kinds is an ambiguity error. \
+                           `merge_all_by_name` is limited to the canonical's own kind.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -488,8 +538,9 @@ pub fn registry() -> Vec<ToolSpec> {
                         "alias_names": {"type": "array", "items": {"type": "string"}, "description": "Names of entities to merge away."},
                         "merge_all_by_name": {
                             "type": "boolean", "default": false,
-                            "description": "If true, merge all entities sharing canonical_name as aliases."
+                            "description": "If true, merge all entities of the canonical's kind sharing its name as aliases."
                         },
+                        "kind": {"type": "string", "description": "Optional kind restricting canonical_name / alias_names lookups. Omitted: those names span all kinds (a multi-kind canonical_name is an ambiguity error; an alias set spanning kinds is refused)."},
                         "group_id": {"type": "string", "default": "liminis"},
                         "dry_run": {"type": "boolean", "default": false, "description": "Preview the merge plan without writing."}
                     }
@@ -648,7 +699,13 @@ pub fn registry() -> Vec<ToolSpec> {
                            rather than dropped — the edge is still created, just missing that \
                            hop until a `knowledge_rebind_pointers` pass resolves it. A bare \
                            `uuid` endpoint that turns out to belong to a different group than \
-                           the edge is rejected before any write.",
+                           the edge is rejected before any write. `source_kind` / `target_kind` \
+                           (issue #615, optional) pin a FOREIGN endpoint's pointer to an entity \
+                           kind (stored as `endpoint_kind`): a kind-pinned pointer resolves \
+                           within that kind only and stays `bound` when a same-named entity of \
+                           another kind appears. Omitted, the pointer resolves across ALL kinds \
+                           and becomes `ambiguous` — with no hop — once a second kind shares the \
+                           name. Supplying a kind for a `{uuid}` endpoint is rejected.",
             scope: Scope::Write,
             input_schema: || {
                 let endpoint_schema = || {
@@ -680,6 +737,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "name": {"type": "string", "description": "Relation name, e.g. RELATES_TO subtype label."},
                         "source": endpoint_schema(),
                         "target": endpoint_schema(),
+                        "source_kind": {"type": "string", "description": "Optional kind for a foreign `source` endpoint (pins the pointer to that kind). Rejected for a {uuid} endpoint."},
+                        "target_kind": {"type": "string", "description": "Optional kind for a foreign `target` endpoint (pins the pointer to that kind). Rejected for a {uuid} endpoint."},
                         "group_id": {"type": "string", "default": "liminis", "description": "The edge's own (layer) group_id."},
                         "fact": {"type": "string", "description": "Natural-language fact text for the edge."},
                         "valid_at": {"type": "string", "description": "Optional ISO-8601 timestamp this fact became true."},
@@ -713,13 +772,22 @@ pub fn registry() -> Vec<ToolSpec> {
                            `knowledge_backfill_summary_embeddings` is run for its group_id. If the \
                            configured embedder is unavailable, the call still succeeds with a \
                            zero-vector name_embedding and a non-null `embedding_warning` in the \
-                           response.",
+                           response. Entity identity is `(group_id, kind, name)` (issue #615): \
+                           `kind` is optional and WRITES ARE KIND-SCOPED — omitted, the call \
+                           acts on the default kind `Entity` ONLY, so a name-only write can \
+                           never reach into (or overwrite) another kind's same-named node; \
+                           given, it resolves/creates within exactly that kind. `kind` is always \
+                           one of the entity's `labels` (appended after `Entity` if you omit it \
+                           there) and is immutable: an `entity_uuid` whose entity has a \
+                           different kind than a supplied `kind` is rejected. The rename guard \
+                           is per-kind.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "The entity's name (required)."},
+                        "kind": {"type": "string", "description": "Optional entity kind (identity-bearing, immutable; non-empty, no U+001F). Omitted: acts on the default kind \"Entity\" only."},
                         "entity_uuid": {"type": "string", "description": "Optional: update this exact entity by UUID (strict group-scoped lookup, no create fallback) instead of resolving by name."},
                         "group_id": {"type": "string", "default": "liminis"},
                         "labels": {"type": "array", "items": {"type": "string"}, "default": ["Entity"], "description": "Defaults to [\"Entity\"] when omitted or empty."},
@@ -757,7 +825,14 @@ pub fn registry() -> Vec<ToolSpec> {
                            through to a Binder exception) if it matches neither. If the \
                            configured embedder is unavailable, the call still succeeds with a \
                            zero-vector fact_embedding and a non-null `embedding_warning` in the \
-                           response.",
+                           response. Endpoints are always EXISTING entities (this tool never \
+                           creates one), so `source_kind` / `target_kind` (issue #615, \
+                           optional) follow the READ rule: given, that endpoint resolves \
+                           exactly within that kind; omitted, it spans ALL kinds and, if more \
+                           than one kind has an entity of that name, the call fails with \
+                           JSON-RPC error -32002 listing the candidates' kinds and uuids — it \
+                           never silently picks one. `adr` (KnowledgeChannel) -> `adr` (Topic) \
+                           links two distinct nodes and is not a self-loop.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -765,6 +840,8 @@ pub fn registry() -> Vec<ToolSpec> {
                     "properties": {
                         "source_name": {"type": "string", "description": "Source entity name, resolved within group_id (required)."},
                         "target_name": {"type": "string", "description": "Target entity name, resolved within group_id (required)."},
+                        "source_kind": {"type": "string", "description": "Optional kind for the source endpoint. Omitted: spans all kinds; a multi-kind match is an ambiguity error (-32002)."},
+                        "target_kind": {"type": "string", "description": "Optional kind for the target endpoint. Omitted: spans all kinds; a multi-kind match is an ambiguity error (-32002)."},
                         "predicate": {"type": "string", "description": "The edge's identity label — participates in the (source, predicate, target, group_id) upsert match (required)."},
                         "group_id": {"type": "string", "default": "liminis"},
                         "fact": {"type": "string", "description": "Natural-language fact text. Defaults to \"<source_name> <predicate> <target_name>\" when omitted."},
@@ -1231,18 +1308,18 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_44_unique_tools() {
+    fn registry_has_45_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 44);
+        assert_eq!(r.len(), 45);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 44, "tool names must be unique");
+        assert_eq!(names.len(), 45, "tool names must be unique");
     }
 
     #[test]
     fn scope_bucket_sizes_match_fr_004_table() {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
-        assert_eq!(count(Scope::Read), 14);
+        assert_eq!(count(Scope::Read), 15);
         assert_eq!(count(Scope::Write), 15);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 14);

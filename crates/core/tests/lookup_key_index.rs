@@ -476,7 +476,7 @@ fn open_or_rebuild_backfills_lookup_key_from_replayed_wal() {
     // schema_migrate.rs) was built to close. Asserting the marker here confirms this call site
     // now goes through the same persisting path, not just that the in-process flag is healthy.
     let status = conn
-        .cypher_query("MATCH (s:SchemaState {key: 'entity_lookup_key_backfill'}) RETURN s.status")
+        .cypher_query("MATCH (s:SchemaState {key: 'entity_kind_lookup_key_v2'}) RETURN s.status")
         .unwrap();
     assert_eq!(
         status,

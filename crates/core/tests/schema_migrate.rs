@@ -313,7 +313,7 @@ fn migrate_retries_lookup_key_backfill_after_a_prior_failure() {
         "a failed backfill must be reported as untrusted, not silently healthy"
     );
     let status_after_failure = conn
-        .cypher_query("MATCH (s:SchemaState {key: 'entity_lookup_key_backfill'}) RETURN s.status")
+        .cypher_query("MATCH (s:SchemaState {key: 'entity_kind_lookup_key_v2'}) RETURN s.status")
         .unwrap();
     assert_eq!(
         status_after_failure,
@@ -341,7 +341,7 @@ fn migrate_retries_lookup_key_backfill_after_a_prior_failure() {
          reporting failure forever"
     );
     let status_after_retry = conn
-        .cypher_query("MATCH (s:SchemaState {key: 'entity_lookup_key_backfill'}) RETURN s.status")
+        .cypher_query("MATCH (s:SchemaState {key: 'entity_kind_lookup_key_v2'}) RETURN s.status")
         .unwrap();
     assert_eq!(status_after_retry, vec![vec!["complete".to_string()]]);
     let rows = conn
