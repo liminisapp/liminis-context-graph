@@ -429,11 +429,19 @@ fn build_ontology(file: OntologyFile, mode_override: Option<OntologyMode>) -> Op
                 );
             }
             let parent = raw.parent.map(|p| normalize_entity_type(&p));
+            // `Merged` is a reserved kind (it would masquerade as a merge tombstone, #615) and
+            // `Unclassified` is the strict-mode catch-all: neither may carry identity.
+            let identity = raw.identity && !matches!(normalized.as_str(), "Merged" | "Unclassified");
+            if raw.identity && !identity {
+                eprintln!(
+                    "liminis-context-graph: ontology: entity type '{normalized}' is reserved and cannot be identity-bearing — ignoring `identity: true`"
+                );
+            }
             Some(EntityTypeDef {
                 name: normalized,
                 description: raw.description,
                 parent,
-                identity: raw.identity,
+                identity,
             })
         })
         .collect();

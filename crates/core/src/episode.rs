@@ -101,6 +101,24 @@ enum DedupDecision {
     },
 }
 
+/// Outcome of resolving one edge endpoint name in Phase C (issue #616). `Ambiguous` means the
+/// name maps to entities of more than one kind; the edge is dropped rather than guessed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EndpointResolution {
+    Found(String),
+    Missing,
+    Ambiguous,
+}
+
+impl EndpointResolution {
+    fn into_uuid(self) -> Option<String> {
+        match self {
+            EndpointResolution::Found(u) => Some(u),
+            _ => None,
+        }
+    }
+}
+
 /// Result of Phase B's per-entity resolution attempt.
 /// Name-matched entities skip the async dedup-adapter check entirely.
 enum PhaseBResult {
@@ -142,6 +160,7 @@ async fn resolve_phase_b(
     db: Arc<Db>,
     group_id: String,
     entity_names: Vec<String>,
+    entity_kinds: Vec<String>,
     name_embeddings: Vec<Vec<f32>>,
     use_hybrid: bool,
 ) -> Result<Vec<PhaseBResult>, Error> {
@@ -151,18 +170,25 @@ async fn resolve_phase_b(
         for (i, name) in entity_names.iter().enumerate() {
             let trimmed = name.trim();
             // Name-first resolution: case-insensitive exact match short-circuits embedding lookup.
-            if let Some(existing) =
-                conn.get_entity_by_name_ci(trimmed, &group_id, crate::types::DEFAULT_KIND)?
-            {
+            // Resolution is scoped to the entity's own kind (issue #616): an identity-bearing
+            // kind only ever matches its own kind, and the default kind only the default kind.
+            let kind = entity_kinds[i].as_str();
+            if let Some(existing) = conn.get_entity_by_name_ci(trimmed, &group_id, kind)? {
                 out.push(PhaseBResult::NameMatch { existing });
                 continue;
             }
             // Embedding-based resolution fallback.
             let emb = &name_embeddings[i];
             let candidate = if use_hybrid {
-                conn.hybrid_dedup_similar_entity(emb, trimmed, &group_id, DEDUP_THRESHOLD)?
+                conn.hybrid_dedup_similar_entity_kind(
+                    emb,
+                    trimmed,
+                    &group_id,
+                    DEDUP_THRESHOLD,
+                    kind,
+                )?
             } else {
-                conn.brute_force_similar_entity(emb, &group_id, DEDUP_THRESHOLD)?
+                conn.brute_force_similar_entity_kind(emb, &group_id, DEDUP_THRESHOLD, kind)?
             };
             out.push(PhaseBResult::EmbeddingCandidate { candidate });
         }
@@ -390,6 +416,33 @@ pub async fn add_episode(
     // position so the batch's output (dense, in submission order) can be scattered back to the
     // right index — the one non-mechanical step in this conversion (see #445 research/plan).
     let entity_names: Vec<String> = extraction.entities.iter().map(|e| e.name.clone()).collect();
+    // Per-entity kind (issue #616, FR-002/FR-003): the entity's *primary* extracted type, if and
+    // only if the group's resolved ontology marks that type identity-bearing; otherwise the
+    // default kind. Decided here, once, from the primary type alone — parent-hierarchy ancestors
+    // never confer kind and no label or declaration order is consulted. `Unclassified` (the
+    // strict-mode catch-all) is never identity-bearing.
+    let entity_kinds: Vec<String> = extraction
+        .entities
+        .iter()
+        .map(|e| {
+            if e.entity_type == ENTITY_UNCLASSIFIED {
+                return crate::types::DEFAULT_KIND.to_string();
+            }
+            ontology_ref
+                .and_then(|o| o.identity_kind(&e.entity_type))
+                .unwrap_or_else(|| crate::types::DEFAULT_KIND.to_string())
+        })
+        .collect();
+    // Kinds an edge endpoint that is not in this batch may resolve against (cross-batch
+    // resolution): the default kind plus this group's identity-bearing kinds. Never asserted
+    // kinds extraction did not create (#615: extraction stays out of them).
+    let endpoint_kinds: Vec<String> = {
+        let mut k = vec![crate::types::DEFAULT_KIND.to_string()];
+        if let Some(o) = ontology_ref {
+            k.extend(o.identity_set());
+        }
+        k
+    };
     let name_refs: Vec<&str> = entity_names.iter().map(|s| s.as_str()).collect();
     let summary_indices: Vec<usize> = extraction
         .entities
@@ -568,6 +621,7 @@ pub async fn add_episode(
         Arc::clone(&db_shared),
         group_id.to_string(),
         entity_names.clone(),
+        entity_kinds.clone(),
         name_embeddings.clone(),
         use_hybrid,
     )
@@ -587,6 +641,7 @@ pub async fn add_episode(
                 db_retry,
                 group_id.to_string(),
                 entity_names.clone(),
+                entity_kinds.clone(),
                 name_embeddings.clone(),
                 use_hybrid,
             )
@@ -617,19 +672,26 @@ pub async fn add_episode(
                     uuid: uuid::Uuid::new_v4().to_string(),
                     name: extracted.name.clone(),
                     group_id: gid_owned.clone(),
-                    // Extraction is confined to the default-kind namespace (issue #615,
-                    // FR-010): it neither merges into nor creates a non-`Entity` kind.
-                    // Ontology-driven kinds are a separate phase.
-                    kind: crate::types::DEFAULT_KIND.to_string(),
+                    // Ontology-driven kind (issue #616): the primary type when identity-bearing,
+                    // otherwise the default kind (issue #615, FR-010: extraction stays out of
+                    // asserted kinds).
+                    kind: entity_kinds[i].clone(),
                     labels: {
                         let mut labels = vec!["Entity".to_string()];
-                        if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
-                            if let Some(ancestors) = ontology_ref
-                                .and_then(|o| o.ancestor_map.get(&extracted.entity_type))
+                        // An identity-bearing kind is spelled by its normalized type name, so
+                        // `kind ∈ labels` holds in open mode too, where the raw string is kept.
+                        let label_type = if entity_kinds[i] != crate::types::DEFAULT_KIND {
+                            entity_kinds[i].as_str()
+                        } else {
+                            extracted.entity_type.as_str()
+                        };
+                        if !label_type.is_empty() && label_type != "Entity" {
+                            if let Some(ancestors) =
+                                ontology_ref.and_then(|o| o.ancestor_map.get(label_type))
                             {
                                 labels.extend(ancestors.iter().cloned());
                             }
-                            labels.push(extracted.entity_type.clone());
+                            labels.push(label_type.to_string());
                         }
                         labels
                     },
@@ -783,44 +845,62 @@ pub async fn add_episode(
         // the model — so neither a batch-internal case mismatch (#209) nor a control character
         // in the original entity name causes a genuine batch-local match to fall through to the
         // global fallback unnecessarily.
-        let name_to_uuid: std::collections::HashMap<String, String> = extraction
-            .entities
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (normalize_name(&e.name), entity_uuids[i].clone()))
-            .collect();
-
-        // Per-batch memo of scan-fallback resolutions. Self-healing the row's `lookup_key` on a
-        // scan *hit* (see `get_entity_by_name_ci_with_scan_fallback`) only bounds the cost of a
-        // name that exists; a name that doesn't (a hallucinated or otherwise never-persisted
-        // extraction) has nothing to self-heal, so without this memo every edge referencing
-        // that same missing name in this batch would re-run its own full scan.
-        // This closure caches both outcomes locally, for this Phase C pass only, so a batch
-        // pays at most one scan per unique unresolved name regardless of whether it resolves
-        // (FR-002).
         //
-        // Keyed by `raw_name.trim().to_lowercase()` — the exact normalization
-        // `get_entity_by_name_ci`/`scan_entity_by_name_ci` match on — not `normalize_name`
-        // (which additionally strips control characters). Keying on the stricter
-        // `normalize_name` would conflate e.g. `"Apple"` and `"A\u{0001}pple"` into one cache
-        // entry despite the DB layer treating them as distinct names, letting a cached result
-        // for one silently serve the other.
-        let mut scan_cache: std::collections::HashMap<String, Option<String>> =
+        // Multi-kind (issue #616): edges carry names only, so a name can map to one entity per
+        // kind in this batch (e.g. a `Person` "Aurora" and a default-kind "Aurora"). Within one
+        // kind a later duplicate replaces the earlier (the pre-#616 behaviour); across kinds the
+        // name is *ambiguous* and the edge is dropped rather than guessed at (#414 / ADR-0615).
+        let mut name_to_uuid: std::collections::HashMap<String, Vec<(String, String)>> =
             std::collections::HashMap::new();
-        let mut resolve_via_scan = |raw_name: &str| -> Result<Option<String>, Error> {
+        for (i, e) in extraction.entities.iter().enumerate() {
+            let slot = name_to_uuid.entry(normalize_name(&e.name)).or_default();
+            match slot.iter_mut().find(|(k, _)| *k == entity_kinds[i]) {
+                Some(existing) => existing.1 = entity_uuids[i].clone(),
+                None => slot.push((entity_kinds[i].clone(), entity_uuids[i].clone())),
+            }
+        }
+
+        let mut scan_cache: std::collections::HashMap<String, EndpointResolution> =
+            std::collections::HashMap::new();
+        let mut resolve_via_scan = |raw_name: &str| -> Result<EndpointResolution, Error> {
             let key = raw_name.trim().to_lowercase();
             if let Some(cached) = scan_cache.get(&key) {
                 return Ok(cached.clone());
             }
-            let uuid = conn
-                .get_entity_by_name_ci_with_scan_fallback(
+            let resolution = if endpoint_kinds.len() == 1 {
+                // No identity-bearing kinds in this group: exactly the pre-#616 lookup.
+                match conn.get_entity_by_name_ci_with_scan_fallback(
                     raw_name,
                     &gid_owned,
                     crate::types::DEFAULT_KIND,
-                )?
-                .map(|existing| existing.uuid);
-            scan_cache.insert(key, uuid.clone());
-            Ok(uuid)
+                )? {
+                    Some(existing) => EndpointResolution::Found(existing.uuid),
+                    None => EndpointResolution::Missing,
+                }
+            } else {
+                // Default kind plus the group's identity-bearing kinds (issue #616). More than
+                // one hit is ambiguous — never picked between.
+                let mut hits = conn.resolve_entities_by_name_in_kinds(
+                    raw_name,
+                    &gid_owned,
+                    &endpoint_kinds,
+                )?;
+                match hits.len() {
+                    0 => EndpointResolution::Missing,
+                    1 => EndpointResolution::Found(hits.remove(0).uuid),
+                    _ => EndpointResolution::Ambiguous,
+                }
+            };
+            scan_cache.insert(key, resolution.clone());
+            Ok(resolution)
+        };
+        // Resolves one edge endpoint: this batch first, then the persisted graph.
+        let mut resolve_endpoint = |raw_name: &str| -> Result<EndpointResolution, Error> {
+            match name_to_uuid.get(&normalize_name(raw_name)).map(Vec::as_slice) {
+                Some([(_, uuid)]) => Ok(EndpointResolution::Found(uuid.clone())),
+                Some(several) if several.len() > 1 => Ok(EndpointResolution::Ambiguous),
+                _ => resolve_via_scan(raw_name),
+            }
         };
 
         // Insert relationship edges. This is the sole, authoritative point at which an edge's
@@ -839,17 +919,21 @@ pub async fn add_episode(
             // unique unresolved name in the batch, for both hits (also self-healed via a
             // `lookup_key` write for future requests) and misses (memoized only for this pass,
             // since there's nothing to persist for a name that doesn't exist).
-            let src_uuid = match name_to_uuid.get(&normalize_name(&edge.source_name)) {
-                Some(u) => Some(u.clone()),
-                None => resolve_via_scan(&edge.source_name)?,
-            };
-            let dst_uuid = match name_to_uuid.get(&normalize_name(&edge.target_name)) {
-                Some(u) => Some(u.clone()),
-                None => resolve_via_scan(&edge.target_name)?,
-            };
+            let src_res = resolve_endpoint(&edge.source_name)?;
+            let dst_res = resolve_endpoint(&edge.target_name)?;
+            let ambiguous = src_res == EndpointResolution::Ambiguous
+                || dst_res == EndpointResolution::Ambiguous;
+            let src_uuid = src_res.into_uuid();
+            let dst_uuid = dst_res.into_uuid();
             let (src_uuid, dst_uuid) = match (src_uuid, dst_uuid) {
                 (Some(s), Some(d)) => (s, d),
                 (src, dst) => {
+                    if ambiguous {
+                        eprintln!(
+                            "liminis-context-graph: dropping edge at commit, ambiguous endpoint (same name under more than one kind): '{}' → '{}'",
+                            edge.source_name, edge.target_name
+                        );
+                    }
                     eprintln!(
                         "liminis-context-graph: dropping edge at commit, unresolvable endpoint: '{}' → '{}' (src_resolved={}, dst_resolved={})",
                         edge.source_name, edge.target_name, src.is_some(), dst.is_some()
