@@ -802,3 +802,83 @@ fn dedup_candidate_queries_never_offer_a_non_default_kind() {
         .unwrap();
     assert_eq!(hit.unwrap().uuid, "e");
 }
+
+// ── `same_as` corrections never cross kinds (D5) ──────────────────────────────
+
+fn write_corrections(yaml: &str) -> TempDir {
+    let ws = TempDir::new().unwrap();
+    let dir = ws.path().join(".liminis");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("knowledge-corrections.yaml"), yaml).unwrap();
+    ws
+}
+
+#[test]
+fn same_as_alias_resolves_within_the_canonicals_kind_only() {
+    let (db, _dir) = make_db();
+    let conn = db.connect().unwrap();
+    // The Fruit is the earliest "Apple": an unscoped by-name lookup could return it.
+    conn.insert_entity(&entity("fruit", "Apple", "Fruit", G, "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&entity(
+        "co-inc",
+        "Apple Inc",
+        "Company",
+        G,
+        "2026-01-02 00:00:00",
+    ))
+    .unwrap();
+
+    let yaml = "corrections:\n  - id: c1\n    type: same_as\n    canonical_uuid: co-inc\n    aliases:\n      - \"Apple\"\n";
+
+    // Only a Fruit "Apple" exists: the alias is not found, and the Fruit is untouched.
+    let ws = write_corrections(yaml);
+    let r = lcg_core::corrections::apply_corrections_file(&conn, ws.path(), false);
+    assert!(!r.success, "cross-kind alias must be refused: {r:?}");
+    let fruit = conn.get_entity_by_uuid("fruit").unwrap().unwrap();
+    assert!(!fruit.labels.contains(&"Merged".to_string()));
+
+    // A same-kind "Apple" exists too: it (not the Fruit) is merged into the canonical.
+    conn.insert_entity(&entity(
+        "co-apple",
+        "Apple",
+        "Company",
+        G,
+        "2026-01-03 00:00:00",
+    ))
+    .unwrap();
+    let ws = write_corrections(yaml);
+    let r = lcg_core::corrections::apply_corrections_file(&conn, ws.path(), false);
+    assert!(r.success, "{r:?}");
+    let co = conn.get_entity_by_uuid("co-apple").unwrap().unwrap();
+    assert!(co.labels.contains(&"Merged".to_string()));
+    let fruit = conn.get_entity_by_uuid("fruit").unwrap().unwrap();
+    assert!(!fruit.labels.contains(&"Merged".to_string()));
+}
+
+#[test]
+fn same_as_canonical_name_spanning_kinds_is_refused_as_ambiguous() {
+    let (db, _dir) = make_db();
+    let conn = db.connect().unwrap();
+    conn.insert_entity(&entity("fruit", "Apple", "Fruit", G, "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&entity(
+        "co-apple",
+        "Apple",
+        "Company",
+        G,
+        "2026-01-02 00:00:00",
+    ))
+    .unwrap();
+    conn.insert_entity(&entity("other", "Appl", "Fruit", G, "2026-01-03 00:00:00"))
+        .unwrap();
+
+    let ws = write_corrections(
+        "corrections:\n  - id: c1\n    type: same_as\n    canonical: \"Apple\"\n    aliases:\n      - \"Appl\"\n",
+    );
+    let r = lcg_core::corrections::apply_corrections_file(&conn, ws.path(), false);
+    assert!(!r.success, "{r:?}");
+    assert!(r.errors.join(" ").contains("ambiguous"), "{:?}", r.errors);
+    let other = conn.get_entity_by_uuid("other").unwrap().unwrap();
+    assert!(!other.labels.contains(&"Merged".to_string()));
+}

@@ -525,12 +525,18 @@ fn apply_same_as(
     }
 
     for alias_name in aliases {
-        // Find alias entity by name in same group as canonical
+        // Find alias entity by name in same group *and kind* as canonical — merges never cross
+        // kinds (issue #615, D5), so a same-named entity of another kind is not an alias
+        // candidate. The earliest match wins (`created_at ASC, uuid ASC`), deterministically.
         let alias_entity = conn
-            .get_entity_by_name(alias_name, &canonical_group)?
+            .get_entities_by_name_all(alias_name, &canonical_group, Some(&canonical_entity.kind))?
+            .into_iter()
+            .next()
             .ok_or_else(|| {
                 Error::Ipc(format!(
-                    "alias entity '{alias_name}' not found in group '{canonical_group}'"
+                    "alias entity '{alias_name}' of kind '{}' not found in group \
+                     '{canonical_group}' (merges never cross kinds)",
+                    canonical_entity.kind
                 ))
             })?;
         let alias_uuid = alias_entity.uuid.clone();
@@ -661,10 +667,21 @@ fn resolve_canonical(conn: &Conn, entry: &CorrectionEntry) -> Result<EntityRow, 
     if let Some(ref name) = entry.canonical {
         // Try the first group found for this entity name using search_entities
         let candidates = conn.search_entities(name)?;
-        return candidates
-            .into_iter()
-            .find(|e| e.name == *name)
-            .ok_or_else(|| Error::Ipc(format!("canonical entity '{name}' not found in graph")));
+        let mut exact: Vec<EntityRow> =
+            candidates.into_iter().filter(|e| e.name == *name).collect();
+        if exact.is_empty() {
+            return Err(Error::Ipc(format!(
+                "canonical entity '{name}' not found in graph"
+            )));
+        }
+        // A name shared by several kinds in the first match's group is ambiguous (issue #615,
+        // D2's read rule) — refuse rather than pick one; `canonical_uuid` disambiguates.
+        let first_group = exact[0].group_id.clone();
+        exact.retain(|e| e.group_id == first_group);
+        if exact.iter().any(|e| e.kind != exact[0].kind) {
+            return Err(crate::assert::ambiguity_error(name, &first_group, exact));
+        }
+        return Ok(exact.remove(0));
     }
 
     Err(Error::Ipc(
