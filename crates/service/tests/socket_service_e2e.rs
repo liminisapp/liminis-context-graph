@@ -37,9 +37,22 @@ use common::{binary_path, spawn_stub_embedder, ChildGuard};
 /// platforms rather than relying on the OS's broken-pipe behavior for a hard process abort — the
 /// only failure mode the #561 crash investigation actually observed, not a guarantee against a
 /// wedge/hang (FR-006).
+///
+/// The reader only reads on request (see `read_requests`), and only after the request has been
+/// written and flushed. That keeps the send path bounded too: at most one operation is ever in
+/// flight on the pipe, so a write can never queue behind a pending read (issue #598, Windows).
 struct Connection {
     writer: Box<dyn Write>,
     lines: Receiver<std::io::Result<String>>,
+    /// Asks the reader thread for exactly one line. Sent only AFTER a request has been written and
+    /// flushed, so no read is ever in flight before a write. On Windows the pipe is a synchronous
+    /// file object and the I/O manager serializes operations against it, so a read left pending
+    /// between calls blocks the next write forever (the #598 hang).
+    read_requests: std::sync::mpsc::Sender<()>,
+    /// Set when a `call` times out. That call's read is still posted, so any later write on this
+    /// connection would block behind it; refuse instead of wedging. Callers must open a fresh
+    /// `Connection` after a timeout.
+    poisoned: bool,
 }
 
 impl Connection {
@@ -65,9 +78,15 @@ impl Connection {
 
     fn from_parts(read_half: Box<dyn Read + Send>, writer: Box<dyn Write>) -> Self {
         let (tx, rx) = mpsc::channel();
+        let (req_tx, req_rx) = mpsc::channel::<()>();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(read_half);
             loop {
+                // Park here, not on the pipe. A read posted before the caller has written would sit
+                // pending on the shared synchronous file object and deadlock that write (Windows).
+                if req_rx.recv().is_err() {
+                    break;
+                }
                 let mut line = String::new();
                 let result = match reader.read_line(&mut line) {
                     Ok(0) => Err(std::io::Error::new(
@@ -83,7 +102,12 @@ impl Connection {
                 }
             }
         });
-        Self { writer, lines: rx }
+        Self {
+            writer,
+            lines: rx,
+            read_requests: req_tx,
+            poisoned: false,
+        }
     }
 
     /// Sends a request and waits up to 30s (matching the read timeout the Unix branch used to
@@ -91,16 +115,41 @@ impl Connection {
     /// on a write failure, a closed connection, a timeout, or unparseable JSON, so callers can
     /// report which stage failed and inspect the child process's state (see `call_checked`).
     fn call(&mut self, id: u64, method: &str, params: Value) -> Result<Value, String> {
+        self.call_with_timeout(id, method, params, Duration::from_secs(30))
+    }
+
+    fn call_with_timeout(
+        &mut self,
+        id: u64,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
+        if self.poisoned {
+            return Err(format!(
+                "connection poisoned by an earlier timeout; cannot send {method}"
+            ));
+        }
         let request = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         writeln!(self.writer, "{request}").map_err(|e| format!("write request: {e}"))?;
         self.writer
             .flush()
             .map_err(|e| format!("flush request: {e}"))?;
-        match self.lines.recv_timeout(Duration::from_secs(30)) {
+        // ORDER IS LOAD-BEARING: ask for the line only after the write has flushed. Sending this
+        // token earlier lets the reader post its read first, and on Windows that pending read
+        // blocks the write forever -- the #598 deadlock, rebuilt with extra machinery.
+        self.read_requests
+            .send(())
+            .map_err(|e| format!("reader thread gone: {e}"))?;
+        match self.lines.recv_timeout(timeout) {
             Ok(Ok(line)) => serde_json::from_str(&line)
                 .map_err(|e| format!("bad response {line:?} to {method}: {e}")),
             Ok(Err(e)) => Err(format!("connection closed while awaiting {method}: {e}")),
-            Err(e) => Err(format!("timed out waiting for {method} response: {e}")),
+            Err(e) => {
+                // The read for this call is still posted; a later write would block behind it.
+                self.poisoned = true;
+                Err(format!("timed out waiting for {method} response: {e}"))
+            }
         }
     }
 }
@@ -411,4 +460,37 @@ fn fts_index_create_and_query_returns_real_rows() {
             .any(|r| r.get(0).and_then(Value::as_str) == Some("f0")),
         "FTS query for 'hydraulic' should match f0, whose summary contains it: {queried}"
     );
+}
+
+/// A `Read` that blocks until `release` is dropped, then reports EOF — stands in for a service
+/// that never answers.
+struct BlockedReader(Receiver<()>);
+
+impl Read for BlockedReader {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        let _ = self.0.recv();
+        Ok(0)
+    }
+}
+
+/// A timed-out call leaves its read posted, so the connection must refuse further calls rather
+/// than write behind that read (which wedges on Windows). Untested by a passing e2e run, which
+/// never times out.
+#[test]
+fn timed_out_call_poisons_the_connection() {
+    let (release, blocked) = mpsc::channel::<()>();
+    let mut conn =
+        Connection::from_parts(Box::new(BlockedReader(blocked)), Box::new(std::io::sink()));
+
+    let first = conn
+        .call_with_timeout(1, "health_check", json!({}), Duration::from_millis(100))
+        .expect_err("no response is ever produced");
+    assert!(first.contains("timed out"), "unexpected error: {first}");
+
+    let second = conn
+        .call(2, "health_check", json!({}))
+        .expect_err("connection must be poisoned after a timeout");
+    assert!(second.contains("poisoned"), "unexpected error: {second}");
+
+    drop(release);
 }
