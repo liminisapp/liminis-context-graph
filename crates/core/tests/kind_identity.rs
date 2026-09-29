@@ -68,10 +68,7 @@ fn make_state(db: Arc<Db>, wal_dir: Option<PathBuf>) -> Arc<AppState> {
         wal_max_bytes_per_file: 5 * 1024 * 1024,
         embedding_model: "bge-base-en-v1.5".to_string(),
         wal_writers: Arc::new(Mutex::new(
-            wal_writer
-                .into_iter()
-                .map(|w| (G.to_string(), w))
-                .collect(),
+            wal_writer.into_iter().map(|w| (G.to_string(), w)).collect(),
         )),
         active_writes: Arc::new(AtomicUsize::new(0)),
         rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
@@ -154,7 +151,11 @@ async fn same_name_different_kinds_coexist_and_channel_is_untouched() {
     assert!(ch.attributes.contains("docs"));
     assert_eq!(ch.labels, vec!["Entity", "KnowledgeChannel"]);
     let tp = rows.iter().find(|r| r.kind == "Topic").unwrap();
-    assert_eq!(tp.labels, vec!["Entity", "Topic"], "kind is appended to labels");
+    assert_eq!(
+        tp.labels,
+        vec!["Entity", "Topic"],
+        "kind is appended to labels"
+    );
 
     // Re-asserting the channel updates it in place (idempotent per (group, kind, name)).
     let again = assert_entity(&state, json!({"name": "ADR", "kind": "KnowledgeChannel"})).await;
@@ -182,9 +183,18 @@ async fn relationship_between_same_named_kinds_links_two_distinct_nodes() {
     let conn = db.connect().unwrap();
     let edges = conn.get_edges_by_group_ids(Some(&[G])).unwrap();
     assert_eq!(edges.len(), 1);
-    assert_eq!(edges[0].source_node_uuid, ch["entity_uuid"].as_str().unwrap());
-    assert_eq!(edges[0].target_node_uuid, tp["entity_uuid"].as_str().unwrap());
-    assert_ne!(edges[0].source_node_uuid, edges[0].target_node_uuid, "not a self-loop");
+    assert_eq!(
+        edges[0].source_node_uuid,
+        ch["entity_uuid"].as_str().unwrap()
+    );
+    assert_eq!(
+        edges[0].target_node_uuid,
+        tp["entity_uuid"].as_str().unwrap()
+    );
+    assert_ne!(
+        edges[0].source_node_uuid, edges[0].target_node_uuid,
+        "not a self-loop"
+    );
 }
 
 // ── SC-003 / SC-004 (D2) ──────────────────────────────────────────────────────
@@ -248,9 +258,19 @@ async fn single_non_default_kind_resolves_on_name_only_read() {
     let (db, _dir) = make_db();
     let state = make_state(Arc::clone(&db), None);
     let tp = assert_entity(&state, json!({"name": "lonely", "kind": "Topic"})).await;
-    let v = call("knowledge_resolve_entity", json!({"name": "lonely"}), &state).await;
+    let v = call(
+        "knowledge_resolve_entity",
+        json!({"name": "lonely"}),
+        &state,
+    )
+    .await;
     assert_eq!(v["result"]["node"]["uuid"], tp["entity_uuid"]);
-    let v = call("knowledge_resolve_entity", json!({"name": "nobody"}), &state).await;
+    let v = call(
+        "knowledge_resolve_entity",
+        json!({"name": "nobody"}),
+        &state,
+    )
+    .await;
     assert_eq!(v["result"]["found"], false);
 }
 
@@ -263,10 +283,17 @@ async fn name_only_write_is_scoped_to_the_default_kind() {
         json!({"name": "adr", "kind": "KnowledgeChannel", "summary": "chan"}),
     )
     .await;
-    assert_entity(&state, json!({"name": "adr", "kind": "Topic", "summary": "topic"})).await;
+    assert_entity(
+        &state,
+        json!({"name": "adr", "kind": "Topic", "summary": "topic"}),
+    )
+    .await;
 
     let created = assert_entity(&state, json!({"name": "adr", "summary": "plain"})).await;
-    assert_eq!(created["created"], true, "no kind-Entity node existed: a new one is created");
+    assert_eq!(
+        created["created"], true,
+        "no kind-Entity node existed: a new one is created"
+    );
 
     let rows = nodes_named(&db, "adr");
     assert_eq!(rows.len(), 3);
@@ -279,8 +306,14 @@ async fn name_only_write_is_scoped_to_the_default_kind() {
     let upd = assert_entity(&state, json!({"name": "adr", "summary": "plain2"})).await;
     assert_eq!(upd["created"], false);
     let rows = nodes_named(&db, "adr");
-    assert_eq!(rows.iter().find(|r| r.kind == "Entity").unwrap().summary, "plain2");
-    assert_eq!(rows.iter().find(|r| r.kind == "Topic").unwrap().summary, "topic");
+    assert_eq!(
+        rows.iter().find(|r| r.kind == "Entity").unwrap().summary,
+        "plain2"
+    );
+    assert_eq!(
+        rows.iter().find(|r| r.kind == "Topic").unwrap().summary,
+        "topic"
+    );
 }
 
 #[tokio::test]
@@ -297,7 +330,10 @@ async fn rename_guard_is_kind_scoped_and_entity_uuid_kind_is_immutable() {
         &state,
     )
     .await;
-    assert!(v.get("error").is_none(), "cross-kind rename must not collide: {v}");
+    assert!(
+        v.get("error").is_none(),
+        "cross-kind rename must not collide: {v}"
+    );
 
     // A supplied kind must match the uuid's kind: kind is immutable.
     let v = call(
@@ -306,7 +342,13 @@ async fn rename_guard_is_kind_scoped_and_entity_uuid_kind_is_immutable() {
         &state,
     )
     .await;
-    assert!(v["error"]["message"].as_str().unwrap().contains("immutable"), "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("immutable"),
+        "{v}"
+    );
 }
 
 #[tokio::test]
@@ -364,10 +406,17 @@ async fn new_wal_records_carry_kind_but_never_lookup_key_and_replay_recomputes_i
     assert_entity(&state, json!({"name": "adr", "kind": "KnowledgeChannel"})).await;
     assert_entity(&state, json!({"name": "adr", "kind": "Topic"})).await;
     // An update writes a `SET ... e.lookup_key = $lookup_key` record too.
-    assert_entity(&state, json!({"name": "adr", "kind": "Topic", "summary": "v2"})).await;
+    assert_entity(
+        &state,
+        json!({"name": "adr", "kind": "Topic", "summary": "v2"}),
+    )
+    .await;
 
     let text = wal_text(wal_dir.path());
-    assert!(text.contains("$lookup_key"), "template still names the derived param");
+    assert!(
+        text.contains("$lookup_key"),
+        "template still names the derived param"
+    );
     assert!(
         !text.contains("\"lookup_key\""),
         "no WAL record may carry a lookup_key param value: {text}"
@@ -376,11 +425,20 @@ async fn new_wal_records_carry_kind_but_never_lookup_key_and_replay_recomputes_i
 
     let (db2, _d2) = replay_into_fresh(wal_dir.path());
     let conn = db2.connect().unwrap();
-    let ch = conn.get_entity_by_name_ci("adr", G, "KnowledgeChannel").unwrap().unwrap();
-    let tp = conn.get_entity_by_name_ci("adr", G, "Topic").unwrap().unwrap();
+    let ch = conn
+        .get_entity_by_name_ci("adr", G, "KnowledgeChannel")
+        .unwrap()
+        .unwrap();
+    let tp = conn
+        .get_entity_by_name_ci("adr", G, "Topic")
+        .unwrap()
+        .unwrap();
     assert_ne!(ch.uuid, tp.uuid);
     assert_eq!(tp.summary, "v2");
-    assert!(conn.get_entity_by_name_ci("adr", G, "Entity").unwrap().is_none());
+    assert!(conn
+        .get_entity_by_name_ci("adr", G, "Entity")
+        .unwrap()
+        .is_none());
     let rows = conn
         .cypher_query("MATCH (e:Entity) RETURN e.lookup_key ORDER BY e.lookup_key")
         .unwrap();
@@ -441,8 +499,14 @@ async fn dump_round_trip_preserves_kinds() {
     let (db, _dir) = make_db();
     {
         let conn = db.connect().unwrap();
-        conn.insert_entity(&entity("a", "adr", "KnowledgeChannel", G, "2026-01-01 00:00:00"))
-            .unwrap();
+        conn.insert_entity(&entity(
+            "a",
+            "adr",
+            "KnowledgeChannel",
+            G,
+            "2026-01-01 00:00:00",
+        ))
+        .unwrap();
         conn.insert_entity(&entity("b", "adr", "Topic", G, "2026-01-02 00:00:00"))
             .unwrap();
         conn.insert_entity(&entity("c", "adr", "Entity", G, "2026-01-03 00:00:00"))
@@ -473,10 +537,7 @@ async fn dump_round_trip_preserves_kinds() {
 
 // ── D4: pointers ──────────────────────────────────────────────────────────────
 
-fn pointer_edge(
-    db: &Db,
-    target_kind: Option<&str>,
-) -> (String, lcg_core::RelatesToEdge) {
+fn pointer_edge(db: &Db, target_kind: Option<&str>) -> (String, lcg_core::RelatesToEdge) {
     let conn = db.connect().unwrap();
     let edge = create_cross_group_edge(
         &conn,
@@ -515,22 +576,41 @@ fn pointer_without_kind_goes_ambiguous_and_kind_pinned_pointer_stays_bound() {
     let (db, _dir) = make_db();
     {
         let conn = db.connect().unwrap();
-        conn.insert_entity(&entity("hub", "hub", "Entity", "layer", "2026-01-01 00:00:00"))
-            .unwrap();
+        conn.insert_entity(&entity(
+            "hub",
+            "hub",
+            "Entity",
+            "layer",
+            "2026-01-01 00:00:00",
+        ))
+        .unwrap();
         conn.insert_entity(&entity("t1", "adr", "Topic", "src", "2026-01-01 00:00:00"))
             .unwrap();
     }
     let (loose, _) = pointer_edge(&db, None);
     let (pinned, _) = pointer_edge(&db, Some("Topic"));
-    assert_eq!(dst_state(&db, &loose).0, BindingState::Bound, "one kind: binds as today");
+    assert_eq!(
+        dst_state(&db, &loose).0,
+        BindingState::Bound,
+        "one kind: binds as today"
+    );
     let (st, uuid, kind) = dst_state(&db, &pinned);
-    assert_eq!((st, uuid.as_deref(), kind.as_deref()), (BindingState::Bound, Some("t1"), Some("Topic")));
+    assert_eq!(
+        (st, uuid.as_deref(), kind.as_deref()),
+        (BindingState::Bound, Some("t1"), Some("Topic"))
+    );
 
     // A second kind of the same name appears in the source group.
     {
         let conn = db.connect().unwrap();
-        conn.insert_entity(&entity("c1", "adr", "KnowledgeChannel", "src", "2026-01-02 00:00:00"))
-            .unwrap();
+        conn.insert_entity(&entity(
+            "c1",
+            "adr",
+            "KnowledgeChannel",
+            "src",
+            "2026-01-02 00:00:00",
+        ))
+        .unwrap();
         rebind_pointers_forced(&conn, "src", "2026-01-03T00:00:00Z").unwrap();
     }
     assert_eq!(dst_state(&db, &loose).0, BindingState::Ambiguous);
@@ -552,12 +632,24 @@ async fn add_cross_group_edge_accepts_kind_for_foreign_endpoints_only() {
     let state = make_state(Arc::clone(&db), None);
     {
         let conn = db.connect().unwrap();
-        conn.insert_entity(&entity("hub", "hub", "Entity", "layer", "2026-01-01 00:00:00"))
-            .unwrap();
+        conn.insert_entity(&entity(
+            "hub",
+            "hub",
+            "Entity",
+            "layer",
+            "2026-01-01 00:00:00",
+        ))
+        .unwrap();
         conn.insert_entity(&entity("t1", "adr", "Topic", "src", "2026-01-01 00:00:00"))
             .unwrap();
-        conn.insert_entity(&entity("c1", "adr", "KnowledgeChannel", "src", "2026-01-01 00:00:00"))
-            .unwrap();
+        conn.insert_entity(&entity(
+            "c1",
+            "adr",
+            "KnowledgeChannel",
+            "src",
+            "2026-01-01 00:00:00",
+        ))
+        .unwrap();
     }
     let v = call(
         "knowledge_add_cross_group_edge",
@@ -569,8 +661,14 @@ async fn add_cross_group_edge_accepts_kind_for_foreign_endpoints_only() {
     )
     .await;
     assert!(v.get("error").is_none(), "{v}");
-    assert_eq!(v["result"]["cross_group_pointers"]["dst"]["endpoint_kind"], "Topic", "{v}");
-    assert_eq!(v["result"]["cross_group_pointers"]["dst"]["resolved_uuid"], "t1", "{v}");
+    assert_eq!(
+        v["result"]["cross_group_pointers"]["dst"]["endpoint_kind"], "Topic",
+        "{v}"
+    );
+    assert_eq!(
+        v["result"]["cross_group_pointers"]["dst"]["resolved_uuid"], "t1",
+        "{v}"
+    );
 
     // A kind on a {uuid} endpoint is a validation error.
     let v = call(
@@ -603,9 +701,16 @@ fn merge_params(canonical: &str, alias: &str) -> MergeEntitiesParams {
 fn merge_refuses_to_cross_kinds_and_modifies_nothing() {
     let (db, _dir) = make_db();
     let conn = db.connect().unwrap();
-    conn.insert_entity(&entity("t", "adr", "Topic", G, "2026-01-01 00:00:00")).unwrap();
-    conn.insert_entity(&entity("c", "adr", "KnowledgeChannel", G, "2026-01-02 00:00:00"))
+    conn.insert_entity(&entity("t", "adr", "Topic", G, "2026-01-01 00:00:00"))
         .unwrap();
+    conn.insert_entity(&entity(
+        "c",
+        "adr",
+        "KnowledgeChannel",
+        G,
+        "2026-01-02 00:00:00",
+    ))
+    .unwrap();
 
     for dry_run in [true, false] {
         let mut p = merge_params("t", "c");
@@ -613,10 +718,16 @@ fn merge_refuses_to_cross_kinds_and_modifies_nothing() {
         let r = merge_entities(&conn, &p, "2026-02-01T00:00:00Z");
         assert!(!r.success, "dry_run={dry_run}");
         let msg = r.errors.join(" ");
-        assert!(msg.contains("'Topic'") && msg.contains("'KnowledgeChannel'"), "{msg}");
+        assert!(
+            msg.contains("'Topic'") && msg.contains("'KnowledgeChannel'"),
+            "{msg}"
+        );
     }
     let c = conn.get_entity_by_uuid("c").unwrap().unwrap();
-    assert!(!c.labels.contains(&"Merged".to_string()), "alias must be untouched");
+    assert!(
+        !c.labels.contains(&"Merged".to_string()),
+        "alias must be untouched"
+    );
     assert_eq!(nodes_named(&db, "adr").len(), 2);
 }
 
@@ -624,17 +735,26 @@ fn merge_refuses_to_cross_kinds_and_modifies_nothing() {
 fn same_kind_merge_is_unchanged_and_merge_all_by_name_stays_in_kind() {
     let (db, _dir) = make_db();
     let conn = db.connect().unwrap();
-    conn.insert_entity(&entity("t1", "adr", "Topic", G, "2026-01-01 00:00:00")).unwrap();
-    conn.insert_entity(&entity("t2", "adr", "Topic", G, "2026-01-02 00:00:00")).unwrap();
-    conn.insert_entity(&entity("c1", "adr", "KnowledgeChannel", G, "2026-01-03 00:00:00"))
+    conn.insert_entity(&entity("t1", "adr", "Topic", G, "2026-01-01 00:00:00"))
         .unwrap();
+    conn.insert_entity(&entity("t2", "adr", "Topic", G, "2026-01-02 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&entity(
+        "c1",
+        "adr",
+        "KnowledgeChannel",
+        G,
+        "2026-01-03 00:00:00",
+    ))
+    .unwrap();
 
     let r = merge_entities(&conn, &merge_params("t1", "t2"), "2026-02-01T00:00:00Z");
     assert!(r.success, "{:?}", r.errors);
     assert_eq!(r.merged_count, 1);
 
     // merge_all_by_name from a Topic canonical never sweeps the KnowledgeChannel.
-    conn.insert_entity(&entity("t3", "adr", "Topic", G, "2026-01-04 00:00:00")).unwrap();
+    conn.insert_entity(&entity("t3", "adr", "Topic", G, "2026-01-04 00:00:00"))
+        .unwrap();
     let mut p = merge_params("t1", "unused");
     p.alias_uuids.clear();
     p.merge_all_by_name = true;
@@ -665,13 +785,18 @@ fn same_kind_merge_is_unchanged_and_merge_all_by_name_stays_in_kind() {
 fn dedup_candidate_queries_never_offer_a_non_default_kind() {
     let (db, _dir) = make_db();
     let conn = db.connect().unwrap();
-    conn.insert_entity(&entity("t", "adr", "Topic", G, "2026-01-01 00:00:00")).unwrap();
+    conn.insert_entity(&entity("t", "adr", "Topic", G, "2026-01-01 00:00:00"))
+        .unwrap();
     // Identical embedding: brute-force similarity would match the Topic if it were a candidate.
     let hit = conn
         .brute_force_similar_entity(&[1.0, 0.0, 0.0, 0.0], G, 0.5)
         .unwrap();
-    assert!(hit.is_none(), "a Topic must never be an extraction dedup candidate");
-    conn.insert_entity(&entity("e", "adr2", "Entity", G, "2026-01-02 00:00:00")).unwrap();
+    assert!(
+        hit.is_none(),
+        "a Topic must never be an extraction dedup candidate"
+    );
+    conn.insert_entity(&entity("e", "adr2", "Entity", G, "2026-01-02 00:00:00"))
+        .unwrap();
     let hit = conn
         .brute_force_similar_entity(&[1.0, 0.0, 0.0, 0.0], G, 0.5)
         .unwrap();
