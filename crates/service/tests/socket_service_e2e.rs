@@ -41,6 +41,10 @@ use common::{binary_path, spawn_stub_embedder, ChildGuard};
 /// The reader only reads on request (see `read_requests`), and only after the request has been
 /// written and flushed. That keeps the send path bounded too: at most one operation is ever in
 /// flight on the pipe, so a write can never queue behind a pending read (issue #598, Windows).
+///
+/// Each `call` waits at most 30s on both platforms. A call that times out poisons the connection
+/// (its read is still posted, so a later write could block behind it): every later `call` fails
+/// immediately with a "poisoned" error, and the caller must open a fresh `Connection`.
 struct Connection {
     writer: Box<dyn Write>,
     lines: Receiver<std::io::Result<String>>,
@@ -243,6 +247,10 @@ fn spawn_service() -> (SpawnedService, Connection) {
     let mut cmd = Command::new(binary_path());
     cmd.env("LCG_DB_PATH", dir.path().join("test.db"))
         .env("LCG_SOCKET_PATH", &socket_path)
+        // Without this the WAL lands in `.lcg/wal` relative to the cwd (`crates/service/`): it
+        // pollutes the source tree and is shared, with carried-over sequence numbers, by every
+        // test process that runs alongside.
+        .env("LCG_WAL_DIR", dir.path().join("wal"))
         .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
         .args(["--embedder-http", &embedder_url])
         // Never called: the test performs no extraction, but startup requires an extractor.
