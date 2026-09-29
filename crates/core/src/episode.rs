@@ -806,6 +806,13 @@ pub async fn add_episode(
             return Err(Error::Cancelled);
         }
     };
+    // Re-run the D1 guard now that the write lock is held (issue #616). The check at the top ran
+    // before extraction, lock-free; a `knowledge_delete_by_group` / `knowledge_clear_all` that
+    // completed in between removed this group's stamp and dropped its cached ontology. Without
+    // this, Phase C would write identity-kind entities with no stamp, and the next resolve would
+    // falsely refuse the group though its ontology never changed. After such a purge the group
+    // has no carriers, so this re-stamps; otherwise it is a cache hit.
+    state.check_identity(group_id)?;
     let (edges_inserted, edges_dropped_unresolvable, edges_reclassified_unclassified, dropped_edges) =
         tokio::task::spawn_blocking(
             move || -> Result<(usize, usize, usize, Vec<DroppedEdgeDetail>), Error> {

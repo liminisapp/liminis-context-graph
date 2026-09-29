@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwapOption;
+use futures::future::BoxFuture;
 use lcg_core::{
     app_state::{AppState, GroupOntologyCacheState, OntologyDriftState},
     db::Db,
@@ -15,17 +16,17 @@ use lcg_core::{
     embedder::MockEmbedder,
     episode::{self, AddEpisodeResult},
     error::Error,
-    extractor::ConfigurableExtractor,
+    extractor::{ConfigurableExtractor, ExtractOptions, Extractor},
     handlers, identity_stamp,
     ipc::IpcRequest,
     ontology::{compute_ancestor_map, EntityTypeDef, Ontology, OntologyMode},
     telemetry::{NoopSink, TelemetrySink},
-    types::{ExtractedEdge, ExtractedEntity, ExtractionResult, SourceType},
+    types::{ExtractedEdge, ExtractedEntity, ExtractionOutcome, ExtractionResult, SourceType},
     EntityRow,
 };
 use serde_json::json;
 use tempfile::TempDir;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
 const DIM: usize = 4;
@@ -70,12 +71,26 @@ fn make_state(
     ontology: Option<Ontology>,
     extractions: Vec<ExtractionResult>,
 ) -> Arc<AppState> {
+    make_state_with(
+        db,
+        root,
+        ontology,
+        Arc::new(ConfigurableExtractor::new(extractions)),
+    )
+}
+
+fn make_state_with(
+    db: Arc<Db>,
+    root: Option<&Path>,
+    ontology: Option<Ontology>,
+    extractor: Arc<dyn Extractor>,
+) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(MockEmbedder::new(DIM)),
-        extractor: Arc::new(ConfigurableExtractor::new(extractions)),
+        extractor,
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(RwLock::new(())),
         sink,
@@ -686,6 +701,111 @@ async fn purge_then_reingest_then_restart_does_not_falsely_refuse() {
         .check_identity(G)
         .expect("unchanged ontology must not be refused after a restart");
     assert!(restarted.group_identity_refusal(G).is_none());
+}
+
+/// Extractor whose `extract` signals it has started, then waits for `release` before returning
+/// its queued result, so a test can land a purge in the middle of an ingest's extraction.
+struct GatedExtractor {
+    inner: ConfigurableExtractor,
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl Extractor for GatedExtractor {
+    fn extract<'a>(
+        &'a self,
+        opts: ExtractOptions<'a>,
+    ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
+        Box::pin(async move {
+            self.started.notify_one();
+            self.release.notified().await;
+            self.inner.extract(opts).await
+        })
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        entities: &'a [(&'a str, &'a str)],
+        allowed_types: Option<&'a [String]>,
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        self.inner.classify_entities(entities, allowed_types)
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        edges: &'a [(&'a str, &'a str)],
+        relation_types: &'a [(String, Option<String>)],
+    ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+        self.inner.classify_relations(edges, relation_types)
+    }
+}
+
+/// A purge that completes while an ingest into the same group is mid-extraction removes the
+/// stamp and drops the cached ontology after that ingest's lock-free D1 check has already passed.
+/// The ingest must re-stamp once it holds the write lock; otherwise it writes `Person` entities
+/// with no stamp and the group is falsely refused from then on.
+#[tokio::test]
+async fn purge_during_in_flight_ingest_does_not_falsely_refuse() {
+    let (db, _d) = make_db();
+    let root = TempDir::new().unwrap();
+    let onto = || ontology(OntologyMode::Open, &[("Person", true, None)]);
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let state = make_state_with(
+        Arc::clone(&db),
+        Some(root.path()),
+        Some(onto()),
+        Arc::new(GatedExtractor {
+            inner: ConfigurableExtractor::new(vec![extraction(vec![ent("Ada", "Person")], vec![])]),
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        }),
+    );
+
+    // Establish the stamp so the purge has something to remove.
+    state.check_identity(G).unwrap();
+    assert!(identity_stamp::stamp_path(root.path(), G).unwrap().exists());
+
+    let in_flight = tokio::spawn({
+        let state = Arc::clone(&state);
+        async move { ingest(&state, G, 1).await }
+    });
+    started.notified().await;
+
+    let v = serde_json::to_value(
+        handlers::dispatch(
+            IpcRequest {
+                jsonrpc: "2.0".into(),
+                id: json!(1),
+                method: "knowledge_delete_by_group".into(),
+                params: json!({"group_ids": [G], "confirm": true}),
+            },
+            Arc::clone(&state),
+            None,
+        )
+        .await,
+    )
+    .unwrap();
+    assert!(v.get("error").is_none(), "{v}");
+    assert!(!identity_stamp::stamp_path(root.path(), G).unwrap().exists());
+
+    release.notify_one();
+    in_flight.await.unwrap().unwrap();
+    assert!(entities(&db, G).iter().any(|e| e.kind == "Person"));
+    assert_eq!(
+        identity_stamp::read_stamp(root.path(), G)
+            .unwrap()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        vec!["Person"],
+        "the in-flight ingest must re-record the stamp the purge removed"
+    );
+
+    // Restart: a fresh process with the unchanged ontology still resolves the group.
+    let restarted = make_state(Arc::clone(&db), Some(root.path()), Some(onto()), vec![]);
+    restarted
+        .check_identity(G)
+        .expect("unchanged ontology must not be refused after a purge raced an ingest");
 }
 
 /// A remediation's `clear_group_drift` landing on a `Resolving` slot (issue #495) upserts the
