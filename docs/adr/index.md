@@ -130,6 +130,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0577](0577-strip-wal-embeddings.md) | `knowledge_strip_wal_embeddings` — Two-Pass In-Place Stripping of Pre-0.14 WAL Vectors | 2026-09-09 |
 | [0581](0581-windows-static-openssl.md) | Link OpenSSL Statically on Windows | 2026-09-15 |
 | [0615](0615-kind-scoped-entity-identity.md) | Kind-Scoped Entity Identity — `Entity.kind` and `lookup_key = group_id ␟ kind ␟ name` | 2026-09-29 |
+| [0616](0616-ontology-driven-kind-assignment.md) | Ontology-Driven Kind Assignment — identity-bearing entity types during extraction | 2026-09-29 |
 
 ## Historical numbering
 

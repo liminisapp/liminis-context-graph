@@ -101,6 +101,12 @@ it creates or merges its own `Entity "adr"`. On all-`Entity` data this is exactl
 behaviour, and it keeps the indexed extraction hot path at one probe per name. Ontology-driven
 kinds are the follow-up that lifts this.
 
+> **Amended by [ADR-0616](0616-ontology-driven-kind-assignment.md) (#616).** Extraction now
+> assigns a non-`Entity` kind to entities whose primary type the ontology marks `identity: true`,
+> and Phase B / Phase C resolve within the entity's own kind. Extraction still never touches an
+> *asserted* kind it does not create; a group with no identity flags behaves exactly as described
+> here.
+
 **Label rewriters preserve kind (FR-001).** `apply_entity_type_labels` and the restamp phase
 derive labels from the ontology alone; both append the entity's kind when absent. The
 `Merged`-only writers are untouched.
@@ -123,7 +129,7 @@ this ADR.
 - The tool registry gains `knowledge_resolve_entity` (45 tools; `read` 15).
 - A kind-less pointer flips to `ambiguous` when a same-named second kind appears in its source
   group. Intended; kind-pinned pointers are the escape hatch.
-- Extraction does not merge into asserted non-`Entity` entities until ontology-driven kinds land.
+- Extraction does not merge into asserted non-`Entity` entities. (ADR-0616 adds ontology-driven kinds, but extraction still only ever resolves within `Entity` and the group's own identity-bearing kinds.)
 - First start after upgrade pays a one-time O(N) backfill.
 - The Python-side `service_protocol.py` (the liminis app repo) needs a follow-up for the additive
   wire changes; nothing here breaks it.

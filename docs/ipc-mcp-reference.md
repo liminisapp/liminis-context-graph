@@ -371,8 +371,18 @@ error code **`-32002`**; `error.data` is `{"reason": "ambiguous_entity", "name",
 included, nothing modified) if the canonical and any alias differ in kind, with an error naming the
 kinds; `merge_all_by_name` is limited to the canonical's own kind.
 
-**Extraction stays in the `Entity` namespace.** `knowledge_add_episode`/`knowledge_process_chunk`
-create and merge only kind-`Entity` entities and never merge into an asserted non-`Entity` node.
+**Extraction and kinds.** `knowledge_add_episode`/`knowledge_process_chunk` create kind-`Entity`
+entities, except that an entity whose primary type the ontology marks `identity: true` is created
+with that type as its `kind` and resolves only within it (see
+[Identity-bearing types](ontology.md#identity-bearing-types)). Extraction never merges into an
+asserted kind it did not create. For a group whose identity-bearing set changed in a way that would
+reinterpret existing entities, `knowledge_add_episode` fails with JSON-RPC error code **`-32003`**;
+`error.data` is `{"reason": "identity_set_change_refused", "group_id", "label", "entity_count"}`, and
+`knowledge_status` lists the group under `group_identity_refusals`. Nothing is modified; restore
+the recorded set (and restart) or re-ingest the group from source.
+`knowledge_reprocess_entity_types` never changes an entity's kind and adds an additive
+`kind_disagreements` array (`entity_id`, `entity_name`, `kind`, `classified_type`) — report-only —
+to both its dry-run plan and its result.
 
 ### Relation typing (`canonicalize_relations`, `backfill_relation_types`, `reprocess_relation_types`)
 
