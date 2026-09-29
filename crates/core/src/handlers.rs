@@ -411,6 +411,11 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "recovery_available": recovery_available,
             "ontology": ontology_summary,
             "group_ontology_drift": group_ontology_drift,
+            "group_identity_refusals": state
+                .all_group_identity_refusals()
+                .into_iter()
+                .map(|(group_id, message)| json!({"group_id": group_id, "message": message}))
+                .collect::<Vec<_>>(),
             "indices_built": state.indices_built.load(Ordering::Acquire),
             "name_index_trusted": null,
             "name_index_fallback_scans": null,
@@ -723,6 +728,15 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     };
     result["ontology"] = ontology_summary;
     result["group_ontology_drift"] = group_ontology_drift;
+    // Per-group identity-bearing-set refusals (issue #616, D1): only groups whose ontology
+    // change was refused appear; absent means no refusal (or not yet resolved this process).
+    result["group_identity_refusals"] = Value::Array(
+        state
+            .all_group_identity_refusals()
+            .into_iter()
+            .map(|(group_id, message)| json!({"group_id": group_id, "message": message}))
+            .collect(),
+    );
     Ok(result)
 }
 
@@ -1837,6 +1851,15 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
         Ok(())
     })
     .await??;
+
+    // The identity-bearing-set stamps (issue #616) describe entities that no longer exist once
+    // the WAL is gone too. With `preserve_wal` they are kept: a rebuild restores each entity's
+    // own kind, and the stamp is what still records which set those kinds were created under.
+    if !preserve_wal {
+        if let Some(root) = state.workspace_root.as_deref() {
+            crate::identity_stamp::remove_all_stamps(root);
+        }
+    }
 
     // Phase 2: create fresh DB and initialize schema
     let db_path_reinit = db_path.clone();

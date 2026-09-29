@@ -1258,6 +1258,27 @@ impl<'db> Conn<'db> {
         self.count_by_group_ids("RelatesToNode_", "rn", group_ids)
     }
 
+    /// Counts `Entity` nodes in `group_id` whose full `labels` list carries `label` (issue #616,
+    /// D1). Deliberately the full list — ancestor labels and the kind label included — because
+    /// D1 asks whether any existing node would be reinterpreted. A group-scoped scan, not an
+    /// indexed lookup; callers run it only when a group's identity-bearing set actually differs
+    /// from its recorded one.
+    pub fn count_entities_carrying_label(&self, group_id: &str, label: &str) -> Result<u64, Error> {
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE e.group_id = $gid AND $label IN e.labels RETURN count(*)",
+            serde_json::json!({ "gid": group_id, "label": label }),
+        )?;
+        for row in rows {
+            match &row[0] {
+                lbug::Value::Int64(n) => return Ok(*n as u64),
+                lbug::Value::UInt64(n) => return Ok(*n),
+                lbug::Value::Int32(n) => return Ok(*n as u64),
+                _ => {}
+            }
+        }
+        Ok(0)
+    }
+
     fn count_by_group_ids(&self, label: &str, var: &str, group_ids: &[&str]) -> Result<u64, Error> {
         let sql = format!("MATCH ({var}:{label}) WHERE {var}.group_id IN $gids RETURN count(*)");
         let rows = self.query_params(&sql, serde_json::json!({ "gids": group_ids }))?;

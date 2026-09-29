@@ -195,6 +195,11 @@ pub async fn add_episode(
     state.active_writes.fetch_add(1, Ordering::Relaxed);
     let _active_guard = ActiveWriteGuard(Arc::clone(&state.active_writes));
 
+    // Identity-bearing-set guard (issue #616, D1): a group whose ontology changed the
+    // identity-bearing set in a way that would reinterpret existing entities is refused here,
+    // before any extraction, without touching data or other groups.
+    state.check_identity(group_id)?;
+
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
     // Resolves this group's own ontology file if one exists, else falls back to the
     // workspace-wide ontology (FR-001, FR-002, FR-005) — governs extraction guidance, strict-mode
