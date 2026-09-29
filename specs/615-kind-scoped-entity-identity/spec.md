@@ -122,7 +122,7 @@ A cross-group pointer created with no kind keeps binding as today while only one
 ### Functional Requirements
 
 - **FR-001**: `Entity` MUST gain a `kind STRING` column; every entity MUST have exactly one kind, and `kind` MUST be present in `labels`.
-- **FR-002**: `lookup_key` MUST be computed as `group_id ␟ kind ␟ lower(trim(name))`, and the ART index MUST enforce uniqueness on it, so two entities of different kinds may share a name in one group.
+- **FR-002**: `lookup_key` MUST be computed as `group_id ␟ kind ␟ lower(trim(name))`, and uniqueness on that key MUST hold (enforced by the write lock plus kind-scoped resolution, not by a database constraint — the ART index is non-unique by design, ADR-0221, and `Merged` tombstones share their canonical's key; see ADR-0615), so two entities of different kinds may share a name in one group.
 - **FR-003**: `knowledge_assert_entity` MUST accept an optional `kind`; when omitted it MUST act on the default kind `Entity` only (D2).
 - **FR-004**: `knowledge_assert_relationship` MUST accept optional `source_kind` / `target_kind` for endpoint resolution, following D2's read rule for resolving existing endpoints (and D2's write rule when an endpoint is created).
 - **FR-005**: An exact entity lookup by `(group_id, name, kind)` MUST be available, either as an option on `knowledge_find_entities` / `knowledge_list_entities` or as a dedicated call — the Plan stage decides which.
@@ -159,7 +159,7 @@ A cross-group pointer created with no kind keeps binding as today while only one
 - `kind` is compared verbatim after trimming (case-sensitive, matching ontology type names), unlike `name`, which is lowercased for the key. The default kind is exactly `Entity`.
 - The existing invariant that `labels` begins with `Entity` (`enforce_entity_first`) is retained; a non-default kind is added to `labels` after `Entity`, so `kind` is always contained in `labels`.
 - An entity's kind is immutable; "changing" kind means asserting a new entity of the other kind.
-- The `lookup_key` ART index unique-key semantic (#221) is retained; only the key composition changes.
+- The `lookup_key` ART index remains a non-unique secondary index (#221); only the key composition changes. Uniqueness of `(group_id, kind, name)` is maintained by the write lock plus kind-scoped resolution (ADR-0615).
 - Existing on-disk databases are migrated by the same mechanism used for prior additive schema changes (backfilling kind `Entity`); the specific mechanism is a Plan-stage decision.
 - No WAL/storage version bump is introduced; old and new binaries' WAL compatibility follows D3.
 

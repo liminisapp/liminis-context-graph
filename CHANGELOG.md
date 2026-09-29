@@ -9,6 +9,31 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+### Upgrading
+
+- **First start migrates entities (issue #615).** `Entity` gains a `kind` column and `lookup_key`
+  becomes `group_id ␟ kind ␟ lower(name)`. A one-time backfill sets every existing entity to kind
+  `Entity` and re-keys it (O(N), automatic). **Downgrade is unsupported:** a pre-#615 binary cannot
+  replay a WAL written after this change (`lookup_key` is no longer written to the WAL).
+
+### Added
+
+- **Kind-scoped entity identity** ([ADR-0615](docs/adr/0615-kind-scoped-entity-identity.md), #615,
+  implements #614). Same-named entities of different kinds now coexist instead of the second
+  `knowledge_assert_entity` overwriting the first. `knowledge_assert_entity` takes `kind`
+  (omitted ⇒ default kind `Entity` only — writes are scoped); `knowledge_assert_relationship` takes
+  `source_kind`/`target_kind`; new read tool `knowledge_resolve_entity`; `kind` filter on
+  `knowledge_find_entities`/`knowledge_list_entities`; `kind` on `knowledge_merge_entities`;
+  `source_kind`/`target_kind` (stored as pointer `endpoint_kind`) on
+  `knowledge_add_cross_group_edge`. A name-only resolution matching several kinds fails with
+  JSON-RPC `-32002` and a candidate list. Merges never cross kinds. Every entity node now carries
+  `kind` (additive).
+
+### Changed
+
+- `lookup_key` is a derived value: stripped from WAL records on write, recomputed on replay; a
+  literal `lookup_key` in an older WAL is ignored. Old WALs replay as kind `Entity`.
+
 ## [0.15.0] - 2026-09-15
 
 lbug 0.18.1 → 0.20.3. **One-way storage migration (42 → 47) — read Upgrading.** No API changes.

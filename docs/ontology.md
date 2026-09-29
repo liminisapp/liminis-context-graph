@@ -59,6 +59,10 @@ pick up a changed file.
 **Direct-assert is unaffected.** `knowledge_assert_entity`/`knowledge_assert_relationship` accept
 arbitrary `labels` regardless of any per-group or workspace ontology — per-group resolution only
 governs *extraction-guided* groups (`knowledge_add_episode` and the maintenance operations above).
+An entity's `kind` (issue #615) is part of its identity, not its ontology type: extraction always
+creates kind `Entity` (ontology-driven kinds are a separate, future phase), while direct-assert may
+give an entity any `kind`. The ontology restamp/reprocess operations rewrite type labels but
+preserve the entity's kind in its `labels`.
 
 **`canonicalize_relations`** resolves and applies the target group's own ontology, scoped to the
 `group_id` the call already requires. **`backfill_relation_types`** is ontology-independent — it
