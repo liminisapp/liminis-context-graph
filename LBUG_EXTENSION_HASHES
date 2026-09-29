@@ -17,15 +17,16 @@
 # stage-lbug-extensions.sh never writes to this file.
 #
 # Format: one entry per line, "<platform> <extension> <sha256>", where <platform> is one of
-# lbug's own platform strings (osx_arm64, linux_amd64, linux_arm64, win_amd64) and <extension>
-# is vector or fts. Values below were computed from the extension binaries actually bundled in
-# the published v0.15.0 release archives (re-hashed from the release assets, not the live CDN).
+# is vector or fts. Values below are the lbug 0.21.0 extensions (CDN path v0.21.0), fetched
+# 2026-09-29 after upstream's 00:03 UTC republish (origin and edge agreed). Verified against an
+# lbug 0.21.0 core: macOS arm64 full lcg suite, Windows 11 vector 45/45 + fts 10/10
+# row-asserting pairing runs (issue #619).
 
-osx_arm64 vector 83da02ce1b9fa87ebe67baa3df436641002aade89af1698e6a9df3cb4f93239b
-osx_arm64 fts 26982d5f0bc7ec5a1514dc9a812cb1955db153f8b0d985116f0d9ebfe07c05fc
-linux_amd64 vector 30070e072ea33b03f089536644a1f1e259d886c07d0e51bb244b30aaabd8852e
-linux_amd64 fts e5d8c26e1220e293b20a1d0ab36962f7fd9ff45595725cad0bbe81fb9c442810
-linux_arm64 vector 534be4c893508b02140ed40bcd0fc7370d707c84a1b1e7679f0568a59d6a4af8
-linux_arm64 fts d45dc9ab738613501d7eb1ebd03be65044997aecbd0cc63834e000aa59ece69a
-win_amd64 vector 6c90c4be634b02e54dcd6eb5b9bb7ec328e69d6c94e576daa6abc12bc78579f3
-win_amd64 fts cee505b03a2a8f4f3c25a75c22d457b617d1310f013a676554e5afa5d1e8b358
+osx_arm64 vector 6f878f3c0a2320a34967ff568fcf6bbe9065666e95035f0eddfe28bbc73b53f4
+osx_arm64 fts 248332de781a7781f612a55b5397e88f58f1f1ba2a973836ada199eab0f6bf10
+linux_amd64 vector 571726cc2ea0d202df1909ae5a3b0528c9dea3ea8d40be6c16b310ec14aa8821
+linux_amd64 fts 742f2756c2f80bcd1886b6ee0446483038cff0ecf6cf47f698bc6fe855cbaef6
+linux_arm64 vector 583101f5bf2d0e5d40de2ee8966018a3bdf0fb8ad8951ef51ef46cd59169445f
+linux_arm64 fts b8675b086664e3d6742330a517c5b619f0ac10dd094d250f12bef9822a8d5750
+win_amd64 vector 7bbceb965ecb3c0620eed794319532d9e241d1ebe577cd2c10153620f8000316
+win_amd64 fts 7b6132ae6a554e3eeb3c4b0da7e2eb5c483b258b31e848a0e3d6000ac29885ee
