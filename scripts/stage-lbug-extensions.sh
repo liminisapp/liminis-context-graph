@@ -25,7 +25,7 @@
 # after it was found to cause silent row loss in an unrelated query path (see ADR-0559). Either
 # way, this script is the one place that performs the download — at release-build or CI-build
 # time, not at a user's startup — shared by .github/build-setup.yml (per-target release
-# packaging) and ci.yml's build-release job (a single linux_amd64 fetch, cached and reused by
+# packaging) and ci.yml's `build (release profile)` job (id `build-release`) (a single linux_amd64 fetch, cached and reused by
 # every other CI job via LCG_LBUG_HOME).
 #
 # Reads the version from the repo-root LBUG_EXTENSION_VERSION file — the same file

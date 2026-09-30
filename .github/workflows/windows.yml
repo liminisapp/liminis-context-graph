@@ -1,7 +1,7 @@
 name: Windows
 
 # Windows build + transport coverage (issue #581). Kept out of ci.yml on purpose: that workflow's
-# job graph (build-release artifacts, lbug cache ownership, the docs-only classifier feeding the
+# job graph (`build-release` job artifacts, lbug cache ownership, the docs-only classifier feeding the
 # required `test (ubuntu-latest)` check) is Linux-shaped, and this job shares none of it. Not a
 # required check unless branch protection is changed to make it one.
 #

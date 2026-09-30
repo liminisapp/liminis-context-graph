@@ -4206,6 +4206,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0637](0637-extract-false-assert-only-types.md) | Assert-Only Ontology Types — `extract: false` excludes a type from the LLM extractor | 2026-09-30 |
 | [0628](0628-health-check-busy-state.md) | `health_check` Reports `busy` Instead of Blocking Behind `write_lock` | 2026-09-29 |
 | [0629](0629-find-search-evidence-and-similarity-floor.md) | Search Evidence and a `min_similarity` Floor for `find_entities` / `find_relationships` | 2026-09-30 |
+| [0640](0640-ci-cheap-checks-first-and-fail-fast.md) | CI Cheap-Checks-First Pre-Gate and Run-Wide Fail-Fast | 2026-09-30 |
 
 ## Historical numbering
 

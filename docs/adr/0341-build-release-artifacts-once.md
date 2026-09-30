@@ -237,3 +237,11 @@ it is a real behavior change worth naming explicitly rather than treating as inc
   dominant CI cost; this change is not expected to move that number
 - #298 / ADR-0298 — the post-merge failure notifier updated in Decision 8
 - `.github/workflows/ci.yml` — the merged workflow implementing this decision
+
+## Amendment (2026-09-30, issue #640)
+
+The build job's display name changed from `build release artifacts` to `build (release profile)`;
+its id `build-release` and role as the run's single release-profile build are unchanged. It now
+`needs:` a cheap `lint` pre-gate, and `test` plus the six e2e jobs fail fast (cancel the run on
+their own failure) while remaining parallel. The fmt, eval script guard and ML-deps steps moved
+from `test` to `lint`. See ADR-0640.
