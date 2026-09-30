@@ -181,6 +181,8 @@ async fn earliest_running_job_is_chosen() {
     assert_eq!(health(&state).await["job_id"], "older");
 }
 
+// The guard is held across the await on purpose: it simulates a contended mutex.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn contended_rebuild_jobs_mutex_falls_back_to_writing() {
     let (db, _dir) = make_db();
