@@ -585,6 +585,17 @@ async fn parity_find_relationships_nonempty() {
             "edge below the floor leaked through: {floored}"
         );
     }
+
+    // A non-numeric floor is rejected, proving the parameter is parsed by the handler rather than
+    // silently ignored (which the floored call above cannot show with zero-vector embeddings).
+    let bad = dispatch_val(
+        463,
+        "knowledge_find_relationships",
+        json!({"query": "works at", "min_similarity": "high"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_err_resp(&bad, 463, -32000);
 }
 
 // ── Helpers for Tier 1a handshake tests ──────────────────────────────────────
