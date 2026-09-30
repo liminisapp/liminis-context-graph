@@ -271,7 +271,7 @@ thing splits into several nodes. Leave those unflagged.
 - The flag is matched against the normalized (PascalCase) type name, like every other type match.
   An undeclared type (open mode) or `Unclassified` (strict mode) is never identity-bearing.
   `Merged` and `Unclassified` cannot be flagged.
-- Asserted entities (`knowledge_assert_entity`) are unaffected: they use the caller's `kind`.
+- Asserted entities (`knowledge_assert_entity`) are unaffected: they use the caller's `kind`. To keep a host-asserted identity type out of extraction entirely, also set [`extract: false`](#assert-only-types-extract-false).
 - **Edges name endpoints by name only.** If one batch contains the same name under two kinds, or a
   name from an earlier chunk resolves to more than one kind, that endpoint is ambiguous and the
   edge is dropped (counted in `edges_dropped_unresolvable`) rather than guessed at.
@@ -317,6 +317,56 @@ really want is to re-ingest the group from source (lcg does not automate this).
 
 Because the flag is part of the ontology content hash, adding one also raises the ordinary
 [drift](#drift-detection) warning; that warning is separate from, and weaker than, this refusal.
+
+### Assert-only types (`extract: false`)
+
+A host that asserts its own structural types through `knowledge_assert_entity` /
+`knowledge_assert_relationship` — a `Source` entity and a `DERIVED_FROM` relation, say — does not
+want the LLM extractor minting them from prose. Mark such a type `extract: false` (entity and
+relation types both accept it; absent or `true` means extractable):
+
+```yaml
+entity_types:
+  - name: Person
+  - name: Source
+    identity: true         # still identity-bearing for asserts and the identity-set guard
+    extract: false         # but never offered to, nor accepted from, the extractor
+relation_types:
+  - name: KNOWS
+  - name: DERIVED_FROM
+    extract: false
+```
+
+`extract: false` is an extraction-time concept only; everything else treats the type as fully
+declared.
+
+- **Prompts.** The entity and edge extraction prompts omit the type (and its description,
+  aliases and keywords). An ontology with no `extract: false` type renders byte-identical prompts.
+  If *every* entity type is `extract: false` the entity section falls back to the default
+  vocabulary; if every relation type is, the relation section is omitted.
+- **Stray extractor output.** A prompt is advisory, so an extracted entity typed with an
+  `extract: false` type (matched after normalization: `source`, `SOURCE` and `Source` are the same)
+  is reclassified to `Unclassified` with the original label preserved in `original_entity_type` —
+  in **both** `strict` and `open` mode, and it never receives the type's identity `kind` or its
+  label. An extracted edge of such a relation type is reclassified to `relation_type: UNCLASSIFIED`
+  with `original_relation_type` preserved. Both count toward `entities_reclassified_unclassified` /
+  `edges_reclassified_unclassified`. Every other undeclared label keeps its normal `open`-mode
+  behaviour. See [ADR-0637](adr/0637-extract-false-assert-only-types.md).
+- **Asserts are unaffected.** `knowledge_assert_entity {kind: "Source"}` and
+  `knowledge_assert_relationship` with `relation_type: "DERIVED_FROM"` work exactly as for any
+  declared type.
+- **Identity and hierarchy.** An `identity: true, extract: false` type counts in the identity set
+  and the `-32003` guard. The flag is per type and not inherited through `parent`: children of an
+  `extract: false` type are extractable and still get the parent's ancestor label.
+- **Reprocessing and canonicalization.** `knowledge_reprocess_entity_types`,
+  `knowledge_reprocess_relation_types` and `knowledge_canonicalize_relations` never retype into an
+  `extract: false` type. Already-asserted entities and edges of such a type are not off-ontology
+  candidates; under `scope: all` an asserted `Source` entity may appear in `kind_disagreements`
+  because the classifier cannot choose `Source`.
+- **Drift, not refusal.** Flipping `extract` changes the content hash (so it reports as
+  [drift](#drift-detection)) but never the identity set, so
+  [`knowledge_reload_ontology`](#reloading-a-groups-ontology) accepts it. Ontologies with no
+  `extract: false` type hash exactly as before.
 
 See [`docs/examples/ontology.example.yaml`](https://github.com/verveguy/liminis-context-graph/blob/main/docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
 

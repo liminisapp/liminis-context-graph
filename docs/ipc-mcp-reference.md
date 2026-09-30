@@ -460,6 +460,7 @@ group from source.
 `knowledge_reprocess_entity_types` never changes an entity's kind and adds an additive
 `kind_disagreements` array (`entity_id`, `entity_name`, `kind`, `classified_type`) — report-only —
 to both its dry-run plan and its result.
+Ontology types flagged `extract: false` are never offered as reclassification targets by `knowledge_reprocess_entity_types` / `knowledge_reprocess_relation_types` (nor by `knowledge_canonicalize_relations`); see [Assert-only types](ontology.md#assert-only-types-extract-false).
 
 ### Ontology reload (`knowledge_reload_ontology`)
 
