@@ -106,6 +106,10 @@ jobs:
       - name: Decide whether the run is actionable
         id: gate
         run: |
+          # This job sets no default shell, so GitHub's bare `bash -e` has no pipefail. Without
+          # it a failed `gh api` would feed empty input to `jq -s`, read as "no failed job",
+          # and silently drop a real failure as if it were a supersede-cancellation.
+          set -o pipefail
           case "$CONCLUSION" in
             success) actionable=true ;;
             skipped) actionable=false ;;
