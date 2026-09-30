@@ -1054,7 +1054,10 @@ pub async fn add_episode(
             },
         )
         .await??;
-    drop(_write_guard);
+    // The write lock stays held through the sidecar/drift block below (issue #627): it makes the
+    // `reloaded_since_extraction` check and the sidecar write atomic with respect to
+    // `knowledge_reload_ontology`, which takes the same lock. Dropping it first would let a reload
+    // land between the check and the write and have this episode's stale hash overwrite it.
 
     // After a successful DB commit, persist the current ontology hash to `.lcg/ontology-hash.json`
     // and clear the drift flag. Errors are non-fatal — a missed write means drift stays reported
@@ -1075,7 +1078,19 @@ pub async fn add_episode(
         // handle_rebuild_from_wal — extend the clear to this group specifically, using the same
         // resolved ontology (`resolved_ontology`, Phase A above) that just guided this episode's
         // extraction, so the recorded hash matches what the DB now actually reflects.
-        if let Err(e) =
+        //
+        // Skipped when a `knowledge_reload_ontology` (issue #627) swapped the group's cached
+        // ontology between Phase A and here: recording this episode's (now stale) hash would
+        // overwrite the reloaded ontology's sidecar and clear its drift. The episode's own
+        // entities stay typed by the ontology it was extracted under.
+        let reloaded_since_extraction = state
+            .cached_ontology_hash(group_id)
+            .is_some_and(|h| h != crate::ontology::content_hash(resolved_ontology.as_deref()));
+        if reloaded_since_extraction {
+            eprintln!(
+                "liminis-context-graph: ontology-sidecar: group {group_id:?} ontology was reloaded during this episode's extraction — not recording the stale ontology hash"
+            );
+        } else if let Err(e) =
             ontology_sidecar::write_group_sidecar(root, group_id, resolved_ontology.as_deref())
         {
             eprintln!(
@@ -1086,6 +1101,7 @@ pub async fn add_episode(
             state.clear_group_drift(group_id, resolved_ontology.clone());
         }
     }
+    drop(_write_guard);
 
     // Publish the ontology that guided this episode's extraction as a documentation-only sidecar
     // in the group's own WAL directory (FR-007) — travels automatically under the existing

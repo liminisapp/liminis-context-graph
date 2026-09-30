@@ -3,6 +3,7 @@
 **Status**: Accepted
 **Date**: 2026-08-20
 **Issue**: #446
+**Amended by**: ADR-0627 (a group's cached resolution can now be reloaded with `knowledge_reload_ontology`; restart is no longer the only way to pick up a per-group file edit)
 **Relates to**: ADR-0014 (ontology extractor trait parameter), ADR-0018 (ontology hash sidecar),
 ADR-0049 (bare-path ontology loader), ADR-0378 (multi-stream WAL per group directory), ADR-0385
 (per-group mutation attribution)

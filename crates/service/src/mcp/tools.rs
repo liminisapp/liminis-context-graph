@@ -47,7 +47,7 @@ fn kind_filter_prop() -> Value {
     })
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (45 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (46 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -870,7 +870,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── admin (14) — WAL/lifecycle/recovery/index maintenance ────────────────────
+        // ── admin (15) — WAL/lifecycle/recovery/index maintenance ────────────────────
         ToolSpec {
             name: "knowledge_dump_wal",
             description: "Snapshot the current graph contents into a fresh compacted WAL \
@@ -1267,6 +1267,38 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
+        ToolSpec {
+            name: "knowledge_reload_ontology",
+            description: "Reload ONE group's ontology without a service restart (issue #627): \
+                           discards the group's cached resolution and re-resolves it through the \
+                           normal precedence (per-group `.lcg/ontology/<group>.yaml`, then the \
+                           workspace ontology loaded at startup, then free-form), so an edited \
+                           per-group file takes effect on the live service and other groups are \
+                           untouched. Returns { group_id, previous_hash (null if the group was \
+                           not yet resolved), new_hash (\"none\" for no ontology), changed, drift \
+                           ({group_id, drifted, drift_summary}), identity_refusal }. An unchanged \
+                           file returns changed: false and has no side effects. If the new \
+                           ontology adds or removes `identity: true` on a type the group already \
+                           holds, the group is refused exactly as a restart would refuse it: \
+                           `identity_refusal` is a structured object ({message, label, count, \
+                           adding}), knowledge_add_episode for the group fails with -32003, and \
+                           the group is listed in knowledge_status.group_identity_refusals; \
+                           restore the previous identity-bearing set in the file and reload again \
+                           to clear it. Stored data is never modified. Waits for in-flight \
+                           read-lock passes (reprocess/canonicalize/backfill) to finish. `drift` \
+                           compares against the last-ingested ontology, not the previous cache, \
+                           so it is independent of `changed`.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "description": "The group whose ontology should be reloaded (required, non-empty)."}
+                    },
+                    "required": ["group_id"]
+                })
+            },
+        },
     ]
 }
 
@@ -1308,11 +1340,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_45_unique_tools() {
+    fn registry_has_46_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 45);
+        assert_eq!(r.len(), 46);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 45, "tool names must be unique");
+        assert_eq!(names.len(), 46, "tool names must be unique");
     }
 
     #[test]
@@ -1322,7 +1354,18 @@ mod tests {
         assert_eq!(count(Scope::Read), 15);
         assert_eq!(count(Scope::Write), 15);
         assert_eq!(count(Scope::Cypher), 1);
-        assert_eq!(count(Scope::Admin), 14);
+        assert_eq!(count(Scope::Admin), 15);
+    }
+
+    #[test]
+    fn reload_ontology_is_admin_only_and_requires_group_id() {
+        let r = registry();
+        let t = r
+            .iter()
+            .find(|t| t.name == "knowledge_reload_ontology")
+            .expect("knowledge_reload_ontology must be registered");
+        assert_eq!(t.scope, Scope::Admin);
+        assert_eq!((t.input_schema)()["required"], json!(["group_id"]));
     }
 
     #[test]
