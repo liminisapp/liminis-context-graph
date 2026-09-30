@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
-## [Unreleased]
+## [0.16.1] - 2026-09-30
+
+Full detail: [docs/releases/0.16.1.md](docs/releases/0.16.1.md).
 
 ### Added
 
@@ -19,6 +21,12 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   restored and reloaded), and returns `{group_id, previous_hash, new_hash, changed, drift,
   identity_refusal}`. An unchanged file is a no-op. Other groups and stored data are untouched.
   See [docs/ontology.md](docs/ontology.md#reloading-a-groups-ontology).
+- **Relevance evidence and a similarity floor on `knowledge_find_entities` /
+  `knowledge_find_relationships`** ([ADR-0629](docs/adr/0629-find-search-evidence-and-similarity-floor.md),
+  #629, implements #613). Each result carries a `search` object — `rrf_score`, `text_match`,
+  `bm25_score`, and per-path cosine similarities (`null` when that path didn't retrieve it) — and
+  an optional `min_similarity` (clamped 0–1, no default) drops distant vector candidates before
+  fusion; full-text hits stay eligible. Unset, results and order are unchanged.
 
 ### Fixed
 
@@ -30,6 +38,8 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   no longer mistake a rebuilding daemon for a dead one and restart it mid-rebuild. The `healthy`
   and `degraded` responses are unchanged. Out-of-repo callers that treat any `ok: true` as ready
   should gate on `healthy` instead.
+- The docs site now republishes automatically on release (#626); since 0.14.0 it had only been
+  updated by manual dispatch.
 - An episode whose extraction straddles an ontology reload no longer records its stale ontology
   hash in the group's drift sidecar or clears the reloaded group's drift.
 
