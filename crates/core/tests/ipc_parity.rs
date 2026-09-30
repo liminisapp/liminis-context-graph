@@ -533,7 +533,7 @@ async fn parity_find_relationships_nonempty() {
         461,
         "knowledge_find_relationships",
         json!({"query": "works at", "num_results": 5}),
-        state,
+        Arc::clone(&state),
     )
     .await;
     assert_ok_resp(&v, 461);
@@ -543,6 +543,32 @@ async fn parity_find_relationships_nonempty() {
     let count = result["count"].as_u64().unwrap();
     assert_eq!(count, 1, "expected 1 relationship: {v}");
     assert_eq!(result["edges"].as_array().unwrap().len() as u64, count);
+    // Issue #629: each edge carries an additive `search` evidence object.
+    for e in result["edges"].as_array().unwrap() {
+        let s = &e["search"];
+        assert!(s["rrf_score"].is_number(), "expected rrf_score: {v}");
+        assert!(s["text_match"].is_boolean(), "expected text_match: {v}");
+        assert!(
+            s.get("bm25_score").is_some(),
+            "expected bm25_score key: {v}"
+        );
+        assert!(
+            s.get("fact_similarity").is_some(),
+            "expected fact_similarity key: {v}"
+        );
+    }
+
+    // ...and `min_similarity` is accepted; a floor no candidate can meet drops the vector-only
+    // items without changing the envelope.
+    let floored = dispatch_val(
+        462,
+        "knowledge_find_relationships",
+        json!({"query": "zzz unmatched", "num_results": 5, "min_similarity": 1.0}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&floored, 462);
+    assert!(floored["result"]["edges"].is_array(), "{floored}");
 }
 
 // ── Helpers for Tier 1a handshake tests ──────────────────────────────────────
