@@ -533,7 +533,7 @@ async fn parity_find_relationships_nonempty() {
         461,
         "knowledge_find_relationships",
         json!({"query": "works at", "num_results": 5}),
-        state,
+        Arc::clone(&state),
     )
     .await;
     assert_ok_resp(&v, 461);
@@ -543,6 +543,59 @@ async fn parity_find_relationships_nonempty() {
     let count = result["count"].as_u64().unwrap();
     assert_eq!(count, 1, "expected 1 relationship: {v}");
     assert_eq!(result["edges"].as_array().unwrap().len() as u64, count);
+    // Issue #629: each edge carries an additive `search` evidence object.
+    for e in result["edges"].as_array().unwrap() {
+        let s = &e["search"];
+        assert!(s["rrf_score"].is_number(), "expected rrf_score: {v}");
+        assert!(s["text_match"].is_boolean(), "expected text_match: {v}");
+        assert!(
+            s.get("bm25_score").is_some(),
+            "expected bm25_score key: {v}"
+        );
+        assert!(
+            s.get("fact_similarity").is_some(),
+            "expected fact_similarity key: {v}"
+        );
+    }
+
+    // ...and `min_similarity` is accepted and honoured. `MockEmbedder` yields zero vectors, so every
+    // vector candidate sits at similarity exactly 1.0 and survives a floor of 1.0; the invariant
+    // is that anything returned either matched by BM25 or meets the floor on the vector path.
+    // (Floors that actually drop candidates are covered in `search_evidence.rs`.)
+    let floored = dispatch_val(
+        462,
+        "knowledge_find_relationships",
+        json!({"query": "zzz unmatched", "num_results": 5, "min_similarity": 1.0}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&floored, 462);
+    let edges = floored["result"]["edges"].as_array().expect("edges array");
+    assert_eq!(
+        floored["result"]["count"].as_u64().unwrap() as usize,
+        edges.len()
+    );
+    for e in edges {
+        let s = &e["search"];
+        assert!(
+            s["text_match"] == json!(true)
+                || s["fact_similarity"]
+                    .as_f64()
+                    .is_some_and(|x| x >= 1.0 - 1e-6),
+            "edge below the floor leaked through: {floored}"
+        );
+    }
+
+    // A non-numeric floor is rejected, proving the parameter is parsed by the handler rather than
+    // silently ignored (which the floored call above cannot show with zero-vector embeddings).
+    let bad = dispatch_val(
+        463,
+        "knowledge_find_relationships",
+        json!({"query": "works at", "min_similarity": "high"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_err_resp(&bad, 463, -32000);
 }
 
 // ── Helpers for Tier 1a handshake tests ──────────────────────────────────────
