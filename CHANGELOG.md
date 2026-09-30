@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **`health_check` no longer blocks behind the write lock** ([ADR-0628](docs/adr/0628-health-check-busy-state.md),
+  #628, reported in #612). While a write is pending or in progress — notably a long
+  `knowledge_rebuild_from_wal` — it now answers immediately with `state: "busy"`,
+  `ok: true`, `healthy: false` and an `activity` (`rebuilding` with `job_id` and `progress`, or
+  `writing`), instead of queueing until the write finished. Supervisors with short probe timeouts
+  no longer mistake a rebuilding daemon for a dead one and restart it mid-rebuild. The `healthy`
+  and `degraded` responses are unchanged. Out-of-repo callers that treat any `ok: true` as ready
+  should gate on `healthy` instead.
+
 ## [0.16.0] - 2026-09-29
 
 Full detail: [docs/releases/0.16.0.md](docs/releases/0.16.0.md).
