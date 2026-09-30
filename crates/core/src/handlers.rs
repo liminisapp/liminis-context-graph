@@ -171,6 +171,7 @@ async fn handle(
         "knowledge_delete_by_source" => handle_delete_by_source(req, state).await,
         "knowledge_delete_chunk_episode" => handle_delete_chunk_episode(req, state).await,
         "knowledge_delete_by_group" => handle_delete_by_group(req, state).await,
+        "knowledge_reload_ontology" => handle_reload_ontology(req, state).await,
         "knowledge_clear_all" => handle_clear_all(req, state).await,
         "knowledge_dump_wal" => handle_dump_wal(req, state).await,
         "knowledge_prepare_checkpoint" => handle_prepare_checkpoint(state).await,
@@ -1745,6 +1746,59 @@ async fn handle_delete_chunk_episode(
         "chunk_id": req.params["chunk_id"],
         "deleted_count": deleted_uuids.len(),
         "deleted_uuids": deleted_uuids,
+    }))
+}
+
+/// `knowledge_reload_ontology` (issue #627): discards one group's cached ontology resolution and
+/// re-resolves it, so an edited per-group `.lcg/ontology/<group>.yaml` takes effect without a
+/// service restart. Admin-scoped.
+///
+/// Takes the service write lock exactly like `handle_delete_by_group`, so no Phase C commit or
+/// read-lock pass observes a half-swapped cache entry. It waits behind any read-lock holder
+/// (reprocess, canonicalize, backfill passes). Lock-free extraction phases are not blocked: an
+/// episode extracted under the old ontology may still commit afterwards (see `episode.rs`).
+///
+/// A group whose reload would reinterpret existing entities (identity-set guard, ADR-0616) is
+/// refused as a restart would refuse it — reported in `identity_refusal` of a *successful*
+/// response, with `add_episode` then failing `-32003`. If the identity check cannot run, the
+/// reload changes nothing and fails `DbUnavailable`.
+async fn handle_reload_ontology(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let group_id = extract_required_group_id(&req.params["group_id"])?;
+    // Fail before invalidating anything when the DB is gone (the identity check needs it).
+    load_db(&state)?;
+
+    let _guard = state.write_lock.write().await;
+    let state_c = Arc::clone(&state);
+    let gid = group_id.clone();
+    let outcome = tokio::task::spawn_blocking(move || state_c.reload_group_ontology(&gid)).await?;
+    drop(_guard);
+
+    if let Some(reason) = &outcome.identity_unchecked {
+        return Err(Error::DbUnavailable(format!(
+            "cannot verify identity-bearing set for group {group_id:?}: {reason}; \
+             ontology reload not applied"
+        )));
+    }
+
+    let identity_refusal = outcome.identity_refusal.as_ref().map(|r| {
+        json!({
+            "message": r.message(&group_id),
+            "label": r.label,
+            "count": r.count,
+            "adding": r.adding,
+        })
+    });
+    Ok(json!({
+        "group_id": group_id,
+        "previous_hash": outcome.previous_hash,
+        "new_hash": outcome.new_hash,
+        "changed": outcome.changed(),
+        "drift": {
+            "group_id": group_id,
+            "drifted": outcome.drift.drifted,
+            "drift_summary": outcome.drift.drift_summary,
+        },
+        "identity_refusal": identity_refusal,
     }))
 }
 
