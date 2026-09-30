@@ -134,6 +134,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0616](0616-ontology-driven-kind-assignment.md) | Ontology-Driven Kind Assignment — identity-bearing entity types during extraction | 2026-09-29 |
 | [0627](0627-per-group-ontology-reload.md) | Per-Group Ontology Reload Without a Restart — `knowledge_reload_ontology` | 2026-09-30 |
 | [0628](0628-health-check-busy-state.md) | `health_check` Reports `busy` Instead of Blocking Behind `write_lock` | 2026-09-29 |
+| [0629](0629-find-search-evidence-and-similarity-floor.md) | Search Evidence and a `min_similarity` Floor for `find_entities` / `find_relationships` | 2026-09-30 |
 
 ## Historical numbering
 

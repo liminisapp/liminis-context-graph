@@ -282,6 +282,37 @@ is read or the database is touched. A bounded rebuild is **not durable**: WAL en
 bad mutation. `to_seq` bounds an endpoint; it does not add reverse/undo semantics to the
 forward-only replay noted above.
 
+### Search evidence and the similarity floor (`find_entities`, `find_relationships`)
+
+Hybrid search fuses its candidate lists with Reciprocal Rank Fusion, which is rank-only: the top
+hit of a gibberish query scores almost the same as the top hit of a perfect one, and every query
+fills its top-k. To let a caller tell a real match from filler, each result of
+`knowledge_find_entities` and `knowledge_find_relationships` carries an additive `search` object
+(issue #629):
+
+| Field | On | Meaning |
+|-------|----|---------|
+| `rrf_score` | both | fused, rank-based score — ordering only, **not** a relevance measure |
+| `text_match` | both | `true` iff the full-text (BM25) path retrieved the item |
+| `bm25_score` | both | raw BM25 score, or `null` |
+| `name_similarity`, `summary_similarity` | entities | cosine similarity (`1 - distance`) on that vector path, or `null` |
+| `fact_similarity` | relationships | cosine similarity (`1 - distance`) on the fact-vector path, or `null` |
+
+A field is `null` when that retrieval path did not return the item (`text_match` is then `false`).
+Values are raw and unnormalised; cosine similarity can be negative.
+
+Both tools also accept an optional **`min_similarity`** (number). Vector candidates whose cosine
+similarity is below it are dropped *before* fusion, independently per vector path, so they never
+affect the ranking and are not reported for an item they did not qualify for. Full-text matches
+always stay eligible, so an exact-name query still returns its match while a gibberish query
+returns nothing. With the `kind` filter the floor applies on top of the kind path's bounded
+nearest-neighbour probe.
+
+How it differs from `knowledge_search_passages`' `min_score`: the value is clamped to 0–1 the same
+way (a non-number is an invalid-params error), but `min_similarity` has **no default** — omitted
+or `null` means no floor and results are identical to before, apart from the added `search`
+object — and it acts before fusion and per path rather than as a post-filter on a single list.
+
 ### group_ids semantics: omitted vs. empty
 
 Every read tool that accepts `group_ids` treats an **omitted or `null` `group_ids` uniformly as
