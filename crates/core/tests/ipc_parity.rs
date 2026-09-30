@@ -7046,3 +7046,55 @@ async fn explicit_null_group_ids_matches_omitted_all_groups() {
         "explicit null group_ids must match omitted (all groups): {edges_by_group}"
     );
 }
+
+// ── knowledge_reload_ontology (issue #627) ────────────────────────────────────
+
+/// Success shape: every documented field is present, and a first resolution of a group with a
+/// per-group file reports `previous_hash: null`, `changed: true`. Invalid params and degraded mode
+/// return an error response instead of panicking.
+#[tokio::test]
+async fn parity_reload_ontology_shape_and_errors() {
+    let (db, _dir) = make_db(4);
+    let workspace = TempDir::new().unwrap();
+    let path = group_ontology_path(workspace.path(), "grp-a").unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "mode: open\nentity_types:\n  - name: Person\n").unwrap();
+    let state = make_state_with_workspace(db, workspace.path().to_path_buf());
+
+    let v = dispatch_val(
+        700,
+        "knowledge_reload_ontology",
+        json!({"group_id": "grp-a"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 700);
+    let r = &v["result"];
+    assert_eq!(r["group_id"], "grp-a");
+    assert!(r["previous_hash"].is_null(), "{v}");
+    assert!(r["new_hash"].as_str().is_some_and(|h| h != "none"), "{v}");
+    assert_eq!(r["changed"], true);
+    assert_eq!(r["drift"]["group_id"], "grp-a");
+    assert!(r["drift"]["drifted"].is_boolean(), "{v}");
+    assert!(r.get("identity_refusal").is_some_and(Value::is_null), "{v}");
+
+    for (id, params) in [
+        (701, json!({})),
+        (702, json!({"group_id": ""})),
+        (703, json!({"group_id": 7})),
+    ] {
+        let v = dispatch_val(id, "knowledge_reload_ontology", params, Arc::clone(&state)).await;
+        assert_err_resp(&v, id, -32000);
+    }
+
+    // Degraded mode: DB unavailable → error response, no panic.
+    state.db.store(None);
+    let v = dispatch_val(
+        704,
+        "knowledge_reload_ontology",
+        json!({"group_id": "grp-a"}),
+        state,
+    )
+    .await;
+    assert!(v.get("error").is_some(), "{v}");
+}
