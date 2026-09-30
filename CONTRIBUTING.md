@@ -231,10 +231,13 @@ never commit release prep directly to `main` — then tag the merge commit.
    The tag (`vX.Y.Z`) must equal the `Cargo.toml` version, or cargo-dist's `plan` step fails.
 6. The release workflow builds all three platforms and publishes the GitHub Release
    automatically (~5–10 min in practice; `v0.12.0` took under six). Publishing that
-   GitHub Release also triggers `.github/workflows/docs-publish.yml`, which rebuilds
-   the docs site from this tag's `docs/` tree and promotes it to the site root (see
+   GitHub Release is followed by `release.yml`'s `dispatch-docs` job, which dispatches
+   `.github/workflows/docs-publish.yml` to rebuild the docs site from this tag's `docs/`
+   tree and promote it to the site root. (The release is created with `GITHUB_TOKEN`,
+   which does not fire `release: published`; that trigger is kept only for releases
+   created by hand.) See
    [`docs/release-process.md`](docs/release-process.md#docs-publishing) for what to
-   check afterward and how to republish a correction without cutting a new release).
+   check afterward and how to republish a correction without cutting a new release.
 7. **Announce it.** Post to the repository's **Announcements** discussion category once the
    release has published. cargo-dist creates the GitHub Release; nothing posts a discussion.
    Lead with what changed for a user rather than the issue list, and carry the CHANGELOG's

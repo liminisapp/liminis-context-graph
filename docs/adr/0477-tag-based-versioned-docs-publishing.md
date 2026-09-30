@@ -76,12 +76,37 @@ second, wholly independent workflow is the safer shape and keeps the two concern
 (artifact release vs. docs publish) from coupling accidentally.
 
 `docs-publish.yml` triggers on:
-- `release: published`, filtered (FR-009) to tags matching `^v[0-9]+\.[0-9]+\.[0-9]+(-...)?$`
-  — so a non-version release (e.g. the existing `eval-artifacts-2026-07`) is silently
-  skipped rather than attempting to build a `docs/` tree from an unrelated ref.
-- `workflow_dispatch` (`version` required, `ref` optional) — the FR-006 republish path: a
+- `workflow_dispatch` (`version` required, `ref` optional) — the path releases cut by
+  `release.yml` actually take (`release.yml`'s `dispatch-docs` job dispatches it after
+  `host` creates the release; see the amendment below), and the FR-006 republish path: a
   maintainer can rebuild an already-released version's docs from a corrected `main`/branch
   commit without cutting a new release tag, the exact case #473 needed.
+- `release: published`, filtered (FR-009) to tags matching `^v[0-9]+\.[0-9]+\.[0-9]+(-...)?$`
+  — so a non-version release (e.g. the existing `eval-artifacts-2026-07`) is silently
+  skipped rather than attempting to build a `docs/` tree from an unrelated ref. This only
+  fires for releases created outside `GITHUB_TOKEN` (e.g. by hand); it is retained for
+  those.
+
+#### Amendment (#626): `release: published` never fired for `release.yml` releases
+
+This ADR originally described `release: published` as the normal trigger. It never was:
+`release.yml`'s `host` job creates the release with `gh release create` under
+`GITHUB_TOKEN`, and GitHub does not start workflow runs from events created by
+`GITHUB_TOKEN` (exceptions: `workflow_dispatch` and `repository_dispatch`). Every run of
+`docs-publish.yml` until #626 was a manual dispatch, and the site went stale across five
+releases with the release workflow green throughout.
+
+Fix: a hand-added `dispatch-docs` job in `release.yml` (needs `plan` + `host`, gated on
+`host` succeeding and `publishing == 'true'`, so never on `pull_request` plan-only runs)
+runs `gh workflow run docs-publish.yml -f version=<X.Y.Z> -f ref=refs/tags/v<X.Y.Z>` with
+job-scoped `actions: write`. It applies the same tag-shape filter as `docs-publish.yml`
+and skips quietly for non-version tags, because a `workflow_dispatch` with a bad version
+hard-fails. A dispatch failure fails that job (the only signal) but leaves the already-
+published release untouched. If both the dispatch and a `release` event fire for one
+release, the queuing concurrency group and fresh latest-stable computation make the second
+run idempotent. A PAT/App token and cargo-dist `post-announce-jobs` were rejected: the
+former adds a secret for no other benefit, the latter needs a `workflow_call` trigger and
+still a hand-added stanza in `release.yml`.
 
 ### "Latest stable" is always recomputed fresh, never trusted from the triggering event
 

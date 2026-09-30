@@ -66,14 +66,21 @@ one that actually verifies it.
 
 The docs site is **no longer published from `main`**. Every merge to `main` that
 touches `docs/` still runs the PR-time checks below, but does not change the live
-site. Publishing happens only when a GitHub Release is published, via
+site. Publishing happens only when a release is cut, via
 `.github/workflows/docs-publish.yml`. See
 [ADR-0477](adr/0477-tag-based-versioned-docs-publishing.md) for the full design.
 
 ### What happens automatically when you cut a release
 
-`release.yml` (cargo-dist) creates the GitHub Release once artifact builds finish.
-That `release: published` event triggers `docs-publish.yml`, which:
+`release.yml` (cargo-dist) creates the GitHub Release once artifact builds finish. It
+does so with `GITHUB_TOKEN`, and GitHub does not start workflow runs from events created
+by `GITHUB_TOKEN` (the exceptions are `workflow_dispatch` and `repository_dispatch`), so
+the `release: published` event **never triggers** `docs-publish.yml` for these releases.
+Instead, `release.yml`'s hand-added `dispatch-docs` job runs after the release is created
+and dispatches `docs-publish.yml` with `version=<X.Y.Z>` and `ref=refs/tags/v<X.Y.Z>`
+(skipping quietly for a tag that isn't `vX.Y.Z[-pre]`). The `release: published` trigger
+is retained for releases created by hand (UI, or a non-`GITHUB_TOKEN` credential).
+Either way, `docs-publish.yml`:
 
 1. Skips entirely if the release's tag doesn't match the `vX.Y.Z` version-tag
    scheme (e.g. a non-version release like `eval-artifacts-2026-07`) — no docs
@@ -93,7 +100,12 @@ That `release: published` event triggers `docs-publish.yml`, which:
 ### What to check after a release publishes
 
 1. Confirm the `Docs publish` workflow run for the release succeeded:
-   `gh run list --workflow docs-publish.yml --limit 1`.
+   `gh run list --workflow docs-publish.yml --limit 1`. For a release cut by
+   `release.yml` its trigger shows as `workflow_dispatch` (dispatched by the
+   `dispatch-docs` job), not `release`. If there is no such run, check the
+   `dispatch-docs` job in the release workflow run: a red job means the dispatch failed
+   and docs were **not** triggered (the release itself is unaffected) — publish them
+   with `gh workflow run docs-publish.yml -f version=<X.Y.Z>`.
 2. Visit the root URL (`https://v3rv.com/liminis-context-graph/`) and confirm the
    footer reads the new version.
 3. Visit the new version's own URL

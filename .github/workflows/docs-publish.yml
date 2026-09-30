@@ -7,11 +7,17 @@ name: Docs publish
 # hand edits would be fragile.
 #
 # Triggers:
-#   - release: published  -- the normal path. Filtered below (FR-009) so a
+#   - workflow_dispatch    -- the normal path for releases cut by release.yml:
+#     its `dispatch-docs` job dispatches this workflow with the release's
+#     version and tag ref after `host` creates the release. It is also the
+#     FR-006 republish path: rebuild an already-released version's docs
+#     (optionally from a corrected ref) without cutting a new release tag.
+#   - release: published  -- only fires for releases created outside
+#     GITHUB_TOKEN (e.g. by hand in the UI). release.yml creates its release
+#     with GITHUB_TOKEN, and GitHub does not start workflow runs from events
+#     that token creates (except workflow_dispatch/repository_dispatch), so this
+#     trigger alone never fired for them (#626). Filtered below (FR-009) so a
 #     non-version release (e.g. `eval-artifacts-2026-07`) never publishes docs.
-#   - workflow_dispatch    -- the FR-006 republish path: rebuild an already-
-#     released version's docs (optionally from a corrected ref) without
-#     cutting a new release tag.
 on:
   release:
     types: [published]
