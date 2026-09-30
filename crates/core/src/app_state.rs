@@ -986,6 +986,7 @@ mod tests {
                     description: None,
                     parent: None,
                     identity: false,
+                    extract: true,
                 })
                 .collect(),
             relation_types: vec![],

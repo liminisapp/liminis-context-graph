@@ -328,6 +328,7 @@ mod tests {
                     target_type: None,
                     aliases: vec!["LAUNCHED_BY".to_string(), "LAUNCHED_FROM".to_string()],
                     keywords: vec!["launch".to_string()],
+                    extract: true,
                 },
                 crate::ontology::RelationTypeDef {
                     name: "USES".to_string(),
@@ -336,6 +337,7 @@ mod tests {
                     target_type: None,
                     aliases: vec![],
                     keywords: vec![],
+                    extract: true,
                 },
             ],
             ancestor_map: std::collections::HashMap::new(),

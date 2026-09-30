@@ -502,6 +502,7 @@ mod tests {
                 description: None,
                 parent: None,
                 identity: false,
+                extract: true,
             }],
             ancestor_map: std::collections::HashMap::new(),
             relation_types: vec![
@@ -512,6 +513,7 @@ mod tests {
                     target_type: None,
                     aliases: vec!["WROTE".to_string(), "AUTHORED_BY".to_string()],
                     keywords: vec!["author".to_string(), "writ".to_string()],
+                    extract: true,
                 },
                 RelationTypeDef {
                     name: "AFFILIATED_WITH".to_string(),
@@ -520,6 +522,7 @@ mod tests {
                     target_type: None,
                     aliases: vec!["WORKS_FOR".to_string()],
                     keywords: vec!["affiliat".to_string(), "employ".to_string()],
+                    extract: true,
                 },
             ],
         }
