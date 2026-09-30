@@ -101,7 +101,7 @@ impl VocabularyComplianceCounts {
         if !vocab.has_entity_types() {
             return;
         }
-        let names = vocab.entity_type_names();
+        let names = vocab.extractable_entity_type_names();
         for e in entities {
             self.entities_checked += 1;
             if !names.contains(&normalize_entity_type(&e.entity_type)) {
@@ -116,7 +116,7 @@ impl VocabularyComplianceCounts {
         if !vocab.has_relation_types() {
             return;
         }
-        let names = vocab.relation_type_names();
+        let names = vocab.extractable_relation_type_names();
         for e in edges {
             self.edges_checked += 1;
             // A missing relation_type is itself a vocabulary-compliance violation under
