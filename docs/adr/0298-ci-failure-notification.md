@@ -85,7 +85,9 @@ the safer default.
 
 - `success` → close the existing tracking issue (if any) with a comment linking the passing run.
   No-op if none exists.
-- `cancelled` or `skipped` → no-op entirely. `real-corpus-e2e.yml` sets
+- `cancelled` or `skipped` → no-op entirely **(amended by ADR-0640, #640: a `cancelled` run is a
+  no-op only if no job genuinely failed — `ci.yml` now fails fast by cancelling the run, so a real
+  failure can end `cancelled`; see the amendment at the end of this ADR)**. `real-corpus-e2e.yml` sets
   `concurrency: cancel-in-progress: true`, so a superseded run reports `cancelled` — treating that
   as a failure would file spurious issues every time two pushes land close together.
 - anything else (`failure`, `timed_out`, `action_required`, …) → create or comment-update the
@@ -162,3 +164,12 @@ build or maintain.
   `main` since `db27471`.
 - PR #294 — the documentation-drift audit; the same signal-without-a-watcher failure shape found
   the same day, in a different medium.
+
+## Amendment (2026-09-30, issue #640)
+
+`ci.yml` now cancels the run on the first post-build job failure (fail-fast), so a run with a real
+failure can report `cancelled`. The listener's `gate` step now treats `cancelled` as actionable when
+the jobs API shows a job with conclusion `failure`/`timed_out` (or any other non-success,
+non-skipped, non-cancelled conclusion), or a cancelled job holding a step with conclusion
+`failure`. A run cancelled only by a superseding push has none and remains a no-op. The failing-job
+list excludes cancelled jobs without a failed step, so the issue names the real cause. See ADR-0640.

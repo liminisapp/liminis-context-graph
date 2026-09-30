@@ -82,7 +82,7 @@ The `ideas/` directory (created on demand) holds pre-spec sketches and design no
 
 ## Rust pre-commit checks (MUST run before every commit)
 
-CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merge. Run the **local gate below** before pushing to save a fabrik retry cycle — it is the debug-profile equivalent that fits the time budget on a warm cache (see below for the cold-worktree case). Full release verification is CI's job, not yours.
+CI runs three commands (see `.github/workflows/ci.yml`); any failure blocks merge. Since #640 the cheapest of them — `cargo fmt --all --check`, the eval script guards and the ML-runtime-deps `cargo tree` guard — run first in a no-compile `lint` pre-gate that the release build waits on, and the first failing post-build job cancels the run (ADR-0640). Run the **local gate below** before pushing to save a fabrik retry cycle — it is the debug-profile equivalent that fits the time budget on a warm cache (see below for the cold-worktree case). Full release verification is CI's job, not yours.
 
 > **Local verification has a 10-minute budget.** See "Long-running commands" above for the general rule and the casualty list. The specific case here: CI's `test` job — a release build plus the suite plus the R-003 bench correctness gate — used to measure **15–18 minutes** even on a warm cache, so the complete release verification path cannot be run in the foreground; CI already runs it on every PR. Use the debug-mode local gate below instead, which fits inside the budget; let CI own full release verification.
 >
