@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
-## [Unreleased]
+## [0.16.0] - 2026-09-29
+
+Full detail: [docs/releases/0.16.0.md](docs/releases/0.16.0.md).
 
 ### Upgrading
 
@@ -47,6 +49,8 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   republish of the `v0.20.0` extensions left 0.20.3 with no safe Windows fts pairing (see ADR-0593
   addendum). 0.21.0 extensions are published per-version and pinned in `LBUG_EXTENSION_HASHES`.
   Storage version stays 47: **no database migration.**
+- Release builds verify the staged lbug extension bytes against pinned sha256 (#593); Windows CI
+  now creates and queries vector/FTS indexes rather than only loading the extensions (#587).
 
 - `lookup_key` is a derived value: stripped from WAL records on write, recomputed on replay; a
   literal `lookup_key` in an older WAL is ignored. Old WALs replay as kind `Entity`.
