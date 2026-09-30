@@ -57,7 +57,9 @@ nothing resolves. `changed` is `previous != new`, or, for a never-resolved group
 **Stale-commit guard.** `add_episode` extracts lock-free (ADR-0543); an episode extracted under
 ontology A can commit after a reload to B and then record A's hash in the group sidecar and clear
 B's drift. Phase C now skips `write_group_sidecar` / `clear_group_drift` when the group's cached
-ontology hash differs from the one extraction used (`AppState::cached_ontology_hash`). The episode's
+ontology hash differs from the one extraction used (`AppState::cached_ontology_hash`). The check and
+the sidecar write run while `add_episode` still holds the service write lock — the lock a reload takes —
+so a reload cannot land between them. The episode's
 own entities stay typed by A; failing or retrying such episodes was rejected as a semantic change to
 `add_episode` for a race bounded by extraction time.
 

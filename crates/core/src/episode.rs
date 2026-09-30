@@ -1054,7 +1054,10 @@ pub async fn add_episode(
             },
         )
         .await??;
-    drop(_write_guard);
+    // The write lock stays held through the sidecar/drift block below (issue #627): it makes the
+    // `reloaded_since_extraction` check and the sidecar write atomic with respect to
+    // `knowledge_reload_ontology`, which takes the same lock. Dropping it first would let a reload
+    // land between the check and the write and have this episode's stale hash overwrite it.
 
     // After a successful DB commit, persist the current ontology hash to `.lcg/ontology-hash.json`
     // and clear the drift flag. Errors are non-fatal — a missed write means drift stays reported
@@ -1098,6 +1101,7 @@ pub async fn add_episode(
             state.clear_group_drift(group_id, resolved_ontology.clone());
         }
     }
+    drop(_write_guard);
 
     // Publish the ontology that guided this episode's extraction as a documentation-only sidecar
     // in the group's own WAL directory (FR-007) — travels automatically under the existing
