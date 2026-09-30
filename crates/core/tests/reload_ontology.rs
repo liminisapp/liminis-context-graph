@@ -631,3 +631,34 @@ async fn episode_straddling_a_reload_does_not_clobber_sidecar_or_drift() {
     let st = status(&state).await;
     assert_eq!(drift_for(&st, G).unwrap()["drifted"], true, "{st}");
 }
+
+// ── #637: flipping `extract` is drift, never an identity refusal ──────────────
+
+#[tokio::test]
+async fn flipping_extract_is_drift_and_accepted() {
+    let (db, _d) = make_db();
+    let root = TempDir::new().unwrap();
+    // A carried identity type: flipping its identity flag would be refused, flipping `extract`
+    // must not be.
+    write_file(root.path(), G, PERSON_ID);
+    let state = make_state(
+        Arc::clone(&db),
+        root.path(),
+        vec![one(vec![ent("Ada", "Person")])],
+    );
+    ingest(&state, G, 1).await.unwrap();
+
+    write_file(
+        root.path(),
+        G,
+        "mode: open\nentity_types:\n  - name: Person\n    identity: true\n    extract: false\n",
+    );
+    let r = reload(&state, G).await;
+    assert_eq!(r["changed"], true, "{r}");
+    assert_ne!(r["previous_hash"], r["new_hash"], "{r}");
+    assert!(r["identity_refusal"].is_null(), "{r}");
+    assert!(refused_groups(&status(&state).await).is_empty());
+    let st = status(&state).await;
+    let drift = drift_for(&st, G).expect("G must be in group_ontology_drift");
+    assert_eq!(drift["drifted"], true, "{st}");
+}

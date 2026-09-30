@@ -315,9 +315,29 @@ pub async fn add_episode(
     // entity tally is counted directly here: because the empty-name retain above already ran,
     // every entity reaching this loop is guaranteed to be persisted, so there's no desync risk.
     let mut entities_reclassified_unclassified = 0usize;
+    //
+    // `extract: false` types (#637, ADR-0637) are excluded from the strict-mode vocabulary, so a
+    // stray label naming one is reclassified here like any other off-vocabulary type. The same
+    // reclassification also applies in open mode (below), where the raw label would otherwise be
+    // stamped on the entity verbatim — the only open-mode labels touched are `extract: false` ones.
     if let Some(onto) = ontology_ref {
-        if onto.mode == OntologyMode::Strict && onto.has_entity_types() {
-            let vocab = onto.entity_type_names();
+        // Strict mode with no extractable entity type has no vocabulary to filter against (the
+        // prompt falls back to the default one), so it takes the same direct-label path as open mode.
+        if onto.mode != OntologyMode::Strict || onto.extractable_entity_types().next().is_none() {
+            for e in extraction.entities.iter_mut() {
+                if onto.is_extract_false_entity(&e.entity_type) {
+                    eprintln!(
+                        "liminis-context-graph: ontology: reclassifying entity '{}' to Unclassified (type '{}' is extract: false)",
+                        e.name, e.entity_type
+                    );
+                    e.original_entity_type = Some(e.entity_type.clone());
+                    e.entity_type = ENTITY_UNCLASSIFIED.to_string();
+                    entities_reclassified_unclassified += 1;
+                }
+            }
+        }
+        if onto.mode == OntologyMode::Strict && onto.extractable_entity_types().next().is_some() {
+            let vocab = onto.extractable_entity_type_names();
             for e in extraction.entities.iter_mut() {
                 let normalized = normalize_entity_type(&e.entity_type);
                 if normalized.is_empty() || normalized == "Entity" {
@@ -356,8 +376,27 @@ pub async fn add_episode(
     // here would desync the tally from what's actually persisted — the same failure mode
     // ADR-0051 fixed for `edges_dropped_unresolvable` by making Phase C the sole authoritative
     // counting point. The tally is instead taken in Phase C, alongside `edges_inserted`.
+    //
+    // `extract: false` relation types (#637, ADR-0637) are absent from `build_alias_map`, so in
+    // strict mode a stray label naming one falls through to `UNCLASSIFIED` here. In open mode only
+    // those labels are reclassified (the tally in Phase C keys on `original_relation_type`).
     if let Some(onto) = ontology_ref {
-        if onto.mode == OntologyMode::Strict && onto.has_relation_types() {
+        if onto.mode != OntologyMode::Strict || onto.extractable_relation_types().next().is_none() {
+            for e in extraction.edges.iter_mut() {
+                let Some(original) = e.relation_type.clone() else {
+                    continue;
+                };
+                if onto.is_extract_false_relation(&original) {
+                    eprintln!(
+                        "liminis-context-graph: ontology: reclassifying edge '{}' → '{}' to UNCLASSIFIED (relation_type '{}' is extract: false)",
+                        e.source_name, e.target_name, original
+                    );
+                    e.relation_type = Some(UNCLASSIFIED.to_string());
+                    e.original_relation_type = Some(original);
+                }
+            }
+        }
+        if onto.mode == OntologyMode::Strict && onto.extractable_relation_types().next().is_some() {
             let alias_map = build_alias_map(onto);
             for e in extraction.edges.iter_mut() {
                 let original = e.relation_type.clone();
@@ -762,7 +801,10 @@ pub async fn add_episode(
     // mode, where the strict-mode reclassify filter never runs) would be miscounted as a
     // strict-mode reclassification. Captured now since `ontology_ref` isn't 'static and can't
     // move into the spawn_blocking closure.
-    let is_strict_mode = ontology_ref.is_some_and(|o| o.mode == OntologyMode::Strict);
+    // The strict relation filter only runs when some relation type is extractable (#637).
+    let is_strict_mode = ontology_ref.is_some_and(|o| {
+        o.mode == OntologyMode::Strict && o.extractable_relation_types().next().is_some()
+    });
 
     // ── Phase C: commit under write lock ─────────────────────────────────────
     let episode_uuid = uuid::Uuid::new_v4().to_string();
@@ -985,7 +1027,11 @@ pub async fn add_episode(
                 source_descriptions: vec![],
             })?;
             edges_inserted += 1;
-            if is_strict_mode && edge.relation_type.as_deref() == Some(UNCLASSIFIED) {
+            // Open mode only reclassifies `extract: false` labels (#637), which always set
+            // `original_relation_type`; a literal "UNCLASSIFIED" from the extractor never does.
+            if (is_strict_mode || edge.original_relation_type.is_some())
+                && edge.relation_type.as_deref() == Some(UNCLASSIFIED)
+            {
                 edges_reclassified_unclassified += 1;
             }
         }

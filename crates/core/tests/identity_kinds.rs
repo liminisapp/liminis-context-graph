@@ -53,6 +53,7 @@ fn ontology(mode: OntologyMode, types: &[(&str, bool, Option<&str>)]) -> Ontolog
             description: None,
             parent: p.map(|s| s.to_string()),
             identity: *id,
+            extract: true,
         })
         .collect();
     lcg_core::ontology::validate_and_clean_parents(&mut entity_types);

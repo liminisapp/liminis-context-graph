@@ -126,15 +126,24 @@ pub async fn reprocess_relation_types(
     progress_tx: Option<UnboundedSender<Value>>,
     ontology: Arc<Ontology>,
 ) -> Result<Value, Error> {
+    // Declared set: drives the off-ontology candidate filter, so an asserted edge of an
+    // `extract: false` type (#637) is not a candidate.
     let ontology_type_names = ontology.relation_type_names();
 
-    // Build the allowed_types menu (sorted for deterministic prompts).
+    // Build the allowed_types menu (sorted for deterministic prompts). Extractable types only:
+    // reprocessing never retypes an edge into an `extract: false` type (#637).
     let mut allowed_types: Vec<(String, Option<String>)> = ontology
-        .relation_types
-        .iter()
+        .extractable_relation_types()
         .map(|rt| (rt.name.clone(), rt.description.clone()))
         .collect();
     allowed_types.sort_by(|a, b| a.0.cmp(&b.0));
+    if allowed_types.is_empty() {
+        return Ok(json!({
+            "success": false,
+            "error": "every declared relation type is `extract: false`; reprocessing has no \
+                      extractable type to classify into",
+        }));
+    }
 
     // ── Phase A (read lock): collect candidate edges based on scope ──────────
     let db = state
@@ -228,6 +237,11 @@ pub async fn reprocess_relation_types(
             verdict.clone()
         };
         if edge.current_type.as_deref() == Some(new_type.as_str()) {
+            unchanged_count += 1;
+            continue;
+        }
+        // Defensive (#637): never write an `extract: false` type from classifier output.
+        if ontology.is_extract_false_relation(&new_type) {
             unchanged_count += 1;
             continue;
         }

@@ -501,6 +501,7 @@ mod tests {
                 description: Some("A human being".to_string()),
                 parent: None,
                 identity: false,
+                extract: true,
             }],
             relation_types: vec![],
             ancestor_map: std::collections::HashMap::new(),

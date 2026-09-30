@@ -45,6 +45,7 @@ fn test_ontology() -> Arc<Ontology> {
             description: None,
             parent: None,
             identity: false,
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
         relation_types: vec![
@@ -55,6 +56,7 @@ fn test_ontology() -> Arc<Ontology> {
                 target_type: None,
                 aliases: vec!["WROTE".to_string(), "AUTHORED_BY".to_string()],
                 keywords: vec!["author".to_string(), "writ".to_string()],
+                extract: true,
             },
             RelationTypeDef {
                 name: "AFFILIATED_WITH".to_string(),
@@ -63,6 +65,7 @@ fn test_ontology() -> Arc<Ontology> {
                 target_type: None,
                 aliases: vec!["WORKS_FOR".to_string()],
                 keywords: vec!["affiliat".to_string(), "employ".to_string()],
+                extract: true,
             },
             RelationTypeDef {
                 name: "MANAGES".to_string(),
@@ -71,6 +74,7 @@ fn test_ontology() -> Arc<Ontology> {
                 target_type: None,
                 aliases: vec![],
                 keywords: vec!["manag".to_string(), "supervis".to_string()],
+                extract: true,
             },
         ],
     })

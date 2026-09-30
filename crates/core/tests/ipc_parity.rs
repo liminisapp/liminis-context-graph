@@ -774,6 +774,7 @@ fn make_person_ontology() -> Arc<Ontology> {
         description: None,
         parent: None,
         identity: false,
+        extract: true,
     }];
     let ancestor_map = std::collections::HashMap::from([("Person".to_string(), vec![])]);
     Arc::new(Ontology {
@@ -859,6 +860,7 @@ fn make_relation_ontology() -> Arc<Ontology> {
                 target_type: None,
                 aliases: vec![],
                 keywords: vec![],
+                extract: true,
             },
             RelationTypeDef {
                 name: "AFFILIATED_WITH".to_string(),
@@ -867,6 +869,7 @@ fn make_relation_ontology() -> Arc<Ontology> {
                 target_type: None,
                 aliases: vec![],
                 keywords: vec![],
+                extract: true,
             },
         ],
         ancestor_map: std::collections::HashMap::new(),
@@ -3787,6 +3790,7 @@ async fn parity_canonicalize_no_deletion_of_arrow_edges() {
             description: None,
             parent: None,
             identity: false,
+            extract: true,
         }],
         relation_types: vec![RelationTypeDef {
             name: "AFFILIATED_WITH".to_string(),
@@ -3795,6 +3799,7 @@ async fn parity_canonicalize_no_deletion_of_arrow_edges() {
             target_type: None,
             aliases: vec![],
             keywords: vec!["affiliat".to_string()],
+            extract: true,
         }],
         ancestor_map: std::collections::HashMap::new(),
     });
@@ -3853,6 +3858,7 @@ async fn parity_canonicalize_relations_shape() {
             description: None,
             parent: None,
             identity: false,
+            extract: true,
         }],
         relation_types: vec![RelationTypeDef {
             name: "RELATES_TO".to_string(),
@@ -3861,6 +3867,7 @@ async fn parity_canonicalize_relations_shape() {
             target_type: None,
             aliases: vec![],
             keywords: vec!["relat".to_string()],
+            extract: true,
         }],
         ancestor_map: std::collections::HashMap::new(),
     });

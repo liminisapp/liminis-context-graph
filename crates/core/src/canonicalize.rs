@@ -94,15 +94,20 @@ pub struct LexicalIndex {
     keywords: Vec<(String, String)>,
     /// All canonical type names (for checking if current_rt is already canonical).
     canonical_names: std::collections::HashSet<String>,
+    /// Declared `extract: false` relation names (#637). An edge already typed as one of these
+    /// was asserted by the host and is never remapped by name or keyword evidence.
+    assert_only_names: std::collections::HashSet<String>,
 }
 
 /// Builds the alias→canonical relation-type map: each canonical name maps to itself, and each
 /// declared alias maps to its canonical name. Shared by `build_lexical_index` (the offline
 /// `knowledge_canonicalize_relations` pass) and the ingest-time strict-mode filter in
-/// `episode.rs` (FR-001) — one map, two consumers, per ADR-0310.
+/// `episode.rs` (FR-001) — one map, two consumers, per ADR-0310. Only extractable relation
+/// types (#637) are mapped, so neither consumer can retype an edge *into* an `extract: false`
+/// type from extracted evidence.
 pub fn build_alias_map(ontology: &Ontology) -> HashMap<String, String> {
     let mut exact: HashMap<String, String> = HashMap::new();
-    for rt in &ontology.relation_types {
+    for rt in ontology.extractable_relation_types() {
         // Canonical name maps to itself
         exact.insert(rt.name.clone(), rt.name.clone());
         // Aliases map to the canonical name
@@ -117,9 +122,16 @@ pub fn build_lexical_index(ontology: &Ontology) -> LexicalIndex {
     let exact = build_alias_map(ontology);
     let mut keywords: Vec<(String, String)> = Vec::new();
     let mut canonical_names = std::collections::HashSet::new();
+    let mut assert_only_names = std::collections::HashSet::new();
 
     for rt in &ontology.relation_types {
+        // Every declared name stays "already canonical" (idempotent for asserted edges),
+        // including `extract: false` ones (#637).
         canonical_names.insert(rt.name.clone());
+        if !rt.extract {
+            assert_only_names.insert(rt.name.clone());
+            continue;
+        }
         // Keywords for substring matching
         for kw in &rt.keywords {
             keywords.push((kw.clone(), rt.name.clone()));
@@ -130,6 +142,7 @@ pub fn build_lexical_index(ontology: &Ontology) -> LexicalIndex {
         exact,
         keywords,
         canonical_names,
+        assert_only_names,
     }
 }
 
@@ -157,6 +170,9 @@ pub fn is_noise_edge(s: &str) -> bool {
 /// 5. `relation_type` is already a canonical name → Mapped (idempotent)
 /// 6. Normalized `relation_type` in exact map (alias) or keyword match → Mapped
 /// 7. → Residual
+///
+/// Before step 3, an edge whose `relation_type` is a declared `extract: false` name is returned
+/// as `Mapped` to itself, so asserted assert-only edges are never retyped (#637).
 pub fn classify_edge_lexically(
     name: &str,
     current_rt: Option<&str>,
@@ -169,6 +185,14 @@ pub fn classify_edge_lexically(
     if let Some(rt) = current_rt {
         if is_noise_edge(rt) {
             return EdgeClass::Noise;
+        }
+    }
+
+    // An edge already typed as an `extract: false` relation was asserted by the host (#637):
+    // keep it as is rather than letting name/keyword evidence from extractable types retype it.
+    if let Some(rt) = current_rt {
+        if idx.assert_only_names.contains(rt) {
+            return EdgeClass::Mapped(rt.to_string());
         }
     }
 
@@ -305,8 +329,7 @@ pub async fn canonicalize_relations(
     let gloss_embeddings: Vec<(String, Vec<f32>)> = {
         let mut result = Vec::new();
         let types_with_desc: Vec<(String, String)> = ontology
-            .relation_types
-            .iter()
+            .extractable_relation_types()
             .filter_map(|rt| {
                 rt.description
                     .as_deref()
@@ -502,6 +525,7 @@ mod tests {
                 description: None,
                 parent: None,
                 identity: false,
+                extract: true,
             }],
             ancestor_map: std::collections::HashMap::new(),
             relation_types: vec![
@@ -512,6 +536,7 @@ mod tests {
                     target_type: None,
                     aliases: vec!["WROTE".to_string(), "AUTHORED_BY".to_string()],
                     keywords: vec!["author".to_string(), "writ".to_string()],
+                    extract: true,
                 },
                 RelationTypeDef {
                     name: "AFFILIATED_WITH".to_string(),
@@ -520,6 +545,7 @@ mod tests {
                     target_type: None,
                     aliases: vec!["WORKS_FOR".to_string()],
                     keywords: vec!["affiliat".to_string(), "employ".to_string()],
+                    extract: true,
                 },
             ],
         }
@@ -597,6 +623,29 @@ mod tests {
         match class {
             EdgeClass::Mapped(t) => assert_eq!(t, "AFFILIATED_WITH"),
             _ => panic!("expected Mapped(AFFILIATED_WITH)"),
+        }
+    }
+
+    #[test]
+    fn test_classify_asserted_extract_false_edge_not_remapped() {
+        let mut ontology = make_ontology_with_rules();
+        ontology.relation_types.push(RelationTypeDef {
+            name: "DERIVED_FROM".to_string(),
+            description: None,
+            source_type: None,
+            target_type: None,
+            aliases: vec![],
+            keywords: vec![],
+            extract: false,
+        });
+        let idx = build_lexical_index(&ontology);
+
+        // The name carries an extractable keyword ("author"), but the edge was asserted as
+        // DERIVED_FROM and must stay so.
+        let class = classify_edge_lexically("authored from", Some("DERIVED_FROM"), &idx);
+        match class {
+            EdgeClass::Mapped(t) => assert_eq!(t, "DERIVED_FROM"),
+            _ => panic!("expected Mapped(DERIVED_FROM), got {class:?}"),
         }
     }
 
