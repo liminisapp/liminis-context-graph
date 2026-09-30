@@ -4615,6 +4615,21 @@ async fn handle_reprocess_entity_types(
                           least one declared entity type to constrain classification",
             }));
         }
+        // `extract: false` types (#637) stay in the declared set above (so an asserted entity of
+        // such a type is not an off-ontology candidate) but are never offered as a target.
+        if resolved_ontology
+            .as_deref()
+            .unwrap()
+            .extractable_entity_types()
+            .next()
+            .is_none()
+        {
+            return Ok(json!({
+                "success": false,
+                "error": "every declared entity type is `extract: false`; reprocessing has no \
+                          extractable type to classify into",
+            }));
+        }
         Some(names)
     } else {
         None
@@ -4650,11 +4665,17 @@ async fn handle_reprocess_entity_types(
     }
 
     // Build the allowed_types list for constrained scopes (sorted for deterministic prompts).
-    let allowed_types: Option<Vec<String>> = ontology_type_names.map(|tn| {
-        let mut v: Vec<String> = tn.into_iter().collect();
-        v.sort_unstable();
-        v
-    });
+    // The menu is the extractable subset only (#637): reprocessing never retypes into an
+    // `extract: false` type.
+    let allowed_types: Option<Vec<String>> = if ontology_type_names.is_some() {
+        resolved_ontology.as_deref().map(|o| {
+            let mut v: Vec<String> = o.extractable_entity_type_names().into_iter().collect();
+            v.sort_unstable();
+            v
+        })
+    } else {
+        None
+    };
 
     // Phase B (no lock): classify entities via LLM in batches.
     let pairs: Vec<(String, String)> = entities
@@ -4717,6 +4738,15 @@ async fn handle_reprocess_entity_types(
     for (entity, assigned_type) in entities.iter().zip(types.iter()) {
         if assigned_type.is_empty() {
             // LLM returned no assignment (FR-010): leave unchanged.
+            unchanged_count += 1;
+            continue;
+        }
+        // Defensive (#637): the menu excludes `extract: false` types, but never trust the
+        // classifier's output to honour it.
+        if resolved_ontology
+            .as_deref()
+            .is_some_and(|o| o.is_extract_false_entity(assigned_type))
+        {
             unchanged_count += 1;
             continue;
         }
