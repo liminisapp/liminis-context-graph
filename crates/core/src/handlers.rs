@@ -1144,6 +1144,18 @@ fn optional_kind_param(v: &Value) -> Result<Option<String>, Error> {
     crate::types::normalize_kind(Some(v.as_str().unwrap_or(""))).map(Some)
 }
 
+/// Parses an optional `min_similarity` param (issue #629): absent/null ⇒ `None` (no floor);
+/// a number is clamped to 0.0–1.0, as `min_score` is for `search_passages`; any other type is a
+/// validation error. Unlike `min_score` there is deliberately no default — unset means no floor.
+fn optional_min_similarity_param(v: &Value) -> Result<Option<f64>, Error> {
+    if v.is_null() {
+        return Ok(None);
+    }
+    v.as_f64()
+        .map(|x| Some(x.clamp(0.0, 1.0)))
+        .ok_or_else(|| Error::Ipc("min_similarity must be a number".to_string()))
+}
+
 async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let query = p["query"].as_str().unwrap_or("").to_string();
@@ -1152,14 +1164,17 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     // Optional kind filter (issue #615): omitted ⇒ all kinds (D2's read rule). Multi-row, so
     // there is nothing to be ambiguous about — every candidate is returned with its own `kind`.
     let kind = optional_kind_param(&p["kind"])?;
+    // Optional similarity floor (issue #629), parsed once and reused by the retry below.
+    let min_similarity = optional_min_similarity_param(&p["min_similarity"])?;
 
-    let result = search::hybrid_entity_search_kind(
+    let result = search::hybrid_entity_search_scored(
         load_db(&state)?,
         Arc::clone(&state.embedder),
         &query,
         group_ids.clone(),
         limit,
         kind.clone(),
+        min_similarity,
     )
     .await;
 
@@ -1168,13 +1183,14 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
         Err(e) if is_missing_index_error(&e) => {
             if !state.indices_built.load(Ordering::Acquire) {
                 build_indices_once(&state).await?;
-                search::hybrid_entity_search_kind(
+                search::hybrid_entity_search_scored(
                     load_db(&state)?,
                     Arc::clone(&state.embedder),
                     &query,
                     group_ids,
                     limit,
                     kind,
+                    min_similarity,
                 )
                 .await
                 .map_err(|e2| {
@@ -1200,13 +1216,15 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     let query = p["query"].as_str().unwrap_or("").to_string();
     let group_ids = extract_optional_group_ids_preserve_empty(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
+    let min_similarity = optional_min_similarity_param(&p["min_similarity"])?;
 
-    let result = search::hybrid_edge_search(
+    let result = search::hybrid_edge_search_scored(
         load_db(&state)?,
         Arc::clone(&state.embedder),
         &query,
         group_ids.clone(),
         limit,
+        min_similarity,
     )
     .await;
 
@@ -1215,12 +1233,13 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
         Err(e) if is_missing_index_error(&e) => {
             if !state.indices_built.load(Ordering::Acquire) {
                 build_indices_once(&state).await?;
-                search::hybrid_edge_search(
+                search::hybrid_edge_search_scored(
                     load_db(&state)?,
                     Arc::clone(&state.embedder),
                     &query,
                     group_ids,
                     limit,
+                    min_similarity,
                 )
                 .await
                 .map_err(|e2| {
@@ -5788,6 +5807,24 @@ fn enrich_edge_from_entity_ep_info(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn min_similarity_param_parsing() {
+        assert_eq!(optional_min_similarity_param(&Value::Null).unwrap(), None);
+        assert_eq!(
+            optional_min_similarity_param(&json!(0.5)).unwrap(),
+            Some(0.5)
+        );
+        assert_eq!(optional_min_similarity_param(&json!(0)).unwrap(), Some(0.0));
+        assert_eq!(optional_min_similarity_param(&json!(7)).unwrap(), Some(1.0));
+        assert_eq!(
+            optional_min_similarity_param(&json!(-3.5)).unwrap(),
+            Some(0.0)
+        );
+        for bad in [json!("0.5"), json!(true), json!({}), json!([0.5])] {
+            assert!(optional_min_similarity_param(&bad).is_err(), "{bad}");
+        }
+    }
+
     use super::*;
 
     // #407: a single test function, not five, because `cargo test` runs tests within a binary
