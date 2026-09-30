@@ -11,7 +11,7 @@ title: Ontology
 
 Place the ontology at `{workspace}/.lcg/ontology.yaml`.
 
-**Requires a service restart to take effect.** The ontology is loaded once at startup and held in memory. Editing the file while the service runs has no effect until the next restart.
+**Requires a service restart to take effect.** The workspace-wide ontology is loaded once at startup and held in memory. Editing the file while the service runs has no effect until the next restart. (A group's *per-group* file can instead be picked up on a live service with [`knowledge_reload_ontology`](#reloading-a-groups-ontology); that call re-resolves one group but does not re-read this workspace file.)
 
 ## Per-group ontologies
 
@@ -53,8 +53,9 @@ through to step 2 (the workspace-wide ontology) if one exists, or step 3 (free-f
 it doesn't — never a startup failure or a hard error for that group. This degrades gracefully to
 whatever ontology this workspace already has validated (which may be none at all), and the failure
 is logged so it's observable rather than silent. Like the workspace-wide file, per-group files are
-loaded once (on that group's first use in the running process) and cached — restart the service to
-pick up a changed file.
+loaded once (on that group's first use in the running process) and cached — restart the service, or
+call [`knowledge_reload_ontology`](#reloading-a-groups-ontology) for that group, to pick up a changed
+file.
 
 **Direct-assert is unaffected.** `knowledge_assert_entity`/`knowledge_assert_relationship` accept
 arbitrary `labels` regardless of any per-group or workspace ontology — per-group resolution only
@@ -80,7 +81,7 @@ behaves identically; only the documentation available to the consumer is degrade
 
 ## Drift detection
 
-If the ontology governing a group's data changes between service restarts — the file is edited,
+If the ontology governing a group's data changes between service restarts or reloads — the file is edited,
 or a group starts/stops resolving through a per-group file versus the workspace fallback — the
 graph's entity/relation types may no longer match the vocabulary that produced them. Drift
 detection catches this and recommends **Recreate + re-ingest** (or a WAL rebuild/replay) as the
@@ -109,13 +110,76 @@ caching: a group that has **not yet been resolved** in this process picks up wha
 (or the workspace fallback) contains *at the time of that first use*, so an edit made while the
 service keeps running is visible the first time the group is actually used. It's only a group
 whose resolution is **already cached** — because it was used earlier in this process — that needs
-a restart to see a later edit; once a group's drift status has been computed, it does not change
-again mid-process even if its file is edited again afterward.
+a restart (or a [`knowledge_reload_ontology`](#reloading-a-groups-ontology) call) to see a later
+edit; once a group's drift status has been computed, it does not change again mid-process even if
+its file is edited again afterward, unless that group is reloaded.
 
 Drift clears after a successful remediation for the specific group remediated: either a fresh
 ingest for that group (`knowledge_add_episode`, e.g. following "Recreate + re-ingest") or a
 `knowledge_rebuild_from_wal` replay for that group. Clearing one group's drift never clears (or
 affects) any other group's drift status.
+
+## Reloading a group's ontology
+
+A group's ontology is resolved on its first use and then cached, so editing its file does not
+affect a running service. To make **one group** adopt an edited ontology without restarting (and
+so without interrupting every co-resident group), call the admin-scoped `knowledge_reload_ontology`
+(MCP tool of the same name; `admin` scope only):
+
+```json
+{"method": "knowledge_reload_ontology", "params": {"group_id": "content"}}
+```
+
+The group's cached resolution is discarded and immediately re-resolved through the normal
+precedence (per-group file, then the workspace ontology, then free-form). The response:
+
+```json
+{
+  "group_id": "content",
+  "previous_hash": "3f1a…",
+  "new_hash": "9b7c…",
+  "changed": true,
+  "drift": {"group_id": "content", "drifted": true, "drift_summary": "…"},
+  "identity_refusal": null
+}
+```
+
+- `previous_hash` is `null` if the group had not been resolved in this process yet; `new_hash` is
+  `"none"` when the group resolves to no ontology.
+- `changed` is `true` iff the two hashes differ. Reloading an unchanged file returns
+  `changed: false` and changes nothing (drift, refusal state and stored identity stamp included), so
+  it is safe to call defensively. A never-resolved group that resolves to no ontology is also
+  `changed: false`.
+- `drift` is the group's per-group drift status after the reload, the same entry
+  `knowledge_status.group_ontology_drift` reports. It compares against the **last-ingested**
+  ontology, not the previous cached one, so `changed` and `drift.drifted` are independent.
+- `identity_refusal` is `null`, or — when the new ontology adds or removes `identity: true` on a type
+  the group already holds — an object `{message, label, count, adding}`. The group is then refused
+  exactly as a restart would refuse it (see [Identity-bearing types](#identity-bearing-types)):
+  `knowledge_add_episode` fails with `-32003` and the group is listed in
+  `knowledge_status.group_identity_refusals`. The reload call itself still succeeds. Restore the
+  previous identity-bearing set in the file and reload again to clear the refusal.
+
+After a successful reload, new extraction for the group is typed by the new ontology, and
+`knowledge_canonicalize_relations` and `knowledge_reprocess_entity_types` resolve against it. Other
+groups' cached resolutions, hashes and drift status are untouched, and no stored data or schema is
+modified.
+
+Things to know:
+
+- The reload takes the service write lock, so it waits for in-flight read-lock passes
+  (`knowledge_reprocess_*`, `knowledge_canonicalize_relations`, backfills) to finish; while it waits,
+  new reads and writes queue behind it.
+- Extraction that is already in flight is not interrupted: an episode whose extraction started under
+  the old ontology may still commit afterwards with entities typed by the old ontology, but it will
+  not overwrite the group's recorded ontology hash or clear the drift the reload reported.
+  Reprocess/canonicalize calls that resolved their ontology just before a reload likewise finish
+  under the old one; only reload-then-call ordering is guaranteed.
+- The workspace-wide `.lcg/ontology.yaml` is still read only at startup. A group that relies on it
+  re-resolves to the startup value; a workspace-wide edit still requires a restart.
+- If the identity-set check cannot run (database unavailable), the reload fails and changes nothing.
+- A missing `group_id` is rejected with an error; a malformed or unreadable per-group file is treated
+  as missing, as at first resolution.
 
 ## Format
 
@@ -246,8 +310,9 @@ process, its identity-bearing set is compared with the record:
   ```
 
 A refusal modifies no data and affects only the offending group — reads, reprocessing, other
-groups and service startup are unaffected. It holds for the life of the process; restoring the
-recorded set and restarting the service loads the group normally. The remedy for a change you
+groups and service startup are unaffected. It holds until the group is reloaded with the recorded set restored
+([`knowledge_reload_ontology`](#reloading-a-groups-ontology)) or the service is restarted with it
+restored; either loads the group normally. The remedy for a change you
 really want is to re-ingest the group from source (lcg does not automate this).
 
 Because the flag is part of the ontology content hash, adding one also raises the ordinary

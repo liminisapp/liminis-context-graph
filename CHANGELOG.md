@@ -9,6 +9,17 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+### Added
+
+- **`knowledge_reload_ontology`** ([ADR-0627](docs/adr/0627-per-group-ontology-reload.md), #627,
+  implements #611). An `admin`-scope IPC method and MCP tool that reloads **one group's** ontology
+  without a service restart: it re-resolves the group through the normal precedence, honours the
+  identity-set guard (a reload that would reinterpret existing entities is reported in
+  `identity_refusal` and enforced as `-32003` on writes, and clears when the previous set is
+  restored and reloaded), and returns `{group_id, previous_hash, new_hash, changed, drift,
+  identity_refusal}`. An unchanged file is a no-op. Other groups and stored data are untouched.
+  See [docs/ontology.md](docs/ontology.md#reloading-a-groups-ontology).
+
 ### Fixed
 
 - **`health_check` no longer blocks behind the write lock** ([ADR-0628](docs/adr/0628-health-check-busy-state.md),
@@ -19,6 +30,8 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   no longer mistake a rebuilding daemon for a dead one and restart it mid-rebuild. The `healthy`
   and `degraded` responses are unchanged. Out-of-repo callers that treat any `ok: true` as ready
   should gate on `healthy` instead.
+- An episode whose extraction straddles an ontology reload no longer records its stale ontology
+  hash in the group's drift sidecar or clears the reloaded group's drift.
 
 ## [0.16.0] - 2026-09-29
 

@@ -4,6 +4,7 @@
 **Date**: 2026-09-29
 **Issue**: #616 (second phase of community report #614; follows #615)
 **Amends**: ADR-0615 (its "Extraction stays in the `Entity` namespace" section)
+**Amended by**: ADR-0627 (a refusal now holds until the group is reloaded with the identity-bearing set restored via `knowledge_reload_ontology`, or the process restarts — not only for the life of the process)
 
 ## Context
 
