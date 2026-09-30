@@ -558,8 +558,10 @@ async fn parity_find_relationships_nonempty() {
         );
     }
 
-    // ...and `min_similarity` is accepted; a floor no candidate can meet drops the vector-only
-    // items without changing the envelope.
+    // ...and `min_similarity` is accepted and honoured. `MockEmbedder` yields zero vectors, so every
+    // vector candidate sits at similarity exactly 1.0 and survives a floor of 1.0; the invariant
+    // is that anything returned either matched by BM25 or meets the floor on the vector path.
+    // (Floors that actually drop candidates are covered in `search_evidence.rs`.)
     let floored = dispatch_val(
         462,
         "knowledge_find_relationships",
@@ -568,7 +570,21 @@ async fn parity_find_relationships_nonempty() {
     )
     .await;
     assert_ok_resp(&floored, 462);
-    assert!(floored["result"]["edges"].is_array(), "{floored}");
+    let edges = floored["result"]["edges"].as_array().expect("edges array");
+    assert_eq!(
+        floored["result"]["count"].as_u64().unwrap() as usize,
+        edges.len()
+    );
+    for e in edges {
+        let s = &e["search"];
+        assert!(
+            s["text_match"] == json!(true)
+                || s["fact_similarity"]
+                    .as_f64()
+                    .is_some_and(|x| x >= 1.0 - 1e-6),
+            "edge below the floor leaked through: {floored}"
+        );
+    }
 }
 
 // ── Helpers for Tier 1a handshake tests ──────────────────────────────────────
