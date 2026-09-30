@@ -30,14 +30,15 @@ Choose the single most appropriate type. If none fit well, use the closest match
 
 fn build_entity_types_section(ontology: Option<&Ontology>) -> String {
     let onto = match ontology {
-        Some(o) if o.has_entity_types() => o,
+        // `extract: false` types (#637) are never offered; none left ⇒ same as no ontology.
+        Some(o) if o.extractable_entity_types().next().is_some() => o,
         _ => return DEFAULT_ENTITY_TYPES_SECTION.to_string(),
     };
 
     let mut section = String::from(
         "<ENTITY_TYPES>\nThe following entity types are defined for this workspace:\n",
     );
-    for et in &onto.entity_types {
+    for et in onto.extractable_entity_types() {
         if let Some(desc) = &et.description {
             section.push_str(&format!("- {}: {}\n", et.name, desc));
         } else {
@@ -66,14 +67,14 @@ fn build_entity_types_section(ontology: Option<&Ontology>) -> String {
 // rather than adding both-modes text like the entity-type section does (see ADR-0310).
 fn build_fact_types_section(ontology: Option<&Ontology>) -> String {
     let onto = match ontology {
-        Some(o) if o.has_relation_types() => o,
+        Some(o) if o.extractable_relation_types().next().is_some() => o,
         _ => return String::new(),
     };
 
     let mut section = String::from(
         "<FACT_TYPES>\nThe following relation types are defined for this workspace:\n",
     );
-    for rt in &onto.relation_types {
+    for rt in onto.extractable_relation_types() {
         let sig = match (&rt.source_type, &rt.target_type) {
             (Some(s), Some(t)) => format!(" ({} → {})", s, t),
             _ => String::new(),
@@ -462,5 +463,114 @@ mod tests {
             prompt.contains("REFERENCE_TIME"),
             "edge prompt must contain REFERENCE_TIME"
         );
+    }
+
+    // ── extract: false (#637) ─────────────────────────────────────────────────
+
+    fn assert_only_ontology(mode: OntologyMode, extract_false: bool) -> Ontology {
+        use crate::ontology::{EntityTypeDef, RelationTypeDef};
+        let flag = !extract_false;
+        Ontology {
+            mode,
+            entity_types: vec![
+                EntityTypeDef {
+                    name: "Person".to_string(),
+                    description: Some("A human".to_string()),
+                    parent: None,
+                    identity: false,
+                    extract: true,
+                },
+                EntityTypeDef {
+                    name: "Source".to_string(),
+                    description: Some("A wiki page the host asserts".to_string()),
+                    parent: None,
+                    identity: true,
+                    extract: flag,
+                },
+            ],
+            relation_types: vec![
+                RelationTypeDef {
+                    name: "KNOWS".to_string(),
+                    description: Some("acquaintance".to_string()),
+                    source_type: None,
+                    target_type: None,
+                    aliases: vec![],
+                    keywords: vec![],
+                    extract: true,
+                },
+                RelationTypeDef {
+                    name: "DERIVED_FROM".to_string(),
+                    description: Some("provenance link".to_string()),
+                    source_type: None,
+                    target_type: None,
+                    aliases: vec!["SOURCED_FROM".to_string()],
+                    keywords: vec![],
+                    extract: flag,
+                },
+            ],
+            ancestor_map: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn extract_false_types_absent_from_prompts() {
+        for mode in [OntologyMode::Open, OntologyMode::Strict] {
+            let onto = assert_only_ontology(mode, true);
+            let entity = entity_system_prompt(SourceType::Text, Some(&onto));
+            assert!(entity.contains("- Person: A human"));
+            assert!(!entity.contains("Source"));
+            assert!(!entity.contains("wiki page the host asserts"));
+            let edge = edge_system_prompt(Some(&onto));
+            assert!(edge.contains("- KNOWS: acquaintance"));
+            assert!(!edge.contains("DERIVED_FROM"));
+            assert!(!edge.contains("SOURCED_FROM"));
+            assert!(!edge.contains("provenance link"));
+        }
+    }
+
+    #[test]
+    fn flagless_prompts_list_every_type() {
+        // With no `extract: false` type the rendering lists all declared types.
+        let onto = assert_only_ontology(OntologyMode::Open, false);
+        let entity = entity_system_prompt(SourceType::Text, Some(&onto));
+        assert!(entity.contains(
+            "- Person: A human\n- Source: A wiki page the host asserts\nPrefer the listed"
+        ));
+        let section = build_fact_types_section(Some(&onto));
+        assert_eq!(
+            section,
+            "<FACT_TYPES>\nThe following relation types are defined for this workspace:\n\
+             - KNOWS: acquaintance\n- DERIVED_FROM: provenance link\n</FACT_TYPES>\n"
+        );
+    }
+
+    #[test]
+    fn all_extract_false_renders_as_no_ontology_types() {
+        use crate::ontology::{EntityTypeDef, RelationTypeDef};
+        let onto = Ontology {
+            mode: OntologyMode::Strict,
+            entity_types: vec![EntityTypeDef {
+                name: "Source".to_string(),
+                description: None,
+                parent: None,
+                identity: true,
+                extract: false,
+            }],
+            relation_types: vec![RelationTypeDef {
+                name: "DERIVED_FROM".to_string(),
+                description: None,
+                source_type: None,
+                target_type: None,
+                aliases: vec![],
+                keywords: vec![],
+                extract: false,
+            }],
+            ancestor_map: std::collections::HashMap::new(),
+        };
+        assert_eq!(
+            build_entity_types_section(Some(&onto)),
+            DEFAULT_ENTITY_TYPES_SECTION
+        );
+        assert_eq!(build_fact_types_section(Some(&onto)), "");
     }
 }
