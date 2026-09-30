@@ -14,8 +14,8 @@ on:
     inputs:
       e2e_only:
         description: >
-          Skip the test job (release build verification, clippy, fmt, R-003 bench) and
-          run only build-release plus the five real-corpus e2e jobs. Mirrors the old
+          Skip the test job (release build verification, clippy, R-003 bench) and
+          run only lint, the release build plus the five real-corpus e2e jobs. Mirrors the old
           standalone `real-corpus-e2e.yml` workflow_dispatch path (see #341) now that
           its jobs live in this file.
         type: boolean
@@ -45,6 +45,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+# Read-only by default. The seven post-build jobs (`test` and the six e2e jobs) override
+# this at job level with `contents: read` + `actions: write` — a job-level block replaces
+# this one entirely — solely so their final fail-fast step (#640, ADR-0640) can run
+# `gh run cancel`. Nothing else in the workflow holds write access.
 permissions:
   contents: read
 
@@ -104,14 +108,68 @@ jobs:
         with:
           extra-deny-pattern: "^crates/core/tests/fixtures/real_corpus_wal/"
 
+  # #640: cheap pre-gate. Runs the checks that need no compile — `cargo fmt --check`, the
+  # eval script guards and the ML-runtime-deps `cargo tree` guard — so a trivial failure is
+  # reported in about a minute instead of after the ~15-minute release build. `build-release`
+  # `needs:` this job, so a failure here means no compile or test job ever starts. Gated by
+  # the same fail-safe `if:` as `build-release` (docs-only PRs skip both; ADR-0322). Nothing
+  # here touches lbug's build script: `cargo tree` only resolves metadata, so this job needs
+  # neither the lbug cache, the OpenSSL staging nor the extension bundle. See ADR-0640.
+  # clippy deliberately stays in `test`: it is ~14s against the restored release build, but a
+  # debug `--all-targets` run here would be a cold full-workspace compile.
+  lint:
+    name: lint (fmt + guards)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      # The benchmark scripts' guards decide whether to spend money on a multi-hour run, and
+      # they had no automated coverage — #278 took seven review rounds, with roughly half the
+      # findings introduced by the previous round's fix. These run in seconds and need no
+      # network, API key, model server, or built binary, so they belong on every PR.
+      # They also cover portability: `md5 -q` shipped once and would have failed only here,
+      # on Linux, in the direction that blocks a valid run.
+      - name: eval script guards
+        run: crates/eval/scripts/test-scripts.sh
+
+      - name: check no ML runtime deps
+        run: |
+          # Capture `cargo tree` on its own (stderr kept) so a registry/network failure fails
+          # this step. Previously its stderr went to /dev/null inside a pipeline whose final
+          # `|| true` made an empty result read as "OK" — a silent pass (#640).
+          tree=$(cargo tree)
+          # Match crate names only — "tch" must not also match "scratch", etc.
+          # cargo tree prints lines like "├── tch v0.18.0"; an awk filter on the
+          # crate-name token avoids the substring false positives the prior grep had.
+          banned=$(printf '%s\n' "$tree" \
+            | awk '{ for (i=1;i<=NF;i++) if ($i ~ /^v[0-9]/) print $(i-1) }' \
+            | grep -Ex '(tch|candle|onnxruntime|tract)' || true)
+          if [ -n "$banned" ]; then
+            echo "ERROR: ML runtime dependency detected — violates Principle V"
+            echo "$banned"
+            exit 1
+          fi
+          echo "OK: no ML runtime deps found"
+
   # #341: the single build job for the whole workspace. Produces everything every other
   # job needs: the lbug cache (unchanged), a same-run artifact of the full `target/release`
   # tree for `test`, and a small artifact of exactly the six binaries the five e2e jobs
   # need. Nothing downstream of this job invokes `cargo build`/`cargo test --no-run` again.
   build-release:
-    name: build release artifacts
+    name: build (release profile)
     runs-on: ubuntu-latest
-    needs: changes
+    needs: [changes, lint]
     # `!cancelled()` overrides the default "skip if a dependency didn't succeed" behavior
     # so this still runs when `changes` itself fails outright (e.g. a checkout infra
     # failure) rather than just left its output unset. Without this, `needs.changes
@@ -121,7 +179,15 @@ jobs:
     # actually classified. `needs.changes.result != 'success'` is the fail-safe: any
     # non-success classifier outcome is treated as code-changed, same direction as the
     # in-script fail-safe defaults in the `changes` job itself.
-    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true')"
+    #
+    # #640: `needs.lint.result == 'success'` gates the build on the cheap pre-gate. `lint`
+    # shares this job's `changes`-based `if:`, so on a docs-only run both skip from the same
+    # condition and nothing new can block; a skipped `lint` never coexists with a running
+    # build. A failed `lint` skips this job (and, via `needs.build-release.result`, every job
+    # after it). No fail-fast cancel step here: `changes` and `lint` are already finished, so
+    # there is no in-flight sibling to stop, and a cancel could only turn the run's
+    # `failure` conclusion into `cancelled`.
+    if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.lint.result == 'success'"
     outputs:
       cache-hit: ${{ steps.lbug-cache.outputs.cache-hit }}
     steps:
@@ -331,8 +397,7 @@ jobs:
           if-no-files-found: error
 
       # `test` (below) needs the *entire* built tree (clippy and the R-003 bench operate
-      # over more than the six e2e binaries; `cargo fmt --check` does not need it, but
-      # runs in the same job), so it gets a full-tree hand-off via a same-run artifact
+      # over more than the six e2e binaries), so it gets a full-tree hand-off via a same-run artifact
       # rather than the small artifact above (FR-004 is scoped to what the e2e jobs need,
       # not to this hand-off — see ADR-0341, Key Decisions). `actions/cache` was
       # considered and rejected for this specific hand-off: this ~2.7GB payload is
@@ -363,8 +428,11 @@ jobs:
     # fail-safe above, for the same reason: a failed `changes` job must not silently
     # skip `test`. The final clause implements the `e2e_only` workflow_dispatch input
     # (#341): a manual "e2e only" run still needs `build-release` (the e2e jobs depend
-    # on it) but skips this job's own release-verification/clippy/fmt/bench tail.
+    # on it) but skips this job's own release-verification/clippy/bench tail.
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success' && !(github.event_name == 'workflow_dispatch' && inputs.e2e_only)"
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -372,7 +440,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt
+          components: clippy
 
       # Must match build-release's own normalization step exactly (same commit, same
       # deterministic timestamp) — see that step's comment for why this is required
@@ -459,15 +527,6 @@ jobs:
           fi
           echo "OK: full cache hit confirmed, no recompilation after restoring build-release's output"
 
-      # The benchmark scripts' guards decide whether to spend money on a multi-hour run, and
-      # they had no automated coverage — #278 took seven review rounds, with roughly half the
-      # findings introduced by the previous round's fix. These run in seconds and need no
-      # network, API key, model server, or built binary, so they belong on every PR.
-      # They also cover portability: `md5 -q` shipped once and would have failed only here,
-      # on Linux, in the direction that blocks a valid run.
-      - name: eval script guards
-        run: crates/eval/scripts/test-scripts.sh
-
       # R-003 correctness gate: 95% decision-overlap between brute-force and hybrid dedup.
       # Runs here (not bench-dedup) so it shares the release build artifacts already restored
       # into ./target/. `dedup_overlap_check` is its own [[bench]] target (not a group sharing a
@@ -488,26 +547,25 @@ jobs:
       - name: compile-check remaining bench targets
         run: cargo check --release --benches -p lcg-core
 
-      - name: check no ML runtime deps
-        run: |
-          # Match crate names only — "tch" must not also match "scratch", etc.
-          # cargo tree prints lines like "├── tch v0.18.0"; an awk filter on the
-          # crate-name token avoids the substring false positives the prior grep had.
-          banned=$(cargo tree 2>/dev/null \
-            | awk '{ for (i=1;i<=NF;i++) if ($i ~ /^v[0-9]/) print $(i-1) }' \
-            | grep -Ex '(tch|candle|onnxruntime|tract)' || true)
-          if [ -n "$banned" ]; then
-            echo "ERROR: ML runtime dependency detected — violates Principle V"
-            echo "$banned"
-            exit 1
-          fi
-          echo "OK: no ML runtime deps found"
-
       - name: cargo clippy
         run: cargo clippy --release -- -D warnings
 
-      - name: cargo fmt
-        run: cargo fmt --check
+      # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
+      # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
+      # failed — it is false when the job itself is cancelled, so cancellations never
+      # cascade. Best-effort: fork PRs get a read-only token (403) and a second job failing
+      # at the same moment hits an already-cancelling run (409); neither may change this
+      # job's original failed conclusion, hence `continue-on-error` and the `||` fallback.
+      # Inlined (not a composite action) because the e2e jobs do no checkout. See ADR-0640.
+      - name: Fail fast - cancel the run
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "::error::fail-fast: job '${{ github.job }}' failed, cancelling the run"
+          gh run cancel "$GITHUB_RUN_ID" || echo "::warning::fail-fast: could not cancel the run (read-only token or already cancelling)"
 
   # #341: the five real-corpus e2e jobs, merged in from the now-deleted
   # real-corpus-e2e.yml so a single `needs: build-release` can gate them at job
@@ -537,6 +595,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-release]
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -591,6 +652,23 @@ jobs:
           fi
           echo "OK: no recompilation detected in this job's output"
 
+      # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
+      # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
+      # failed — it is false when the job itself is cancelled, so cancellations never
+      # cascade. Best-effort: fork PRs get a read-only token (403) and a second job failing
+      # at the same moment hits an already-cancelling run (409); neither may change this
+      # job's original failed conclusion, hence `continue-on-error` and the `||` fallback.
+      # Inlined (not a composite action) because the e2e jobs do no checkout. See ADR-0640.
+      - name: Fail fast - cancel the run
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "::error::fail-fast: job '${{ github.job }}' failed, cancelling the run"
+          gh run cancel "$GITHUB_RUN_ID" || echo "::warning::fail-fast: could not cancel the run (read-only token or already cancelling)"
+
   # wal_root_migration's SC-001 acceptance test (#431) drives the real 74MB/12,481-seq legacy
   # fixture through `migrate_wal_root_if_needed` and asserts parity with 0.13.1's rebuild output.
   # It is #[ignore]d for the same reason as its siblings above — too slow for the default
@@ -605,6 +683,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [changes, build-release]
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -647,11 +728,31 @@ jobs:
           fi
           echo "OK: no recompilation detected in this job's output"
 
+      # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
+      # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
+      # failed — it is false when the job itself is cancelled, so cancellations never
+      # cascade. Best-effort: fork PRs get a read-only token (403) and a second job failing
+      # at the same moment hits an already-cancelling run (409); neither may change this
+      # job's original failed conclusion, hence `continue-on-error` and the `||` fallback.
+      # Inlined (not a composite action) because the e2e jobs do no checkout. See ADR-0640.
+      - name: Fail fast - cancel the run
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "::error::fail-fast: job '${{ github.job }}' failed, cancelling the run"
+          gh run cancel "$GITHUB_RUN_ID" || echo "::warning::fail-fast: could not cancel the run (read-only token or already cancelling)"
+
   mcp-real-corpus-e2e:
     name: mcp_real_corpus_e2e (ubuntu-latest)
     runs-on: ubuntu-latest
     needs: [changes, build-release]
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -697,11 +798,31 @@ jobs:
           fi
           echo "OK: no recompilation detected in this job's output"
 
+      # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
+      # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
+      # failed — it is false when the job itself is cancelled, so cancellations never
+      # cascade. Best-effort: fork PRs get a read-only token (403) and a second job failing
+      # at the same moment hits an already-cancelling run (409); neither may change this
+      # job's original failed conclusion, hence `continue-on-error` and the `||` fallback.
+      # Inlined (not a composite action) because the e2e jobs do no checkout. See ADR-0640.
+      - name: Fail fast - cancel the run
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "::error::fail-fast: job '${{ github.job }}' failed, cancelling the run"
+          gh run cancel "$GITHUB_RUN_ID" || echo "::warning::fail-fast: could not cancel the run (read-only token or already cancelling)"
+
   mcp-write-mutation-e2e:
     name: mcp_real_corpus_mutation_e2e (ubuntu-latest)
     runs-on: ubuntu-latest
     needs: [changes, build-release]
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -747,11 +868,31 @@ jobs:
           fi
           echo "OK: no recompilation detected in this job's output"
 
+      # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
+      # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
+      # failed — it is false when the job itself is cancelled, so cancellations never
+      # cascade. Best-effort: fork PRs get a read-only token (403) and a second job failing
+      # at the same moment hits an already-cancelling run (409); neither may change this
+      # job's original failed conclusion, hence `continue-on-error` and the `||` fallback.
+      # Inlined (not a composite action) because the e2e jobs do no checkout. See ADR-0640.
+      - name: Fail fast - cancel the run
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "::error::fail-fast: job '${{ github.job }}' failed, cancelling the run"
+          gh run cancel "$GITHUB_RUN_ID" || echo "::warning::fail-fast: could not cancel the run (read-only token or already cancelling)"
+
   mcp-admin-data-e2e:
     name: mcp_real_corpus_admin_data_e2e (ubuntu-latest)
     runs-on: ubuntu-latest
     needs: [changes, build-release]
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -797,11 +938,31 @@ jobs:
           fi
           echo "OK: no recompilation detected in this job's output"
 
+      # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
+      # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
+      # failed — it is false when the job itself is cancelled, so cancellations never
+      # cascade. Best-effort: fork PRs get a read-only token (403) and a second job failing
+      # at the same moment hits an already-cancelling run (409); neither may change this
+      # job's original failed conclusion, hence `continue-on-error` and the `||` fallback.
+      # Inlined (not a composite action) because the e2e jobs do no checkout. See ADR-0640.
+      - name: Fail fast - cancel the run
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "::error::fail-fast: job '${{ github.job }}' failed, cancelling the run"
+          gh run cancel "$GITHUB_RUN_ID" || echo "::warning::fail-fast: could not cancel the run (read-only token or already cancelling)"
+
   mcp-admin-lifecycle-e2e:
     name: mcp_real_corpus_admin_lifecycle_e2e (ubuntu-latest)
     runs-on: ubuntu-latest
     needs: [changes, build-release]
     if: "!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code_changed == 'true') && needs.build-release.result == 'success'"
+    permissions:
+      contents: read
+      actions: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -847,3 +1008,20 @@ jobs:
             exit 1
           fi
           echo "OK: no recompilation detected in this job's output"
+
+      # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
+      # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
+      # failed — it is false when the job itself is cancelled, so cancellations never
+      # cascade. Best-effort: fork PRs get a read-only token (403) and a second job failing
+      # at the same moment hits an already-cancelling run (409); neither may change this
+      # job's original failed conclusion, hence `continue-on-error` and the `||` fallback.
+      # Inlined (not a composite action) because the e2e jobs do no checkout. See ADR-0640.
+      - name: Fail fast - cancel the run
+        if: failure()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          echo "::error::fail-fast: job '${{ github.job }}' failed, cancelling the run"
+          gh run cancel "$GITHUB_RUN_ID" || echo "::warning::fail-fast: could not cancel the run (read-only token or already cancelling)"
