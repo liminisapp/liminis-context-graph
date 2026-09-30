@@ -332,8 +332,100 @@ pub struct PassageResult {
     pub attributes: String,
 }
 
+/// Why an entity was returned by `knowledge_find_entities` (issue #629): the fused RRF score
+/// plus each retrieval path's raw evidence. A path that did not retrieve the item reports
+/// `None` (serialized as `null`). Similarities are cosine similarity (`1 - distance`); a
+/// non-finite value is reported as `None` so it never reaches JSON.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EntitySearchEvidence {
+    pub rrf_score: f64,
+    /// `true` iff the BM25 (full-text) path retrieved the item.
+    pub text_match: bool,
+    pub bm25_score: Option<f64>,
+    pub name_similarity: Option<f64>,
+    pub summary_similarity: Option<f64>,
+}
+
+/// Why a fact was returned by `knowledge_find_relationships` (issue #629). See
+/// [`EntitySearchEvidence`] for field semantics.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EdgeSearchEvidence {
+    pub rrf_score: f64,
+    pub text_match: bool,
+    pub bm25_score: Option<f64>,
+    pub fact_similarity: Option<f64>,
+}
+
+/// An [`EntityRow`] with its `search` evidence, flattened so the row's own fields stay at the
+/// top level. Used only by `knowledge_find_entities`; `EntityRow` itself is unchanged.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScoredEntity {
+    #[serde(flatten)]
+    pub entity: EntityRow,
+    pub search: EntitySearchEvidence,
+}
+
+/// A [`RelatesToEdge`] with its `search` evidence, flattened. Used only by
+/// `knowledge_find_relationships`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScoredEdge {
+    #[serde(flatten)]
+    pub edge: RelatesToEdge,
+    pub search: EdgeSearchEvidence,
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn scored_entity_flattens_row_and_serializes_null_evidence() {
+        let scored = ScoredEntity {
+            entity: EntityRow {
+                uuid: "u1".into(),
+                name: "Apollo".into(),
+                ..Default::default()
+            },
+            search: EntitySearchEvidence {
+                rrf_score: 0.5,
+                text_match: false,
+                bm25_score: None,
+                name_similarity: Some(0.75),
+                summary_similarity: None,
+            },
+        };
+        let v = serde_json::to_value(&scored).unwrap();
+        assert_eq!(v["uuid"], "u1");
+        assert_eq!(v["name"], "Apollo");
+        assert_eq!(v["search"]["text_match"], false);
+        assert!(v["search"]["bm25_score"].is_null());
+        assert_eq!(v["search"]["name_similarity"], 0.75);
+        assert!(v["search"]["summary_similarity"].is_null());
+        assert!(v["search"].get("rrf_score").is_some());
+    }
+
+    #[test]
+    fn scored_edge_flattens_edge_and_serializes_evidence() {
+        let scored = ScoredEdge {
+            edge: RelatesToEdge {
+                uuid: "e1".into(),
+                fact: "A knows B".into(),
+                ..Default::default()
+            },
+            search: EdgeSearchEvidence {
+                rrf_score: 0.03,
+                text_match: true,
+                bm25_score: Some(1.5),
+                fact_similarity: None,
+            },
+        };
+        let v = serde_json::to_value(&scored).unwrap();
+        assert_eq!(v["uuid"], "e1");
+        assert_eq!(v["fact"], "A knows B");
+        assert_eq!(v["search"]["text_match"], true);
+        assert_eq!(v["search"]["bm25_score"], 1.5);
+        assert!(v["search"]["fact_similarity"].is_null());
+    }
+
     use super::*;
 
     #[test]
