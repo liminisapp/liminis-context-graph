@@ -5807,6 +5807,8 @@ fn enrich_edge_from_entity_ep_info(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn min_similarity_param_parsing() {
         assert_eq!(optional_min_similarity_param(&Value::Null).unwrap(), None);
@@ -5824,8 +5826,6 @@ mod tests {
             assert!(optional_min_similarity_param(&bad).is_err(), "{bad}");
         }
     }
-
-    use super::*;
 
     // #407: a single test function, not five, because `cargo test` runs tests within a binary
     // in parallel by default — separate tests toggling the same process-global env var would

@@ -376,6 +376,7 @@ pub struct ScoredEdge {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
 
     #[test]
     fn scored_entity_flattens_row_and_serializes_null_evidence() {
@@ -425,8 +426,6 @@ mod tests {
         assert_eq!(v["search"]["bm25_score"], 1.5);
         assert!(v["search"]["fact_similarity"].is_null());
     }
-
-    use super::*;
 
     #[test]
     fn extracted_entity_summary_absent_defaults_to_empty_string() {
