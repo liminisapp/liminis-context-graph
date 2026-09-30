@@ -245,6 +245,47 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
     Ok(json!({ "episode_uuid": result.episode_uuid }))
 }
 
+/// Builds the `busy` health payload (issue #628) without touching the DB or awaiting anything.
+///
+/// If a rebuild job is `Running`, reports `activity: "rebuilding"` with that job's `job_id` and
+/// `progress` (earliest `start_time` wins, `job_id` breaks ties). Otherwise — no running job, or
+/// the `rebuild_jobs` mutex is contended or poisoned — reports `activity: "writing"` with no
+/// progress. `try_lock` keeps this non-blocking (FR-008).
+fn busy_health_payload(state: &AppState) -> Value {
+    if let Ok(jobs) = state.rebuild_jobs.try_lock() {
+        let running = jobs
+            .values()
+            .filter(|j| j.status == JobStatus::Running)
+            .min_by(|a, b| {
+                a.start_time
+                    .cmp(&b.start_time)
+                    .then_with(|| a.job_id.cmp(&b.job_id))
+            });
+        if let Some(job) = running {
+            return json!({
+                "ok": true,
+                "healthy": false,
+                "state": "busy",
+                "activity": "rebuilding",
+                "job_id": job.job_id,
+                "progress": {
+                    "mutations_replayed": job.mutations_replayed,
+                    "wal_files_processed": job.wal_files_processed,
+                    "wal_files_total": job.wal_files_total,
+                    "elapsed_seconds": job.elapsed_seconds(),
+                },
+            });
+        }
+    }
+    json!({"ok": true, "healthy": false, "state": "busy", "activity": "writing"})
+}
+
+/// Liveness/readiness probe. Never waits on the write lock (issue #628).
+///
+/// - DB not loaded: `{ok:false, healthy:false, state:"degraded", reason}`.
+/// - Write lock free: probes the DB, `{ok:true, healthy:true, state:"healthy"}`.
+/// - Write lock held or a write pending: `{ok:true, healthy:false, state:"busy", activity, ..}`
+///   (alive but not ready), answered without connecting to the DB.
 async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
     let db_opt = state.db.load_full();
     match db_opt {
@@ -258,7 +299,9 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
             Ok(json!({"ok": false, "healthy": false, "state": "degraded", "reason": reason}))
         }
         Some(db) => {
-            let _guard = state.write_lock.read().await;
+            let Ok(_guard) = state.write_lock.try_read() else {
+                return Ok(busy_health_payload(&state));
+            };
             tokio::task::spawn_blocking(move || {
                 let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
                 conn.probe().map_err(|e| Error::Ipc(format!("db: {e}")))
