@@ -22,10 +22,16 @@ name: CI Failure Notify
 # a shared build job at job granularity — a restructuring `workflow_run` can't see
 # through. "Real-Corpus E2E" no longer exists as a workflow, so it's replaced by "CI"
 # below. This is a deliberate broadening, not just a rename: this listener now also
-# fires for a post-merge failure of `test` itself (release build, clippy, fmt, R-003
+# fires for a post-merge failure of `test` itself (release build, clippy, R-003
 # bench), which it never did before. That's an intentional side effect (a `test`
 # failure on `main` going unnoticed is arguably worse than the gap this widens), not an
 # oversight — see ADR-0341.
+#
+# #640: ci.yml now fails fast — the first failing post-build job runs `gh run cancel`, so a
+# genuinely failing run can end with conclusion `cancelled`. `cancelled` therefore no longer
+# means "superseded, ignore": the `gate` step below treats a cancelled run as actionable only
+# if the jobs API shows a real failure (a job that failed/timed out, or any failed step). A
+# run cancelled purely by a superseding push has neither and stays a no-op. See ADR-0640.
 on:
   workflow_run:
     workflows:
@@ -85,15 +91,42 @@ jobs:
       CONCLUSION: ${{ github.event.workflow_run.conclusion }}
       WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
       WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+      # jq selector for a *genuinely* failing job: one whose conclusion is neither
+      # success/skipped/cancelled (so timed_out/action_required still count), or one that
+      # is marked cancelled but holds a failed step (#640 — a job that issued the fail-fast
+      # cancel can itself be reported cancelled while its failed step keeps `failure`).
+      # Cancelled siblings with no failed step are excluded, so the issue names the real cause.
+      FAILING_JOB_JQ: 'select((.conclusion != null and .conclusion != "success" and .conclusion != "skipped" and .conclusion != "cancelled") or ((.steps // []) | any(.conclusion == "failure")))'
     steps:
-      # cancel-in-progress: true on ci.yml means a superseded run reports 'cancelled' —
-      # that must never be treated as a failure signal.
-      - name: Skip cancelled/superseded runs
-        if: env.CONCLUSION == 'cancelled' || env.CONCLUSION == 'skipped'
-        run: echo "Run concluded '$CONCLUSION' (superseded or skipped) — not a signal, no-op."
+      # Decides whether this run is a signal at all. ci.yml's `cancel-in-progress: true`
+      # means a run superseded by a newer push reports 'cancelled' — that is not a failure
+      # signal. But ci.yml's fail-fast (#640) can also leave a run `cancelled` after a real
+      # failure, which IS one. The jobs API tells them apart: only the latter has a
+      # genuinely failing job. `success` stays actionable so an open issue still resolves.
+      - name: Decide whether the run is actionable
+        id: gate
+        run: |
+          case "$CONCLUSION" in
+            success) actionable=true ;;
+            skipped) actionable=false ;;
+            cancelled)
+              jobs_json=$(gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" \
+                | jq -s '{jobs: [.[].jobs[]]}')
+              n=$(echo "$jobs_json" | jq "[.jobs[] | $FAILING_JOB_JQ] | length")
+              if [ "$n" -gt 0 ]; then
+                echo "Run concluded 'cancelled' but $n job(s) genuinely failed (fail-fast) — actionable."
+                actionable=true
+              else
+                echo "Run concluded 'cancelled' with no failed job (superseded) — not a signal, no-op."
+                actionable=false
+              fi
+              ;;
+            *) actionable=true ;;
+          esac
+          echo "actionable=$actionable" >> "$GITHUB_OUTPUT"
 
       - name: Derive workflow slug and labels
-        if: env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
+        if: steps.gate.outputs.actionable == 'true'
         id: labels
         run: |
           slug=$(basename "$WORKFLOW_PATH" .yml)
@@ -107,7 +140,7 @@ jobs:
       # other failure (permissions, rate limiting, API error) fails the run loudly
       # instead of silently defeating the notification mechanism downstream.
       - name: Ensure labels exist
-        if: env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
+        if: steps.gate.outputs.actionable == 'true'
         env:
           WORKFLOW_LABEL: ${{ steps.labels.outputs.workflow_label }}
         run: |
@@ -124,7 +157,7 @@ jobs:
           create_label "$WORKFLOW_LABEL" "Auto-filed failures for $WORKFLOW_NAME"
 
       - name: Find existing tracking issue
-        if: env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
+        if: steps.gate.outputs.actionable == 'true'
         id: existing
         env:
           WORKFLOW_LABEL: ${{ steps.labels.outputs.workflow_label }}
@@ -142,19 +175,21 @@ jobs:
             --comment "✅ [$WORKFLOW_NAME run]($RUN_URL) passed — resolving."
 
       - name: Gather failing job detail
-        if: env.CONCLUSION != 'success' && env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
+        if: steps.gate.outputs.actionable == 'true' && env.CONCLUSION != 'success'
         id: detail
         run: |
-          # Match anything but success/skipped, not just "failure" — a timed-out or
-          # action_required job reports conclusion: "timed_out"/"action_required",
-          # not "failure", and would otherwise be silently dropped from the report.
+          # FAILING_JOB_JQ (job env above) matches anything but success/skipped/cancelled,
+          # not just "failure" — a timed-out or action_required job reports
+          # conclusion: "timed_out"/"action_required", not "failure", and would otherwise
+          # be silently dropped from the report. Jobs cancelled by ci.yml's fail-fast are
+          # excluded unless they hold a failed step, so the report names the real cause.
           # --paginate: the jobs endpoint defaults to 30 per page: without it, a
           # watched workflow with more than 30 jobs would silently drop failing jobs
           # past the first page from the report.
           jobs_json=$(gh api --paginate "repos/$GH_REPO/actions/runs/$RUN_ID/jobs" \
             | jq -s '{jobs: [.[].jobs[]]}')
-          failing_names=$(echo "$jobs_json" | jq -r '[.jobs[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped") | .name] | join(", ")')
-          first_failing_id=$(echo "$jobs_json" | jq -r '[.jobs[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped")][0].id // empty')
+          failing_names=$(echo "$jobs_json" | jq -r "[.jobs[] | $FAILING_JOB_JQ | .name] | join(\", \")")
+          first_failing_id=$(echo "$jobs_json" | jq -r "[.jobs[] | $FAILING_JOB_JQ][0].id // empty")
           echo "failing_names=$failing_names" >> "$GITHUB_OUTPUT"
           {
             echo "log_excerpt<<EOF_$RUN_ID"
@@ -175,7 +210,7 @@ jobs:
       # the script body) so log content pulled from a test run is never re-parsed
       # as shell syntax by the heredoc it's substituted into.
       - name: File or update failure issue
-        if: env.CONCLUSION != 'success' && env.CONCLUSION != 'cancelled' && env.CONCLUSION != 'skipped'
+        if: steps.gate.outputs.actionable == 'true' && env.CONCLUSION != 'success'
         env:
           ISSUE_NUMBER: ${{ steps.existing.outputs.number }}
           WORKFLOW_LABEL: ${{ steps.labels.outputs.workflow_label }}
