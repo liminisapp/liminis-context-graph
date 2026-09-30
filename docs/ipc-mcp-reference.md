@@ -101,6 +101,50 @@ until `connected` and `queryable` are both `true` and `initializing` is `false` 
 for the full rationale. A `degraded` response after startup has otherwise settled is a legitimate
 outcome (e.g. unrecovered corruption) — not something to retry indefinitely.
 
+A `busy` response (see [Health check contract](#health-check-contract)) is **not** a readiness
+signal: it means the service is alive but a write is holding or waiting for the write lock — most
+importantly a long `knowledge_rebuild_from_wal`. Pollers keep waiting on `busy` (gate on
+`result.healthy == true`) and must not treat it as failure.
+
+### Health check contract
+
+`health_check` never waits on the write lock, so it answers promptly even during a long WAL
+rebuild ([ADR-0628](adr/0628-health-check-busy-state.md), #628). The response's `state` is one of:
+
+| `state` | `ok` | `healthy` | Meaning | Supervisor action |
+|---|---|---|---|---|
+| `healthy` | `true` | `true` | Alive and ready: DB open, no write in progress or pending. | Ready — send work. |
+| `busy` | `true` | `false` | Alive, **not ready**: a write is pending or in progress. | Alive — keep waiting; do not restart. |
+| `degraded` | `false` | `false` | Alive but unusable: DB not loaded. `reason` says why. | Recover (`knowledge_recover`) or investigate. |
+| *(no answer)* | — | — | Dead or wedged. | Restart. |
+
+`busy` carries an `activity` field. While a `knowledge_rebuild_from_wal` job is running:
+
+```json
+{"ok": true, "healthy": false, "state": "busy", "activity": "rebuilding",
+ "job_id": "…", "progress": {"mutations_replayed": 48210, "wal_files_processed": 3,
+                             "wal_files_total": 12, "elapsed_seconds": 91.4}}
+```
+
+`progress` uses the same values as `knowledge_rebuild_status`. For any other writer the response
+is `{"ok": true, "healthy": false, "state": "busy", "activity": "writing"}` with no `job_id` or
+`progress`. The busy path never connects to or queries the database.
+
+Notes:
+
+- `busy` means "a write is pending **or** in progress": a writer queued behind readers also makes
+  the lock unavailable, so an otherwise idle service can briefly report `busy`.
+- Batched passes ([ADR-0030](adr/0030-batched-write-lock-for-long-running-passes.md)) release the
+  lock between batches, so during one the state alternates between `busy` and `healthy`.
+- A streaming rebuild (`_progress_token`) is not registered as a job: it reports
+  `activity: "writing"` without `progress`.
+- Startup work (legacy and WAL-root migration, startup recovery) runs before the accept loop, so a
+  probe sent then queues in the kernel and gets no answer until startup finishes.
+- `healthy` can be reported in the short window after a rebuild job is registered but before it
+  takes the write lock.
+- `busy` has `healthy: false` on purpose: existing pollers that gate on `healthy` keep waiting.
+  A liveness probe that only needs "is the process alive" should accept `ok: true`.
+
 ## MCP-over-stdio transport
 
 `liminis-context-graph --mcp-stdio` starts a native [Model Context Protocol](https://modelcontextprotocol.io)

@@ -132,6 +132,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0593](0593-pin-lbug-extension-bytes.md) | Pin lbug extension bytes; treat embedded version strings as a diagnostic, not an oracle | 2026-09-16 |
 | [0615](0615-kind-scoped-entity-identity.md) | Kind-Scoped Entity Identity — `Entity.kind` and `lookup_key = group_id ␟ kind ␟ name` | 2026-09-29 |
 | [0616](0616-ontology-driven-kind-assignment.md) | Ontology-Driven Kind Assignment — identity-bearing entity types during extraction | 2026-09-29 |
+| [0628](0628-health-check-busy-state.md) | `health_check` Reports `busy` Instead of Blocking Behind `write_lock` | 2026-09-29 |
 
 ## Historical numbering
 
