@@ -99,10 +99,12 @@ pub struct LexicalIndex {
 /// Builds the alias→canonical relation-type map: each canonical name maps to itself, and each
 /// declared alias maps to its canonical name. Shared by `build_lexical_index` (the offline
 /// `knowledge_canonicalize_relations` pass) and the ingest-time strict-mode filter in
-/// `episode.rs` (FR-001) — one map, two consumers, per ADR-0310.
+/// `episode.rs` (FR-001) — one map, two consumers, per ADR-0310. Only extractable relation
+/// types (#637) are mapped, so neither consumer can retype an edge *into* an `extract: false`
+/// type from extracted evidence.
 pub fn build_alias_map(ontology: &Ontology) -> HashMap<String, String> {
     let mut exact: HashMap<String, String> = HashMap::new();
-    for rt in &ontology.relation_types {
+    for rt in ontology.extractable_relation_types() {
         // Canonical name maps to itself
         exact.insert(rt.name.clone(), rt.name.clone());
         // Aliases map to the canonical name
@@ -119,7 +121,12 @@ pub fn build_lexical_index(ontology: &Ontology) -> LexicalIndex {
     let mut canonical_names = std::collections::HashSet::new();
 
     for rt in &ontology.relation_types {
+        // Every declared name stays "already canonical" (idempotent for asserted edges),
+        // including `extract: false` ones (#637).
         canonical_names.insert(rt.name.clone());
+        if !rt.extract {
+            continue;
+        }
         // Keywords for substring matching
         for kw in &rt.keywords {
             keywords.push((kw.clone(), rt.name.clone()));
@@ -305,8 +312,7 @@ pub async fn canonicalize_relations(
     let gloss_embeddings: Vec<(String, Vec<f32>)> = {
         let mut result = Vec::new();
         let types_with_desc: Vec<(String, String)> = ontology
-            .relation_types
-            .iter()
+            .extractable_relation_types()
             .filter_map(|rt| {
                 rt.description
                     .as_deref()
