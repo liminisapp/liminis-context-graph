@@ -16,7 +16,7 @@ use crate::{
     error::Error,
     extractor::Extractor,
     identity_stamp::{self, IdentityRefusal},
-    ontology::{load_ontology, Ontology},
+    ontology::{content_hash, load_ontology, Ontology},
     ontology_sidecar,
     rebuild_job::RebuildJob,
     telemetry::TelemetrySink,
@@ -71,6 +71,30 @@ pub enum GroupOntologyCacheState {
     Resolved(GroupOntologyEntry),
 }
 
+/// Result of [`AppState::reload_group_ontology`] (issue #627).
+#[derive(Debug, Clone)]
+pub struct ReloadOutcome {
+    /// Hash of the group's cached ontology before the reload; `None` if it was not resolved yet.
+    pub previous_hash: Option<String>,
+    /// Hash of the ontology the group now resolves to (`"none"` for no ontology).
+    pub new_hash: String,
+    pub drift: GroupDriftStatus,
+    pub identity_refusal: Option<IdentityRefusal>,
+    /// The identity-set check could not run; the reload changed nothing.
+    pub identity_unchecked: Option<String>,
+}
+
+impl ReloadOutcome {
+    /// `true` iff the group's ontology hash differs before and after. A never-resolved group
+    /// counts as changed only if it now resolves to an ontology.
+    pub fn changed(&self) -> bool {
+        match &self.previous_hash {
+            Some(prev) => prev != &self.new_hash,
+            None => self.new_hash != "none",
+        }
+    }
+}
+
 pub struct AppState {
     /// ArcSwapOption allows `clear_all` and `knowledge_recover` to atomically replace the live Db
     /// under the write lock without holding an inner Mutex. `None` represents degraded state
@@ -122,7 +146,8 @@ pub struct AppState {
     pub cancelled_chunks: Arc<AtomicUsize>,
     /// Workspace-scoped entity/relation vocabulary loaded from `.lcg/ontology.yaml`.
     /// `None` when no file is present, empty, or malformed — free-form extraction applies.
-    /// Requires a service restart to pick up changes (FR-007; v1.5 will add hot-reload).
+    /// Read once at startup: a service restart is needed to pick up changes to this file.
+    /// `knowledge_reload_ontology` re-resolves one group but does not re-read it.
     pub ontology: Option<Arc<Ontology>>,
     /// Drift state computed at startup by comparing the current ontology's hash against the
     /// persisted `.lcg/ontology-hash.json` sidecar. Cleared after each successful ingest write.
@@ -133,8 +158,8 @@ pub struct AppState {
     /// group this process never touches never pays the file read. The cached value's `ontology`
     /// is already the *fully resolved* ontology for that group (a per-group file if one exists
     /// and is valid, otherwise the workspace-wide `ontology` above), so callers never need to
-    /// re-apply the fallback themselves. Like `ontology`, requires a restart to pick up
-    /// changes — hot-reload is out of scope (see the issue's Assumptions).
+    /// re-apply the fallback themselves. Edits to a per-group file are picked up by a restart, or
+    /// per group by `knowledge_reload_ontology` (issue #627).
     ///
     /// Since issue #451, each entry's `drift` field also carries that group's drift status,
     /// computed on the same first-resolution trigger (FR-007) — folded into this existing cache
@@ -240,7 +265,7 @@ impl AppState {
         let ontology = load_ontology(workspace_root.as_deref()).map(Arc::new);
         if ontology.is_none() {
             eprintln!(
-                "liminis-context-graph: ontology: none — free-form extraction (restart required to pick up changes)"
+                "liminis-context-graph: ontology: none — free-form extraction (restart required to pick up changes to the workspace file)"
             );
         }
         // For pre-#98 workspaces that have no sidecar file, check whether the DB already
@@ -322,6 +347,12 @@ impl AppState {
             }
         }
 
+        self.resolve_and_cache(group_id).0
+    }
+
+    /// The first-resolution path behind [`Self::resolve_ontology`], also returning the computed
+    /// entry (so [`Self::reload_group_ontology`] can report an uncached `identity_unchecked` one).
+    fn resolve_and_cache(&self, group_id: &str) -> (Option<Arc<Ontology>>, GroupOntologyEntry) {
         // Mark this group as being resolved *before* the sidecar read below, so a concurrent
         // remediation's `clear_group_drift` landing in the window between this read and this
         // call's own insert (issue #495) can tell it's racing an in-flight resolution and upsert
@@ -336,20 +367,22 @@ impl AppState {
         if entry.identity_unchecked.is_some() {
             // The identity-set check could not run (issue #616): don't cache, so the next
             // resolve re-checks rather than silently accepting a flag change.
-            return resolved;
+            return (resolved, entry);
         }
         // Only warn if this thread's (possibly stale) computation actually won the race and
         // became the cached state (issue #495): if a concurrent remediation's `clear_group_drift`
         // got there first, `entry` is discarded below and the group is not actually drifted, so
         // printing here would reproduce the same false-positive stderr symptom the cache-state
         // fix already closes.
-        if self.insert_group_ontology_entry_if_not_resolved(group_id, entry) && drift.drifted {
+        if self.insert_group_ontology_entry_if_not_resolved(group_id, entry.clone())
+            && drift.drifted
+        {
             eprintln!(
                 "liminis-context-graph: ontology: drift detected for group {group_id:?} — {} — recommend Recreate + re-ingest",
                 drift.drift_summary.as_deref().unwrap_or("unknown change")
             );
         }
-        resolved
+        (resolved, entry)
     }
 
     /// Marks `group_id` as having a first resolution in flight (issue #495), unless it's already
@@ -483,7 +516,8 @@ impl AppState {
     /// Enforces D1 for `group_id` (issue #616): `Ok` unless the group's identity-bearing set
     /// change was refused (or could not be checked because the DB is unavailable). Called at the
     /// top of `add_episode`, the only extraction entry. Other groups, reads and reprocessing are
-    /// unaffected; a refusal holds for the life of the process (ontology reload is restart-only).
+    /// unaffected; a refusal holds until the group is reloaded with its identity-bearing set restored
+    /// (`knowledge_reload_ontology`) or the process restarts.
     pub fn check_identity(&self, group_id: &str) -> Result<(), crate::error::Error> {
         let _ = self.resolve_ontology(group_id);
         if let Ok(guard) = self.group_ontologies.lock() {
@@ -709,9 +743,104 @@ impl AppState {
     /// stamp on disk — and the next restart would refuse the group though its ontology never
     /// changed. Re-resolving with no carriers writes the stamp, keeping a single stamp writer.
     /// Also resets the group's cached drift status, which re-derives from the drift sidecar.
+    /// [`Self::reload_group_ontology`] wraps this with an immediate re-resolve.
     pub fn invalidate_group_ontology(&self, group_id: &str) {
         if let Ok(mut guard) = self.group_ontologies.lock() {
             guard.remove(group_id);
+        }
+    }
+
+    /// Reloads `group_id`'s ontology (`knowledge_reload_ontology`, issue #627): re-resolves it
+    /// through the normal first-resolution path — per-group file, then the startup workspace
+    /// ontology, then none — including the D1 identity-set check, and returns what changed.
+    ///
+    /// The caller must hold the service `write_lock` exclusively (as `knowledge_delete_by_group`
+    /// does) so no Phase C commit or read-lock pass observes a half-swapped entry.
+    ///
+    /// - A cached group whose would-be ontology hashes the same as its cached one is left
+    ///   untouched (no sidecar read, DB count or stamp check), so an unchanged reload has no side
+    ///   effects — including a refused group staying refused.
+    /// - Otherwise the entry is invalidated and re-resolved. The identity stamp is only ever
+    ///   written by [`Self::check_identity_set`], reached through that resolution.
+    /// - If the identity check cannot run, the prior cache state is restored and the outcome
+    ///   carries `identity_unchecked`, so a failed reload changes nothing.
+    pub fn reload_group_ontology(&self, group_id: &str) -> ReloadOutcome {
+        let snapshot = self
+            .group_ontologies
+            .lock()
+            .ok()
+            .and_then(|g| g.get(group_id).cloned());
+        let previous = match &snapshot {
+            Some(GroupOntologyCacheState::Resolved(e)) => Some(e.clone()),
+            _ => None,
+        };
+        let previous_hash = previous
+            .as_ref()
+            .map(|e| content_hash(e.ontology.as_deref()));
+
+        if let (Some(prev), Some(prev_hash)) = (&previous, &previous_hash) {
+            let would_be = self.load_resolved_ontology(group_id);
+            if &content_hash(would_be.as_deref()) == prev_hash {
+                return ReloadOutcome {
+                    new_hash: prev_hash.clone(),
+                    previous_hash: previous_hash.clone(),
+                    drift: prev.drift.clone(),
+                    identity_refusal: prev.identity_refusal.clone(),
+                    identity_unchecked: None,
+                };
+            }
+        }
+
+        self.invalidate_group_ontology(group_id);
+        let (_, computed) = self.resolve_and_cache(group_id);
+
+        if let Some(reason) = computed.identity_unchecked.clone() {
+            if let Ok(mut guard) = self.group_ontologies.lock() {
+                match snapshot {
+                    Some(state) => {
+                        guard.insert(group_id.to_string(), state);
+                    }
+                    None => {
+                        guard.remove(group_id);
+                    }
+                }
+            }
+            return ReloadOutcome {
+                previous_hash,
+                new_hash: content_hash(computed.ontology.as_deref()),
+                drift: computed.drift,
+                identity_refusal: None,
+                identity_unchecked: Some(reason),
+            };
+        }
+
+        // Prefer the cached entry: a racing remediation's upsert may have won the insert.
+        let entry = match self
+            .group_ontologies
+            .lock()
+            .ok()
+            .and_then(|g| g.get(group_id).cloned())
+        {
+            Some(GroupOntologyCacheState::Resolved(e)) => e,
+            _ => computed,
+        };
+        ReloadOutcome {
+            previous_hash,
+            new_hash: content_hash(entry.ontology.as_deref()),
+            drift: entry.drift,
+            identity_refusal: entry.identity_refusal,
+            identity_unchecked: None,
+        }
+    }
+
+    /// Content hash of `group_id`'s cached, `Resolved` ontology (`"none"` when it resolved to
+    /// no ontology), or `None` if the group has no resolved entry. `add_episode`'s commit phase
+    /// compares it with the ontology its lock-free extraction phase used, to detect a reload
+    /// that landed in between.
+    pub fn cached_ontology_hash(&self, group_id: &str) -> Option<String> {
+        match self.group_ontologies.lock().ok()?.get(group_id)? {
+            GroupOntologyCacheState::Resolved(e) => Some(content_hash(e.ontology.as_deref())),
+            GroupOntologyCacheState::Resolving => None,
         }
     }
 
