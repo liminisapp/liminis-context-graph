@@ -17,6 +17,8 @@ name: CI Failure Notify
 # packaging regression is reported here. Failed tag-triggered "Release" runs are NOT
 # reported: a tag run's head_branch is the tag, not main, so the guard below skips it —
 # those stay visible to the maintainer who pushed the tag.
+# "Windows" coverage on main is best-effort under bursts: windows.yml cancels superseded runs
+# (cancel-in-progress), and cancelled runs are ignored here (see ADR-0639).
 # claude-review.yml is excluded because it only triggers on pull_request and never runs
 # against main directly.
 #

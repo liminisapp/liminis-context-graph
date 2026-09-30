@@ -65,6 +65,14 @@ The `release.yml` header records the same boundary.
   keeps path-filtered per-PR coverage via `windows.yml`; macOS and aarch64 Linux are now covered
   only post-merge.
 - Every merge to `main`, including docs-only ones, runs the four-target build (no path filter).
+- **`Windows` failure coverage on `main` is best-effort under bursts.** `windows.yml` has
+  `concurrency: cancel-in-progress: true` keyed on the ref, so two quick merges share the group
+  `windows-refs/heads/main` and the second cancels the first mid-build. The listener ignores
+  cancelled runs, so a merge whose Windows build was cancelled and whose successor then passes is
+  never reported, even if it would have failed. `Release` has no `concurrency:` block and does not
+  have this gap, and it covers the Windows target's packaging on every merge. Changing
+  `windows.yml` is out of scope here (FR-011); making `cancel-in-progress` false on `main` is a
+  possible follow-up.
 - The new behaviour cannot be exercised locally; the first `Release` run on `main` after merge is
   the real test (four builds, pin and linkage steps executed, `host`/`announce`/`dispatch-docs`
   skipped).
