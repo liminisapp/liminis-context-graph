@@ -267,6 +267,68 @@ async fn stray_extract_false_edge_is_not_stored_as_that_type() {
     }
 }
 
+/// Strict mode where every type is `extract: false` has no extractable vocabulary: the prompt
+/// falls back to the default one, so ingest must not reclassify ordinary labels — only stray
+/// labels naming an assert-only type.
+#[tokio::test]
+async fn strict_all_extract_false_does_not_reclassify_ordinary_labels() {
+    let entity_types = vec![etype("Source", true, false, None)];
+    let ancestor_map = compute_ancestor_map(&entity_types);
+    let onto = Ontology {
+        mode: OntologyMode::Strict,
+        entity_types,
+        relation_types: vec![rtype("DERIVED_FROM", false)],
+        ancestor_map,
+    };
+    let (db, _d) = make_db();
+    let state = make_state(
+        Arc::clone(&db),
+        Some(onto),
+        vec![ExtractionResult {
+            entities: vec![
+                ent("Ada", "Person"),
+                ent("Bob", "Person"),
+                ent("wiki/Home", "Source"),
+            ],
+            edges: vec![
+                edge("Ada", "Bob", "KNOWS"),
+                edge("Ada", "Bob", "DERIVED_FROM"),
+            ],
+        }],
+    );
+    let r = ingest(&state, 1).await;
+    assert_eq!(r.entities_reclassified_unclassified, 1);
+    assert_eq!(r.edges_reclassified_unclassified, 1);
+
+    let rows = entities(&db);
+    let ada = rows.iter().find(|e| e.name == "Ada").unwrap();
+    assert!(ada.labels.contains(&"Person".to_string()), "{ada:?}");
+    let home = rows.iter().find(|e| e.name == "wiki/Home").unwrap();
+    assert_ne!(home.kind, "Source", "{home:?}");
+    assert!(
+        home.labels.contains(&"Unclassified".to_string()),
+        "{home:?}"
+    );
+
+    let edges = db
+        .connect()
+        .unwrap()
+        .get_edges_by_group_ids(Some(&[G]))
+        .unwrap();
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.relation_type.as_deref() == Some("KNOWS")),
+        "{edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .all(|e| e.relation_type.as_deref() != Some("DERIVED_FROM")),
+        "{edges:?}"
+    );
+}
+
 #[tokio::test]
 async fn open_mode_other_undeclared_labels_are_unchanged() {
     let (db, _d) = make_db();

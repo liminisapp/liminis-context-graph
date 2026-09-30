@@ -45,6 +45,10 @@ reprocess handlers discard classifier output naming one.
 
 **All types `extract: false`.** Treated as "no extractable types": the entity section falls back to
 the default vocabulary, the relation section is omitted, and reprocess returns a clear error.
+Ingest agrees with the prompt: the strict-mode vocabulary / alias-map filters only run when at least
+one extractable type exists, so ordinary labels are not mass-reclassified to `Unclassified`; stray
+labels naming an `extract: false` type are still reclassified via the same direct-label path as open
+mode.
 
 **Hash and reload.** `content_hash` appends `extract_false:` / `extract_false_relations:` sections
 only when at least one type sets the flag, so unflagged ontologies hash byte-identically.

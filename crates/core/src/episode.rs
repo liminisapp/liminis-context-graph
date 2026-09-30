@@ -321,7 +321,9 @@ pub async fn add_episode(
     // reclassification also applies in open mode (below), where the raw label would otherwise be
     // stamped on the entity verbatim — the only open-mode labels touched are `extract: false` ones.
     if let Some(onto) = ontology_ref {
-        if onto.mode != OntologyMode::Strict {
+        // Strict mode with no extractable entity type has no vocabulary to filter against (the
+        // prompt falls back to the default one), so it takes the same direct-label path as open mode.
+        if onto.mode != OntologyMode::Strict || onto.extractable_entity_types().next().is_none() {
             for e in extraction.entities.iter_mut() {
                 if onto.is_extract_false_entity(&e.entity_type) {
                     eprintln!(
@@ -334,7 +336,7 @@ pub async fn add_episode(
                 }
             }
         }
-        if onto.mode == OntologyMode::Strict && onto.has_entity_types() {
+        if onto.mode == OntologyMode::Strict && onto.extractable_entity_types().next().is_some() {
             let vocab = onto.extractable_entity_type_names();
             for e in extraction.entities.iter_mut() {
                 let normalized = normalize_entity_type(&e.entity_type);
@@ -379,7 +381,7 @@ pub async fn add_episode(
     // strict mode a stray label naming one falls through to `UNCLASSIFIED` here. In open mode only
     // those labels are reclassified (the tally in Phase C keys on `original_relation_type`).
     if let Some(onto) = ontology_ref {
-        if onto.mode != OntologyMode::Strict {
+        if onto.mode != OntologyMode::Strict || onto.extractable_relation_types().next().is_none() {
             for e in extraction.edges.iter_mut() {
                 let Some(original) = e.relation_type.clone() else {
                     continue;
@@ -394,7 +396,7 @@ pub async fn add_episode(
                 }
             }
         }
-        if onto.mode == OntologyMode::Strict && onto.has_relation_types() {
+        if onto.mode == OntologyMode::Strict && onto.extractable_relation_types().next().is_some() {
             let alias_map = build_alias_map(onto);
             for e in extraction.edges.iter_mut() {
                 let original = e.relation_type.clone();
@@ -799,7 +801,10 @@ pub async fn add_episode(
     // mode, where the strict-mode reclassify filter never runs) would be miscounted as a
     // strict-mode reclassification. Captured now since `ontology_ref` isn't 'static and can't
     // move into the spawn_blocking closure.
-    let is_strict_mode = ontology_ref.is_some_and(|o| o.mode == OntologyMode::Strict);
+    // The strict relation filter only runs when some relation type is extractable (#637).
+    let is_strict_mode = ontology_ref.is_some_and(|o| {
+        o.mode == OntologyMode::Strict && o.extractable_relation_types().next().is_some()
+    });
 
     // ── Phase C: commit under write lock ─────────────────────────────────────
     let episode_uuid = uuid::Uuid::new_v4().to_string();
