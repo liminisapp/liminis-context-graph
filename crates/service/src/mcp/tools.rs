@@ -47,6 +47,15 @@ fn kind_filter_prop() -> Value {
     })
 }
 
+fn min_similarity_prop() -> Value {
+    json!({
+        "type": "number", "minimum": 0.0, "maximum": 1.0,
+        "description": "Optional minimum cosine similarity (clamped 0.0-1.0) for vector \
+                         candidates, applied before fusion. Full-text matches are never \
+                         dropped. No default: omitted means no floor."
+    })
+}
+
 /// The full, ordered registry — one entry per `knowledge_*` dispatch method (46 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
@@ -82,7 +91,20 @@ pub fn registry() -> Vec<ToolSpec> {
                            same-named entities of different kinds as separate nodes (a multi-row \
                            read never picks one and never errors on ambiguity — use \
                            `knowledge_resolve_entity` when exactly one entity is needed); given, \
-                           only entities of that kind are returned.",
+                           only entities of that kind are returned. Every node also carries a \
+                           `search` object (issue #629) explaining why it matched: `rrf_score` \
+                           (fused, rank-based — NOT a relevance measure on its own), \
+                           `text_match` (true iff the full-text path retrieved it), `bm25_score`, \
+                           `name_similarity` and `summary_similarity` (cosine similarity, \
+                           1 - distance). A path that did not retrieve the node reports null \
+                           (`text_match` false). Optional `min_similarity` (0-1, clamped, no \
+                           default) drops vector candidates below that cosine similarity \
+                           before fusion, per vector path (name, summary); full-text matches \
+                           stay eligible regardless, so an exact-name query still returns its \
+                           match while a gibberish query returns nothing. Unset, there is no \
+                           floor. With `kind`, the floor applies on top of the kind path's \
+                           bounded nearest-neighbour probe, which can already miss a rare \
+                           kind.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -94,7 +116,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "num_results": {
                             "type": "integer", "minimum": 1, "default": 10,
                             "description": "Maximum number of entities to return."
-                        }
+                        },
+                        "min_similarity": min_similarity_prop()
                     },
                     "required": ["query"]
                 })
@@ -132,7 +155,15 @@ pub fn registry() -> Vec<ToolSpec> {
                            empty on this read path (not populated). The response returns \
                            the relationship list under the `edges` key. Does not include \
                            episode `attributes` (issue #528) — this path returns edges, \
-                           never a full episode object.",
+                           never a full episode object. Every edge also carries a `search` \
+                           object (issue #629): `rrf_score` (fused, rank-based — NOT a \
+                           relevance measure on its own), `text_match` (true iff the \
+                           full-text path retrieved it), `bm25_score` and `fact_similarity` \
+                           (cosine similarity, 1 - distance); a path that did not retrieve \
+                           the edge reports null (`text_match` false). Optional \
+                           `min_similarity` (0-1, clamped, no default) drops fact-vector \
+                           candidates below that cosine similarity before fusion; full-text \
+                           matches stay eligible regardless. Unset, there is no floor.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -143,7 +174,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "num_results": {
                             "type": "integer", "minimum": 1, "default": 10,
                             "description": "Maximum number of relationships to return."
-                        }
+                        },
+                        "min_similarity": min_similarity_prop()
                     },
                     "required": ["query"]
                 })
@@ -1431,6 +1463,34 @@ mod tests {
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_entity_types"));
         assert!(!is_streaming_method("knowledge_status"));
+    }
+
+    #[test]
+    fn find_tools_document_min_similarity_and_search_evidence() {
+        let r = registry();
+        for (name, evidence) in [
+            ("knowledge_find_entities", "summary_similarity"),
+            ("knowledge_find_relationships", "fact_similarity"),
+        ] {
+            let tool = r.iter().find(|t| t.name == name).unwrap();
+            let prop = &(tool.input_schema)()["properties"]["min_similarity"];
+            assert_eq!(prop["type"], "number", "{name}");
+            assert_eq!(prop["minimum"], 0.0, "{name}");
+            assert_eq!(prop["maximum"], 1.0, "{name}");
+            assert!(
+                prop.get("default").is_none(),
+                "{name}: unset must mean no floor"
+            );
+            for field in [
+                "`search`",
+                "rrf_score",
+                "text_match",
+                "bm25_score",
+                evidence,
+            ] {
+                assert!(tool.description.contains(field), "{name} missing {field}");
+            }
+        }
     }
 
     #[test]
