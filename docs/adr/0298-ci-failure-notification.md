@@ -173,3 +173,11 @@ the jobs API shows a job with conclusion `failure`/`timed_out` (or any other non
 non-skipped, non-cancelled conclusion), or a cancelled job holding a step with conclusion
 `failure`. A run cancelled only by a superseding push has none and remains a no-op. The failing-job
 list excludes cancelled jobs without a failed step, so the issue names the real cause. See ADR-0640.
+
+## Amendment (2026-09-30, issue #639)
+
+`Release` (`release.yml`) and `Windows` (`windows.yml`) were added to the `workflows:` list.
+`release.yml` now runs build-and-check-only on every push to `main` instead of on pull requests
+([ADR-0639](0639-post-merge-release-packaging-verification.md)), so this listener is what makes a
+post-merge packaging failure visible (`workflow:release`). The `head_branch == 'main'` guard is
+unchanged; failed tag-triggered `Release` runs are therefore not reported.
