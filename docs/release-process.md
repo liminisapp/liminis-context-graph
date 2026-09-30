@@ -62,6 +62,32 @@ conclusion alone is not sufficient. Set `RELEASE_SHA` to the exact commit being 
 Do not treat step 1 alone as sufficient evidence that "full e2e passed." Step 2 is the
 one that actually verifies it.
 
+## Release packaging is verified post-merge
+
+`release.yml` does **not** run on pull requests. Release packaging — the four-target build
+(`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-pc-windows-msvc`), the pinned lbug extension-hash check
+([ADR-0593](adr/0593-pin-lbug-extension-bytes.md)) and the OpenSSL linkage guards
+([ADR-0550](adr/0550-openssl-dynamic-linkage-via-rpath.md),
+[ADR-0581](adr/0581-windows-static-openssl.md)) — is verified once per merge, by the
+`Release` run on the push to `main`. That run builds and checks but publishes nothing (no
+GitHub Release, no announcement, no docs dispatch); only a pushed version tag publishes. See
+[ADR-0639](adr/0639-post-merge-release-packaging-verification.md).
+
+A PR that breaks packaging is therefore caught after merge and fixed forward. Before
+tagging, with `RELEASE_SHA` set as above:
+
+```bash
+gh issue list --label ci-failure --label workflow:release --state open
+gh run list --workflow release.yml --commit "$RELEASE_SHA" --limit 5
+```
+
+A failed `Release` run on `main` files (or updates) a `ci-failure` + `workflow:release`
+issue via `ci-failure-notify.yml`, and the issue closes itself on the next green run. Treat
+an open one as a blocker: fix forward, or record in the release PR why the release proceeds
+anyway. Failed tag-triggered runs are not reported by the listener — watch the run you just
+triggered.
+
 ## Docs publishing
 
 The docs site is **no longer published from `main`**. Every merge to `main` that

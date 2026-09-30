@@ -101,7 +101,7 @@ The maintainer works in git worktrees and never commits directly to `main`. See 
 
 ### CI failure issues
 
-If you see an open issue labeled `ci-failure` with a `workflow:<name>` label (e.g. `workflow:real-corpus-e2e`), it was filed automatically by [`.github/workflows/ci-failure-notify.yml`](.github/workflows/ci-failure-notify.yml): one of the repo's non-gating post-merge workflows (`real-corpus-e2e`, `bench`, `eval`) failed on `main`. It's assigned to the maintainer, updates in place on repeat failures instead of duplicating, and closes itself automatically on the next passing run — see [ADR-0298](docs/adr/0298-ci-failure-notification.md). (`real-corpus-e2e` also now runs on the PR path as a non-required check — see [ADR-0328](docs/adr/0328-real-corpus-e2e-on-pr-path.md) — but this notifier only ever fires for its post-merge run on `main`.)
+If you see an open issue labeled `ci-failure` with a `workflow:<name>` label (e.g. `workflow:real-corpus-e2e`), it was filed automatically by [`.github/workflows/ci-failure-notify.yml`](.github/workflows/ci-failure-notify.yml): one of the repo's non-gating post-merge workflows (`real-corpus-e2e`, `bench`, `eval`, `Release`, `Windows`) failed on `main`. It's assigned to the maintainer, updates in place on repeat failures instead of duplicating, and closes itself automatically on the next passing run — see [ADR-0298](docs/adr/0298-ci-failure-notification.md). (`real-corpus-e2e` also now runs on the PR path as a non-required check — see [ADR-0328](docs/adr/0328-real-corpus-e2e-on-pr-path.md) — but this notifier only ever fires for its post-merge run on `main`.)
 
 ## Release runbook (maintainers)
 
@@ -134,15 +134,19 @@ release from it and **requires the pushed tag to match that version**, so the bu
 must agree. Per this repo's worktree rule, prepare the release on a branch and land it via a PR —
 never commit release prep directly to `main` — then tag the merge commit.
 
-0. **Check non-gating workflow health.** `real-corpus-e2e`, `bench`, and `eval` are not part of the
-   required PR gate (deliberately, for cost reasons) and can go silently red for days — see
+0. **Check non-gating workflow health.** `real-corpus-e2e`, `bench`, `eval`, `Release` and `Windows`
+   are not part of the required PR gate (deliberately, for cost reasons) and can go silently red
+   for days — see
    [ADR-0298](docs/adr/0298-ci-failure-notification.md). (`real-corpus-e2e` also runs, non-gating,
    on the PR path per [ADR-0328](docs/adr/0328-real-corpus-e2e-on-pr-path.md); `bench` and `eval`
    still don't.) Run
    `gh issue list --label ci-failure --state open` before proceeding. If it's empty, continue. If
    it isn't, either fix the underlying failure first or record in the release PR why the release
    is proceeding anyway — don't ship over a known-broken post-merge check silently the way
-   `v0.11.0` did (#298).
+   `v0.11.0` did (#298). A `workflow:release` issue means release packaging (four-target build,
+   pinned extension hashes, OpenSSL linkage) failed on `main` after merge — it is **not** checked
+   per PR (see step 6 and [ADR-0639](docs/adr/0639-post-merge-release-packaging-verification.md)),
+   so treat it as a blocker: fix forward before tagging.
 1. **Run the sidecar-gated tests, and record their output in the release PR.** Two tests in
    `crates/core/tests/real_corpus_replay_perf.rs` need a live embedding sidecar and **skip silently
    when one is absent** — they print `[SKIP]` and *pass*, so a green board says nothing about
@@ -229,8 +233,10 @@ never commit release prep directly to `main` — then tag the merge commit.
 4. **Open a PR and merge it** to `main` once CI is green.
 5. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
    The tag (`vX.Y.Z`) must equal the `Cargo.toml` version, or cargo-dist's `plan` step fails.
-6. The release workflow builds all three platforms and publishes the GitHub Release
-   automatically (~5–10 min in practice; `v0.12.0` took under six). Publishing that
+6. The release workflow builds all four targets and publishes the GitHub Release
+   automatically. The same workflow also runs on every push to `main` (build and check only —
+   it publishes nothing and never runs on PRs), which is where packaging is verified before
+   you tag; only a pushed version tag publishes (~5–10 min in practice; `v0.12.0` took under six). Publishing that
    GitHub Release is followed by `release.yml`'s `dispatch-docs` job, which dispatches
    `.github/workflows/docs-publish.yml` to rebuild the docs site from this tag's `docs/`
    tree and promote it to the site root. (The release is created with `GITHUB_TOKEN`,

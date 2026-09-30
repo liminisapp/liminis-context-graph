@@ -11,7 +11,14 @@ name: CI Failure Notify
 # fires strictly after the watched workflows complete, so it cannot appear in branch
 # protection's required_status_checks and cannot block a merge. Coverage today:
 # "CI" (ci.yml — see note below), bench.yml, eval.yml, "Swift sidecar CI" (swift.yml,
-# re-enabled 2026-08-25 by #502 — see docs/adr/0502-pin-explicit-macos-runner-for-swift-sidecar-ci.md).
+# re-enabled 2026-08-25 by #502 — see docs/adr/0502-pin-explicit-macos-runner-for-swift-sidecar-ci.md),
+# "Release" (release.yml) and "Windows" (windows.yml), both added by #639 (ADR-0639).
+# "Release" now runs build-and-check-only on every push to main instead of on PRs, so a
+# packaging regression is reported here. Failed tag-triggered "Release" runs are NOT
+# reported: a tag run's head_branch is the tag, not main, so the guard below skips it —
+# those stay visible to the maintainer who pushed the tag.
+# "Windows" coverage on main is best-effort under bursts: windows.yml cancels superseded runs
+# (cancel-in-progress), and cancelled runs are ignored here (see ADR-0639).
 # claude-review.yml is excluded because it only triggers on pull_request and never runs
 # against main directly.
 #
@@ -39,6 +46,8 @@ on:
       - "Perf Benchmarks"
       - "Extraction-Quality Eval"
       - "Swift sidecar CI"
+      - "Release"
+      - "Windows"
     types: [completed]
 
 permissions:
