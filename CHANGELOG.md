@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [0.16.2] - 2026-09-30
+
+Full detail: [docs/releases/0.16.2.md](docs/releases/0.16.2.md).
+
+### Added
+
+- **Assert-only ontology types: `extract: false`** ([ADR-0637](docs/adr/0637-extract-false-assert-only-types.md),
+  #637, implements #636). An entity or relation type marked `extract: false` is omitted from the
+  extraction prompts and never accepted from the extractor — a stray extracted label is
+  reclassified to `Unclassified` / `UNCLASSIFIED` (original label kept) in both strict and open
+  mode and never receives the type's identity `kind` — while staying fully declared for
+  `knowledge_assert_*`, the identity set and its `-32003` guard, ancestry and drift. Reprocess and
+  canonicalize never retype into one. Defaults to `true`; an ontology without the flag renders
+  identical prompts and hashes identically. See
+  [docs/ontology.md](docs/ontology.md#assert-only-types-extract-false).
+
 ## [0.16.1] - 2026-09-30
 
 Full detail: [docs/releases/0.16.1.md](docs/releases/0.16.1.md).
