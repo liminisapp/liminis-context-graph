@@ -521,8 +521,8 @@ jobs:
           LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
         run: |
           cargo test --release --no-run > /tmp/fp.log 2>&1 || true
-          grep -v 'compiler::fingerprint\]' /tmp/fp.log > /tmp/build.log || true
-          echo "fingerprint log lines: $(grep -c 'compiler::fingerprint\]' /tmp/fp.log || true)"
+          grep -v 'compiler::fingerprint' /tmp/fp.log > /tmp/build.log || true
+          echo "fingerprint log lines: $(grep -c 'compiler::fingerprint' /tmp/fp.log || true)"
           echo "dirty units: $(grep -c 'dirty:' /tmp/fp.log || true)"
           echo "--- first dirty reasons ---"
           grep 'dirty:\|stale:\|StaleDependency\|FsStatusOutdated\|MissingFile\|NothingFresh' /tmp/fp.log | cut -c1-300 | head -n 60 || true
