@@ -22,7 +22,33 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `knowledge_merge_entities` and WAL replay are unaffected. Existing bad merges are not
   repaired; re-ingest.
 
+### Changed
+
+- **`LCG_DEDUP_LLM` parsing.** It previously enabled the dead adapter when set to *any* value,
+  including `0`/`false`. `0`, `false`, `off`, `no` and the empty string are now off.
+
+### Deprecated
+
+- **`LCG_DEDUP_ADAPTER_URL` (and `GRAPHITI_DEDUP_ADAPTER_URL`) is ignored.** The bespoke
+  `{candidate, incoming}` HTTP protocol it configured was never implemented by any server shipped
+  with lcg and has been removed along with `LocalDedupAdapter`. Setting the variable logs a
+  deprecation warning at startup; nothing contacts the URL. Use `LCG_DEDUP_LLM`, which uses the
+  configured extractor.
+
 ### Added
+
+- **LLM-verified extraction dedup** ([ADR-0652](docs/adr/0652-llm-verified-extraction-dedup-via-extractor.md),
+  #652). `LCG_DEDUP_LLM` now works: when on (opt-in, off by default) and an extraction provider is
+  configured, each embedding-path dedup candidate that survives the #650 identifier veto is judged
+  by the **configured extractor** — the Anthropic API or the OpenAI-compatible
+  `--extractor-uds` / `--extractor-http` endpoint — in one batched call per chunk. Any error,
+  timeout or malformed/unattributable answer resolves to "not a duplicate" with a logged warning
+  and never aborts the chunk; cancellation still propagates. Exact-name matches, vetoed pairs and
+  identical-normalized-name pairs never cost a call; WAL replay never calls the LLM. Startup logs
+  the active mode and `knowledge_status` reports it as `dedup_mode` (`"veto-only"` |
+  `"llm-verified"`); `dedup_paths` gains `llm_confirmed`, `llm_rejected` and `llm_unavailable`.
+  Dedup token usage is reported with telemetry `role="dedup"`, and verdicts are recorded to / served
+  from LLM cassettes as `judge_duplicates` records. No schema or WAL change.
 
 - `knowledge_process_chunk` returns an additive `dedup_paths` object of per-path resolution
   counts (`exact_name`, `embedding_merge`, `vetoed`, `adapter_rejected`, `salvage_vetoed`), and

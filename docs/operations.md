@@ -317,6 +317,16 @@ Supervisor liveness probes should treat any response with `ok: true` as alive an
 
 Beyond the [ontology summary](ontology.md#knowledge_status-summary), `knowledge_status` reports:
 
+**`dedup_mode`** (string, always present, including when degraded) — what protects the graph from
+wrong embedding-path merges during extraction, beyond the cosine threshold (issue #652,
+[ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)). `"veto-only"`: the
+deterministic identifier-mismatch veto ([ADR-0650](adr/0650-identifier-mismatch-veto-for-extraction-dedup.md))
+is the only check, so any candidate that passes it merges. `"llm-verified"`: the configured
+extractor additionally judges each surviving candidate (`LCG_DEDUP_LLM`, off by default). If
+`LCG_DEDUP_LLM` is on but no extraction provider is configured the field reads `"veto-only"` and
+startup logged a warning. The same mode is logged once at startup as `dedup: mode=…`; per-chunk
+path counts are on `knowledge_process_chunk`'s `dedup_paths`.
+
 **`indices_built`** (boolean) — whether the entity/relationship FTS + HNSW search indices are
 currently built and reflect the graph's current contents. The service builds these indices
 **eagerly at startup** — immediately after schema init on a fresh DB, or as part of

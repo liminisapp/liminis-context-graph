@@ -25,7 +25,7 @@ use crate::{
 /// Per-chunk tally of Phase B entity-resolution outcomes by path (issue #650, ADR-0650). One
 /// named field per path so later work (#652's LLM-confirmed / LLM-rejected paths) can extend the
 /// struct without reshaping call sites. Each extracted entity increments exactly one of
-/// `exact_name`, `embedding_merge`, `vetoed`, `llm_confirmed`, `llm_rejected`, `llm_unavailable`, or none (a plain insert with no
+/// `exact_name`, `embedding_merge`, `vetoed`, `adapter_rejected`, `llm_confirmed`, `llm_rejected`, `llm_unavailable`, or none (a plain insert with no
 /// above-threshold candidate); `salvage_vetoed` counts off-list edge endpoints, not entities.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct DedupPathCounts {
@@ -38,6 +38,9 @@ pub struct DedupPathCounts {
     /// Above-threshold candidates existed but every one was discarded by the identifier-mismatch
     /// veto, so the entity was inserted. Counted once per incoming entity.
     pub vetoed: usize,
+    /// A candidate survived the veto but a non-LLM (custom/legacy) dedup adapter said "not a
+    /// duplicate", so the entity was inserted.
+    pub adapter_rejected: usize,
     /// The LLM dedup check (#652) judged a surviving candidate a duplicate and it merged.
     pub llm_confirmed: usize,
     /// The LLM dedup check judged a surviving candidate distinct, so the entity was inserted.
@@ -995,10 +998,16 @@ pub async fn add_episode(
                     merge_into(&state, &mut merge_state, *i, existing, &extracted.summary).await?
                 }
                 DedupVerdict::Distinct => {
-                    dedup_paths.llm_rejected += 1;
+                    if llm_mode {
+                        dedup_paths.llm_rejected += 1;
+                    } else {
+                        dedup_paths.adapter_rejected += 1;
+                    }
                     make_insert_row(*i)
                 }
                 DedupVerdict::Unknown => {
+                    // Only the LLM adapter can fail to answer; a legacy per-pair adapter's `Err`
+                    // lands here too and is likewise an insert.
                     dedup_paths.llm_unavailable += 1;
                     make_insert_row(*i)
                 }

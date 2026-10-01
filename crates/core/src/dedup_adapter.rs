@@ -94,16 +94,42 @@ pub fn build_dedup_adapter(extractor: &Arc<dyn Extractor>) -> Arc<dyn DedupAdapt
 
 // ── DedupAdapter trait ────────────────────────────────────────────────────────
 
+/// Confirms or rejects embedding-path dedup candidates. An implementation overrides **either**
+/// [`DedupAdapter::judge_batch`] (batched, never fails) **or** [`DedupAdapter::is_duplicate`]
+/// (per-pair, fallible); each default is expressed through the other, so overriding neither
+/// recurses forever. [`DedupAdapter::mode`] defaults to veto-only.
 pub trait DedupAdapter: Send + Sync {
     /// Judges a batch of `(existing, incoming)` candidate pairs. Returns exactly one verdict per
     /// pair, in order. Never fails: every failure mode is [`DedupVerdict::Unknown`], which the
-    /// caller treats as "not a duplicate".
-    fn judge_batch<'a>(&'a self, pairs: &'a [DuplicatePair]) -> BoxFuture<'a, Vec<DedupVerdict>>;
+    /// caller treats as "not a duplicate". The default calls [`DedupAdapter::is_duplicate`] per
+    /// pair, with an `Err` becoming `Unknown`.
+    fn judge_batch<'a>(&'a self, pairs: &'a [DuplicatePair]) -> BoxFuture<'a, Vec<DedupVerdict>> {
+        Box::pin(async move {
+            let mut out = Vec::with_capacity(pairs.len());
+            for pair in pairs {
+                let (candidate, incoming) = rows_from(pair);
+                out.push(match self.is_duplicate(&candidate, &incoming).await {
+                    Ok(true) => DedupVerdict::Duplicate,
+                    Ok(false) => DedupVerdict::Distinct,
+                    Err(e) => {
+                        eprintln!(
+                            "liminis-context-graph: dedup adapter failed ({e}); treating the \
+                             candidate as not duplicate"
+                        );
+                        DedupVerdict::Unknown
+                    }
+                });
+            }
+            out
+        })
+    }
 
     /// The mode this adapter implements, as reported by `knowledge_status`.
-    fn mode(&self) -> DedupMode;
+    fn mode(&self) -> DedupMode {
+        DedupMode::VetoOnly
+    }
 
-    /// Single-pair convenience over [`DedupAdapter::judge_batch`]: `true` only for a definite
+    /// Single-pair form of [`DedupAdapter::judge_batch`]: `true` only for a definite
     /// "duplicate" verdict.
     fn is_duplicate<'a>(
         &'a self,
@@ -116,6 +142,29 @@ pub trait DedupAdapter: Send + Sync {
             Ok(verdicts.first() == Some(&DedupVerdict::Duplicate))
         })
     }
+}
+
+/// Reconstructs the row/entity form of a pair for adapters that implement the per-pair
+/// [`DedupAdapter::is_duplicate`]. Lossy by design: only name, type and summary survive.
+fn rows_from(pair: &DuplicatePair) -> (EntityRow, ExtractedEntity) {
+    let mut labels = vec!["Entity".to_string()];
+    if !pair.existing.entity_type.is_empty() {
+        labels.push(pair.existing.entity_type.clone());
+    }
+    (
+        EntityRow {
+            name: pair.existing.name.clone(),
+            summary: pair.existing.summary.clone(),
+            labels,
+            ..EntityRow::default()
+        },
+        ExtractedEntity {
+            name: pair.incoming.name.clone(),
+            entity_type: pair.incoming.entity_type.clone(),
+            summary: pair.incoming.summary.clone(),
+            original_entity_type: None,
+        },
+    )
 }
 
 /// The pair shown to the judge for an existing row and an incoming extracted entity.

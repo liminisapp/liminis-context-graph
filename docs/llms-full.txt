@@ -256,8 +256,8 @@ Source: https://v3rv.com/liminis-context-graph/configuration
 | `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` | No | Advisory threshold, in **characters** (not bytes), above which `knowledge_process_chunk`'s `chunk_text` is considered oversized (default `8000`). Ingestion is unaffected — no rejection, truncation, or internal splitting — but a call whose `chunk_text` exceeds this threshold gains a `warning` field in its result naming the actual character count and the recommended maximum, and emits a `chunk_text_oversized` telemetry event (see [Telemetry](telemetry.md)). Extraction quality degrades well before any context-window limit is reached, so splitting oversized input into multiple `knowledge_process_chunk` calls is the caller's responsibility. An invalid value (non-numeric, zero, or negative) logs a warning to stderr and falls back to the default. |
 | `LCG_RECORD_LLM` | No | Path to an LLM cassette (JSONL). If set, every extraction call is recorded to this file in addition to running live — see [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). Mutually exclusive with `LCG_REPLAY_LLM`. |
 | `LCG_REPLAY_LLM` | No | Path to a previously recorded LLM cassette (JSONL). If set, extraction is served entirely from the cassette — no extractor provider is resolved, no credentials are required, and no network call is ever made. Mutually exclusive with `LCG_RECORD_LLM`. See [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). |
-| `LCG_DEDUP_LLM` | No | If set, enables local dedup adapter |
-| `LCG_DEDUP_ADAPTER_URL` | No | URL for the local dedup HTTP adapter (default `http://127.0.0.1:8767`) |
+| `LCG_DEDUP_LLM` | No | Enables the **LLM-verified extraction dedup check** ([ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)). **Off by default** (opt-in). When on *and* an extraction provider is configured, every embedding-path dedup candidate that survives the identifier-mismatch veto is judged by the same extractor used for extraction (the Anthropic API, or the OpenAI-compatible `--extractor-uds` / `--extractor-http` endpoint) — one batched call per chunk, bounded by a 30 s timeout. `duplicate` merges; `not duplicate`, an extractor error, a timeout or any malformed/unattributable answer inserts a separate entity (a missed merge is recoverable, a wrong merge is not) and logs a warning. Exact-name matches, veto-rejected pairs and identical-normalized-name pairs never cost a call, and WAL replay never calls the LLM. Values `0`, `false`, `off`, `no` and the empty string are off; anything else is on. If on with no extractor configured the service still starts, warns, and runs veto-only. The active mode is logged at startup (`dedup: mode=…`) and reported as `dedup_mode` (`"veto-only"` or `"llm-verified"`) by `knowledge_status`. Dedup calls report token usage with `role="dedup"`. Under `LCG_RECORD_LLM` / `LCG_REPLAY_LLM` the verdicts are recorded and served as `judge_duplicates` cassette records; a cassette without them yields "not a duplicate". |
+| `LCG_DEDUP_ADAPTER_URL` | No | **Deprecated and ignored** (retired in 0.16.3). The bespoke `{candidate, incoming}` HTTP protocol it configured was never implemented by any server shipped with lcg. If set, startup logs a deprecation warning and nothing contacts the URL. Use `LCG_DEDUP_LLM`. |
 | `LCG_WAL_DIR` | No | WAL **root** directory (default `.lcg/wal`) — holds one subdirectory per `group_id` (issue #378), e.g. `<LCG_WAL_DIR>/liminis/` for the default group. A pre-378 single-stream directory (loose `*.jsonl`/`.checkpoints/`/`.wal-bounds.json` with no `liminis/` subdirectory) is migrated into this layout automatically on first boot under the upgraded binary — see [Operations](operations.md#on-disk-layout) and [ADR-0378](adr/0378-multi-stream-wal-per-group-directory.md). |
 | `LCG_WAL_MAX_BYTES_PER_FILE` | No | Per-file byte-size rotation threshold for the WAL (default `5242880` = 5 MB); set to `0` to disable byte-size rotation and rely on event count only |
 | `LCG_WAL_MAX_EVENTS_PER_FILE` | No | Per-file event-count rotation threshold for the WAL (default `10000`); rotation fires when either this threshold or `LCG_WAL_MAX_BYTES_PER_FILE` is reached |
@@ -280,7 +280,7 @@ That's 33 variables as of this page's writing, covering every `env::var`/`lcg_en
 accepts its old `GRAPHITI_*` spelling — `GRAPHITI_SOCKET_PATH`, `GRAPHITI_DB_PATH`,
 `GRAPHITI_EMBEDDING_URL`, `GRAPHITI_EMBEDDING_MODEL`, `GRAPHITI_EMBEDDING_DIM`,
 `GRAPHITI_EMBEDDING_API_KEY`, `GRAPHITI_EXTRACTION_LLM`, `GRAPHITI_DEDUP_LLM`,
-`GRAPHITI_DEDUP_ADAPTER_URL`, and `GRAPHITI_WAL_DIR`. Using one logs `DEPRECATED: env var <old> is
+`GRAPHITI_DEDUP_ADAPTER_URL` (deprecated and ignored, like `LCG_DEDUP_ADAPTER_URL`), and `GRAPHITI_WAL_DIR`. Using one logs `DEPRECATED: env var <old> is
 deprecated; rename to <new>` at startup. They are honoured for now; prefer the `LCG_*` names.
 `OPENAI_API_KEY` is not in this list — it's a convenience fallback for `LCG_EMBEDDING_API_KEY`,
 not a legacy spelling of an LCG-specific variable, so using it triggers no deprecation warning.
@@ -1407,6 +1407,9 @@ result fields exist for that, both introduced in 0.13.2.
       "embedding_merge": 1,
       "vetoed": 2,
       "adapter_rejected": 0,
+      "llm_confirmed": 0,
+      "llm_rejected": 0,
+      "llm_unavailable": 0,
       "salvage_vetoed": 0
     }
   }
@@ -1418,7 +1421,11 @@ result fields exist for that, both introduced in 0.13.2.
   embedding candidates, all of which were rejected by the identifier-mismatch veto (names
   differing by a number or identifier, such as `ADR 2018` / `ADR 2019`), so a new entity was
   inserted; `adapter_rejected` counts candidates that survived the veto but were rejected by
-  the dedup adapter; `salvage_vetoed` counts off-list edge endpoints whose salvage candidates
+  a non-LLM (custom) dedup adapter; `llm_confirmed`, `llm_rejected` and `llm_unavailable` count
+  candidates judged by the [LLM dedup check](configuration.md) (`LCG_DEDUP_LLM`,
+  [ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)) as duplicate (merged),
+  distinct (inserted) and unanswerable — error, timeout or malformed answer — (inserted); when the
+  check is off, a surviving candidate merges and counts as `embedding_merge`; `salvage_vetoed` counts off-list edge endpoints whose salvage candidates
   were all vetoed. The tallies are per chunk; sum them across chunks for a run total.
 
 ### Progress notifications
@@ -1528,7 +1535,7 @@ Emitted after every successful Anthropic API call from `extractor.rs`. This is a
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `role` | string | Which LLM use-case produced these tokens (`"extraction"`, future: `"dedup"`) |
+| `role` | string | Which LLM use-case produced these tokens (`"extraction"`, `"dedup"` — the LLM dedup check, #652) |
 | `model` | string | Anthropic model identifier (e.g. `claude-haiku-4-5-20251001`) |
 | `input_tokens` | u64 | Input tokens billed by the API |
 | `output_tokens` | u64 | Output tokens billed by the API |
@@ -2584,6 +2591,16 @@ Supervisor liveness probes should treat any response with `ok: true` as alive an
 ## `knowledge_status` health fields
 
 Beyond the [ontology summary](ontology.md#knowledge_status-summary), `knowledge_status` reports:
+
+**`dedup_mode`** (string, always present, including when degraded) — what protects the graph from
+wrong embedding-path merges during extraction, beyond the cosine threshold (issue #652,
+[ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)). `"veto-only"`: the
+deterministic identifier-mismatch veto ([ADR-0650](adr/0650-identifier-mismatch-veto-for-extraction-dedup.md))
+is the only check, so any candidate that passes it merges. `"llm-verified"`: the configured
+extractor additionally judges each surviving candidate (`LCG_DEDUP_LLM`, off by default). If
+`LCG_DEDUP_LLM` is on but no extraction provider is configured the field reads `"veto-only"` and
+startup logged a warning. The same mode is logged once at startup as `dedup: mode=…`; per-chunk
+path counts are on `knowledge_process_chunk`'s `dedup_paths`.
 
 **`indices_built`** (boolean) — whether the entity/relationship FTS + HNSW search indices are
 currently built and reflect the graph's current contents. The service builds these indices
@@ -4263,6 +4280,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0640](0640-ci-cheap-checks-first-and-fail-fast.md) | CI Cheap-Checks-First Pre-Gate and Run-Wide Fail-Fast | 2026-09-30 |
 | [0650](0650-identifier-mismatch-veto-for-extraction-dedup.md) | Identifier-Mismatch Veto for Extraction-Time Entity Dedup | 2026-10-01 |
 | [0651](0651-merge-consolidates-summaries-and-refreshes-embedding.md) | Entity Merge Consolidates Summaries and Always Re-embeds `summary_embedding` | 2026-10-01 |
+| [0652](0652-llm-verified-extraction-dedup-via-extractor.md) | LLM-Verified Extraction Dedup via the Configured Extractor | 2026-10-01 |
 
 ## Historical numbering
 

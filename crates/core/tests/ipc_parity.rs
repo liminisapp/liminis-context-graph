@@ -1446,6 +1446,7 @@ async fn test_knowledge_process_chunk_ok() {
         "exact_name",
         "embedding_merge",
         "vetoed",
+        "adapter_rejected",
         "llm_confirmed",
         "llm_rejected",
         "llm_unavailable",

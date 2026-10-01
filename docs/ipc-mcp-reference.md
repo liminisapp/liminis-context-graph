@@ -690,6 +690,9 @@ result fields exist for that, both introduced in 0.13.2.
       "embedding_merge": 1,
       "vetoed": 2,
       "adapter_rejected": 0,
+      "llm_confirmed": 0,
+      "llm_rejected": 0,
+      "llm_unavailable": 0,
       "salvage_vetoed": 0
     }
   }
@@ -701,7 +704,11 @@ result fields exist for that, both introduced in 0.13.2.
   embedding candidates, all of which were rejected by the identifier-mismatch veto (names
   differing by a number or identifier, such as `ADR 2018` / `ADR 2019`), so a new entity was
   inserted; `adapter_rejected` counts candidates that survived the veto but were rejected by
-  the dedup adapter; `salvage_vetoed` counts off-list edge endpoints whose salvage candidates
+  a non-LLM (custom) dedup adapter; `llm_confirmed`, `llm_rejected` and `llm_unavailable` count
+  candidates judged by the [LLM dedup check](configuration.md) (`LCG_DEDUP_LLM`,
+  [ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)) as duplicate (merged),
+  distinct (inserted) and unanswerable — error, timeout or malformed answer — (inserted); when the
+  check is off, a surviving candidate merges and counts as `embedding_merge`; `salvage_vetoed` counts off-list edge endpoints whose salvage candidates
   were all vetoed. The tallies are per chunk; sum them across chunks for a run total.
 
 ### Progress notifications
