@@ -731,6 +731,13 @@ fn create_fts_indexes_outcome(conn: &Conn<'_>) -> Result<FtsOutcome, Error> {
 /// moves the failure to the next one.
 pub(crate) fn rebuild_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
     ensure_schema_state_table(conn)?;
+    // Clear any *current* marker first (the backstop runs with one set): otherwise a crash after
+    // only some of the drops would leave a marker that the next open trusts, skipping the rebuild
+    // and leaving an undropped inconsistent index in place (FR-009).
+    conn.exec_params_unrecorded(
+        "MATCH (s:SchemaState {key: $key}) DELETE s",
+        serde_json::json!({ "key": FTS_MARKER_KEY }),
+    )?;
     for sql in DROP_FTS_SQL {
         let _ = conn.query_unrecorded(sql);
     }
@@ -866,6 +873,21 @@ mod fts_marker_tests {
             create_fts_indexes_outcome(&conn).unwrap(),
             FtsOutcome::Current
         );
+    }
+
+    /// FR-009: `rebuild_fts_indexes` clears the marker before its first drop and re-sets it
+    /// last, whether or not a marker was present when it started.
+    #[test]
+    fn rebuild_with_current_marker_or_none_ends_marked() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+        rebuild_fts_indexes(&conn).unwrap();
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+        clear_marker(&conn);
+        rebuild_fts_indexes(&conn).unwrap();
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
     }
 
     #[test]

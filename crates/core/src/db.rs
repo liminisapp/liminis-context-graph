@@ -40,8 +40,22 @@ pub struct Db {
 /// one-time, logged event and is deliberately not counted here.
 #[derive(Default)]
 pub struct FtsRepairStatus {
-    count: AtomicU64,
-    last_unix_ms: AtomicU64,
+    /// `(count, last_unix_ms)` under one lock so a reader never sees a count paired with
+    /// another repair's timestamp (or a timestamp with a count of 0).
+    inner: std::sync::Mutex<(u64, u64)>,
+}
+
+impl FtsRepairStatus {
+    fn record(&self, now_ms: u64) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.0 += 1;
+        g.1 = now_ms;
+    }
+
+    fn snapshot(&self) -> (u64, Option<u64>) {
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        (g.0, Some(g.1).filter(|ms| *ms != 0))
+    }
 }
 
 /// Observability for the `lookup_key` ART-index design, surfaced through `knowledge_status`'s
@@ -394,17 +408,10 @@ impl Db {
         Ok((db, stats))
     }
 
-    /// Number of backstop FTS rebuilds since this `Db` was opened (issue #649, ADR-0649).
-    pub fn fts_repair_count(&self) -> u64 {
-        self.fts_repair_status.count.load(Ordering::Relaxed)
-    }
-
-    /// Unix-ms timestamp of the last backstop FTS rebuild, or `None` if there has been none.
-    pub fn fts_last_repair_unix_ms(&self) -> Option<u64> {
-        match self.fts_repair_status.last_unix_ms.load(Ordering::Relaxed) {
-            0 => None,
-            ms => Some(ms),
-        }
+    /// `(count, last_unix_ms)` of backstop FTS rebuilds since this `Db` was opened (issue #649,
+    /// ADR-0649), read atomically as a pair; the timestamp is `None` if there has been none.
+    pub fn fts_repair_snapshot(&self) -> (u64, Option<u64>) {
+        self.fts_repair_status.snapshot()
     }
 
     /// Opens a fresh connection against the already-set-up database.
@@ -502,14 +509,11 @@ impl<'db> Conn<'db> {
         );
         match crate::schema::rebuild_fts_indexes(self) {
             Ok(()) => {
-                self.fts_repair_status.count.fetch_add(1, Ordering::Relaxed);
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
-                self.fts_repair_status
-                    .last_unix_ms
-                    .store(now, Ordering::Relaxed);
+                self.fts_repair_status.record(now);
                 true
             }
             Err(e) => {
@@ -519,17 +523,19 @@ impl<'db> Conn<'db> {
         }
     }
 
+    /// `(count, last_unix_ms)` of backstop FTS rebuilds since the owning `Db` was opened.
+    pub fn fts_repair_snapshot(&self) -> (u64, Option<u64>) {
+        self.fts_repair_status.snapshot()
+    }
+
     /// Number of backstop FTS rebuilds since the owning `Db` was opened (issue #649).
     pub fn fts_repair_count(&self) -> u64 {
-        self.fts_repair_status.count.load(Ordering::Relaxed)
+        self.fts_repair_snapshot().0
     }
 
     /// Unix-ms timestamp of the last backstop FTS rebuild, or `None` if there has been none.
     pub fn fts_last_repair_unix_ms(&self) -> Option<u64> {
-        match self.fts_repair_status.last_unix_ms.load(Ordering::Relaxed) {
-            0 => None,
-            ms => Some(ms),
-        }
+        self.fts_repair_snapshot().1
     }
 
     /// Executes a parameterized Cypher statement via lbug prepared-statement binding,
@@ -670,7 +676,18 @@ impl<'db> Conn<'db> {
     /// Records `(sql, Null)` on success so `handle_query_cypher` can WAL-log mutation
     /// queries issued via this escape hatch.
     pub fn cypher_query(&self, sql: &str) -> Result<Vec<Vec<String>>, Error> {
-        let result = self.inner.query(sql)?;
+        // Same statement-level FTS backstop as `raw_query` (issue #649, ADR-0649): this is the
+        // escape hatch for arbitrary mutations, so a delete/update here must self-heal too.
+        let result = match self.inner.query(sql) {
+            Ok(r) => r,
+            Err(e) => {
+                let e = Error::from(e);
+                if !self.repair_fts_after(&e) {
+                    return Err(e);
+                }
+                self.inner.query(sql)?
+            }
+        };
         let mut rows = Vec::new();
         for row in result {
             rows.push(row.iter().map(value_as_string).collect());
@@ -5228,12 +5245,12 @@ mod fts_backstop_tests {
         let (_d, db) = open();
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
-        assert_eq!(conn.fts_repair_count(), 0);
-        assert_eq!(conn.fts_last_repair_unix_ms(), None);
+        assert_eq!(conn.fts_repair_snapshot(), (0, None));
         let _ = conn.drain_mutations();
         assert!(conn.repair_fts_after(&inconsistent()));
-        assert_eq!(conn.fts_repair_count(), 1);
-        assert!(conn.fts_last_repair_unix_ms().is_some());
+        let (count, last) = conn.fts_repair_snapshot();
+        assert_eq!(count, 1);
+        assert!(last.is_some());
         assert!(
             conn.drain_mutations().is_empty(),
             "repair must not be WAL-recorded"
@@ -5247,7 +5264,7 @@ mod fts_backstop_tests {
         conn.init_schema(4).unwrap();
         conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
         assert!(!conn.repair_fts_after(&inconsistent()));
-        assert_eq!(conn.fts_repair_count(), 0);
+        assert_eq!(conn.fts_repair_snapshot().0, 0);
         conn.exec_transaction_control("ROLLBACK").unwrap();
     }
 
@@ -5257,6 +5274,6 @@ mod fts_backstop_tests {
         let conn = db.connect().unwrap();
         conn.init_schema(4).unwrap();
         assert!(!conn.repair_fts_after(&Error::QueryFailed("boom".to_string())));
-        assert_eq!(conn.fts_repair_count(), 0);
+        assert_eq!(conn.fts_repair_snapshot().0, 0);
     }
 }

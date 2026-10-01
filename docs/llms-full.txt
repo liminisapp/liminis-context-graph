@@ -2661,9 +2661,9 @@ staleness worth investigating — see
 times, since this process opened the database, a write hit `FTS index '<idx>' is inconsistent` and
 the service rebuilt all three FTS indexes and retried that statement once, and when the last such
 repair finished (Unix ms; `null` if none). Both are `null` while the service is degraded. A
-non-zero count means an FTS index was built by a different lbug version than the running one and
-was not caught at startup (typically a pinned 0.16.0–0.16.2 build touched it); it has been repaired
-and normally does not recur. The one-time startup rebuild (marker `fts_built_by_lbug` in
+non-zero count means a residual FTS inconsistency that the startup marker did not catch was
+detected and repaired (the classifier matches the error text, not its cause, so it does not by
+itself identify a version mismatch); it normally does not recur. The one-time startup rebuild (marker `fts_built_by_lbug` in
 `SchemaState`) is *not* counted here; it is logged on stderr
 (`rebuilding full-text (FTS) indexes: they were not built by this lbug version`) and its time is
 proportional to corpus size. See

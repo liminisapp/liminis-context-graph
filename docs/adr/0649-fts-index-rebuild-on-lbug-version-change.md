@@ -54,11 +54,12 @@ Nothing in the file format reveals the problem, so detection has to be recorded 
    WAL; index DDL and the marker `MERGE` must never reach it. `Conn::query_unrecorded` /
    `exec_params_unrecorded` bypass recording and the backstop below; `ensure_schema_state_table`
    uses the unrecorded path too.
-6. **Statement-level backstop.** `Conn::raw_query` / `exec_params` catch
+6. **Statement-level backstop.** `Conn::raw_query` / `exec_params` / `cypher_query` catch
    `error::is_fts_inconsistent_error`; outside an explicit transaction they rebuild all 3 indexes
    (unrecorded), bump `FtsRepairStatus`, log, and **retry that one statement once**. A failed
    autocommit statement is atomic and the caller already holds the write lock, so the retry is safe
-   and idempotent. It covers an index touched by a pinned 0.16.0–0.16.2 build after the marker was
+   and idempotent. `rebuild_fts_indexes` clears any current marker before its first drop, so a crash
+   mid-rebuild never leaves a trusted marker beside half-dropped indexes. It covers an index touched by a pinned 0.16.0–0.16.2 build after the marker was
    written, or any path that bypasses `init_schema`. The repair count and last-repair timestamp are
    reported as `fts_repair_count` / `fts_last_repair_unix_ms` in `knowledge_status` (`null` when
    degraded).

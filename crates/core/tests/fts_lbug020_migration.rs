@@ -287,6 +287,22 @@ fn backstop_rebuilds_all_three_indexes_and_retries() {
     );
 }
 
+/// FR-006: the `knowledge_query_cypher` escape hatch (`Conn::cypher_query`) is covered by the same
+/// backstop as `raw_query` / `exec_params`.
+#[test]
+fn backstop_covers_cypher_query_mutations() {
+    let (_dir, db_path) = extract_fixture();
+    let db = Db::open(db_path.to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    let uuid = arrow_edge_uuid(&conn);
+    conn.cypher_query(&format!(
+        "MATCH (r:RelatesToNode_ {{uuid: '{uuid}'}}) DETACH DELETE r"
+    ))
+    .expect("cypher_query must repair and retry");
+    assert_eq!(conn.fts_repair_count(), 1);
+    assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+}
+
 /// FR-007 / acceptance 3: `knowledge_rebuild_from_wal {from_seq: 0, force_clear: true}` against
 /// stale FTS indexes (open-time rebuild bypassed) completes with no failed mutations -- the
 /// purge no longer deletes through a live index.
