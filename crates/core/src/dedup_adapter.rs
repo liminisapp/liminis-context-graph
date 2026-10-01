@@ -47,13 +47,16 @@ impl DedupMode {
 /// Whether `LCG_DEDUP_LLM` asks for the extractor-backed check. Unset, empty, `0`, `false`,
 /// `off` and `no` (case-insensitive) are off; anything else is on.
 pub fn dedup_llm_requested() -> bool {
-    match lcg_env_var("LCG_DEDUP_LLM", "GRAPHITI_DEDUP_LLM") {
-        Ok(v) => !matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "" | "0" | "false" | "off" | "no"
-        ),
-        Err(_) => false,
-    }
+    lcg_env_var("LCG_DEDUP_LLM", "GRAPHITI_DEDUP_LLM")
+        .map(|v| parse_flag(&v))
+        .unwrap_or(false)
+}
+
+fn parse_flag(v: &str) -> bool {
+    !matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "off" | "no"
+    )
 }
 
 /// Whether the (retired) `LCG_DEDUP_ADAPTER_URL` / `GRAPHITI_DEDUP_ADAPTER_URL` is set.
@@ -339,11 +342,13 @@ mod tests {
     use crate::types::ExtractionOutcome;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    type AnswerFn = Box<dyn Fn(&[DuplicatePair]) -> Result<Vec<DedupVerdict>, Error> + Send + Sync>;
+
     /// Scripted judge: records every group it sees and answers via `answer`.
     struct ScriptedJudge {
         calls: AtomicUsize,
         group_sizes: Mutex<Vec<usize>>,
-        answer: Box<dyn Fn(&[DuplicatePair]) -> Result<Vec<DedupVerdict>, Error> + Send + Sync>,
+        answer: AnswerFn,
         delay: Duration,
     }
 
@@ -423,6 +428,16 @@ mod tests {
                 }
             })
             .collect())
+    }
+
+    #[test]
+    fn llm_flag_parsing_treats_off_values_as_off() {
+        for off in ["", "0", "false", "FALSE", "off", "No", "  "] {
+            assert!(!parse_flag(off), "{off:?} must be off");
+        }
+        for on in ["1", "true", "on", "yes", "anything"] {
+            assert!(parse_flag(on), "{on:?} must be on");
+        }
     }
 
     #[tokio::test]
