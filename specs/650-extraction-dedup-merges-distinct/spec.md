@@ -1,4 +1,6 @@
-# Feature Specification: Identifier veto and real LLM check for extraction-time entity dedup
+# Feature Specification: Identifier veto for extraction-time entity dedup
+
+> **Scope change (2026-10-01):** the LLM dedup check (User Story 3, FR-007–FR-009, FR-012, SC-003 and the LLM-confirmed / LLM-rejected counters) moved to #652. This issue ships the deterministic identifier veto and per-path observability only. `LocalDedupAdapter` and `LCG_DEDUP_ADAPTER_URL` are left untouched here. Items marked "deferred to #652" below are retained for traceability and are **not** requirements of this issue. The "LLM mode" in User Story 4 and the LLM counters in its scenario 3 are likewise #652; here the startup log reports passthrough + identifier veto.
 
 **Feature Branch**: `fabrik/issue-650`
 **Created**: 2026-10-01
@@ -66,7 +68,7 @@ A user with no LLM extractor available still gets alias merging for names withou
 
 ---
 
-### User Story 3 - LLM confirms ambiguous embedding candidates (Priority: P2)
+### User Story 3 - LLM confirms ambiguous embedding candidates (Priority: P2) — DEFERRED to #652
 
 An operator who has configured an extractor (Anthropic API, or the OpenAI-compatible `--extractor-uds` / `--extractor-http` endpoint) gets a constrained yes/no judgement on each embedding candidate that survives the veto, so aliases merge and look-alikes do not.
 
@@ -119,13 +121,13 @@ At startup the log states which dedup mode is active. Extraction results and/or 
 - **FR-004**: If the two names' distinguishing-token sets differ, including when only one side has any, the candidate MUST NOT be a duplicate and resolution MUST take the `Insert` path.
 - **FR-005**: The veto MUST NOT apply to the exact case-insensitive name-match path, to `knowledge_merge_entities`, or to any non-extraction code path.
 - **FR-006**: When the veto does not fire and no LLM dedup check is active, an above-threshold candidate MUST merge as today (`PostgreSQL`/`Postgres`, `New York`/`New York City`).
-- **FR-007**: The dead `LocalDedupAdapter` HTTP protocol (`LCG_DEDUP_ADAPTER_URL`, `{candidate, incoming}` → `{is_duplicate}`) MUST be replaced by an LLM dedup check that uses the already-configured extractor (Anthropic API or OpenAI-compatible UDS/HTTP endpoint). `LCG_DEDUP_ADAPTER_URL` MUST either be removed or kept as a documented deprecated alias. The "Phase B (#59)" deprecation note MUST be resolved.
-- **FR-008**: The LLM check MUST ask a constrained yes/no question containing both entities' names, types and summaries, and MUST be invoked only for embedding candidates that survive the veto.
-- **FR-009**: The LLM dedup check MUST be controllable by configuration. Its default (opt-in or opt-out) MUST be chosen and documented, with cost weighed (at most one small call per ambiguous candidate, batched per chunk where feasible).
+- **FR-007** *(deferred to #652)*: The dead `LocalDedupAdapter` HTTP protocol (`LCG_DEDUP_ADAPTER_URL`, `{candidate, incoming}` → `{is_duplicate}`) MUST be replaced by an LLM dedup check that uses the already-configured extractor (Anthropic API or OpenAI-compatible UDS/HTTP endpoint). `LCG_DEDUP_ADAPTER_URL` MUST either be removed or kept as a documented deprecated alias. The "Phase B (#59)" deprecation note MUST be resolved.
+- **FR-008** *(deferred to #652)*: The LLM check MUST ask a constrained yes/no question containing both entities' names, types and summaries, and MUST be invoked only for embedding candidates that survive the veto.
+- **FR-009** *(deferred to #652)*: The LLM dedup check MUST be controllable by configuration. Its default (opt-in or opt-out) MUST be chosen and documented, with cost weighed (at most one small call per ambiguous candidate, batched per chunk where feasible).
 - **FR-010**: The passthrough adapter MUST remain only as the explicit "no LLM available / disabled" fallback.
 - **FR-011**: Startup MUST log which dedup mode is active.
-- **FR-012**: If the LLM check errors or returns an unparseable answer, the system MUST apply a documented, deterministic fallback (the conservative choice is `Insert`) and MUST NOT fail the extraction. Cancellation MUST continue to propagate as `Error::Cancelled`.
-- **FR-013**: Merge counts by path MUST be exposed in the extraction result and/or `knowledge_status`. The paths are exact-name, embedding merge with veto passed, LLM-confirmed, LLM-rejected, and vetoed.
+- **FR-012** *(deferred to #652)*: If the LLM check errors or returns an unparseable answer, the system MUST apply a documented, deterministic fallback (the conservative choice is `Insert`) and MUST NOT fail the extraction. Cancellation MUST continue to propagate as `Error::Cancelled`.
+- **FR-013**: Merge counts by path MUST be exposed in the extraction result and/or `knowledge_status`. This issue implements exact-name, embedding merge with veto passed, vetoed (plus adapter-rejected and salvage-vetoed); the LLM-confirmed and LLM-rejected paths are added by #652, and the counter structure is extensible for them.
 - **FR-014**: WAL replay MUST be unaffected. Recorded merge mutations replay as written, so existing WALs produce identical graphs. Only new extractions change.
 - **FR-015**: If a new `knowledge_*` method or field is added, the MCP tool registry (`crates/service/src/mcp/tools.rs`) and its count assertions, and the IPC parity tests, MUST be updated. Any new configuration is documented in `docs/configuration.md` (and `docs/llms-full.txt`).
 
@@ -141,7 +143,7 @@ At startup the log states which dedup mode is active. Extraction results and/or 
 
 - **SC-001**: All six "distinct" pairs from the table (`ADR 2018`/`2019`, `lcg 0.15.0`/`0.16.2`, `RFC 9110`/`9111`, `Q3`/`Q4 2025 roadmap`, `issue #611`/`#612`, `Project Aurora`/`v2`) are never merged by extraction, tested with fixed embeddings forcing cosine ≥ 0.85, on both dedup paths.
 - **SC-002**: `PostgreSQL`/`Postgres` and `New York`/`New York City` still merge on the embedding path when no LLM check is configured.
-- **SC-003**: With a stubbed extractor and the LLM check enabled, a rejected embedding candidate becomes an `Insert`, and a confirmed one becomes a `Merge`.
+- **SC-003** *(deferred to #652)*: With a stubbed extractor and the LLM check enabled, a rejected embedding candidate becomes an `Insert`, and a confirmed one becomes a `Merge`.
 - **SC-004**: Startup logs the active dedup mode, and per-path merge counts are reported and consistent with observed decisions.
 - **SC-005**: Existing WALs replay to identical graphs, and the existing exact-name and `knowledge_merge_entities` tests pass unchanged.
 
@@ -149,7 +151,7 @@ At startup the log states which dedup mode is active. Extraction results and/or 
 
 - Extraction-time only. `knowledge_merge_entities` and the exact-name path are unchanged.
 - Being conservative on false negatives (missed merges) is acceptable. A missed merge leaves two entities, and a wrong merge is unrecoverable without re-ingestion.
-- Research decides the default for the LLM check. The lean is on when an extractor is configured and off otherwise, with an explicit opt-out. The default is logged at startup.
+- *(Deferred to #652)* Research decides the default for the LLM check. The lean is on when an extractor is configured and off otherwise, with an explicit opt-out. The default is logged at startup.
 - Research confirms that WAL replay re-applies recorded merge mutations and never re-runs Phase B.
 - Patch-sized change, milestone 0.16.3.
 - Existing bad merges are not repaired by this change; recovery is by re-ingestion.

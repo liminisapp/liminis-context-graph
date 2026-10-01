@@ -37,7 +37,7 @@ tokenization, so the veto adds its own tokenizer on top. Split on whitespace; pe
 - **Standalone single-letter designators** (`Phase A`, `Plan B`, `Vitamin C`, `World War I`): a
   token that is, after trimming, exactly one letter. `E-mail` / `T-shirt` do not qualify.
   Two exemptions keep ordinary names merging: a **trailing-period initial** (`Brett A.`,
-  `Alice B. Smith`) and a **single-letter first token of a multi-token name** (the article in
+  `Alice B. Smith`) and a **leading `a` of a multi-token name** (the article in
   `A Tale of Two Cities`).
 
 ### Placement: at candidate selection, not after
@@ -80,5 +80,10 @@ logs `dedup: mode=<passthrough | local-adapter (LCG_DEDUP_LLM)> + identifier vet
   `Python 3` / `Python`, `Web 2.0` / `Web2.0`, mixed alphanumerics such as `K8s` aliases.
 - **Known gap:** `Brett A.` vs `Brett B.` is *not* vetoed, because both are exempt initials; unit
   tested as documented behaviour.
+- **Known gap:** Roman numerals other than a bare `I` are not tokens, so `World War II` /
+  `World War III` and `Henry VII` / `Henry VIII` are not vetoed; unit tested as documented
+  behaviour.
+- The leading-article exemption applies only to the letter `a`, so `C Programming` /
+  `D Programming` and `X Corp` / `Y Corp` are vetoed.
 - Existing bad merges are not repaired; recovery is re-ingestion.
 - The concurrent-ingest TOCTOU residual risk of ADR-0029 is unchanged.

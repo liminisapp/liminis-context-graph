@@ -15,7 +15,8 @@
 //!   `#611` → `611`, `COVID-19` → `19`, `GPT-4` and `GPT 4` agree).
 //! - **Standalone single-letter designators** (`Phase A`, `Plan B`): a token that is exactly one
 //!   letter, except trailing-period initials (`Brett A.`) and a single-letter token in first
-//!   position of a multi-token name (the article in `A Tale of Two Cities`).
+//!   position of a multi-token name when it is the article `a` (`A Tale of Two Cities`); other
+//!   leading letters (`C Programming`, `X Corp`) remain designators.
 
 use std::collections::BTreeSet;
 
@@ -57,7 +58,7 @@ pub fn distinguishing_tokens(name: &str) -> BTreeSet<String> {
             continue;
         }
         let initial = raw.ends_with('.');
-        let leading_article = i == 0 && multi;
+        let leading_article = i == 0 && multi && trimmed == "a";
         if !initial && !leading_article {
             out.insert(trimmed.to_string());
         }
@@ -123,6 +124,19 @@ mod tests {
         assert!(!vetoed("A Tale of Two Cities", "Tale of Two Cities"));
         // Known gap (ADR-0650): distinct initials are both exempt, so they are not vetoed.
         assert!(!vetoed("Brett A.", "Brett B."));
+    }
+
+    #[test]
+    fn leading_letter_other_than_article_is_a_designator() {
+        assert!(vetoed("C Programming", "D Programming"));
+        assert!(vetoed("X Corp", "Y Corp"));
+    }
+
+    #[test]
+    fn roman_numerals_beyond_i_are_a_known_gap() {
+        // Documented in ADR-0650: multi-letter Roman numerals are not tokens.
+        assert!(!vetoed("World War II", "World War III"));
+        assert!(!vetoed("Henry VII", "Henry VIII"));
     }
 
     #[test]
