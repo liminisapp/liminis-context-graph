@@ -1199,3 +1199,35 @@ fn test_apply_same_as_leaves_foreign_edge_untouched() {
         "no replacement group-L edge should be written onto the canonical by apply_same_as"
     );
 }
+
+// ── Issue #650 / FR-005: the identifier-mismatch veto never applies to explicit merges ──
+
+/// An operator-requested merge of `ADR 2018` into `ADR 2019` is honoured: the extraction-time
+/// veto lives only in `episode.rs` candidate selection, not in `merge_entities`.
+#[test]
+fn test_explicit_merge_ignores_identifier_veto() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+    conn.insert_entity(&make_entity("adr-2019", "ADR 2019", TS))
+        .unwrap();
+    conn.insert_entity(&make_entity("adr-2018", "ADR 2018", TS))
+        .unwrap();
+
+    let result = merge_entities(
+        &conn,
+        &MergeEntitiesParams {
+            canonical_uuid: Some("adr-2019".to_string()),
+            canonical_name: None,
+            alias_uuids: vec!["adr-2018".to_string()],
+            alias_names: vec![],
+            merge_all_by_name: false,
+            kind: None,
+            group_id: "liminis".to_string(),
+            dry_run: false,
+        },
+        TS,
+    );
+    assert!(result.success, "errors: {:?}", result.errors);
+    assert_eq!(result.merged_count, 1);
+}
