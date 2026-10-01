@@ -18,6 +18,17 @@ pub trait DedupAdapter: Send + Sync {
     ) -> BoxFuture<'a, Result<bool, Error>>;
 }
 
+/// Human-readable description of the active extraction-time dedup mode, for the startup log
+/// (issue #650). Reads the same `LCG_DEDUP_LLM` switch as `AppState::from_env`. The
+/// identifier-mismatch veto (ADR-0650) is always on, in front of whichever adapter is selected.
+pub fn dedup_mode_description() -> &'static str {
+    if lcg_env_var("LCG_DEDUP_LLM", "GRAPHITI_DEDUP_LLM").is_ok() {
+        "local-adapter (LCG_DEDUP_LLM) + identifier veto"
+    } else {
+        "passthrough + identifier veto"
+    }
+}
+
 // ── PassthroughDedupAdapter ───────────────────────────────────────────────────
 
 /// Always returns `Ok(true)` — preserves cosine-only dedup behavior when LCG_DEDUP_LLM unset.
@@ -89,5 +100,39 @@ impl DedupAdapter for LocalDedupAdapter {
         incoming: &'a ExtractedEntity,
     ) -> BoxFuture<'a, Result<bool, Error>> {
         Box::pin(self.call(candidate, incoming))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// The startup log line (issue #650) must track the same `LCG_DEDUP_LLM` switch that
+    /// `AppState::from_env` uses to pick the adapter.
+    #[test]
+    fn dedup_mode_description_tracks_lcg_dedup_llm() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let (new, old) = (
+            std::env::var("LCG_DEDUP_LLM").ok(),
+            std::env::var("GRAPHITI_DEDUP_LLM").ok(),
+        );
+        std::env::remove_var("LCG_DEDUP_LLM");
+        std::env::remove_var("GRAPHITI_DEDUP_LLM");
+        assert_eq!(dedup_mode_description(), "passthrough + identifier veto");
+        std::env::set_var("LCG_DEDUP_LLM", "1");
+        assert_eq!(
+            dedup_mode_description(),
+            "local-adapter (LCG_DEDUP_LLM) + identifier veto"
+        );
+        std::env::remove_var("LCG_DEDUP_LLM");
+        if let Some(v) = new {
+            std::env::set_var("LCG_DEDUP_LLM", v);
+        }
+        if let Some(v) = old {
+            std::env::set_var("GRAPHITI_DEDUP_LLM", v);
+        }
     }
 }

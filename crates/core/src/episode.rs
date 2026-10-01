@@ -20,6 +20,27 @@ use crate::{
     wal_exec,
 };
 
+/// Per-chunk tally of Phase B entity-resolution outcomes by path (issue #650, ADR-0650). One
+/// named field per path so later work (#652's LLM-confirmed / LLM-rejected paths) can extend the
+/// struct without reshaping call sites. Each extracted entity increments exactly one of
+/// `exact_name`, `embedding_merge`, `vetoed`, `adapter_rejected`, or none (a plain insert with no
+/// above-threshold candidate); `salvage_vetoed` counts off-list edge endpoints, not entities.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct DedupPathCounts {
+    /// Merged via the exact case-insensitive name match (no veto, no adapter).
+    pub exact_name: usize,
+    /// Merged on the embedding path: a candidate survived the identifier veto and the dedup
+    /// adapter confirmed it.
+    pub embedding_merge: usize,
+    /// Above-threshold candidates existed but every one was discarded by the identifier-mismatch
+    /// veto, so the entity was inserted. Counted once per incoming entity.
+    pub vetoed: usize,
+    /// A candidate survived the veto but the (legacy) dedup adapter said "not a duplicate".
+    pub adapter_rejected: usize,
+    /// Off-list edge endpoints whose above-threshold salvage candidates were all vetoed.
+    pub salvage_vetoed: usize,
+}
+
 #[derive(Debug)]
 pub struct AddEpisodeResult {
     pub episode_uuid: String,
@@ -62,6 +83,8 @@ pub struct AddEpisodeResult {
     /// reaches the Phase C resolution code that populates `edges_dropped_unresolvable` anyway.
     /// An edge with multiple blank fields is counted once, not once per field.
     pub edges_dropped_malformed: usize,
+    /// Phase B resolution outcomes by path for this chunk (issue #650).
+    pub dedup_paths: DedupPathCounts,
 }
 
 struct ActiveWriteGuard(Arc<std::sync::atomic::AtomicUsize>);
@@ -125,7 +148,12 @@ enum PhaseBResult {
     /// Exact case-insensitive name match found in the persisted graph.
     NameMatch { existing: EntityRow },
     /// No name match; embedding-based candidate (may be None if no similar entity exists).
-    EmbeddingCandidate { candidate: Option<EntityRow> },
+    /// `vetoed` is the number of above-threshold candidates the identifier-mismatch veto
+    /// discarded (issue #650).
+    EmbeddingCandidate {
+        candidate: Option<EntityRow>,
+        vetoed: usize,
+    },
 }
 
 /// Validates and returns a timestamp string from LLM output.
@@ -179,8 +207,10 @@ async fn resolve_phase_b(
             }
             // Embedding-based resolution fallback.
             let emb = &name_embeddings[i];
-            let candidate = if use_hybrid {
-                conn.hybrid_dedup_similar_entity_kind(
+            // Name-aware selection: candidates failing the identifier-mismatch veto are discarded
+            // before the best is picked (issue #650, ADR-0650).
+            let selection = if use_hybrid {
+                conn.hybrid_dedup_similar_entity_kind_for_name(
                     emb,
                     trimmed,
                     &group_id,
@@ -188,9 +218,18 @@ async fn resolve_phase_b(
                     kind,
                 )?
             } else {
-                conn.brute_force_similar_entity_kind(emb, &group_id, DEDUP_THRESHOLD, kind)?
+                conn.brute_force_similar_entity_kind_for_name(
+                    emb,
+                    trimmed,
+                    &group_id,
+                    DEDUP_THRESHOLD,
+                    kind,
+                )?
             };
-            out.push(PhaseBResult::EmbeddingCandidate { candidate });
+            out.push(PhaseBResult::EmbeddingCandidate {
+                candidate: selection.candidate,
+                vetoed: selection.vetoed,
+            });
         }
         Ok::<_, Error>(out)
     })
@@ -533,6 +572,8 @@ pub async fn add_episode(
         true
     });
 
+    let mut dedup_paths = DedupPathCounts::default();
+
     if !extraction.edges.is_empty() {
         // Keyed by the same normalization applied to a name before it ever reaches the model
         // (control-char strip + trim + lowercase, `prompts::normalize_name`) — an entity name
@@ -579,15 +620,28 @@ pub async fn add_episode(
             std::collections::HashMap::new();
         for ((lower, original), emb) in missing_names.into_iter().zip(missing_embeddings) {
             let mut best: Option<(f32, &str)> = None;
+            let mut any_vetoed = false;
             for (i, candidate_emb) in name_embeddings.iter().enumerate() {
                 let score = crate::db::cosine_similarity(&emb, candidate_emb);
                 let is_better = match best {
                     Some((b, _)) => score > b,
                     None => true,
                 };
-                if score >= DEDUP_THRESHOLD && is_better {
-                    best = Some((score, extraction.entities[i].name.as_str()));
+                if score >= DEDUP_THRESHOLD {
+                    // Identifier-mismatch veto (issue #650): `ADR 2018` must not be rewritten
+                    // onto a batch entity `ADR 2019`.
+                    if crate::identifier_veto::identifier_mismatch(
+                        &original,
+                        &extraction.entities[i].name,
+                    ) {
+                        any_vetoed = true;
+                    } else if is_better {
+                        best = Some((score, extraction.entities[i].name.as_str()));
+                    }
                 }
+            }
+            if best.is_none() && any_vetoed {
+                dedup_paths.salvage_vetoed += 1;
             }
             if let Some((score, canonical)) = best {
                 eprintln!(
@@ -761,6 +815,7 @@ pub async fn add_episode(
                         existing.name, existing.labels, extracted.entity_type
                     );
                 }
+                dedup_paths.exact_name += 1;
                 DedupDecision::Merge {
                     existing_uuid: existing.uuid.clone(),
                     merged_summary: format!("{} {}", existing.summary, extracted.summary),
@@ -768,6 +823,7 @@ pub async fn add_episode(
             }
             PhaseBResult::EmbeddingCandidate {
                 candidate: Some(existing),
+                ..
             } => {
                 let is_dup = tokio::select! {
                     r = state.dedup.is_duplicate(existing, extracted) => r?,
@@ -777,15 +833,23 @@ pub async fn add_episode(
                     }
                 };
                 if is_dup {
+                    dedup_paths.embedding_merge += 1;
                     DedupDecision::Merge {
                         existing_uuid: existing.uuid.clone(),
                         merged_summary: format!("{} {}", existing.summary, extracted.summary),
                     }
                 } else {
+                    dedup_paths.adapter_rejected += 1;
                     make_insert_row(name_embeddings[i].clone(), summary_embeddings[i].clone())
                 }
             }
-            PhaseBResult::EmbeddingCandidate { candidate: None } => {
+            PhaseBResult::EmbeddingCandidate {
+                candidate: None,
+                vetoed,
+            } => {
+                if *vetoed > 0 {
+                    dedup_paths.vetoed += 1;
+                }
                 make_insert_row(name_embeddings[i].clone(), summary_embeddings[i].clone())
             }
         };
@@ -1185,6 +1249,7 @@ pub async fn add_episode(
         entities_reclassified_unclassified,
         entities_dropped_malformed,
         edges_dropped_malformed,
+        dedup_paths,
     })
 }
 

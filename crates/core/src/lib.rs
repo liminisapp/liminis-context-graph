@@ -19,6 +19,7 @@ pub mod extraction_failures;
 pub mod extractor;
 pub mod group_purge;
 pub mod handlers;
+pub mod identifier_veto;
 pub mod identity_stamp;
 pub mod ipc;
 pub(crate) mod lbug_extension_home;
@@ -46,7 +47,9 @@ pub mod wal_strip;
 pub use app_state::AppState;
 pub use cassette::{CassetteRecord, CassetteWriter, RecordingExtractor, ReplayingExtractor};
 pub use db::{Conn, Db, WalPositionRecord};
-pub use dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter};
+pub use dedup_adapter::{
+    dedup_mode_description, DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter,
+};
 pub use embedder::{Embedder, MockEmbedder, NameMapEmbedder, OaiEmbedder};
 pub use embedding_cache::{EmbedderContext, EmbeddingCache};
 pub use error::Error;

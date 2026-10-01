@@ -138,6 +138,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0629](0629-find-search-evidence-and-similarity-floor.md) | Search Evidence and a `min_similarity` Floor for `find_entities` / `find_relationships` | 2026-09-30 |
 | [0639](0639-post-merge-release-packaging-verification.md) | Verify Release Packaging Post-Merge on `main`, Not on Every PR Push | 2026-09-30 |
 | [0640](0640-ci-cheap-checks-first-and-fail-fast.md) | CI Cheap-Checks-First Pre-Gate and Run-Wide Fail-Fast | 2026-09-30 |
+| [0650](0650-identifier-mismatch-veto-for-extraction-dedup.md) | Identifier-Mismatch Veto for Extraction-Time Entity Dedup | 2026-10-01 |
 
 ## Historical numbering
 

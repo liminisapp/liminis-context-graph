@@ -498,6 +498,46 @@ async fn test_off_list_endpoint_salvaged_via_name_embedding_similarity() {
     assert_eq!(rels[0].target_node_uuid, ocean_acidification.uuid);
 }
 
+// ── Issue #650: the identifier-mismatch veto also gates endpoint salvage ───────
+
+#[tokio::test]
+async fn test_salvage_does_not_rewrite_endpoint_onto_identifier_mismatched_entity() {
+    let (db, _dir) = make_db();
+
+    // 'ADR 2018' is off-list and embeds identically to the batch entity 'ADR 2019' (cosine 1.0,
+    // well above DEDUP_THRESHOLD), but the names differ only by an identifier — the veto must
+    // stop salvage rewriting the endpoint onto 'ADR 2019'.
+    let mut map = HashMap::new();
+    map.insert("ADR 2019".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("ADR 2018".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("Ocean Acidification".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
+    let embedder = NameMapEmbedder::new(EMB_DIM, map);
+
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["ADR 2019", "Ocean Acidification"],
+        &[(
+            "ADR 2018",
+            "Ocean Acidification",
+            "ADR 2018 concerns acidification",
+        )],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, embedder);
+
+    let result = run_episode(&state, "ep-a", "ADR 2018 concerns acidification.", GROUP_A).await;
+
+    assert_eq!(
+        result.edges_extracted, 0,
+        "vetoed endpoint must not be salvaged"
+    );
+    assert_eq!(result.edges_dropped_unresolvable, 1);
+    assert_eq!(result.dedup_paths.salvage_vetoed, 1);
+    let conn = db.connect().unwrap();
+    assert!(conn
+        .list_relationships(Some(&[GROUP_A]), 10)
+        .unwrap()
+        .is_empty());
+}
+
 // ── Edge case: adversarial pairs must not cross-resolve below the similarity threshold ──
 
 #[tokio::test]

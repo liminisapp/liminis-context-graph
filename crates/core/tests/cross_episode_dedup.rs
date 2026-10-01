@@ -12,7 +12,7 @@ use arc_swap::ArcSwapOption;
 use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     db::Db,
-    dedup_adapter::PassthroughDedupAdapter,
+    dedup_adapter::{DedupAdapter, PassthroughDedupAdapter},
     embedder::{MockEmbedder, NameMapEmbedder},
     episode,
     extractor::ConfigurableExtractor,
@@ -42,13 +42,22 @@ fn make_state_with(
     extractor: impl lcg_core::extractor::Extractor + 'static,
     embedder: impl lcg_core::embedder::Embedder + 'static,
 ) -> Arc<AppState> {
+    make_state_with_dedup(db, extractor, embedder, Arc::new(PassthroughDedupAdapter))
+}
+
+fn make_state_with_dedup(
+    db: Arc<Db>,
+    extractor: impl lcg_core::extractor::Extractor + 'static,
+    embedder: impl lcg_core::embedder::Embedder + 'static,
+    dedup: Arc<dyn DedupAdapter>,
+) -> Arc<AppState> {
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
     Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(embedder),
         extractor: Arc::new(extractor),
-        dedup: Arc::new(PassthroughDedupAdapter),
+        dedup,
         write_lock: Arc::new(RwLock::new(())),
         sink,
         db_path: "test.db".to_string(),
@@ -451,4 +460,168 @@ async fn test_add_episode_normalizes_non_object_attributes_for_library_callers()
         .cypher_query("MATCH (n:Episodic {name: 'ep-valid-object'}) RETURN n.attributes")
         .unwrap();
     assert_eq!(rows[0][0], r#"{"k":"v"}"#);
+}
+
+// ── Identifier-mismatch veto (issue #650, ADR-0650) ──────────────────────────
+
+/// Rejects every candidate — exercises the `adapter_rejected` counter.
+struct RejectAllAdapter;
+
+impl DedupAdapter for RejectAllAdapter {
+    fn is_duplicate<'a>(
+        &'a self,
+        _candidate: &'a lcg_core::EntityRow,
+        _incoming: &'a ExtractedEntity,
+    ) -> futures::future::BoxFuture<'a, Result<bool, lcg_core::Error>> {
+        Box::pin(async { Ok(false) })
+    }
+}
+
+fn many_entities(names: &[&str]) -> ExtractionResult {
+    ExtractionResult {
+        entities: names
+            .iter()
+            .map(|n| ExtractedEntity {
+                name: n.to_string(),
+                entity_type: "Person".to_string(),
+                summary: format!("{n} summary"),
+                original_entity_type: None,
+            })
+            .collect(),
+        edges: vec![],
+    }
+}
+
+async fn ingest(state: &Arc<AppState>, ep: &str) -> episode::AddEpisodeResult {
+    episode::add_episode(
+        Arc::clone(state),
+        ep,
+        "body",
+        "test",
+        "test source",
+        REF_TIME,
+        GROUP,
+        SourceType::Text,
+        None,
+        "",
+    )
+    .await
+    .unwrap()
+}
+
+/// Embeds `first` at [1,0,0,0] and `second` at cosine ≈ 0.924 from it (≥ DEDUP_THRESHOLD).
+fn close_pair_embedder(first: &str, second: &str) -> NameMapEmbedder {
+    let mut m: HashMap<String, Vec<f32>> = HashMap::new();
+    m.insert(first.to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    m.insert(second.to_string(), vec![0.9239, 0.3827, 0.0, 0.0]);
+    NameMapEmbedder::new(EMB_DIM, m)
+}
+
+async fn run_pair(first: &str, second: &str) -> (usize, episode::AddEpisodeResult) {
+    let (db, _dir) = make_db();
+    let ext = ConfigurableExtractor::new(vec![one_entity(first), one_entity(second)]);
+    let state = make_state_with(Arc::clone(&db), ext, close_pair_embedder(first, second));
+    ingest(&state, "ep-a").await;
+    let second_result = ingest(&state, "ep-b").await;
+    let count = db.connect().unwrap().entity_count_in_group(GROUP).unwrap();
+    (count, second_result)
+}
+
+#[tokio::test]
+async fn identifier_veto_keeps_number_differentiated_names_distinct() {
+    for (a, b) in [
+        ("ADR 2018", "ADR 2019"),
+        ("lcg 0.15.0", "lcg 0.16.2"),
+        ("RFC 9110", "RFC 9111"),
+        ("Q3 2025 roadmap", "Q4 2025 roadmap"),
+        ("issue #611", "issue #612"),
+        ("Project Aurora", "Project Aurora v2"),
+        ("Phase A", "Phase B"),
+    ] {
+        let (count, res) = run_pair(a, b).await;
+        assert_eq!(count, 2, "{a:?} / {b:?} must stay two entities");
+        assert_eq!(res.dedup_paths.vetoed, 1, "{a:?} / {b:?} counted as vetoed");
+        assert_eq!(res.dedup_paths.embedding_merge, 0);
+    }
+}
+
+#[tokio::test]
+async fn identifier_veto_does_not_block_genuine_aliases() {
+    for (a, b) in [("PostgreSQL", "Postgres"), ("New York", "New York City")] {
+        let (count, res) = run_pair(a, b).await;
+        assert_eq!(count, 1, "{a:?} / {b:?} must still merge");
+        assert_eq!(res.dedup_paths.embedding_merge, 1);
+        assert_eq!(res.dedup_paths.vetoed, 0);
+    }
+}
+
+#[tokio::test]
+async fn identifier_veto_leaves_exact_name_match_untouched() {
+    // Same name → exact-name path, never subject to the veto (FR-005).
+    let (db, _dir) = make_db();
+    let ext = ConfigurableExtractor::new(vec![one_entity("ADR 2018"), one_entity("adr 2018")]);
+    let state = make_state_with(Arc::clone(&db), ext, MockEmbedder::new(EMB_DIM));
+    ingest(&state, "ep-a").await;
+    let res = ingest(&state, "ep-b").await;
+    assert_eq!(
+        db.connect().unwrap().entity_count_in_group(GROUP).unwrap(),
+        1
+    );
+    assert_eq!(res.dedup_paths.exact_name, 1);
+}
+
+#[tokio::test]
+async fn dedup_path_counts_match_decisions() {
+    let (db, _dir) = make_db();
+    let mut m: HashMap<String, Vec<f32>> = HashMap::new();
+    m.insert("ADR 2018".into(), vec![1.0, 0.0, 0.0, 0.0]);
+    m.insert("ADR 2019".into(), vec![0.9239, 0.3827, 0.0, 0.0]);
+    m.insert("PostgreSQL".into(), vec![0.0, 0.0, 1.0, 0.0]);
+    m.insert("Postgres".into(), vec![0.0, 0.0, 0.9239, 0.3827]);
+    m.insert("Alpha".into(), vec![0.0, 1.0, 0.0, 0.0]);
+    let ext = ConfigurableExtractor::new(vec![
+        many_entities(&["ADR 2018", "PostgreSQL", "Alpha"]),
+        // vetoed insert, embedding merge, exact-name merge, no-candidate insert
+        many_entities(&["ADR 2019", "Postgres", "alpha", "Zeta"]),
+    ]);
+    let state = make_state_with(Arc::clone(&db), ext, NameMapEmbedder::new(EMB_DIM, m));
+    let first = ingest(&state, "ep-a").await;
+    assert_eq!(first.dedup_paths, episode::DedupPathCounts::default());
+    let res = ingest(&state, "ep-b").await;
+    assert_eq!(
+        res.dedup_paths,
+        episode::DedupPathCounts {
+            exact_name: 1,
+            embedding_merge: 1,
+            vetoed: 1,
+            adapter_rejected: 0,
+            salvage_vetoed: 0,
+        }
+    );
+    // 3 + (ADR 2019, Zeta inserted) = 5 entities; Postgres and alpha merged.
+    assert_eq!(
+        db.connect().unwrap().entity_count_in_group(GROUP).unwrap(),
+        5
+    );
+}
+
+#[tokio::test]
+async fn adapter_rejection_is_counted_separately_from_veto() {
+    let (db, _dir) = make_db();
+    let ext = ConfigurableExtractor::new(vec![one_entity("PostgreSQL"), one_entity("Postgres")]);
+    let state = make_state_with_dedup(
+        Arc::clone(&db),
+        ext,
+        close_pair_embedder("PostgreSQL", "Postgres"),
+        Arc::new(RejectAllAdapter),
+    );
+    ingest(&state, "ep-a").await;
+    let res = ingest(&state, "ep-b").await;
+    assert_eq!(res.dedup_paths.adapter_rejected, 1);
+    assert_eq!(res.dedup_paths.embedding_merge, 0);
+    assert_eq!(res.dedup_paths.vetoed, 0);
+    assert_eq!(
+        db.connect().unwrap().entity_count_in_group(GROUP).unwrap(),
+        2
+    );
 }

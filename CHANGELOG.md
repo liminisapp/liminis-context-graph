@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **Extraction dedup no longer merges entities that differ only by a number or identifier**
+  ([ADR-0650](docs/adr/0650-identifier-mismatch-veto-for-extraction-dedup.md), #650).
+  Name embeddings score `ADR 2018` / `ADR 2019` (and versions, RFCs, quarters, issue numbers)
+  above the dedup threshold, so they were merged into one entity. A deterministic
+  identifier-mismatch veto now rejects embedding merges — and edge-endpoint salvage rewrites —
+  whose names carry different digit-bearing or standalone single-letter tokens. **Behaviour
+  change:** `Python 3` / `Python` and similar pairs no longer merge on the embedding path
+  (a missed merge is recoverable; a wrong one is not). Exact-name matches,
+  `knowledge_merge_entities` and WAL replay are unaffected. Existing bad merges are not
+  repaired; re-ingest.
+
+### Added
+
+- `knowledge_process_chunk` returns an additive `dedup_paths` object of per-path resolution
+  counts (`exact_name`, `embedding_merge`, `vetoed`, `adapter_rejected`, `salvage_vetoed`), and
+  startup logs `dedup: mode=…`.
+
 ## [0.16.2] - 2026-09-30
 
 Full detail: [docs/releases/0.16.2.md](docs/releases/0.16.2.md).
