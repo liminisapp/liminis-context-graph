@@ -92,6 +92,10 @@ checkouts, so the mtime comparison lines up and the restored build is recognized
 fresh. This requirement is unrelated to the cache-vs-artifact choice above; it applies
 identically either way.
 
+*(Amended, #657: this section is necessary but not sufficient, and its claim that the
+normalization yields a cache hit was never verified by a working guard — see the #657
+amendment below.)*
+
 ### 3. Bodily merge into `ci.yml`, not a `workflow_call` orchestrator
 
 GitHub Actions' `needs:` and job-level artifact/cache dependencies only work between
@@ -245,3 +249,47 @@ its id `build-release` and role as the run's single release-profile build are un
 `needs:` a cheap `lint` pre-gate, and `test` plus the six e2e jobs fail fast (cancel the run on
 their own failure) while remaining parallel. The fmt, eval script guard and ML-deps steps moved
 from `test` to `lint`. See ADR-0640.
+
+## Amendment (2026-10-01, issue #657)
+
+The `test` job was recompiling the whole workspace (~233 crates, ~9 of its ~11 minutes) on
+every run, and the FR-006 guard reported "full cache hit" anyway. Two independent defects.
+
+**Root cause of the missed reuse: the artifact had no `.fingerprint/`.** The
+`release-build` upload did not set `include-hidden-files`, whose default in
+`actions/upload-artifact@v7` is `false` (CI run 36911444513 logs it). That silently drops every
+dot-prefixed path, which for `target/release/` means `.fingerprint/` — cargo's per-unit
+freshness records — and `.cargo-lock`. With no fingerprints cargo treats every unit as dirty.
+The fix is `include-hidden-files: true` on that upload, the same flag the
+`lbug-extension-bundle` upload already needed (ADR-0559). The mtime-normalization section
+above was an incomplete theory: it covers workspace path crates, but registry crates such as
+`proc-macro2` and `libc` are not mtime-checked at all and could never have been rescued by it.
+The normalization steps stay; they are necessary, not sufficient.
+
+**Latent coupling.** Fingerprints embed absolute paths. The reuse works because `build-release`
+and `test` both run on `ubuntu-latest` with the same `/home/runner/work/<repo>/<repo>` checkout
+and the same `CARGO_HOME`. Changing either runner layout would silently bring the recompile back
+— the (now working) guard is what would show it.
+
+**Why the guard was blind: ANSI colour.** `dtolnay/rust-toolchain` exports
+`CARGO_TERM_COLOR=always` via `$GITHUB_ENV`, so cargo's output in CI is coloured, and cargo
+styles the status word separately from the rest of the line:
+`ESC[1mESC[92m   CompilingESC[0m proc-macro2`. A colour **reset sits between `Compiling` and the
+following space**, so `grep -q "Compiling "` could never match real output. Its only matches in
+that run were the runner echoing the step's own script text. A guard that cannot fail is worse
+than none, so it is now `scripts/assert-no-compiling.sh <log>`: it strips CSI sequences, then
+matches `^[[:space:]]*Compiling([[:space:]]|$)` — independent of colour settings and of a
+trailing space, and anchored so echoed script text cannot false-match. It is used by `test` and
+all six e2e jobs (whose guards were vacuous rather than wrong: they run prebuilt binaries), and
+`scripts/test-assert-no-compiling.sh` (run in the `lint` job) asserts it on synthetic coloured,
+plain and clean logs, plus a negative control showing the old pattern misses the coloured one.
+`test`'s `cargo test --release` also sets `CARGO_TERM_COLOR=never` so its log stays greppable
+by humans; the guard does not depend on that.
+
+**FR-005 demonstration.** The workflow uses `cancel-in-progress`, so a deliberately red
+pre-fix run cannot be relied on to survive to `test`'s guard step, and a stage must not wait on
+CI. The equivalent demonstration is the self-test's coloured-log and negative-control cases
+(byte-for-byte the sequence from run 36911444513), which run on every push.
+
+**Unchanged:** `build-release` remains the only full compile and only `lbug-cache-*` writer; the
+e2e artifact is still six binaries; the same tests, clippy, R-003 gate and linkage assertion run.
