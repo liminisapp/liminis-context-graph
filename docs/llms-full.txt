@@ -10,7 +10,7 @@ HNSW vector search, and full-text search in a single embedded service, built on
 search cluster: everything runs in one process, on your machine, against files in your
 workspace.
 
-This page documents **v0.16.2**, built directly from that release tag's `docs/`
+This page documents **v0.16.3**, built directly from that release tag's `docs/`
 tree — not from `main`. Unreleased changes merged to `main` since this tag are not reflected
 here; use the version switcher in the footer to browse other published releases.
 
@@ -2657,6 +2657,25 @@ count, or a `name_index_trusted: false` that doesn't clear on its own, signals `
 staleness worth investigating — see
 [ADR-0221](adr/0221-secondary-art-index-for-entity-name-lookup.md) for the mechanism.
 
+**`fts_repair_count`** (integer) and **`fts_last_repair_unix_ms`** (integer or `null`) — how many
+times, since this process opened the database, a write hit `FTS index '<idx>' is inconsistent` and
+the service rebuilt all three FTS indexes and retried that statement once, and when the last such
+repair finished (Unix ms; `null` if none). Both are `null` while the service is degraded. A
+non-zero count means an FTS index was built by a different lbug version than the running one and
+was not caught at startup (typically a pinned 0.16.0–0.16.2 build touched it); it has been repaired
+and normally does not recur. The one-time startup rebuild (marker `fts_built_by_lbug` in
+`SchemaState`) is *not* counted here; it is logged on stderr
+(`rebuilding full-text (FTS) indexes: they were not built by this lbug version`) and its time is
+proportional to corpus size. See
+[ADR-0649](adr/0649-fts-index-rebuild-on-lbug-version-change.md).
+
+**Troubleshooting `FTS index '<idx>' is inconsistent`.** Raised by a delete/update on a row whose
+non-ASCII term is missing from an FTS index built by lbug 0.20 (0.15.x and earlier). 0.16.3
+rebuilds the indexes automatically on first start. On 0.16.0–0.16.2, drop **all three** (not just
+the named one) with `CALL DROP_FTS_INDEX('Entity','node_name_and_summary')`,
+`CALL DROP_FTS_INDEX('RelatesToNode_','edge_name_and_fact')` and
+`CALL DROP_FTS_INDEX('Episodic','episode_content')`, then call `knowledge_build_indices`.
+
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below
 (`{applied_seq, max_seq, generation, generation_status, hydration_status, embedding_model,
@@ -4259,6 +4278,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0629](0629-find-search-evidence-and-similarity-floor.md) | Search Evidence and a `min_similarity` Floor for `find_entities` / `find_relationships` | 2026-09-30 |
 | [0639](0639-post-merge-release-packaging-verification.md) | Verify Release Packaging Post-Merge on `main`, Not on Every PR Push | 2026-09-30 |
 | [0640](0640-ci-cheap-checks-first-and-fail-fast.md) | CI Cheap-Checks-First Pre-Gate and Run-Wide Fail-Fast | 2026-09-30 |
+| [0649](0649-fts-index-rebuild-on-lbug-version-change.md) | Rebuild FTS Indexes When the Building lbug Version Changes | 2026-10-01 |
 | [0650](0650-identifier-mismatch-veto-for-extraction-dedup.md) | Identifier-Mismatch Veto for Extraction-Time Entity Dedup | 2026-10-01 |
 
 ## Historical numbering

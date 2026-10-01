@@ -695,9 +695,7 @@ pub(crate) enum FtsOutcome {
 }
 
 fn create_fts_indexes_outcome(conn: &Conn<'_>) -> Result<FtsOutcome, Error> {
-    ensure_schema_state_table(conn)?;
-    let marker_current =
-        schema_state_status(conn, FTS_MARKER_KEY)?.as_deref() == Some(lbug::VERSION);
+    let marker_current = fts_marker_is_current(conn)?;
 
     let mut already_existed = false;
     for sql in CREATE_FTS_SQL {
@@ -740,6 +738,21 @@ pub(crate) fn rebuild_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
         conn.query_unrecorded(sql)?;
     }
     write_fts_marker(conn)
+}
+
+/// Whether the marker equals the running lbug. Reads first and only creates `SchemaState` when
+/// it is missing: `CREATE NODE TABLE IF NOT EXISTS` is a write transaction (and so a checkpoint)
+/// even when it is a no-op, which `build_indices_and_constraints` — called on every replay and
+/// recovery — must not pay when nothing needs doing.
+fn fts_marker_is_current(conn: &Conn<'_>) -> Result<bool, Error> {
+    match schema_state_status(conn, FTS_MARKER_KEY) {
+        Ok(v) => Ok(v.as_deref() == Some(lbug::VERSION)),
+        Err(e) if crate::error::is_missing_table_error(&e) => {
+            ensure_schema_state_table(conn)?;
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn write_fts_marker(conn: &Conn<'_>) -> Result<(), Error> {

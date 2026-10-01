@@ -125,7 +125,7 @@ Users moving from 0.15 to 0.16, or pinned to 0.16.0–0.16.2, find an upgrade no
 - **FR-004**: The rebuild MUST be logged clearly on stderr, stating that it is one-time, that its time is proportional to corpus size, and that it is needed to recover non-ASCII search.
 - **FR-005**: The rebuild MUST complete before any write path can delete through a stale index. Whether it runs synchronously at open or as part of `build_indices_once` / the startup index build (`app_state.rs:937`) is decided in Research.
 - **FR-006**: If any operation hits `FTS index … is inconsistent`, the system MUST rebuild all three FTS indexes and retry the operation once, and MUST report the event in `knowledge_status` or the logs rather than failing the host's operation outright.
-- **FR-007**: `knowledge_rebuild_from_wal` with `force_clear` MUST drop the FTS indexes before `purge_groups` deletes rows, or rebuild them first, so that a full replay never deletes through a live FTS index. This is to be verified against ADR-0030 and the replay batching design.
+- **FR-007**: `knowledge_rebuild_from_wal` with `force_clear` MUST drop the FTS indexes before `purge_groups` deletes rows, or rebuild them first, so that a full replay never deletes through a live FTS index. This is to be verified against the replay ADRs (0043/0045/0046/0047) and the replay batching design (ADR-0030 is about canonicalization lock batching and does not govern replay).
 - **FR-008**: Fresh databases created under 0.16.3+ MUST write the marker at index creation and MUST NOT rebuild on open.
 - **FR-009**: The rebuild MUST be idempotent and safe to interrupt; a crash midway MUST leave the marker unset so the next open rebuilds again.
 - **FR-010**: The fix MUST NOT change the storage version or any data; only derived FTS indexes are rebuilt.
@@ -164,4 +164,4 @@ Users moving from 0.15 to 0.16, or pinned to 0.16.0–0.16.2, find an upgrade no
 - LadybugDB/ladybug#1092 (upstream report)
 - `scratchpad/repro646/out/` (repro evidence, A1–S2)
 - `crates/core/src/schema.rs` (~654 FTS statements; #615 `entity_kind_lookup_key_v2` pattern), `app_state.rs:937` (`build_indices_once`)
-- ADR-0030 (replay batching design)
+- ADR-0043/0045/0046/0047 (replay design)
