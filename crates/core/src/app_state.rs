@@ -962,8 +962,8 @@ pub async fn build_indices_once(state: &Arc<AppState>) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::embedder::MockEmbedder;
     use crate::dedup_adapter::PassthroughDedupAdapter;
+    use crate::embedder::MockEmbedder;
     use crate::extractor::MockExtractor;
     use crate::ontology::{EntityTypeDef, OntologyMode};
     use crate::telemetry::NoopSink;
