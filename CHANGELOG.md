@@ -15,7 +15,9 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   amendment, #657). The `release-build` artifact omitted `target/release/.fingerprint/`
   (`upload-artifact` skips hidden files by default), so `test` rebuilt ~233 crates (~9 min) on every
   run, and the "no `Compiling`" guard could not notice because cargo's coloured output has an ANSI
-  reset between `Compiling` and the space. The artifact now includes hidden files and the guard
+  reset between `Compiling` and the space. The artifact now includes hidden files, `test` stamps its
+  freshly unpacked `~/.cargo/registry/src` to the commit time (build scripts' `rerun-if-changed` paths are
+  mtime-compared), and the guard
   (`scripts/assert-no-compiling.sh`, self-tested in `lint`) is colour-safe in `test` and all six e2e jobs.
 - **Extraction dedup no longer merges entities that differ only by a number or identifier**
   ([ADR-0650](docs/adr/0650-identifier-mismatch-veto-for-extraction-dedup.md), #650).

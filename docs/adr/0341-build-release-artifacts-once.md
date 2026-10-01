@@ -253,9 +253,10 @@ from `test` to `lint`. See ADR-0640.
 ## Amendment (2026-10-01, issue #657)
 
 The `test` job was recompiling the whole workspace (~233 crates, ~9 of its ~11 minutes) on
-every run, and the FR-006 guard reported "full cache hit" anyway. Two independent defects.
+every run, and the FR-006 guard reported "full cache hit" anyway. Two independent defects in the
+guard/hand-off, and (found after the first fix) a second cause of the recompile itself.
 
-**Root cause of the missed reuse: the artifact had no `.fingerprint/`.** The
+**First cause of the missed reuse: the artifact had no `.fingerprint/`.** The
 `release-build` upload did not set `include-hidden-files`, whose default in
 `actions/upload-artifact@v7` is `false` (CI run 36911444513 logs it). That silently drops every
 dot-prefixed path, which for `target/release/` means `.fingerprint/` — cargo's per-unit
@@ -265,6 +266,29 @@ The fix is `include-hidden-files: true` on that upload, the same flag the
 above was an incomplete theory: it covers workspace path crates, but registry crates such as
 `proc-macro2` and `libc` are not mtime-checked at all and could never have been rescued by it.
 The normalization steps stay; they are necessary, not sufficient.
+
+**Second cause: build-script `rerun-if-changed` paths in a freshly unpacked registry.**
+`include-hidden-files: true` alone did not reach zero `Compiling` lines: with the fix in place
+the colour-safe guard still failed `test` (131 `Compiling` lines, starting `proc-macro2`,
+`quote`). Registry crates are freshness-checked by version, but their *build scripts* are not:
+a script that emits `cargo:rerun-if-changed=<path>` is re-run whenever that path is newer than
+its restored output, and those paths live under `~/.cargo/registry/src/`. Neither job caches
+`~/.cargo/registry`, so `test` unpacks every crate itself *after* the artifact was written; the
+sources are always newer than the restored outputs, so every build script re-runs and every
+crate downstream of one recompiles. The first crates rebuilt (`proc-macro2`, `libc`,
+`parking_lot_core`, `serde_core`, `errno`) all have build scripts, which fits. The `test` job
+now runs `cargo fetch --locked` (which unpacks) and stamps `~/.cargo/registry/src` to the
+commit time, the same deterministic value the workspace files get, before any other cargo
+command; it prints the registry-vs-output mtimes before and after. **Status: hypothesis
+applied, not yet confirmed** — it is confirmed only by a `test` run whose `cargo test
+--release` prints zero `Compiling` lines. The evidence decides: if the temporary `cargo -v`
+diagnostic (`Dirty <unit>: <reason>`) shows another reason, that reason is the fix, and the
+alternative of handing `~/.cargo/registry` from `build-release` to `test` stays open.
+
+**Diagnostic lesson.** `CARGO_LOG=cargo::core::compiler::fingerprint=info` printed zero lines on
+the CI toolchain (rustc/cargo 1.99) in a step that recompiled 130+ crates, while it works on
+cargo 1.95. The diagnostic now uses `cargo -v` (stable `Dirty` status lines) and fails loudly if
+cargo recompiled but explained nothing; a silent zero must never read as "no dirty units".
 
 **Latent coupling.** Fingerprints embed absolute paths. The reuse works because `build-release`
 and `test` both run on `ubuntu-latest` with the same `/home/runner/work/<repo>/<repo>` checkout

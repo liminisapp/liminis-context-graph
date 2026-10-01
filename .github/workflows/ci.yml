@@ -214,9 +214,11 @@ jobs:
       # mtime comparison lines up for workspace path crates. This step is a no-op for
       # content — it only touches mtimes, never file contents.
       # NECESSARY BUT NOT SUFFICIENT (#657): registry crates (proc-macro2, libc, ...) are
-      # not mtime-checked at all; their freshness comes from `.fingerprint/`, which must
-      # be included in the artifact (see `include-hidden-files` on the release-build
-      # upload). Normalising mtimes alone never made the restore a cache hit.
+      # freshness-checked by version, not by mtime; that comes from `.fingerprint/`, which
+      # must be included in the artifact (see `include-hidden-files` on the release-build
+      # upload), plus the registry-source mtime step in `test` for build-script
+      # `rerun-if-changed` paths. Normalising workspace mtimes alone never made the restore
+      # a cache hit.
       - name: Normalize source mtimes to commit time (for cross-job cargo cache reuse)
         run: git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"
 
@@ -486,8 +488,8 @@ jobs:
       - name: Restore executable bits (actions/upload-artifact does not preserve them)
         run: find target/release -type f -exec chmod +x {} +
 
-      # With the full tree restored (including hidden `.fingerprint/`, see #657) this
-      # should be a pure cache hit: no compilation,
+      # With the full tree restored (including hidden `.fingerprint/`, see #657) and the
+      # registry sources mtime-normalised (next steps) this should be a pure cache hit: no compilation,
       # only running the ~50 already-linked integration-test binaries (crates/core: 37,
       # crates/service: 11, crates/eval: 2). The output is captured so the next step can
       # assert that was actually true.
@@ -507,25 +509,68 @@ jobs:
           name: lbug-extension-bundle
           path: lbug-extension-bundle
 
-      # TEMPORARY (#657, FR-006/FR-011): fingerprint evidence for why units are or are not
-      # fresh after the restore. Remove once the first post-fix run has been read and the
-      # result recorded in ADR-0341. Non-blocking for cargo itself, but its non-fingerprint
+      # #657: registry crates are freshness-checked by version, but their *build scripts*
+      # are not. A build script that emits `cargo:rerun-if-changed=<path>` (proc-macro2,
+      # libc, parking_lot_core, serde_core, errno, ... all do) is re-run whenever that path
+      # is newer than the build-script output restored from the artifact, and the paths live
+      # under `~/.cargo/registry/src/`. Neither job caches `~/.cargo/registry`, so this job
+      # unpacks every crate itself, *after* the artifact was written — its sources are
+      # always newer than the restored outputs, every build script re-runs, and every crate
+      # downstream of one recompiles. Unpack now (`cargo fetch` does, see `.cargo-ok`) and
+      # stamp the unpacked sources to the commit time, the same deterministic value the
+      # workspace files get above, which is older than any restored output. The before/after
+      # mtimes are printed so the mechanism is visible in the log rather than assumed.
+      - name: Normalize cargo registry source mtimes (build-script rerun-if-changed)
+        run: |
+          commit_time="$(git log -1 --format=%ct)"
+          cargo fetch --locked
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          show() {
+            echo "--- $1 ---"
+            stat -c '%y  %n' "$cargo_home"/registry/src/*/proc-macro2-*/build.rs \
+              target/release/build/proc-macro2-*/output 2>&1 | head -n 6 || true
+          }
+          show "before (registry source vs restored build-script output)"
+          for d in "$cargo_home/registry/src" "$cargo_home/git/checkouts"; do
+            [ -d "$d" ] && find "$d" -exec touch -h -d "@$commit_time" {} +
+          done
+          show "after"
+          true
+
+      # TEMPORARY (#657, FR-006/FR-011): evidence for why units are or are not fresh after
+      # the restore. Remove once a run has been read and the result recorded in ADR-0341.
+      # It uses `cargo -v`, whose `Dirty <unit>: <reason>` status lines are stable CLI
+      # output, rather than `CARGO_LOG=cargo::core::compiler::fingerprint=info`: the CI
+      # toolchain (rustc/cargo 1.99) printed zero such lines in a run that recompiled 130+
+      # crates, so that tracing target cannot be relied on there. The tracing output is still
+      # captured as a second source, and the step fails loudly if it recompiled but
+      # reported no reason at all. Non-blocking for cargo itself, but its non-fingerprint
       # output is appended to /tmp/build.log so a recompile here cannot be masked from the
       # FR-006 guard below (otherwise this step would warm the tree and the guard would
       # pass vacuously).
-      - name: "TEMP #657: fingerprint diagnostic (dirty reasons after restore)"
-        continue-on-error: true
+      - name: "TEMP #657: dirty-reason diagnostic (after restore + registry mtime fix)"
         env:
           CARGO_LOG: cargo::core::compiler::fingerprint=info
           CARGO_TERM_COLOR: never
           LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
         run: |
-          cargo test --release --no-run > /tmp/fp.log 2>&1 || true
-          grep -v 'compiler::fingerprint' /tmp/fp.log > /tmp/build.log || true
-          echo "fingerprint log lines: $(grep -c 'compiler::fingerprint' /tmp/fp.log || true)"
-          echo "dirty units: $(grep -c 'dirty:' /tmp/fp.log || true)"
-          echo "--- first dirty reasons ---"
-          grep 'dirty:\|stale:\|StaleDependency\|FsStatusOutdated\|MissingFile\|NothingFresh' /tmp/fp.log | cut -c1-300 | head -n 60 || true
+          cargo --version
+          cargo test --release --no-run -v > /tmp/fp.log 2>&1 || true
+          # Keep only status lines (not tracing, `Running` rustc command lines or `Dirty`
+          # reason lines) in the guard's log.
+          grep -Ev 'cargo::core::compiler::fingerprint|^[[:space:]]*(Running|Dirty|Fresh)[[:space:]]' /tmp/fp.log > /tmp/build.log || true
+          compiling=$(grep -Ec '^[[:space:]]*Compiling[[:space:]]' /tmp/fp.log || true)
+          dirty=$(grep -Ec '^[[:space:]]*Dirty[[:space:]]' /tmp/fp.log || true)
+          tracing=$(grep -c 'cargo::core::compiler::fingerprint' /tmp/fp.log || true)
+          echo "Compiling lines: $compiling  Dirty lines: $dirty  fingerprint tracing lines: $tracing"
+          if [ "$compiling" -gt 0 ] && [ "$dirty" -eq 0 ] && [ "$tracing" -eq 0 ]; then
+            echo "ERROR: cargo recompiled but neither -v 'Dirty' lines nor fingerprint tracing explained why; the diagnostic captured no evidence. A zero here must not be read as 'no dirty units'."
+            exit 1
+          fi
+          echo "--- first 60 Dirty reasons (full) ---"
+          grep -E '^[[:space:]]*Dirty[[:space:]]' /tmp/fp.log | head -n 60 || true
+          echo "--- first 30 tracing dirty reasons ---"
+          grep 'dirty:' /tmp/fp.log | cut -c1-400 | head -n 30 || true
 
       - name: cargo test --release (restored build; captured for recompile-regression check)
         env:
