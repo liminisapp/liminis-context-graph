@@ -20,14 +20,18 @@
 set -uo pipefail
 
 log="${1:-}"
-if [ -z "$log" ] || [ ! -r "$log" ]; then
-  echo "usage: $0 <logfile> (log missing or unreadable: '${log}')" >&2
+if [ -z "$log" ] || [ ! -f "$log" ] || [ ! -r "$log" ]; then
+  echo "usage: $0 <logfile> (log missing, unreadable or not a regular file: '${log}')" >&2
   exit 2
 fi
 
 esc=$'\033'
 # Strip CSI sequences (colour/style); then drop a trailing CR in case of progress redraws.
-stripped=$(sed -E "s/${esc}\[[0-9;]*[A-Za-z]//g; s/\r\$//" "$log")
+# A failed normalisation must not read as "no Compiling lines" — fail closed.
+if ! stripped=$(sed -E "s/${esc}\[[0-9;]*[A-Za-z]//g; s/\r\$//" "$log"); then
+  echo "ERROR: could not normalise '$log'; refusing to treat it as a clean log" >&2
+  exit 2
+fi
 
 if hits=$(printf '%s\n' "$stripped" | grep -E '^[[:space:]]*Compiling([[:space:]]|$)'); then
   echo "ERROR: cargo printed 'Compiling' lines in a job that must only reuse a prebuilt tree:"
