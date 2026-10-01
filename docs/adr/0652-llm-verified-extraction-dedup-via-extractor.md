@@ -93,6 +93,12 @@ in replay mode (`LCG_REPLAY_LLM` installs `ReplayingExtractor` directly, so no n
 possible). Existing cassettes carry no such records, so replay with the check on yields a
 `CassetteMiss` per group → insert plus a warning; they stay valid and the cassette format is
 unchanged. Record fresh cassettes to exercise the check deterministically.
+`RecordingExtractor` records a `judge_duplicates` answer only when every verdict in it is definite,
+and at most once per request key. An answer containing `Unknown` is not recorded: the adapter does
+not cache `Unknown`, so the pair is judged again and the retry may return a real verdict, which a
+recorded `Unknown` would shadow (keys are unique per cassette). Replay of an unrecorded call is a
+miss, which resolves to an insert plus a warning — the same outcome `Unknown` has — so replay never
+merges more than the live run did.
 
 ### Observability
 
