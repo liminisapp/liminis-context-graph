@@ -213,12 +213,11 @@ jobs:
       # identical and deterministic across both jobs' independent checkouts, so the
       # mtime comparison lines up for workspace path crates. This step is a no-op for
       # content — it only touches mtimes, never file contents.
-      # NECESSARY BUT NOT SUFFICIENT (#657): registry crates (proc-macro2, libc, ...) are
-      # freshness-checked by version, not by mtime; that comes from `.fingerprint/`, which
-      # must be included in the artifact (see `include-hidden-files` on the release-build
-      # upload), plus the registry-source mtime step in `test` for build-script
-      # `rerun-if-changed` paths. Normalising workspace mtimes alone never made the restore
-      # a cache hit.
+      # NECESSARY BUT NOT SUFFICIENT (#657): this only covers workspace path crates. Two
+      # more things were needed for the restore to be a cache hit: `.fingerprint/` must be
+      # in the artifact (see `include-hidden-files` on the release-build upload), and the
+      # restored `target/release` must have its mtimes normalised after download, because
+      # artifact extraction stamps files in extraction order (see the `test` job).
       - name: Normalize source mtimes to commit time (for cross-job cargo cache reuse)
         run: git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"
 
@@ -488,8 +487,8 @@ jobs:
       - name: Restore executable bits (actions/upload-artifact does not preserve them)
         run: find target/release -type f -exec chmod +x {} +
 
-      # With the full tree restored (including hidden `.fingerprint/`, see #657) and the
-      # registry sources mtime-normalised (next steps) this should be a pure cache hit: no compilation,
+      # With the full tree restored (including hidden `.fingerprint/`, see #657) and its
+      # mtimes normalised (next step) this should be a pure cache hit: no compilation,
       # only running the ~50 already-linked integration-test binaries (crates/core: 37,
       # crates/service: 11, crates/eval: 2). The output is captured so the next step can
       # assert that was actually true.
@@ -509,33 +508,26 @@ jobs:
           name: lbug-extension-bundle
           path: lbug-extension-bundle
 
-      # #657: registry crates are freshness-checked by version, but their *build scripts*
-      # are not. A build script that emits `cargo:rerun-if-changed=<path>` (proc-macro2,
-      # libc, parking_lot_core, serde_core, errno, ... all do) is re-run whenever that path
-      # is newer than the build-script output restored from the artifact, and the paths live
-      # under `~/.cargo/registry/src/`. Neither job caches `~/.cargo/registry`, so this job
-      # unpacks every crate itself, *after* the artifact was written — its sources are
-      # always newer than the restored outputs, every build script re-runs, and every crate
-      # downstream of one recompiles. Unpack now (`cargo fetch` does, see `.cargo-ok`) and
-      # stamp the unpacked sources to the commit time, the same deterministic value the
-      # workspace files get above, which is older than any restored output. The before/after
-      # mtimes are printed so the mechanism is visible in the log rather than assumed.
-      - name: Normalize cargo registry source mtimes (build-script rerun-if-changed)
+      # #657: the second recompile cause, read from the fingerprint evidence of a run with
+      # `.fingerprint/` already restored (131 units dirty, e.g. `Dirty proc-macro2: the
+      # dependency `proc-macro2` was rebuilt (…260s, 9ms after last build at …251s)`).
+      # `actions/download-artifact` does not preserve mtimes: every file is stamped with the
+      # moment it was extracted, so a dependency's output and its dependents' fingerprint
+      # files differ by a few milliseconds in whatever order they were unpacked. Cargo
+      # treats a dependency whose output is newer than the dependent's as rebuilt
+      # (`StaleDependency`) and cascades that through the whole graph. Give every restored
+      # file one identical mtime: nothing in the tree is then newer than anything else, and
+      # it is still newer than the checkout's commit-time-stamped sources and the registry
+      # sources (crates.io tarballs carry their own old mtimes), so `rerun-if-changed`
+      # paths and dep-info source comparisons stay fresh too. `-h` so symlinks are stamped
+      # themselves rather than followed. (A registry-source stamp was tried first, on the
+      # theory that build-script `rerun-if-changed` paths into a freshly unpacked
+      # `~/.cargo/registry` were newer than the restored outputs; the log showed those
+      # sources already carried a 2006 mtime, so it was not the cause and was removed.)
+      - name: Normalize restored target/release mtimes (artifact extraction scrambles ordering)
         run: |
-          commit_time="$(git log -1 --format=%ct)"
-          cargo fetch --locked
-          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
-          show() {
-            echo "--- $1 ---"
-            stat -c '%y  %n' "$cargo_home"/registry/src/*/proc-macro2-*/build.rs \
-              target/release/build/proc-macro2-*/output 2>&1 | head -n 6 || true
-          }
-          show "before (registry source vs restored build-script output)"
-          for d in "$cargo_home/registry/src" "$cargo_home/git/checkouts"; do
-            [ -d "$d" ] && find "$d" -exec touch -h -d "@$commit_time" {} +
-          done
-          show "after"
-          true
+          ts="$(date +%s)"
+          find target/release -exec touch -h -d "@$ts" {} +
 
       # TEMPORARY (#657, FR-006/FR-011): evidence for why units are or are not fresh after
       # the restore. Remove once a run has been read and the result recorded in ADR-0341.
@@ -548,7 +540,7 @@ jobs:
       # output is appended to /tmp/build.log so a recompile here cannot be masked from the
       # FR-006 guard below (otherwise this step would warm the tree and the guard would
       # pass vacuously).
-      - name: "TEMP #657: dirty-reason diagnostic (after restore + registry mtime fix)"
+      - name: "TEMP #657: dirty-reason diagnostic (after restore + mtime normalisation)"
         env:
           CARGO_LOG: cargo::core::compiler::fingerprint=info
           CARGO_TERM_COLOR: never

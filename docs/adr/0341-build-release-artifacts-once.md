@@ -267,23 +267,39 @@ above was an incomplete theory: it covers workspace path crates, but registry cr
 `proc-macro2` and `libc` are not mtime-checked at all and could never have been rescued by it.
 The normalization steps stay; they are necessary, not sufficient.
 
-**Second cause: build-script `rerun-if-changed` paths in a freshly unpacked registry.**
-`include-hidden-files: true` alone did not reach zero `Compiling` lines: with the fix in place
-the colour-safe guard still failed `test` (131 `Compiling` lines, starting `proc-macro2`,
-`quote`). Registry crates are freshness-checked by version, but their *build scripts* are not:
-a script that emits `cargo:rerun-if-changed=<path>` is re-run whenever that path is newer than
-its restored output, and those paths live under `~/.cargo/registry/src/`. Neither job caches
-`~/.cargo/registry`, so `test` unpacks every crate itself *after* the artifact was written; the
-sources are always newer than the restored outputs, so every build script re-runs and every
-crate downstream of one recompiles. The first crates rebuilt (`proc-macro2`, `libc`,
-`parking_lot_core`, `serde_core`, `errno`) all have build scripts, which fits. The `test` job
-now runs `cargo fetch --locked` (which unpacks) and stamps `~/.cargo/registry/src` to the
-commit time, the same deterministic value the workspace files get, before any other cargo
-command; it prints the registry-vs-output mtimes before and after. **Status: hypothesis
-applied, not yet confirmed** — it is confirmed only by a `test` run whose `cargo test
---release` prints zero `Compiling` lines. The evidence decides: if the temporary `cargo -v`
-diagnostic (`Dirty <unit>: <reason>`) shows another reason, that reason is the fix, and the
-alternative of handing `~/.cargo/registry` from `build-release` to `test` stays open.
+**Second cause: artifact extraction scrambles mtimes.** `include-hidden-files: true` alone did
+not reach zero `Compiling` lines: with it in place the colour-safe guard still failed `test`
+(131 `Compiling` lines, starting `proc-macro2`, `quote`). The `cargo test --release --no-run -v`
+diagnostic (CI run 36936445915) printed the reason for each dirty unit, and every leading one
+is `StaleDependency`:
+
+```
+Dirty proc-macro2 v1.0.106: the dependency `proc-macro2` was rebuilt (…190.260s, 9ms after last build at …190.251s)
+Dirty syn v2.0.117: the dependency `proc-macro2` was rebuilt
+Dirty cc v1.2.62: the dependency `shlex` was rebuilt (…212.502s, 5s after last build at …207.883s)
+```
+
+`actions/download-artifact` does not preserve mtimes: every file is stamped with the moment it
+was extracted, so a dependency's output and its dependents' fingerprint files differ by
+milliseconds to seconds, in whatever order they were unpacked. Cargo treats a dependency whose
+output is newer than the dependent's as rebuilt and cascades that through the whole graph, so
+one unlucky pair at the bottom (`proc-macro2`, `libc`) dirties everything above it. The fix is a
+`test` step after the download that stamps every file under `target/release` with one identical
+mtime (`find target/release -exec touch -h -d "@$ts" {} +`): nothing is then newer than
+anything else, while it is still newer than the commit-time-stamped workspace sources and the
+registry sources, so `rerun-if-changed` and dep-info source comparisons stay fresh. This was
+the contingency the Plan named for an extraction-mtime effect. **Status: applied, not yet
+confirmed** — it is confirmed only by a `test` run whose `cargo test --release` prints zero
+`Compiling` lines; the temporary diagnostic is kept for exactly that run and is removed once
+it has been read.
+
+**A falsified hypothesis, recorded so it is not retried.** The first attempt at this second
+cause was that build-script `rerun-if-changed` paths into a freshly unpacked `~/.cargo/registry`
+were newer than the restored build-script outputs, and `test` was made to `cargo fetch` and stamp
+`registry/src` to the commit time. The same run showed the registry sources were never the
+problem: `proc-macro2`'s `build.rs` already carried mtime 2006 (crates.io tarballs preserve
+their own), older than the restored output both before and after the stamp, and the dirty
+reasons are dependency rebuilds, not build-script reruns. That step was removed.
 
 **Diagnostic lesson.** `CARGO_LOG=cargo::core::compiler::fingerprint=info` printed zero lines on
 the CI toolchain (rustc/cargo 1.99) in a step that recompiled 130+ crates, while it works on
