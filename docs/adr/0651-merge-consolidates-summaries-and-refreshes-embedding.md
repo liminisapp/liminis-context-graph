@@ -25,7 +25,7 @@ plain `SET` on an indexed column.
 1. **Consolidate, don't concatenate.** After a merge has been decided (consolidation never affects
    *whether* entities merge), `episode.rs` Phase B produces one bounded summary
    (`crates/core/src/summary_merge.rs`):
-   - incoming empty, or a substring of the current summary → keep the current summary: **no
+   - incoming empty, or a word-aligned substring of the current summary → keep the current summary: **no
      extractor call, no re-embed**;
    - current summary empty → use the incoming one (capped), no call;
    - otherwise → `Extractor::consolidate_summary(name, existing, incoming)`, a small chat call on
