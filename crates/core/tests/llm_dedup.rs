@@ -30,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 const EMB_DIM: usize = 4;
 const REF_TIME: &str = "2026-01-01T00:00:00Z";
 const GROUP: &str = "llm-dedup-grp";
+const CONSOLIDATED: &str = "Alice Smith is a person (consolidated).";
 
 type Answer = Box<dyn Fn(&[DuplicatePair]) -> Result<Vec<DedupVerdict>, Error> + Send + Sync>;
 
@@ -83,6 +84,16 @@ impl Extractor for StubExtractor {
         allowed_types: &'a [(String, Option<String>)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         self.inner.classify_relations(edges, allowed_types)
+    }
+
+    /// Fixed answer, so a judge-confirmed merge can be shown to go through #651's consolidation.
+    fn consolidate_summary<'a>(
+        &'a self,
+        _entity_name: &'a str,
+        _existing: &'a str,
+        _incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(async { Ok(CONSOLIDATED.to_string()) })
     }
 
     fn judge_duplicates<'a>(
@@ -270,6 +281,22 @@ async fn llm_confirms_candidate_and_merges() {
     assert_eq!(entity_count(&db), 1);
     assert_eq!(r.dedup_paths.llm_confirmed, 1);
     assert_eq!(r.dedup_paths.llm_rejected, 0);
+}
+
+/// #651 and #652 together: the judge gates the candidate, and a confirmed merge still
+/// consolidates the summary (and refreshes its embedding) on the merge path.
+#[tokio::test]
+async fn judge_confirmed_merge_consolidates_the_summary() {
+    let mut emb = HashMap::new();
+    near_pair(&mut emb, 0, "Alice Smith", "Alice Smyth");
+    let (stub, state, db, _d) = scenario(&["Alice Smith"], &["Alice Smyth"], emb, confirm_all());
+    ingest(&state, "ep1").await.unwrap();
+    ingest(&state, "ep2").await.unwrap();
+    assert_eq!(stub.calls(), 1, "the judge still gated the candidate");
+    let conn = db.connect().unwrap();
+    let rows = conn.get_entities_by_group_ids(Some(&[GROUP])).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].summary, CONSOLIDATED);
 }
 
 // ── User Story 2: failures never merge and never abort ────────────────────────
