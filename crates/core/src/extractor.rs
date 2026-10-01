@@ -77,6 +77,28 @@ pub trait Extractor: Send + Sync {
         edges: &'a [(&'a str, &'a str)],
         allowed_types: &'a [(String, Option<String>)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>>;
+
+    /// Consolidates an entity's `existing` summary and a newly extracted `incoming` one into a
+    /// single concise, current description (issue #651). Called only after a merge decision, and
+    /// only when `incoming` adds information (see `summary_merge::decide_consolidation`).
+    ///
+    /// The default implementation returns `Error::Config`, which callers treat — like any other
+    /// error or an empty reply — as "use the deterministic bounded fallback"
+    /// (`summary_merge::fallback_merge`); implementors with no LLM behind them (stubs, cassette
+    /// replay) therefore need no code. Implementations return the model's text; callers bound
+    /// it with `summary_merge::cap_summary`.
+    fn consolidate_summary<'a>(
+        &'a self,
+        _entity_name: &'a str,
+        _existing: &'a str,
+        _incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(async {
+            Err(Error::Config(
+                "summary consolidation is not supported by this extractor".to_string(),
+            ))
+        })
+    }
 }
 
 /// Builds the `extract_edges` tool schema for the Anthropic tool-use call. Constrains
@@ -618,6 +640,56 @@ impl AnthropicExtractor {
         })
     }
 
+    async fn do_consolidate_summary(
+        &self,
+        entity_name: &str,
+        existing: &str,
+        incoming: &str,
+    ) -> Result<String, Error> {
+        let (system_text, user_text) =
+            crate::summary_merge::consolidation_prompts(entity_name, existing, incoming);
+        let system_value: Value = if self.is_sonnet() {
+            json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
+        } else {
+            json!(system_text)
+        };
+        let body = json!({
+            "model": &self.model,
+            "max_tokens": 512,
+            "system": system_value,
+            "messages": [{"role": "user", "content": user_text}]
+        });
+
+        let mut attempt = 0u32;
+        loop {
+            let mut req = self
+                .client
+                .post(&self.url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01");
+            if self.is_sonnet() {
+                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
+            }
+            let http_resp = req.json(&body).send().await?;
+            let status = http_resp.status();
+            if (status == 429 || status == 529) && attempt < 3 {
+                sleep(Duration::from_secs(1u64 << attempt)).await;
+                attempt += 1;
+                continue;
+            }
+            let resp: Value = http_resp.error_for_status()?.json().await?;
+            self.emit_token_usage(&resp);
+            let content = resp["content"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|block| block["text"].as_str())
+                .ok_or_else(|| {
+                    Error::Ipc("consolidate_summary response missing content text".to_string())
+                })?;
+            return parse_consolidation_reply(content);
+        }
+    }
+
     async fn do_classify_entities(
         &self,
         entities: &[(&str, &str)],
@@ -912,6 +984,15 @@ impl Extractor for AnthropicExtractor {
         allowed_types: &'a [(String, Option<String>)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(self.do_classify_relations(edges, allowed_types))
+    }
+
+    fn consolidate_summary<'a>(
+        &'a self,
+        entity_name: &'a str,
+        existing: &'a str,
+        incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(self.do_consolidate_summary(entity_name, existing, incoming))
     }
 }
 
@@ -1898,6 +1979,22 @@ impl OaiExtractor {
         })
     }
 
+    async fn do_consolidate_summary(
+        &self,
+        entity_name: &str,
+        existing: &str,
+        incoming: &str,
+    ) -> Result<String, Error> {
+        let (system_text, user_text) =
+            crate::summary_merge::consolidation_prompts(entity_name, existing, incoming);
+        let resp = self.send_chat(&system_text, &user_text, 512).await?;
+        self.emit_token_usage(&resp);
+        let content = oai_message_content(&resp).ok_or_else(|| {
+            Error::Ipc("consolidate_summary response missing message content".to_string())
+        })?;
+        parse_consolidation_reply(content)
+    }
+
     async fn do_classify_entities(
         &self,
         entities: &[(&str, &str)],
@@ -2057,6 +2154,15 @@ impl Extractor for OaiExtractor {
         allowed_types: &'a [(String, Option<String>)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(self.do_classify_relations(edges, allowed_types))
+    }
+
+    fn consolidate_summary<'a>(
+        &'a self,
+        entity_name: &'a str,
+        existing: &'a str,
+        incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(self.do_consolidate_summary(entity_name, existing, incoming))
     }
 }
 
@@ -2291,6 +2397,20 @@ impl Extractor for UnconfiguredExtractor {
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(async { Err(Error::Config(NO_EXTRACTION_PROVIDER_MSG.to_string())) })
     }
+}
+
+/// Parses a consolidation reply — `{"summary": "..."}` per the prompt, tolerating code fences
+/// and, when the model ignored the JSON instruction entirely, bare prose — into bounded summary
+/// text. An empty result is an `Err` so the caller takes the deterministic fallback.
+fn parse_consolidation_reply(content: &str) -> Result<String, Error> {
+    let json_str = extract_json_block(content);
+    let text = match serde_json::from_str::<Value>(json_str) {
+        Ok(v) => v["summary"].as_str().map(str::to_string),
+        Err(_) if !content.contains('{') => Some(content.to_string()),
+        Err(_) => None,
+    };
+    text.and_then(|t| crate::summary_merge::finalize_consolidation(&t))
+        .ok_or_else(|| Error::Ipc("consolidate_summary reply held no summary text".to_string()))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -3191,6 +3311,80 @@ mod tests {
             TelemetryEvent::StructuredOutputParse { call_type, outcome, .. }
                 if call_type == "entities" && outcome == "recovered"
         )));
+    }
+
+    #[test]
+    fn parse_consolidation_reply_accepts_json_fenced_json_and_bare_prose() {
+        assert_eq!(
+            parse_consolidation_reply(r#"{"summary": "  Merged text.  "}"#).unwrap(),
+            "Merged text."
+        );
+        assert_eq!(
+            parse_consolidation_reply("```json\n{\"summary\": \"Fenced.\"}\n```").unwrap(),
+            "Fenced."
+        );
+        assert_eq!(
+            parse_consolidation_reply("Just prose.").unwrap(),
+            "Just prose."
+        );
+    }
+
+    #[test]
+    fn parse_consolidation_reply_rejects_empty_and_malformed() {
+        assert!(parse_consolidation_reply(r#"{"summary": ""}"#).is_err());
+        assert!(parse_consolidation_reply(r#"{"other": "x"}"#).is_err());
+        assert!(parse_consolidation_reply(r#"{"summary": "unterminated"#).is_err());
+        assert!(parse_consolidation_reply("   ").is_err());
+    }
+
+    #[test]
+    fn parse_consolidation_reply_bounds_output() {
+        let long = format!("{{\"summary\": \"{}\"}}", "word ".repeat(400));
+        let out = parse_consolidation_reply(&long).unwrap();
+        assert!(out.chars().count() <= crate::summary_merge::MERGED_SUMMARY_CAP);
+    }
+
+    #[tokio::test]
+    async fn oai_consolidate_summary_returns_summary_and_emits_usage() {
+        let body = json!({
+            "choices": [{"finish_reason": "stop",
+                "message": {"content": r#"{"summary": "Acme builds rockets."}"#}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        })
+        .to_string();
+        let (url, _server) = spawn_stub_http_server(body).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+        let out = extractor
+            .consolidate_summary("Acme", "Acme builds things.", "Acme builds rockets.")
+            .await
+            .unwrap();
+        assert_eq!(out, "Acme builds rockets.");
+        assert!(sink
+            .events()
+            .iter()
+            .any(|e| matches!(e, TelemetryEvent::TokenUsage { .. })));
+    }
+
+    #[tokio::test]
+    async fn oai_consolidate_summary_empty_reply_is_err() {
+        let (url, _server) =
+            spawn_stub_http_server(oai_response_body(r#"{"summary": "   "}"#)).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+        assert!(extractor
+            .consolidate_summary("A", "x.", "y.")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn default_consolidate_summary_is_config_error() {
+        let err = UnconfiguredExtractor
+            .consolidate_summary("A", "x.", "y.")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
     }
 
     #[tokio::test]

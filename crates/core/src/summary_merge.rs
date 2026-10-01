@@ -137,19 +137,21 @@ pub fn consolidation_prompts(
          - On conflict, prefer the most recent or most specific statement and drop the \
          superseded claim; never list both sides of a contradiction.\n\
          - Keep durable facts from both descriptions; drop repetition and per-source phrasing.\n\
-         - Plain text only, no preamble, no quotes, no bullet points.\n\
-         - At most {} characters.",
+         - Plain prose, no bullet points, at most {} characters.\n\
+         - Respond with ONLY a single JSON object of the form {{\"summary\": \"...\"}}. No other \
+         text, no markdown code fences.",
         MERGED_SUMMARY_CAP - 100
     );
     let user = format!(
         "Entity: {entity_name}\n\nCurrent summary:\n{existing}\n\nNew description:\n{incoming}\n\n\
-         Merged summary:"
+         Respond with the JSON object."
     );
     (system, user)
 }
 
-/// Cleans a raw consolidation reply: trims whitespace and surrounding quotes, bounds it with
-/// [`cap_summary`]. Returns `None` for an empty reply so the caller falls back deterministically.
+/// Cleans a consolidation reply's summary text: trims whitespace and surrounding quotes, bounds
+/// it with [`cap_summary`]. Returns `None` for an empty reply so the caller falls back
+/// deterministically.
 pub fn finalize_consolidation(raw: &str) -> Option<String> {
     let trimmed = raw
         .trim()

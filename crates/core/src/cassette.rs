@@ -364,6 +364,19 @@ impl Extractor for RecordingExtractor {
             Ok(result)
         })
     }
+
+    /// Forwarded without recording (issue #651): consolidation is not part of the cassette
+    /// format, so a replayed run takes `ReplayingExtractor`'s default `Err` and falls back to the
+    /// deterministic bounded merge.
+    fn consolidate_summary<'a>(
+        &'a self,
+        entity_name: &'a str,
+        existing: &'a str,
+        incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        self.inner
+            .consolidate_summary(entity_name, existing, incoming)
+    }
 }
 
 // ── ReplayingExtractor ───────────────────────────────────────────────────────

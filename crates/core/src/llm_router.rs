@@ -162,6 +162,60 @@ impl LlmRouter {
         }
     }
 
+    async fn do_consolidate_summary(
+        &self,
+        entity_name: &str,
+        existing: &str,
+        incoming: &str,
+    ) -> Result<String, Error> {
+        if !self
+            .primary_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            match self
+                .primary
+                .consolidate_summary(entity_name, existing, incoming)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    if let Some(fb) = &self.fallback {
+                        if self
+                            .primary_failed
+                            .compare_exchange(
+                                false,
+                                true,
+                                std::sync::atomic::Ordering::AcqRel,
+                                std::sync::atomic::Ordering::Acquire,
+                            )
+                            .is_ok()
+                        {
+                            self.sink.emit(TelemetryEvent::LlmFallback {
+                                ts_ms: now_ms(),
+                                role: "consolidation".to_string(),
+                                primary_model: self.primary_model_name.clone(),
+                                fallback_model: self.fallback_model_name.clone(),
+                                error_reason: err.to_string(),
+                            });
+                        }
+                        return fb
+                            .consolidate_summary(entity_name, existing, incoming)
+                            .await;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        if let Some(fb) = &self.fallback {
+            fb.consolidate_summary(entity_name, existing, incoming)
+                .await
+        } else {
+            Err(Error::Ipc(
+                "BUG: primary_failed set without fallback".to_string(),
+            ))
+        }
+    }
+
     async fn do_classify_relations(
         &self,
         edges: &[(&str, &str)],
@@ -277,6 +331,15 @@ impl Extractor for LlmRouter {
         allowed_types: &'a [(String, Option<String>)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(self.do_classify_relations(edges, allowed_types))
+    }
+
+    fn consolidate_summary<'a>(
+        &'a self,
+        entity_name: &'a str,
+        existing: &'a str,
+        incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(self.do_consolidate_summary(entity_name, existing, incoming))
     }
 }
 
