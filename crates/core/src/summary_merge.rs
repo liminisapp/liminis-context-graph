@@ -29,9 +29,33 @@ pub enum ConsolidationPlan {
     Consolidate,
 }
 
+/// Whether `incoming` occurs in `current` on word boundaries. A raw substring test would treat a
+/// short fragment such as `Red.` as already contained in `Altered.`, silently dropping it; a match
+/// that begins or ends mid-word is not containment.
+fn contains_on_word_boundaries(current: &str, incoming: &str) -> bool {
+    let starts_alnum = incoming.chars().next().is_some_and(char::is_alphanumeric);
+    let ends_alnum = incoming
+        .chars()
+        .next_back()
+        .is_some_and(char::is_alphanumeric);
+    current.match_indices(incoming).any(|(i, m)| {
+        let before_ok = !starts_alnum
+            || current[..i]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric());
+        let after_ok = !ends_alnum
+            || current[i + m.len()..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric());
+        before_ok && after_ok
+    })
+}
+
 pub fn decide_consolidation(current: &str, incoming: &str) -> ConsolidationPlan {
     let incoming = incoming.trim();
-    if incoming.is_empty() || current.contains(incoming) {
+    if incoming.is_empty() || contains_on_word_boundaries(current, incoming) {
         return ConsolidationPlan::Keep;
     }
     if current.trim().is_empty() {
@@ -170,6 +194,31 @@ pub fn finalize_consolidation(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mid_word_substring_is_not_containment() {
+        // "Red." only occurs inside "Altered." — it adds information and must be consolidated.
+        assert_eq!(
+            decide_consolidation("Altered.", "Red."),
+            ConsolidationPlan::Consolidate
+        );
+        assert_eq!(
+            decide_consolidation("Acme is a company.", "Acme is a comp"),
+            ConsolidationPlan::Consolidate
+        );
+    }
+
+    #[test]
+    fn word_aligned_substring_is_containment() {
+        assert_eq!(
+            decide_consolidation("Former CEO of Acme. Based in Oslo.", "Based in Oslo."),
+            ConsolidationPlan::Keep
+        );
+        assert_eq!(
+            decide_consolidation("Former CEO of Acme.", "CEO of Acme"),
+            ConsolidationPlan::Keep
+        );
+    }
 
     #[test]
     fn empty_incoming_keeps_current() {
