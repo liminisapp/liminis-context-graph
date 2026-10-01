@@ -463,7 +463,9 @@ const LOOKUP_KEY_BACKFILL_STATE_KEY: &str = "entity_kind_lookup_key_v2";
 /// prevent. `CREATE NODE TABLE IF NOT EXISTS` is a catalog check, not a scan, so calling this
 /// unconditionally on every `migrate()` run is cheap regardless of database size or age.
 fn ensure_schema_state_table(conn: &Conn<'_>) -> Result<(), Error> {
-    conn.raw_query(
+    // Unrecorded: derived/marker state must never reach the WAL (ADR-0015, ADR-0649), and
+    // this is now also called from `create_fts_indexes` on handler connections.
+    conn.query_unrecorded(
         "CREATE NODE TABLE IF NOT EXISTS SchemaState (key STRING PRIMARY KEY, status STRING)",
     )?;
     Ok(())
@@ -645,33 +647,115 @@ fn ensure_lookup_key_backfill(conn: &Conn<'_>) {
     }
 }
 
+/// `SchemaState` key recording which lbug version built the FTS indexes (issue #649, ADR-0649).
+/// Its `status` is `lbug::VERSION`. lbug 0.20 → 0.21 changed how non-ASCII FTS terms are stored
+/// *without* a storage-version bump, so a 0.20-built index cannot be maintained (deletes fail)
+/// or searched (silently empty) by 0.21 — and nothing in the file format reveals it. A missing
+/// marker, or one differing from the running lbug, means "rebuild". Written last, after all 3
+/// indexes are known to have been built by the running lbug, so a crash leaves it unset.
+pub(crate) const FTS_MARKER_KEY: &str = "fts_built_by_lbug";
+
+const CREATE_FTS_SQL: [&str; 3] = [
+    "CALL CREATE_FTS_INDEX('Entity', 'node_name_and_summary', ['name', 'summary'])",
+    "CALL CREATE_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact', ['name', 'fact'])",
+    "CALL CREATE_FTS_INDEX('Episodic', 'episode_content', \
+     ['content', 'source', 'source_description'])",
+];
+
+const DROP_FTS_SQL: [&str; 3] = [
+    "CALL DROP_FTS_INDEX('Entity', 'node_name_and_summary')",
+    "CALL DROP_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact')",
+    "CALL DROP_FTS_INDEX('Episodic', 'episode_content')",
+];
+
 /// Creates the 3 FTS indexes. Idempotent — an "already exists" error is swallowed; any other
 /// error (missing table, malformed column, ...) propagates so callers can observe a genuine
 /// index-build failure instead of silently treating it as success.
 /// Index names and covered columns match the upstream Python graphiti-core service (canonical source).
+///
+/// Also the single detection point for FTS indexes built by an older lbug (issue #649,
+/// ADR-0649). Unless the [`FTS_MARKER_KEY`] marker equals the running `lbug::VERSION`:
+/// - all 3 indexes were just *created* → they were built by this lbug (fresh database, or
+///   dropped by a replay): write the marker, nothing else;
+/// - any index *already existed* → it may be stale: drop all 3, recreate all 3, then write
+///   the marker (one-time; logged on stderr).
 pub(crate) fn create_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
-    for sql in [
-        "CALL CREATE_FTS_INDEX('Entity', 'node_name_and_summary', ['name', 'summary'])",
-        "CALL CREATE_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact', ['name', 'fact'])",
-        "CALL CREATE_FTS_INDEX('Episodic', 'episode_content', \
-         ['content', 'source', 'source_description'])",
-    ] {
+    create_fts_indexes_outcome(conn).map(|_| ())
+}
+
+/// What [`create_fts_indexes`] concluded; returned so tests can assert *whether* a rebuild ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FtsOutcome {
+    /// Marker already matched the running lbug; nothing to do.
+    Current,
+    /// All 3 indexes were just created by this lbug; the marker was written, no rebuild.
+    MarkedFresh,
+    /// Pre-existing indexes of unknown provenance were dropped, recreated and marked.
+    Rebuilt,
+}
+
+fn create_fts_indexes_outcome(conn: &Conn<'_>) -> Result<FtsOutcome, Error> {
+    ensure_schema_state_table(conn)?;
+    let marker_current =
+        schema_state_status(conn, FTS_MARKER_KEY)?.as_deref() == Some(lbug::VERSION);
+
+    let mut already_existed = false;
+    for sql in CREATE_FTS_SQL {
         if let Err(e) = conn.raw_query(sql) {
             if !crate::error::is_already_exists_error(&e) {
                 return Err(e);
             }
+            already_existed = true;
         }
     }
-    Ok(())
+    if marker_current {
+        return Ok(FtsOutcome::Current);
+    }
+    if already_existed {
+        eprintln!(
+            "liminis-context-graph: rebuilding full-text (FTS) indexes: they were not built by \
+             this lbug version ({}). This is a one-time rebuild; its time is proportional to \
+             corpus size, and it is needed to recover search and writes for non-ASCII terms \
+             (issue #649).",
+            lbug::VERSION
+        );
+        rebuild_fts_indexes(conn)?;
+        return Ok(FtsOutcome::Rebuilt);
+    }
+    write_fts_marker(conn)?;
+    Ok(FtsOutcome::MarkedFresh)
+}
+
+/// Drops all 3 FTS indexes, recreates them, then records the marker — in that order, so a
+/// crash anywhere leaves the marker unset and the next open rebuilds again. All statements are
+/// unrecorded (never enter `executed_mutations`, hence never the WAL; ADR-0015). Always
+/// rebuilds all 3 together: dropping only the index named in an "inconsistent" error just
+/// moves the failure to the next one.
+pub(crate) fn rebuild_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
+    ensure_schema_state_table(conn)?;
+    for sql in DROP_FTS_SQL {
+        let _ = conn.query_unrecorded(sql);
+    }
+    for sql in CREATE_FTS_SQL {
+        conn.query_unrecorded(sql)?;
+    }
+    write_fts_marker(conn)
+}
+
+fn write_fts_marker(conn: &Conn<'_>) -> Result<(), Error> {
+    conn.exec_params_unrecorded(
+        "MERGE (s:SchemaState {key: $key}) SET s.status = $status",
+        serde_json::json!({ "key": FTS_MARKER_KEY, "status": lbug::VERSION }),
+    )
 }
 
 /// Drops the 3 FTS indexes. Idempotent — errors are suppressed so this is safe to call
 /// even when the indexes are already absent (e.g. repeated reload or interrupted reload).
 /// Used by `handle_rebuild_from_wal` to enable bulk-load replay without inline FTS maintenance.
 pub fn drop_fts_indexes(conn: &Conn<'_>) {
-    let _ = conn.raw_query("CALL DROP_FTS_INDEX('Entity', 'node_name_and_summary')");
-    let _ = conn.raw_query("CALL DROP_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact')");
-    let _ = conn.raw_query("CALL DROP_FTS_INDEX('Episodic', 'episode_content')");
+    for sql in DROP_FTS_SQL {
+        let _ = conn.raw_query(sql);
+    }
 }
 
 #[cfg(test)]
@@ -710,5 +794,110 @@ mod create_fts_indexes_tests {
             !crate::error::is_already_exists_error(&err),
             "missing-table error must not be misclassified as already-exists: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod fts_marker_tests {
+    use super::*;
+    use crate::db::Db;
+    use tempfile::TempDir;
+
+    fn marker(conn: &Conn<'_>) -> Option<String> {
+        schema_state_status(conn, FTS_MARKER_KEY).unwrap()
+    }
+
+    fn clear_marker(conn: &Conn<'_>) {
+        conn.exec_params_unrecorded(
+            "MATCH (s:SchemaState {key: $key}) DELETE s",
+            serde_json::json!({ "key": FTS_MARKER_KEY }),
+        )
+        .unwrap();
+    }
+
+    fn open() -> (TempDir, Db) {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        (dir, db)
+    }
+
+    /// SC-003: a database created by this build writes the marker at index creation and a later
+    /// open does not rebuild.
+    #[test]
+    fn fresh_db_writes_marker_and_does_not_rebuild() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::Current
+        );
+    }
+
+    /// SC-002 / FR-003: indexes present but no marker (every pre-fix database) → rebuild once;
+    /// the next call does not rebuild.
+    #[test]
+    fn missing_marker_rebuilds_once() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        clear_marker(&conn);
+        assert_eq!(marker(&conn), None);
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::Rebuilt
+        );
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::Current
+        );
+    }
+
+    #[test]
+    fn mismatched_marker_rebuilds() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        set_schema_state_status(&conn, FTS_MARKER_KEY, "0.20.3").unwrap();
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::Rebuilt
+        );
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+    }
+
+    /// Indexes dropped (as a replay does) and no marker → the creates all succeed, so the
+    /// indexes are known-fresh: marker only, no rebuild.
+    #[test]
+    fn all_created_writes_marker_without_rebuild() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        drop_fts_indexes(&conn);
+        clear_marker(&conn);
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::MarkedFresh
+        );
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+    }
+
+    /// ADR-0015: the rebuild's DDL and the marker write must never enter `executed_mutations`
+    /// (handlers drain that buffer into the WAL).
+    #[test]
+    fn rebuild_is_not_recorded_for_the_wal() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        clear_marker(&conn);
+        let _ = conn.drain_mutations();
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::Rebuilt
+        );
+        let recorded = conn.drain_mutations();
+        assert!(recorded.is_empty(), "unexpected WAL entries: {recorded:?}");
     }
 }
