@@ -453,6 +453,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "queryable": false,
             "initializing": false,
             "recovery_available": recovery_available,
+            "dedup_mode": state.dedup.mode().as_str(),
             "ontology": ontology_summary,
             "group_ontology_drift": group_ontology_drift,
             "group_identity_refusals": state
@@ -790,6 +791,9 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             .map(|(group_id, message)| json!({"group_id": group_id, "message": message}))
             .collect(),
     );
+    // Extraction-time dedup mode (#652): "veto-only" or "llm-verified". Set once here so every
+    // non-degraded branch above (Queryable and NotQueryable) carries it.
+    result["dedup_mode"] = json!(state.dedup.mode().as_str());
     Ok(result)
 }
 

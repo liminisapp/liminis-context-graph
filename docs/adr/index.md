@@ -141,6 +141,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0649](0649-fts-index-rebuild-on-lbug-version-change.md) | Rebuild FTS Indexes When the Building lbug Version Changes | 2026-10-01 |
 | [0650](0650-identifier-mismatch-veto-for-extraction-dedup.md) | Identifier-Mismatch Veto for Extraction-Time Entity Dedup | 2026-10-01 |
 | [0651](0651-merge-consolidates-summaries-and-refreshes-embedding.md) | Entity Merge Consolidates Summaries and Always Re-embeds `summary_embedding` | 2026-10-01 |
+| [0652](0652-llm-verified-extraction-dedup-via-extractor.md) | LLM-Verified Extraction Dedup via the Configured Extractor | 2026-10-01 |
 
 ## Historical numbering
 

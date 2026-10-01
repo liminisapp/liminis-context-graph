@@ -60,6 +60,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    dedup_judge::{self, DedupVerdict, DuplicatePair},
     error::Error,
     extractor::{ExtractOptions, Extractor},
     prompts,
@@ -141,6 +142,13 @@ fn consolidate_summary_request_value(entity_name: &str, existing: &str, incoming
         "incoming": incoming,
         "system_prompt": system,
         "user_prompt": user,
+    })
+}
+
+fn judge_duplicates_request_value(pairs: &[DuplicatePair]) -> Value {
+    json!({
+        "call_type": "judge_duplicates",
+        "pairs": dedup_judge::pairs_value(pairs),
     })
 }
 
@@ -300,6 +308,9 @@ pub struct RecordingExtractor {
     provider: String,
     model: String,
     writer: Arc<CassetteWriter>,
+    /// Keys of `judge_duplicates` records already written by this process. A repeat of the same
+    /// request must not append the same key again, or `load_records` rejects the cassette.
+    judged_keys: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl RecordingExtractor {
@@ -314,6 +325,7 @@ impl RecordingExtractor {
             provider: provider.into(),
             model: model.into(),
             writer,
+            judged_keys: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -401,6 +413,34 @@ impl Extractor for RecordingExtractor {
             self.record("consolidate_summary", key, request, &response)?;
             Ok(result)
         })
+    }
+
+    fn judge_duplicates<'a>(
+        &'a self,
+        pairs: &'a [DuplicatePair],
+    ) -> BoxFuture<'a, Result<Vec<DedupVerdict>, Error>> {
+        let request = judge_duplicates_request_value(pairs);
+        let key = request_key(&request);
+        Box::pin(async move {
+            let result = self.inner.judge_duplicates(pairs).await?;
+            let response = serde_json::to_value(&result)?;
+            // Only a fully definite answer is recorded. The dedup adapter does not cache `Unknown`,
+            // so such a pair is judged again later and the retry may return a real verdict; a
+            // recorded `Unknown` would shadow it (the key is the same) and replay would diverge
+            // from the live run. Left unrecorded, replay takes the miss path, which is an insert
+            // plus a warning, the same outcome `Unknown` has. A repeat of an already-recorded
+            // key is forwarded live but not re-appended (duplicate keys fail `load_records`).
+            if !result.contains(&DedupVerdict::Unknown)
+                && self.judged_keys.lock().unwrap().insert(key.clone())
+            {
+                self.record("judge_duplicates", key, request, &response)?;
+            }
+            Ok(result)
+        })
+    }
+
+    fn is_configured(&self) -> bool {
+        self.inner.is_configured()
     }
 }
 
@@ -493,6 +533,19 @@ impl Extractor for ReplayingExtractor {
         ));
         Box::pin(async move {
             let response = self.pop("consolidate_summary", &key)?;
+            Ok(serde_json::from_value(response)?)
+        })
+    }
+
+    /// A miss returns [`Error::CassetteMiss`]; the dedup adapter turns that into "not a
+    /// duplicate" (cassettes recorded before #652 carry no `judge_duplicates` records).
+    fn judge_duplicates<'a>(
+        &'a self,
+        pairs: &'a [DuplicatePair],
+    ) -> BoxFuture<'a, Result<Vec<DedupVerdict>, Error>> {
+        let key = request_key(&judge_duplicates_request_value(pairs));
+        Box::pin(async move {
+            let response = self.pop("judge_duplicates", &key)?;
             Ok(serde_json::from_value(response)?)
         })
     }
@@ -623,6 +676,156 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 2, "re-opening must append, not truncate");
+    }
+
+    /// Judge stand-in for the cassette round trip: confirms every pair.
+    struct ConfirmingJudge;
+
+    impl Extractor for ConfirmingJudge {
+        fn extract<'a>(
+            &'a self,
+            _opts: ExtractOptions<'a>,
+        ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
+            Box::pin(async { Err(Error::Ipc("unused".to_string())) })
+        }
+        fn classify_entities<'a>(
+            &'a self,
+            _entities: &'a [(&'a str, &'a str)],
+            _allowed_types: Option<&'a [String]>,
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Err(Error::Ipc("unused".to_string())) })
+        }
+        fn classify_relations<'a>(
+            &'a self,
+            _edges: &'a [(&'a str, &'a str)],
+            _allowed_types: &'a [(String, Option<String>)],
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Err(Error::Ipc("unused".to_string())) })
+        }
+        fn judge_duplicates<'a>(
+            &'a self,
+            pairs: &'a [DuplicatePair],
+        ) -> BoxFuture<'a, Result<Vec<DedupVerdict>, Error>> {
+            Box::pin(async move { Ok(vec![DedupVerdict::Duplicate; pairs.len()]) })
+        }
+    }
+
+    /// Answers `Unknown` on the first call and `Duplicate` afterwards.
+    struct FlakyJudge(std::sync::atomic::AtomicUsize);
+
+    impl Extractor for FlakyJudge {
+        fn extract<'a>(
+            &'a self,
+            _opts: ExtractOptions<'a>,
+        ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
+            Box::pin(async { Err(Error::Ipc("unused".to_string())) })
+        }
+        fn classify_entities<'a>(
+            &'a self,
+            _entities: &'a [(&'a str, &'a str)],
+            _allowed_types: Option<&'a [String]>,
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Err(Error::Ipc("unused".to_string())) })
+        }
+        fn classify_relations<'a>(
+            &'a self,
+            _edges: &'a [(&'a str, &'a str)],
+            _allowed_types: &'a [(String, Option<String>)],
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Err(Error::Ipc("unused".to_string())) })
+        }
+        fn judge_duplicates<'a>(
+            &'a self,
+            pairs: &'a [DuplicatePair],
+        ) -> BoxFuture<'a, Result<Vec<DedupVerdict>, Error>> {
+            let first = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+            Box::pin(async move {
+                let v = if first {
+                    DedupVerdict::Unknown
+                } else {
+                    DedupVerdict::Duplicate
+                };
+                Ok(vec![v; pairs.len()])
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_duplicates_unknown_is_not_recorded_so_a_later_verdict_is() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cassette.jsonl");
+        let writer = Arc::new(CassetteWriter::open(&path).unwrap());
+        let recorder = RecordingExtractor::new(
+            Arc::new(FlakyJudge(Default::default())),
+            "mock",
+            "mock-model",
+            writer,
+        );
+        let pairs = [judge_pair("Bob", "Robert")];
+        assert_eq!(
+            recorder.judge_duplicates(&pairs).await.unwrap(),
+            vec![DedupVerdict::Unknown]
+        );
+        // Nothing recorded for the unknown answer: replay misses (an insert), not a stale Unknown.
+        let replayer = ReplayingExtractor::load(&path).unwrap();
+        assert!(matches!(
+            replayer.judge_duplicates(&pairs).await,
+            Err(Error::CassetteMiss(_))
+        ));
+        // The retry's definite verdict is recorded and replays.
+        assert_eq!(
+            recorder.judge_duplicates(&pairs).await.unwrap(),
+            vec![DedupVerdict::Duplicate]
+        );
+        let replayer = ReplayingExtractor::load(&path).unwrap();
+        assert_eq!(
+            replayer.judge_duplicates(&pairs).await.unwrap(),
+            vec![DedupVerdict::Duplicate]
+        );
+    }
+
+    fn judge_pair(a: &str, b: &str) -> DuplicatePair {
+        let side = |name: &str| dedup_judge::DedupSide {
+            name: name.to_string(),
+            entity_type: "Person".to_string(),
+            summary: String::new(),
+        };
+        DuplicatePair {
+            existing: side(a),
+            incoming: side(b),
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_duplicates_record_then_replay_and_miss() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cassette.jsonl");
+        let writer = Arc::new(CassetteWriter::open(&path).unwrap());
+        let recorder = RecordingExtractor::new(
+            Arc::new(ConfirmingJudge),
+            "mock",
+            "mock-model",
+            Arc::clone(&writer),
+        );
+        let pairs = [judge_pair("Bob", "Robert")];
+        assert_eq!(
+            recorder.judge_duplicates(&pairs).await.unwrap(),
+            vec![DedupVerdict::Duplicate]
+        );
+
+        let replayer = ReplayingExtractor::load(&path).unwrap();
+        assert_eq!(
+            replayer.judge_duplicates(&pairs).await.unwrap(),
+            vec![DedupVerdict::Duplicate]
+        );
+        // A repeated judgement of the same pair must not duplicate the cassette key.
+        recorder.judge_duplicates(&pairs).await.unwrap();
+        ReplayingExtractor::load(&path).expect("repeat judge call keeps the cassette loadable");
+        let other = [judge_pair("Bob", "Alice")];
+        assert!(matches!(
+            replayer.judge_duplicates(&other).await,
+            Err(Error::CassetteMiss(_))
+        ));
     }
 
     #[tokio::test]

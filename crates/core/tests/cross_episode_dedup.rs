@@ -596,6 +596,7 @@ async fn dedup_path_counts_match_decisions() {
             vetoed: 1,
             adapter_rejected: 0,
             salvage_vetoed: 0,
+            ..Default::default()
         }
     );
     // 3 + (ADR 2019, Zeta inserted) = 5 entities; Postgres and alpha merged.

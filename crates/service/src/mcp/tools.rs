@@ -70,8 +70,9 @@ pub fn registry() -> Vec<ToolSpec> {
                            per-group ontology drift (group_ontology_drift — issue #451, an array \
                            of {group_id, drifted, drift_summary} for every group this process has \
                            resolved an ontology for; a group not yet used in this process is \
-                           simply absent, not falsely reported as not drifted), and whether \
-                           search indices are built. generation_status is \
+                           simply absent, not falsely reported as not drifted), the \
+                           extraction-time dedup mode (dedup_mode — issue #652, \"veto-only\" or \
+                           \"llm-verified\"), and whether search indices are built. generation_status is \
                            \"not_applicable\" (no WAL stream yet), \"unknown\" (stream exists but \
                            .wal-generation.json is missing or corrupt — knowledge_rebuild_from_wal \
                            will refuse once a position is recorded), or \"known\". Returns a \

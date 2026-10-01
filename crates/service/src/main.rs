@@ -369,6 +369,27 @@ const EMBEDDER_RETRY_CEILING: Duration = Duration::from_secs(5);
 const EMBEDDER_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const EMBEDDER_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(1);
 
+/// Startup log for the dedup mode and its configuration warnings (#650, #652). Called from every
+/// startup path that builds an `AppState`, including the degraded embedder-unreachable one.
+fn log_dedup_config(extractor_configured: bool) {
+    eprintln!(
+        "dedup: mode={}",
+        lcg_core::dedup_mode_description(extractor_configured)
+    );
+    if lcg_core::dedup_llm_requested() && !extractor_configured {
+        eprintln!(
+            "dedup: warning: LCG_DEDUP_LLM is on but no extraction provider is configured, so \
+             the LLM dedup check cannot run; using veto-only dedup"
+        );
+    }
+    if lcg_core::deprecated_adapter_url_set() {
+        eprintln!(
+            "dedup: warning: LCG_DEDUP_ADAPTER_URL (and GRAPHITI_DEDUP_ADAPTER_URL) is deprecated \
+             and ignored; LCG_DEDUP_LLM now uses the configured extractor (see ADR-0652)"
+        );
+    }
+}
+
 /// Resolves the embedder transport, probes it, opens the DB (with startup self-recovery per
 /// ADR-0009), and builds `AppState`. Shared by the socket service and standalone MCP mode
 /// (`--mcp-stdio` without `--connect`) so both reuse byte-for-byte the same bootstrap path —
@@ -494,6 +515,9 @@ async fn bootstrap_app_state(
                     // branch below's own precedence rule.
                     let degraded_reason = pre_migration_degraded
                         .or_else(|| Some(EMBEDDER_UNREACHABLE_DEGRADED_REASON.to_string()));
+                    // This state carries no extractor, so it runs veto-only whatever
+                    // `LCG_DEDUP_LLM` says; log that rather than leaving the mode unreported.
+                    log_dedup_config(false);
                     let embedding_cache = Arc::new(lcg_core::EmbeddingCache::new());
                     let state = Arc::new(AppState::from_env(
                         telemetry_sink,
@@ -749,7 +773,7 @@ async fn bootstrap_app_state(
 
     // Logged once here rather than from `AppState::from_env`, which also runs on the recovery and
     // attach paths (issue #650).
-    eprintln!("dedup: mode={}", lcg_core::dedup_mode_description());
+    log_dedup_config(extractor.is_configured());
 
     // Derive the WAL root using the same env-var logic as AppState::from_env (issue #378:
     // LCG_WAL_DIR now names a root containing one subdirectory per group_id, not a single
