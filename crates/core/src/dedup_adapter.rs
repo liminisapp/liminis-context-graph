@@ -539,16 +539,10 @@ mod tests {
             DedupMode::LlmVerified
         );
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// The startup log line (issue #650) must track the same `LCG_DEDUP_LLM` switch that
+    /// The startup log line (#650, #652) must track the same `LCG_DEDUP_LLM` switch that
     /// `AppState::from_env` uses to pick the adapter.
     #[test]
     fn dedup_mode_description_tracks_lcg_dedup_llm() {
@@ -559,11 +553,18 @@ mod tests {
         );
         std::env::remove_var("LCG_DEDUP_LLM");
         std::env::remove_var("GRAPHITI_DEDUP_LLM");
-        assert_eq!(dedup_mode_description(), "passthrough + identifier veto");
+        assert_eq!(
+            dedup_mode_description(true),
+            "veto-only (LCG_DEDUP_LLM=off; identifier veto always on)"
+        );
         std::env::set_var("LCG_DEDUP_LLM", "1");
         assert_eq!(
-            dedup_mode_description(),
-            "local-adapter (LCG_DEDUP_LLM) + identifier veto"
+            dedup_mode_description(true),
+            "llm-verified (LCG_DEDUP_LLM=on; identifier veto always on)"
+        );
+        assert_eq!(
+            dedup_mode_description(false),
+            "veto-only (LCG_DEDUP_LLM=on-but-no-extractor; identifier veto always on)"
         );
         std::env::remove_var("LCG_DEDUP_LLM");
         if let Some(v) = new {
