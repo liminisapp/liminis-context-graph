@@ -507,12 +507,32 @@ jobs:
           name: lbug-extension-bundle
           path: lbug-extension-bundle
 
+      # TEMPORARY (#657, FR-006/FR-011): fingerprint evidence for why units are or are not
+      # fresh after the restore. Remove once the first post-fix run has been read and the
+      # result recorded in ADR-0341. Non-blocking for cargo itself, but its non-fingerprint
+      # output is appended to /tmp/build.log so a recompile here cannot be masked from the
+      # FR-006 guard below (otherwise this step would warm the tree and the guard would
+      # pass vacuously).
+      - name: "TEMP #657: fingerprint diagnostic (dirty reasons after restore)"
+        continue-on-error: true
+        env:
+          CARGO_LOG: cargo::core::compiler::fingerprint=info
+          CARGO_TERM_COLOR: never
+          LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
+        run: |
+          cargo test --release --no-run > /tmp/fp.log 2>&1 || true
+          grep -v 'compiler::fingerprint\]' /tmp/fp.log > /tmp/build.log || true
+          echo "fingerprint log lines: $(grep -c 'compiler::fingerprint\]' /tmp/fp.log || true)"
+          echo "dirty units: $(grep -c 'dirty:' /tmp/fp.log || true)"
+          echo "--- first dirty reasons ---"
+          grep 'dirty:\|stale:\|StaleDependency\|FsStatusOutdated\|MissingFile\|NothingFresh' /tmp/fp.log | cut -c1-300 | head -n 60 || true
+
       - name: cargo test --release (restored build; captured for recompile-regression check)
         env:
           # Greppable log; the guard below is colour-safe regardless.
           CARGO_TERM_COLOR: never
           LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
-        run: cargo test --release 2>&1 | tee /tmp/build.log
+        run: cargo test --release 2>&1 | tee -a /tmp/build.log
 
       # Issue #500 FR-006/SC-004: regression guard for leaked, orphaned liminis-context-graph
       # processes. crates/service/tests/ spawns the built binary as a subprocess in many
