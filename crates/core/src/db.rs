@@ -3237,9 +3237,10 @@ impl<'db> Conn<'db> {
     /// name_embedding` by `create_vector_indexes`) rejects a plain `SET` on an indexed column
     /// outright: `Cannot set property name_embedding in table Entity because it is used in one
     /// or more indexes. Try delete and then insert.` This is the same reason
-    /// `episode.rs`'s dedup `DedupDecision::Merge` path (`SET e.summary = $summary`) never
-    /// rewrites `name_embedding` on a re-matched entity either — it is this codebase's existing
-    /// precedent, not a new decision invented for this feature. Since only the create path
+    /// `episode.rs`'s dedup `DedupDecision::Merge` path (which, since #651, `SET`s `summary` and
+    /// `summary_embedding` together) never rewrites `name_embedding` on a re-matched entity
+    /// either — it is this codebase's existing precedent, not a new decision invented for this
+    /// feature. Since only the create path
     /// (`insert_entity`, before any index exists over the row) ever persists an embedding, the
     /// caller no longer computes one at all before calling this update path (issue #444) — the
     /// embedder-unavailable `embedding_warning` fallback is therefore unreachable here; an

@@ -115,13 +115,92 @@ fn hybrid_threshold() -> usize {
 enum DedupDecision {
     Merge {
         existing_uuid: String,
+        /// The summary this merge leaves the entity with (consolidated or fallback, always
+        /// within `MERGED_SUMMARY_CAP`) — issue #651.
         merged_summary: String,
+        /// `Some` only on the *last* merge into a uuid within a chunk whose final summary differs
+        /// from the stored one: Phase C then writes `summary` and `summary_embedding` in a single
+        /// `SET`. `None` means "nothing to write" (summary unchanged, or superseded by a later
+        /// merge into the same uuid in this chunk).
+        summary_embedding: Option<Vec<f32>>,
     },
     Insert {
         // Boxed: `EntityRow` grew past clippy::large_enum_variant's threshold once
         // `summary_embedding` (issue #470) was added, and `Merge`'s variant is much smaller.
         row: Box<EntityRow>,
     },
+}
+
+/// Produces the summary a merge leaves behind (issue #651): `Ok(None)` when the stored summary
+/// stays as it is (empty or already-contained incoming), otherwise the new bounded summary.
+///
+/// Runs in Phase B — lock-free and cancellable, exactly like `dedup.is_duplicate`. The extractor
+/// is consulted only when both sides carry text and the incoming one adds information. Any
+/// failure — `Unconfigured` (silent), a transport/parse error, an empty reply — degrades to the
+/// deterministic `fallback_merge`; a failed consolidation never fails the chunk.
+async fn merged_summary_for(
+    state: &AppState,
+    entity_name: &str,
+    current: &str,
+    incoming: &str,
+) -> Result<Option<String>, Error> {
+    use crate::summary_merge::{
+        decide_consolidation, fallback_merge, finalize_consolidation, ConsolidationPlan,
+    };
+    let merged = match decide_consolidation(current, incoming) {
+        ConsolidationPlan::Keep => return Ok(None),
+        ConsolidationPlan::UseIncoming(s) => s,
+        ConsolidationPlan::Consolidate => {
+            let reply = tokio::select! {
+                r = state.extractor.consolidate_summary(entity_name, current, incoming) => r,
+                _ = state.cancel_token.cancelled() => {
+                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                    return Err(Error::Cancelled);
+                }
+            };
+            match reply {
+                Ok(text) => finalize_consolidation(&text)
+                    .unwrap_or_else(|| fallback_merge(current, incoming)),
+                Err(Error::Config(_)) => fallback_merge(current, incoming),
+                Err(e) => {
+                    eprintln!(
+                        "liminis-context-graph: summary consolidation failed for '{entity_name}', \
+                         using bounded fallback: {e}"
+                    );
+                    fallback_merge(current, incoming)
+                }
+            }
+        }
+    };
+    Ok((merged != current).then_some(merged))
+}
+
+/// Resolves one merge decision in Phase B: advances the per-uuid running summary through
+/// [`merged_summary_for`] and returns the `Merge` decision with no embedding yet (the post-loop
+/// batch attaches it to the latest merge per uuid). Records `decision_idx` as that uuid's latest.
+async fn merge_into(
+    state: &AppState,
+    merge_state: &mut std::collections::HashMap<String, (String, String, usize)>,
+    decision_idx: usize,
+    existing: &EntityRow,
+    incoming: &str,
+) -> Result<DedupDecision, Error> {
+    let entry = merge_state.entry(existing.uuid.clone()).or_insert_with(|| {
+        (
+            existing.summary.clone(),
+            existing.summary.clone(),
+            decision_idx,
+        )
+    });
+    if let Some(next) = merged_summary_for(state, &existing.name, &entry.1, incoming).await? {
+        entry.1 = next;
+    }
+    entry.2 = decision_idx;
+    Ok(DedupDecision::Merge {
+        existing_uuid: existing.uuid.clone(),
+        merged_summary: entry.1.clone(),
+        summary_embedding: None,
+    })
 }
 
 /// Outcome of resolving one edge endpoint name in Phase C (issue #616). `Ambiguous` means the
@@ -754,6 +833,13 @@ pub async fn add_episode(
     let mut decisions: Vec<DedupDecision> = Vec::with_capacity(extraction.entities.len());
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
+    // Per-existing-uuid running summary (issue #651): a second merge into the same entity within
+    // this chunk consolidates on top of the first result, not on the stale pre-chunk summary
+    // (which would let the last Phase C `SET` silently discard the earlier merge).
+    // `merge_state` maps uuid → (summary before this chunk, running summary, index of the latest
+    // Merge decision for that uuid).
+    let mut merge_state: std::collections::HashMap<String, (String, String, usize)> =
+        std::collections::HashMap::new();
     for (i, extracted) in extraction.entities.iter().enumerate() {
         if state.cancel_token.is_cancelled() {
             state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
@@ -816,10 +902,14 @@ pub async fn add_episode(
                     );
                 }
                 dedup_paths.exact_name += 1;
-                DedupDecision::Merge {
-                    existing_uuid: existing.uuid.clone(),
-                    merged_summary: format!("{} {}", existing.summary, extracted.summary),
-                }
+                merge_into(
+                    &state,
+                    &mut merge_state,
+                    decisions.len(),
+                    existing,
+                    &extracted.summary,
+                )
+                .await?
             }
             PhaseBResult::EmbeddingCandidate {
                 candidate: Some(existing),
@@ -834,10 +924,14 @@ pub async fn add_episode(
                 };
                 if is_dup {
                     dedup_paths.embedding_merge += 1;
-                    DedupDecision::Merge {
-                        existing_uuid: existing.uuid.clone(),
-                        merged_summary: format!("{} {}", existing.summary, extracted.summary),
-                    }
+                    merge_into(
+                        &state,
+                        &mut merge_state,
+                        decisions.len(),
+                        existing,
+                        &extracted.summary,
+                    )
+                    .await?
                 } else {
                     dedup_paths.adapter_rejected += 1;
                     make_insert_row(name_embeddings[i].clone(), summary_embeddings[i].clone())
@@ -854,6 +948,40 @@ pub async fn add_episode(
             }
         };
         decisions.push(decision);
+    }
+
+    // Re-embed every merged summary that actually changed — one lock-free, cancellable batch
+    // (issue #651, FR-005), outside `write_lock` per ADR-0543. Only the latest merge into a uuid
+    // carries the embedding; an embedder error fails the chunk (as the pre-lock embedding pass
+    // does) rather than leaving a silently stale vector.
+    let mut changed: Vec<(usize, &str)> = merge_state
+        .values()
+        .filter(|(before, running, _)| before != running)
+        .map(|(_, running, idx)| (*idx, running.as_str()))
+        .collect();
+    changed.sort_by_key(|(idx, _)| *idx);
+    if !changed.is_empty() {
+        let refs: Vec<&str> = changed.iter().map(|(_, s)| *s).collect();
+        let embeddings = tokio::select! {
+            r = state.embedder.embed_batch(&refs) => r?,
+            _ = state.cancel_token.cancelled() => {
+                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                return Err(Error::Cancelled);
+            }
+        };
+        let targets: Vec<(usize, String)> =
+            changed.iter().map(|(i, s)| (*i, s.to_string())).collect();
+        for ((idx, summary), emb) in targets.into_iter().zip(embeddings) {
+            if let DedupDecision::Merge {
+                merged_summary,
+                summary_embedding,
+                ..
+            } = &mut decisions[idx]
+            {
+                *merged_summary = summary;
+                *summary_embedding = Some(emb);
+            }
+        }
     }
 
     // Capture counts before extraction moves into the Phase C closure. `edges_extracted` is
@@ -938,11 +1066,23 @@ pub async fn add_episode(
                 DedupDecision::Merge {
                     existing_uuid,
                     merged_summary,
+                    summary_embedding,
                 } => {
-                    conn.exec_params(
-                        "MATCH (e:Entity {uuid: $uuid}) SET e.summary = $summary",
-                        serde_json::json!({ "uuid": &existing_uuid, "summary": &merged_summary }),
-                    )?;
+                    // `summary` and `summary_embedding` go in ONE statement (issue #651): the
+                    // logged WAL template then names `$summary_embedding`, `log_mutation` strips
+                    // the vector, and replay recomputes it from the co-located `summary`
+                    // (ADR-0526) — so a rebuilt database embeds exactly what this one does.
+                    if let Some(emb) = summary_embedding {
+                        conn.exec_params(
+                            "MATCH (e:Entity {uuid: $uuid}) \
+                             SET e.summary = $summary, e.summary_embedding = $summary_embedding",
+                            serde_json::json!({
+                                "uuid": &existing_uuid,
+                                "summary": &merged_summary,
+                                "summary_embedding": emb,
+                            }),
+                        )?;
+                    }
                     entity_uuids.push(existing_uuid);
                 }
                 DedupDecision::Insert { row } => {
