@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -29,6 +29,33 @@ pub struct Db {
     /// `clear_all`/recovery, so a fresh `Db` naturally starts with default (trusted, no
     /// fallback scans yet) status.
     lookup_key_status: LookupKeyStatus,
+    /// Count and timestamp of backstop FTS rebuilds (issue #649, ADR-0649); surfaced through
+    /// `knowledge_status`. On `Db` for the same reason as `lookup_key_status`.
+    fts_repair_status: FtsRepairStatus,
+}
+
+/// Observability for the statement-level FTS backstop (issue #649, ADR-0649): how many times a
+/// write hit `FTS index '<idx>' is inconsistent` and `Conn` rebuilt all 3 FTS indexes and
+/// retried, and when the last such repair finished. The open-time marker-driven rebuild is a
+/// one-time, logged event and is deliberately not counted here.
+#[derive(Default)]
+pub struct FtsRepairStatus {
+    /// `(count, last_unix_ms)` under one lock so a reader never sees a count paired with
+    /// another repair's timestamp (or a timestamp with a count of 0).
+    inner: std::sync::Mutex<(u64, u64)>,
+}
+
+impl FtsRepairStatus {
+    fn record(&self, now_ms: u64) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.0 += 1;
+        g.1 = now_ms;
+    }
+
+    fn snapshot(&self) -> (u64, Option<u64>) {
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        (g.0, Some(g.1).filter(|ms| *ms != 0))
+    }
 }
 
 /// Observability for the `lookup_key` ART-index design, surfaced through `knowledge_status`'s
@@ -109,6 +136,11 @@ pub struct Conn<'db> {
     /// correctly. See `wal_exec.rs` for the drain-and-flush pattern (ADR-0015).
     executed_mutations: RefCell<Vec<(String, serde_json::Value)>>,
     lookup_key_status: &'db LookupKeyStatus,
+    fts_repair_status: &'db FtsRepairStatus,
+    /// True between a successful `BEGIN TRANSACTION` and the matching `COMMIT`/`ROLLBACK`
+    /// (maintained by [`Conn::exec_transaction_control`], which every explicit transaction in
+    /// the repo goes through). The FTS backstop must not run index DDL inside a transaction.
+    in_txn: Cell<bool>,
 }
 
 /// Serializes `Db::open` across threads. `INSTALL`/`LOAD EXTENSION` mutate a
@@ -230,6 +262,7 @@ impl Db {
         Ok(Self {
             inner,
             lookup_key_status: LookupKeyStatus::default(),
+            fts_repair_status: FtsRepairStatus::default(),
         })
     }
 
@@ -375,6 +408,12 @@ impl Db {
         Ok((db, stats))
     }
 
+    /// `(count, last_unix_ms)` of backstop FTS rebuilds since this `Db` was opened (issue #649,
+    /// ADR-0649), read atomically as a pair; the timestamp is `None` if there has been none.
+    pub fn fts_repair_snapshot(&self) -> (u64, Option<u64>) {
+        self.fts_repair_status.snapshot()
+    }
+
     /// Opens a fresh connection against the already-set-up database.
     /// Extension setup happens once in `Db::open` because `INSTALL` and
     /// `LOAD EXTENSION` are both write transactions in lbug — running them
@@ -385,6 +424,8 @@ impl Db {
             inner: conn,
             executed_mutations: RefCell::new(Vec::new()),
             lookup_key_status: &self.lookup_key_status,
+            fts_repair_status: &self.fts_repair_status,
+            in_txn: Cell::new(false),
         })
     }
 }
@@ -418,11 +459,83 @@ impl<'db> Conn<'db> {
     /// parameters (no string interpolation, no escaping) and records the parameterized
     /// form into the WAL.
     pub(crate) fn raw_query(&self, sql: &str) -> Result<(), Error> {
-        let _ = self.inner.query(sql)?;
+        match self.inner.query(sql) {
+            Ok(_) => {}
+            Err(e) => {
+                let e = Error::from(e);
+                if !self.repair_fts_after(&e) {
+                    return Err(e);
+                }
+                let _ = self.inner.query(sql)?;
+            }
+        }
         self.executed_mutations
             .borrow_mut()
             .push((sql.to_string(), serde_json::Value::Null));
         Ok(())
+    }
+
+    /// Like [`Conn::raw_query`] but records nothing into `executed_mutations` and never runs
+    /// the FTS backstop. For derived-state maintenance (FTS rebuild, marker writes) that must
+    /// not reach the WAL (ADR-0015, ADR-0649).
+    pub(crate) fn query_unrecorded(&self, sql: &str) -> Result<(), Error> {
+        let _ = self.inner.query(sql)?;
+        Ok(())
+    }
+
+    /// Like [`Conn::exec_params`] but records nothing and never runs the FTS backstop.
+    pub(crate) fn exec_params_unrecorded(
+        &self,
+        cypher: &str,
+        params: serde_json::Value,
+    ) -> Result<(), Error> {
+        let mut prepared = self.inner.prepare(cypher)?;
+        self.execute_prepared(&mut prepared, &params)
+    }
+
+    /// Statement-level FTS backstop (issue #649, ADR-0649). If `err` is `FTS index … is
+    /// inconsistent` and this connection is not inside an explicit transaction, rebuilds all 3
+    /// FTS indexes (unrecorded) and returns `true` so the caller retries its single statement
+    /// once. A failed autocommit statement is atomic and the caller already holds the write
+    /// lock, so the retry is safe. Inside a transaction (purge, `remove_episodes_by_source`,
+    /// WAL replay batches) index DDL is unsafe, so the error propagates unchanged.
+    fn repair_fts_after(&self, err: &Error) -> bool {
+        if self.in_txn.get() || !crate::error::is_fts_inconsistent_error(err) {
+            return false;
+        }
+        eprintln!(
+            "liminis-context-graph: write hit an inconsistent FTS index ({err}); rebuilding all \
+             3 FTS indexes and retrying once (time is proportional to corpus size)"
+        );
+        match crate::schema::rebuild_fts_indexes(self) {
+            Ok(()) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                self.fts_repair_status.record(now);
+                true
+            }
+            Err(e) => {
+                eprintln!("liminis-context-graph: FTS backstop rebuild failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// `(count, last_unix_ms)` of backstop FTS rebuilds since the owning `Db` was opened.
+    pub fn fts_repair_snapshot(&self) -> (u64, Option<u64>) {
+        self.fts_repair_status.snapshot()
+    }
+
+    /// Number of backstop FTS rebuilds since the owning `Db` was opened (issue #649).
+    pub fn fts_repair_count(&self) -> u64 {
+        self.fts_repair_snapshot().0
+    }
+
+    /// Unix-ms timestamp of the last backstop FTS rebuild, or `None` if there has been none.
+    pub fn fts_last_repair_unix_ms(&self) -> Option<u64> {
+        self.fts_repair_snapshot().1
     }
 
     /// Executes a parameterized Cypher statement via lbug prepared-statement binding,
@@ -436,7 +549,14 @@ impl<'db> Conn<'db> {
     /// `cypher` must use `$name` placeholders matching keys in the `params` JSON object.
     pub(crate) fn exec_params(&self, cypher: &str, params: serde_json::Value) -> Result<(), Error> {
         let mut prepared = self.inner.prepare(cypher)?;
-        self.execute_prepared(&mut prepared, &params)?;
+        if let Err(e) = self.execute_prepared(&mut prepared, &params) {
+            if !self.repair_fts_after(&e) {
+                return Err(e);
+            }
+            // The rebuild invalidates the plan; re-prepare for the single retry.
+            let mut prepared = self.inner.prepare(cypher)?;
+            self.execute_prepared(&mut prepared, &params)?;
+        }
         self.executed_mutations
             .borrow_mut()
             .push((cypher.to_string(), params));
@@ -459,7 +579,18 @@ impl<'db> Conn<'db> {
     /// of a multi-hour replay, an unbounded-memory regression this issue exists to avoid (User
     /// Story 4), not to introduce in a different place. Used only by WAL replay's `flush_batch`.
     pub(crate) fn exec_transaction_control(&self, sql: &str) -> Result<(), Error> {
-        let _ = self.inner.query(sql)?;
+        let upper = sql.trim_start().to_ascii_uppercase();
+        let is_begin = upper.starts_with("BEGIN");
+        let is_end = upper.starts_with("COMMIT") || upper.starts_with("ROLLBACK");
+        let result = self.inner.query(sql);
+        // BEGIN only opens a transaction if it succeeded; COMMIT/ROLLBACK close it even on
+        // error (the engine auto-rolls-back a failed transaction).
+        if is_begin && result.is_ok() {
+            self.in_txn.set(true);
+        } else if is_end {
+            self.in_txn.set(false);
+        }
+        let _ = result?;
         Ok(())
     }
 
@@ -545,7 +676,18 @@ impl<'db> Conn<'db> {
     /// Records `(sql, Null)` on success so `handle_query_cypher` can WAL-log mutation
     /// queries issued via this escape hatch.
     pub fn cypher_query(&self, sql: &str) -> Result<Vec<Vec<String>>, Error> {
-        let result = self.inner.query(sql)?;
+        // Same statement-level FTS backstop as `raw_query` (issue #649, ADR-0649): this is the
+        // escape hatch for arbitrary mutations, so a delete/update here must self-heal too.
+        let result = match self.inner.query(sql) {
+            Ok(r) => r,
+            Err(e) => {
+                let e = Error::from(e);
+                if !self.repair_fts_after(&e) {
+                    return Err(e);
+                }
+                self.inner.query(sql)?
+            }
+        };
         let mut rows = Vec::new();
         for row in result {
             rows.push(row.iter().map(value_as_string).collect());
@@ -5045,5 +5187,94 @@ mod coerce_unit_tests {
             matches!(v_false, Value::Bool(false)),
             "false must yield Value::Bool(false), got: {v_false:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod fts_backstop_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn inconsistent() -> Error {
+        Error::QueryFailed(
+            "FTS index 'episode_content' is inconsistent: term '\u{2014}' is missing during \
+             delete. Drop and recreate the FTS index."
+                .to_string(),
+        )
+    }
+
+    fn open() -> (TempDir, Db) {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn in_txn_tracks_begin_commit_rollback() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        assert!(!conn.in_txn.get());
+        conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+        assert!(conn.in_txn.get());
+        conn.exec_transaction_control("COMMIT").unwrap();
+        assert!(!conn.in_txn.get());
+        conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+        assert!(conn.in_txn.get());
+        conn.exec_transaction_control("ROLLBACK").unwrap();
+        assert!(!conn.in_txn.get());
+    }
+
+    #[test]
+    fn unrecorded_helpers_leave_executed_mutations_empty() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        let _ = conn.drain_mutations();
+        conn.query_unrecorded("MATCH (e:Entity) RETURN count(*)")
+            .unwrap();
+        conn.exec_params_unrecorded(
+            "MERGE (s:SchemaState {key: $key}) SET s.status = $status",
+            serde_json::json!({ "key": "k", "status": "v" }),
+        )
+        .unwrap();
+        assert!(conn.drain_mutations().is_empty());
+    }
+
+    #[test]
+    fn backstop_rebuilds_and_counts_outside_a_transaction() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        assert_eq!(conn.fts_repair_snapshot(), (0, None));
+        let _ = conn.drain_mutations();
+        assert!(conn.repair_fts_after(&inconsistent()));
+        let (count, last) = conn.fts_repair_snapshot();
+        assert_eq!(count, 1);
+        assert!(last.is_some());
+        assert!(
+            conn.drain_mutations().is_empty(),
+            "repair must not be WAL-recorded"
+        );
+    }
+
+    #[test]
+    fn backstop_does_not_fire_inside_a_transaction() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+        assert!(!conn.repair_fts_after(&inconsistent()));
+        assert_eq!(conn.fts_repair_snapshot().0, 0);
+        conn.exec_transaction_control("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn backstop_ignores_unrelated_errors() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        assert!(!conn.repair_fts_after(&Error::QueryFailed("boom".to_string())));
+        assert_eq!(conn.fts_repair_snapshot().0, 0);
     }
 }
