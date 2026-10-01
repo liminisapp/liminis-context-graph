@@ -143,6 +143,11 @@ jobs:
       - name: eval script guards
         run: crates/eval/scripts/test-scripts.sh
 
+      # #657: the recompile guard used by `test` and the e2e jobs. It was once blind to
+      # cargo's coloured output; this asserts both directions on synthetic logs.
+      - name: recompile-guard self-test
+        run: scripts/test-assert-no-compiling.sh
+
       - name: check no ML runtime deps
         run: |
           # Capture `cargo tree` on its own (stderr kept) so a registry/network failure fails
@@ -206,8 +211,12 @@ jobs:
       # entire workspace on every run and tripping the FR-006 "no Compiling" guard.
       # Stamping every tracked file to the commit's own timestamp makes that value
       # identical and deterministic across both jobs' independent checkouts, so the
-      # mtime comparison lines up and the restored build is recognized as fresh. This
-      # step is a no-op for content — it only touches mtimes, never file contents.
+      # mtime comparison lines up for workspace path crates. This step is a no-op for
+      # content — it only touches mtimes, never file contents.
+      # NECESSARY BUT NOT SUFFICIENT (#657): registry crates (proc-macro2, libc, ...) are
+      # not mtime-checked at all; their freshness comes from `.fingerprint/`, which must
+      # be included in the artifact (see `include-hidden-files` on the release-build
+      # upload). Normalising mtimes alone never made the restore a cache hit.
       - name: Normalize source mtimes to commit time (for cross-job cargo cache reuse)
         run: git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"
 
@@ -416,6 +425,13 @@ jobs:
           path: target/release/
           retention-days: 1
           if-no-files-found: error
+          # #657: load-bearing. `include-hidden-files` defaults to false in
+          # upload-artifact@v7, which silently drops every dot-prefixed path — for
+          # target/release that is `.fingerprint/` (cargo's per-unit freshness records) and
+          # `.cargo-lock`. Without the fingerprints `test` sees every unit as dirty and
+          # recompiles the whole workspace (~233 crates, ~9 min). Same trap as
+          # `lbug-extension-bundle` above (ADR-0559).
+          include-hidden-files: true
 
   test:
     name: test (ubuntu-latest)
@@ -443,9 +459,8 @@ jobs:
           components: clippy
 
       # Must match build-release's own normalization step exactly (same commit, same
-      # deterministic timestamp) — see that step's comment for why this is required
-      # for the restored target/release below to be recognized as fresh rather than
-      # triggering a full recompile.
+      # deterministic timestamp) — see that step's comment. It covers workspace path
+      # crates only; `.fingerprint/` arriving via the artifact covers everything else.
       - name: Normalize source mtimes to commit time (for cross-job cargo cache reuse)
         run: git ls-files -z | xargs -0 touch -d "@$(git log -1 --format=%ct)"
 
@@ -471,7 +486,8 @@ jobs:
       - name: Restore executable bits (actions/upload-artifact does not preserve them)
         run: find target/release -type f -exec chmod +x {} +
 
-      # With the full tree restored, this should be a pure cache hit: no compilation,
+      # With the full tree restored (including hidden `.fingerprint/`, see #657) this
+      # should be a pure cache hit: no compilation,
       # only running the ~50 already-linked integration-test binaries (crates/core: 37,
       # crates/service: 11, crates/eval: 2). The output is captured so the next step can
       # assert that was actually true.
@@ -491,10 +507,32 @@ jobs:
           name: lbug-extension-bundle
           path: lbug-extension-bundle
 
+      # TEMPORARY (#657, FR-006/FR-011): fingerprint evidence for why units are or are not
+      # fresh after the restore. Remove once the first post-fix run has been read and the
+      # result recorded in ADR-0341. Non-blocking for cargo itself, but its non-fingerprint
+      # output is appended to /tmp/build.log so a recompile here cannot be masked from the
+      # FR-006 guard below (otherwise this step would warm the tree and the guard would
+      # pass vacuously).
+      - name: "TEMP #657: fingerprint diagnostic (dirty reasons after restore)"
+        continue-on-error: true
+        env:
+          CARGO_LOG: cargo::core::compiler::fingerprint=info
+          CARGO_TERM_COLOR: never
+          LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
+        run: |
+          cargo test --release --no-run > /tmp/fp.log 2>&1 || true
+          grep -v 'compiler::fingerprint' /tmp/fp.log > /tmp/build.log || true
+          echo "fingerprint log lines: $(grep -c 'compiler::fingerprint' /tmp/fp.log || true)"
+          echo "dirty units: $(grep -c 'dirty:' /tmp/fp.log || true)"
+          echo "--- first dirty reasons ---"
+          grep 'dirty:\|stale:\|StaleDependency\|FsStatusOutdated\|MissingFile\|NothingFresh' /tmp/fp.log | cut -c1-300 | head -n 60 || true
+
       - name: cargo test --release (restored build; captured for recompile-regression check)
         env:
+          # Greppable log; the guard below is colour-safe regardless.
+          CARGO_TERM_COLOR: never
           LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
-        run: cargo test --release 2>&1 | tee /tmp/build.log
+        run: cargo test --release 2>&1 | tee -a /tmp/build.log
 
       # Issue #500 FR-006/SC-004: regression guard for leaked, orphaned liminis-context-graph
       # processes. crates/service/tests/ spawns the built binary as a subprocess in many
@@ -515,17 +553,18 @@ jobs:
       # #341/FR-006: generalized regression guard for Story 4. Previously this only
       # checked for "Compiling lbug " specifically (the original FR-008, from when this
       # job did its own `cargo build --release`). Now that `test` never builds anything
-      # itself — it only restores build-release's output — ANY "Compiling " line here
+      # itself — it only restores build-release's output — ANY `Compiling` line here
       # means the restore silently failed to avoid recompilation for some crate, not
       # just lbug, so the check is no longer lbug-specific.
+      #
+      # The check lives in scripts/assert-no-compiling.sh (self-tested in `lint`) because
+      # the inline `grep -q "Compiling "` it replaces was blind (#657): with the
+      # CARGO_TERM_COLOR=always that dtolnay/rust-toolchain exports, cargo prints
+      # `ESC[1mESC[92m   CompilingESC[0m crate` — a colour reset sits between `Compiling`
+      # and the space — so it never matched, and it reported "full cache hit" on a run that
+      # rebuilt all ~233 crates. The script strips ANSI and anchors on the line start.
       - name: Assert no workspace code recompiled after restoring build-release's output (FR-006)
-        run: |
-          if grep -q "Compiling " /tmp/build.log; then
-            echo "ERROR: workspace code recompiled despite restoring build-release's target/release artifact — the hand-off is broken"
-            grep "Compiling " /tmp/build.log
-            exit 1
-          fi
-          echo "OK: full cache hit confirmed, no recompilation after restoring build-release's output"
+        run: scripts/assert-no-compiling.sh /tmp/build.log
 
       # R-003 correctness gate: 95% decision-overlap between brute-force and hybrid dedup.
       # Runs here (not bench-dedup) so it shares the release build artifacts already restored
@@ -644,13 +683,7 @@ jobs:
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
       # by itself stop a future change from invoking `cargo` after the artifact download.
       - name: Assert no workspace code compiled during this job (FR-006)
-        run: |
-          if grep -q "Compiling " /tmp/e2e-run.log; then
-            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
-            grep "Compiling " /tmp/e2e-run.log
-            exit 1
-          fi
-          echo "OK: no recompilation detected in this job's output"
+        run: scripts/assert-no-compiling.sh /tmp/e2e-run.log
 
       # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
       # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
@@ -720,13 +753,7 @@ jobs:
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
       # by itself stop a future change from invoking `cargo` after the artifact download.
       - name: Assert no workspace code compiled during this job (FR-006)
-        run: |
-          if grep -q "Compiling " /tmp/e2e-run.log; then
-            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
-            grep "Compiling " /tmp/e2e-run.log
-            exit 1
-          fi
-          echo "OK: no recompilation detected in this job's output"
+        run: scripts/assert-no-compiling.sh /tmp/e2e-run.log
 
       # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
       # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
@@ -790,13 +817,7 @@ jobs:
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
       # by itself stop a future change from invoking `cargo` after the artifact download.
       - name: Assert no workspace code compiled during this job (FR-006)
-        run: |
-          if grep -q "Compiling " /tmp/e2e-run.log; then
-            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
-            grep "Compiling " /tmp/e2e-run.log
-            exit 1
-          fi
-          echo "OK: no recompilation detected in this job's output"
+        run: scripts/assert-no-compiling.sh /tmp/e2e-run.log
 
       # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
       # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
@@ -860,13 +881,7 @@ jobs:
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
       # by itself stop a future change from invoking `cargo` after the artifact download.
       - name: Assert no workspace code compiled during this job (FR-006)
-        run: |
-          if grep -q "Compiling " /tmp/e2e-run.log; then
-            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
-            grep "Compiling " /tmp/e2e-run.log
-            exit 1
-          fi
-          echo "OK: no recompilation detected in this job's output"
+        run: scripts/assert-no-compiling.sh /tmp/e2e-run.log
 
       # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
       # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
@@ -930,13 +945,7 @@ jobs:
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
       # by itself stop a future change from invoking `cargo` after the artifact download.
       - name: Assert no workspace code compiled during this job (FR-006)
-        run: |
-          if grep -q "Compiling " /tmp/e2e-run.log; then
-            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
-            grep "Compiling " /tmp/e2e-run.log
-            exit 1
-          fi
-          echo "OK: no recompilation detected in this job's output"
+        run: scripts/assert-no-compiling.sh /tmp/e2e-run.log
 
       # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
       # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
@@ -1001,13 +1010,7 @@ jobs:
       # preinstalled Rust toolchain — omitting an explicit toolchain-install step does not
       # by itself stop a future change from invoking `cargo` after the artifact download.
       - name: Assert no workspace code compiled during this job (FR-006)
-        run: |
-          if grep -q "Compiling " /tmp/e2e-run.log; then
-            echo "ERROR: a 'Compiling' line appeared in this job's output — something invoked cargo build/test after downloading the shared artifact, defeating FR-002/FR-006"
-            grep "Compiling " /tmp/e2e-run.log
-            exit 1
-          fi
-          echo "OK: no recompilation detected in this job's output"
+        run: scripts/assert-no-compiling.sh /tmp/e2e-run.log
 
       # #640 fail-fast: the first real failure in a post-build job cancels the whole run so
       # in-flight siblings stop. `failure()` is true only when an earlier step of THIS job
