@@ -391,6 +391,25 @@ count, or a `name_index_trusted: false` that doesn't clear on its own, signals `
 staleness worth investigating — see
 [ADR-0221](adr/0221-secondary-art-index-for-entity-name-lookup.md) for the mechanism.
 
+**`fts_repair_count`** (integer) and **`fts_last_repair_unix_ms`** (integer or `null`) — how many
+times, since this process opened the database, a write hit `FTS index '<idx>' is inconsistent` and
+the service rebuilt all three FTS indexes and retried that statement once, and when the last such
+repair finished (Unix ms; `null` if none). Both are `null` while the service is degraded. A
+non-zero count means a residual FTS inconsistency that the startup marker did not catch was
+detected and repaired (the classifier matches the error text, not its cause, so it does not by
+itself identify a version mismatch); it normally does not recur. The one-time startup rebuild (marker `fts_built_by_lbug` in
+`SchemaState`) is *not* counted here; it is logged on stderr
+(`rebuilding full-text (FTS) indexes: they were not built by this lbug version`) and its time is
+proportional to corpus size. See
+[ADR-0649](adr/0649-fts-index-rebuild-on-lbug-version-change.md).
+
+**Troubleshooting `FTS index '<idx>' is inconsistent`.** Raised by a delete/update on a row whose
+non-ASCII term is missing from an FTS index built by lbug 0.20 (0.15.x and earlier). Releases after
+0.16.2 rebuild the indexes automatically on first start. On 0.16.0–0.16.2, drop **all three** (not just
+the named one) with `CALL DROP_FTS_INDEX('Entity','node_name_and_summary')`,
+`CALL DROP_FTS_INDEX('RelatesToNode_','edge_name_and_fact')` and
+`CALL DROP_FTS_INDEX('Episodic','episode_content')`, then call `knowledge_build_indices`.
+
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below
 (`{applied_seq, max_seq, generation, generation_status, hydration_status, embedding_model,
