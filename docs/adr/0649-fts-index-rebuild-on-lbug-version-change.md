@@ -79,14 +79,14 @@ Nothing in the file format reveals the problem, so detection has to be recorded 
 
 ## Consequences
 
-- First start of 0.16.3 on a pre-0.16 database performs a one-time FTS rebuild, time proportional
+- First start of the first release containing this fix on a pre-0.16 database performs a one-time FTS rebuild, time proportional
   to corpus size, while the socket is bound but before requests are processed (`health_check`
   reports `busy` only for the write lock, ADR-0628 — supervisors must tolerate the delay; the
   stderr line states it).
 - Fresh databases never rebuild; a second open never rebuilds.
 - Storage version and data are untouched; only derived FTS indexes change (FR-010).
 - Users pinned to 0.16.0–0.16.2 do not get the fix and must drop all three indexes by hand and run
-  `knowledge_build_indices` (release notes).
+  `knowledge_build_indices` (CHANGELOG, Unreleased → Upgrading).
 - Every future lbug bump forces one rebuild (see Decision 4).
 
 ## References

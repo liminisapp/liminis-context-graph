@@ -21,19 +21,6 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   (a missed merge is recoverable; a wrong one is not). Exact-name matches,
   `knowledge_merge_entities` and WAL replay are unaffected. Existing bad merges are not
   repaired; re-ingest.
-
-### Added
-
-- `knowledge_process_chunk` returns an additive `dedup_paths` object of per-path resolution
-  counts (`exact_name`, `embedding_merge`, `vetoed`, `adapter_rejected`, `salvage_vetoed`), and
-  startup logs `dedup: mode=…`.
-
-## [0.16.3] - 2026-10-01
-
-Full detail: [docs/releases/0.16.3.md](docs/releases/0.16.3.md).
-
-### Fixed
-
 - **Databases built by 0.15.x or earlier: non-ASCII FTS terms were undeletable and silently
   unsearchable** ([ADR-0649](docs/adr/0649-fts-index-rebuild-on-lbug-version-change.md), #649,
   fixes #646). lbug 0.20 → 0.21 changed how non-ASCII terms (`→`, `—`, `é`, `東京`, emoji) are
@@ -41,16 +28,32 @@ Full detail: [docs/releases/0.16.3.md](docs/releases/0.16.3.md).
   deletes/updates/`knowledge_rebuild_from_wal {force_clear: true}` with
   `FTS index '<idx>' is inconsistent` and returned zero rows for non-ASCII searches. The service
   now records which lbug version built the FTS indexes and **rebuilds all three once on the first
-  start of 0.16.3** (logged on stderr; time proportional to corpus size). A residual
+  start of the next release** (logged on stderr; time proportional to corpus size). A residual
   `inconsistent` error on a write rebuilds all three and retries that statement once, reported as
   `fts_repair_count` / `fts_last_repair_unix_ms` in `knowledge_status`. A forced full replay now
   drops the FTS indexes before purging.
 
+### Added
+
+- `knowledge_process_chunk` returns an additive `dedup_paths` object of per-path resolution
+  counts (`exact_name`, `embedding_merge`, `vetoed`, `adapter_rejected`, `salvage_vetoed`), and
+  startup logs `dedup: mode=…`.
+
 ### Upgrading
 
-- **From 0.15.x or earlier:** the first start of 0.16.3 rebuilds the FTS indexes once. Nothing to do.
-- **Pinned to 0.16.0–0.16.2:** run `CALL DROP_FTS_INDEX(...)` for all three indexes, then
-  `knowledge_build_indices` — see the [release notes](docs/releases/0.16.3.md#upgrading).
+- **From 0.15.x or earlier, or 0.16.0–0.16.2:** nothing to do. The first start after upgrading
+  rebuilds the three FTS indexes once (logged on stderr; time proportional to corpus size, so a
+  large notebook starts slower that one time). 0.16.0–0.16.2 never wrote the marker, so their
+  databases rebuild too. Later starts, and databases created after this change, don't rebuild.
+- **Staying pinned to 0.16.0–0.16.2:** you don't get the automatic fix. Drop **all three** indexes
+  (dropping only the one named in the error just moves the failure to the next), then recreate
+  them with `knowledge_build_indices`:
+  ```cypher
+  CALL DROP_FTS_INDEX('Entity', 'node_name_and_summary')
+  CALL DROP_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact')
+  CALL DROP_FTS_INDEX('Episodic', 'episode_content')
+  ```
+  (via `knowledge_query_cypher`, or the `cypher` MCP scope).
 
 ## [0.16.2] - 2026-09-30
 

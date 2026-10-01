@@ -404,8 +404,8 @@ proportional to corpus size. See
 [ADR-0649](adr/0649-fts-index-rebuild-on-lbug-version-change.md).
 
 **Troubleshooting `FTS index '<idx>' is inconsistent`.** Raised by a delete/update on a row whose
-non-ASCII term is missing from an FTS index built by lbug 0.20 (0.15.x and earlier). 0.16.3
-rebuilds the indexes automatically on first start. On 0.16.0–0.16.2, drop **all three** (not just
+non-ASCII term is missing from an FTS index built by lbug 0.20 (0.15.x and earlier). Releases after
+0.16.2 rebuild the indexes automatically on first start. On 0.16.0–0.16.2, drop **all three** (not just
 the named one) with `CALL DROP_FTS_INDEX('Entity','node_name_and_summary')`,
 `CALL DROP_FTS_INDEX('RelatesToNode_','edge_name_and_fact')` and
 `CALL DROP_FTS_INDEX('Episodic','episode_content')`, then call `knowledge_build_indices`.
