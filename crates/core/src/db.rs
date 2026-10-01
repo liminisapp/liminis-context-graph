@@ -90,6 +90,15 @@ pub struct WalPositionRecord {
     pub embedding_dim: Option<i64>,
 }
 
+/// Outcome of a name-aware extraction-time dedup candidate selection (issue #650, ADR-0650).
+/// `vetoed` counts the above-threshold candidates discarded by the identifier-mismatch veto
+/// that ranked ahead of `candidate` (all of them when `candidate` is `None`).
+#[derive(Debug, Clone, Default)]
+pub struct DedupSelection {
+    pub candidate: Option<EntityRow>,
+    pub vetoed: usize,
+}
+
 pub struct Conn<'db> {
     inner: lbug::Connection<'db>,
     /// Recorded mutations as `(cypher_template, json_params)` pairs, in execution order.
@@ -1893,6 +1902,42 @@ impl<'db> Conn<'db> {
         threshold: f32,
         kind: &str,
     ) -> Result<Option<EntityRow>, Error> {
+        Ok(self
+            .brute_force_select(name_embedding, None, group_id, threshold, kind)?
+            .candidate)
+    }
+
+    /// Name-aware [`Self::brute_force_similar_entity_kind`] for extraction-time dedup (issue
+    /// #650, ADR-0650): above-threshold candidates are ranked (similarity descending, uuid
+    /// ascending) and any whose name fails the identifier-mismatch veto against `incoming_name`
+    /// is discarded *before* the best is picked, so a vetoed best match cannot hide a valid
+    /// lower-ranked alias. The result is identical to
+    /// [`Self::hybrid_dedup_similar_entity_kind_for_name`] on the same candidate set.
+    pub fn brute_force_similar_entity_kind_for_name(
+        &self,
+        name_embedding: &[f32],
+        incoming_name: &str,
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<DedupSelection, Error> {
+        self.brute_force_select(
+            name_embedding,
+            Some(incoming_name),
+            group_id,
+            threshold,
+            kind,
+        )
+    }
+
+    fn brute_force_select(
+        &self,
+        name_embedding: &[f32],
+        incoming_name: Option<&str>,
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<DedupSelection, Error> {
         let result = self.query_params(
             // Confined to one kind (issue #615, FR-010; #616) — see
             // `get_entity_embeddings_by_uuids_kind`. A NULL kind is a default-kind row.
@@ -1901,7 +1946,7 @@ impl<'db> Conn<'db> {
              e.name_embedding, e.summary, e.attributes, e.kind",
             serde_json::json!({ "gid": group_id, "kind": kind }),
         )?;
-        let mut best: Option<(f32, EntityRow)> = None;
+        let mut ranked: Vec<(f32, EntityRow)> = Vec::new();
 
         for row in result {
             let stored_embedding = value_as_float_array(&row[5]);
@@ -1910,32 +1955,47 @@ impl<'db> Conn<'db> {
             }
             let sim = cosine_similarity(name_embedding, &stored_embedding);
             if sim >= threshold {
-                let candidate_uuid = value_as_string(&row[0]);
-                let is_better = best
-                    .as_ref()
-                    .is_none_or(|(s, r)| sim > *s || (sim == *s && candidate_uuid < r.uuid));
-                if is_better {
-                    best = Some((
-                        sim,
-                        EntityRow {
-                            uuid: candidate_uuid,
-                            name: value_as_string(&row[1]),
-                            group_id: value_as_string(&row[2]),
-                            labels: value_as_str_list(&row[3]),
-                            created_at: value_as_timestamp_str(&row[4]),
-                            name_embedding: stored_embedding,
-                            summary: value_as_string(&row[6]),
-                            attributes: value_as_string(&row[7]),
-                            kind: value_as_kind(&row[8]),
-                            episode_uuids: vec![],
-                            source_descriptions: vec![],
-                            ..Default::default()
-                        },
-                    ));
-                }
+                ranked.push((
+                    sim,
+                    EntityRow {
+                        uuid: value_as_string(&row[0]),
+                        name: value_as_string(&row[1]),
+                        group_id: value_as_string(&row[2]),
+                        labels: value_as_str_list(&row[3]),
+                        created_at: value_as_timestamp_str(&row[4]),
+                        name_embedding: stored_embedding,
+                        summary: value_as_string(&row[6]),
+                        attributes: value_as_string(&row[7]),
+                        kind: value_as_kind(&row[8]),
+                        episode_uuids: vec![],
+                        source_descriptions: vec![],
+                        ..Default::default()
+                    },
+                ));
             }
         }
-        Ok(best.map(|(_, row)| row))
+        ranked.sort_by(|(sa, ra), (sb, rb)| {
+            sb.partial_cmp(sa)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| ra.uuid.cmp(&rb.uuid))
+        });
+        let mut vetoed = 0;
+        for (_, row) in ranked {
+            if incoming_name
+                .is_some_and(|n| crate::identifier_veto::identifier_mismatch(n, &row.name))
+            {
+                vetoed += 1;
+                continue;
+            }
+            return Ok(DedupSelection {
+                candidate: Some(row),
+                vetoed,
+            });
+        }
+        Ok(DedupSelection {
+            candidate: None,
+            vetoed,
+        })
     }
 
     /// Returns the number of Entity nodes in the given group. Returns 0 when the group is empty.
@@ -2024,6 +2084,61 @@ impl<'db> Conn<'db> {
         threshold: f32,
         kind: &str,
     ) -> Result<Option<EntityRow>, Error> {
+        match self
+            .hybrid_ranked(name_embedding, entity_name, group_id, threshold, kind)?
+            .into_iter()
+            .next()
+        {
+            Some((_, uuid)) => self.get_entity_by_uuid(&uuid),
+            None => Ok(None),
+        }
+    }
+
+    /// Name-aware [`Self::hybrid_dedup_similar_entity_kind`] for extraction-time dedup (issue
+    /// #650, ADR-0650): the cosine-rechecked candidates are ranked (similarity descending, uuid
+    /// ascending) and walked in order, discarding any whose name fails the identifier-mismatch
+    /// veto against `entity_name`, so a vetoed best match cannot hide a valid lower-ranked alias.
+    pub fn hybrid_dedup_similar_entity_kind_for_name(
+        &self,
+        name_embedding: &[f32],
+        entity_name: &str,
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<DedupSelection, Error> {
+        let mut vetoed = 0;
+        for (_, uuid) in
+            self.hybrid_ranked(name_embedding, entity_name, group_id, threshold, kind)?
+        {
+            let Some(row) = self.get_entity_by_uuid(&uuid)? else {
+                continue;
+            };
+            if crate::identifier_veto::identifier_mismatch(entity_name, &row.name) {
+                vetoed += 1;
+                continue;
+            }
+            return Ok(DedupSelection {
+                candidate: Some(row),
+                vetoed,
+            });
+        }
+        Ok(DedupSelection {
+            candidate: None,
+            vetoed,
+        })
+    }
+
+    /// Hybrid candidate retrieval shared by the plain and name-aware variants: the cosine-rechecked
+    /// `(similarity, uuid)` pairs at or above `threshold`, ordered similarity descending then uuid
+    /// ascending.
+    fn hybrid_ranked(
+        &self,
+        name_embedding: &[f32],
+        entity_name: &str,
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<Vec<(f32, String)>, Error> {
         const CANDIDATE_K: usize = 200;
 
         let (vector_candidates, bm25_candidates) = if kind == crate::types::DEFAULT_KIND {
@@ -2051,24 +2166,19 @@ impl<'db> Conn<'db> {
 
         let candidate_embeddings = self.get_entity_embeddings_by_uuids_kind(&fused_uuids, kind)?;
 
-        let mut best: Option<(f32, String)> = None;
-        for (uuid, emb) in candidate_embeddings {
-            let sim = cosine_similarity(name_embedding, &emb);
-            if sim >= threshold {
-                let is_better = best
-                    .as_ref()
-                    .is_none_or(|(s, best_uuid)| sim > *s || (sim == *s && &uuid < best_uuid));
-                if is_better {
-                    best = Some((sim, uuid));
-                }
-            }
-        }
-
-        if let Some((_, uuid)) = best {
-            self.get_entity_by_uuid(&uuid)
-        } else {
-            Ok(None)
-        }
+        let mut ranked: Vec<(f32, String)> = candidate_embeddings
+            .into_iter()
+            .filter_map(|(uuid, emb)| {
+                let sim = cosine_similarity(name_embedding, &emb);
+                (sim >= threshold).then_some((sim, uuid))
+            })
+            .collect();
+        ranked.sort_by(|(sa, ua), (sb, ub)| {
+            sb.partial_cmp(sa)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| ua.cmp(ub))
+        });
+        Ok(ranked)
     }
 
     /// Returns an EntityRow by exact name match. Returns the first match if multiple exist.
