@@ -267,7 +267,18 @@ impl ExtractorDedupAdapter {
     async fn judge_group(&self, group: &[DuplicatePair]) -> Vec<DedupVerdict> {
         let unknown = vec![DedupVerdict::Unknown; group.len()];
         match tokio::time::timeout(self.timeout, self.extractor.judge_duplicates(group)).await {
-            Ok(Ok(v)) if v.len() == group.len() => v,
+            Ok(Ok(v)) if v.len() == group.len() => {
+                let unknown = v.iter().filter(|x| **x == DedupVerdict::Unknown).count();
+                if unknown > 0 {
+                    eprintln!(
+                        "liminis-context-graph: dedup judge gave no clear verdict for {unknown} of \
+                         {} candidate(s) (malformed or unattributable answer); treating them as \
+                         not duplicate",
+                        group.len()
+                    );
+                }
+                v
+            }
             Ok(Ok(v)) => {
                 eprintln!(
                     "liminis-context-graph: dedup judge returned {} verdicts for {} pairs; \

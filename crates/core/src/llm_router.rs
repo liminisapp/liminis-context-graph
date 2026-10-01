@@ -305,15 +305,36 @@ impl LlmRouter {
         pairs: &[DuplicatePair],
     ) -> Result<Vec<DedupVerdict>, Error> {
         if !self.primary_failed.load(Ordering::Acquire) {
-            match self.primary.judge_duplicates(pairs).await {
-                Ok(result) => return Ok(result),
+            let mut verdicts = match self.primary.judge_duplicates(pairs).await {
+                Ok(v) if v.len() == pairs.len() => v,
+                Ok(_) => vec![DedupVerdict::Unknown; pairs.len()],
                 Err(err) => {
                     return match &self.fallback {
                         Some(fb) => fb.judge_duplicates(pairs).await,
                         None => Err(err),
                     };
                 }
+            };
+            // A malformed primary answer parses to `Unknown` rather than an error: re-ask the
+            // fallback only for those pairs, keeping the primary's definite verdicts.
+            if let Some(fb) = &self.fallback {
+                let unresolved: Vec<usize> = (0..pairs.len())
+                    .filter(|&i| verdicts[i] == DedupVerdict::Unknown)
+                    .collect();
+                if !unresolved.is_empty() {
+                    let subset: Vec<DuplicatePair> =
+                        unresolved.iter().map(|&i| pairs[i].clone()).collect();
+                    // A failed or short fallback answer leaves the pairs `Unknown` (not a duplicate).
+                    if let Ok(fv) = fb.judge_duplicates(&subset).await {
+                        if fv.len() == subset.len() {
+                            for (&i, v) in unresolved.iter().zip(fv) {
+                                verdicts[i] = v;
+                            }
+                        }
+                    }
+                }
             }
+            return Ok(verdicts);
         }
         match &self.fallback {
             Some(fb) => fb.judge_duplicates(pairs).await,
@@ -569,6 +590,85 @@ mod tests {
             sink.events().is_empty(),
             "no fallback means no LlmFallback event"
         );
+    }
+
+    /// Judge that answers a fixed verdict vector (cycled to the pair count), counting its calls.
+    struct FixedJudge {
+        verdicts: Vec<DedupVerdict>,
+        calls: AtomicUsize,
+    }
+
+    impl Extractor for FixedJudge {
+        fn extract<'a>(
+            &'a self,
+            _opts: ExtractOptions<'a>,
+        ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
+            Box::pin(async { Err(Error::Ipc("unused".into())) })
+        }
+
+        fn classify_entities<'a>(
+            &'a self,
+            _entities: &'a [(&'a str, &'a str)],
+            _allowed_types: Option<&'a [String]>,
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+
+        fn classify_relations<'a>(
+            &'a self,
+            _edges: &'a [(&'a str, &'a str)],
+            _allowed_types: &'a [(String, Option<String>)],
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+
+        fn judge_duplicates<'a>(
+            &'a self,
+            pairs: &'a [DuplicatePair],
+        ) -> BoxFuture<'a, Result<Vec<DedupVerdict>, Error>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let out = (0..pairs.len())
+                .map(|i| self.verdicts[i % self.verdicts.len()])
+                .collect();
+            Box::pin(async move { Ok(out) })
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_duplicates_retries_only_unknown_pairs_on_fallback() {
+        use crate::dedup_judge::DedupSide;
+        let side = |n: &str| DedupSide {
+            name: n.to_string(),
+            entity_type: String::new(),
+            summary: String::new(),
+        };
+        let pairs: Vec<DuplicatePair> = ["a", "b"]
+            .iter()
+            .map(|n| DuplicatePair {
+                existing: side(n),
+                incoming: side("x"),
+            })
+            .collect();
+        // Primary: pair 0 definite "duplicate", pair 1 malformed (Unknown).
+        let primary = Arc::new(FixedJudge {
+            verdicts: vec![DedupVerdict::Duplicate, DedupVerdict::Unknown],
+            calls: AtomicUsize::new(0),
+        });
+        let fallback = Arc::new(FixedJudge {
+            verdicts: vec![DedupVerdict::Distinct],
+            calls: AtomicUsize::new(0),
+        });
+        let router = LlmRouter::new(
+            Arc::clone(&primary) as Arc<dyn Extractor>,
+            "p".to_string(),
+            Some(Arc::clone(&fallback) as Arc<dyn Extractor>),
+            "f".to_string(),
+            Arc::new(CaptureSink::new()) as Arc<dyn TelemetrySink>,
+        );
+        let v = router.judge_duplicates(&pairs).await.unwrap();
+        assert_eq!(v, vec![DedupVerdict::Duplicate, DedupVerdict::Distinct]);
+        assert_eq!(fallback.calls.load(Ordering::SeqCst), 1);
+        assert!(!router.primary_failed.load(Ordering::Acquire));
     }
 
     #[tokio::test]

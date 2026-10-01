@@ -308,6 +308,10 @@ pub struct RecordingExtractor {
     provider: String,
     model: String,
     writer: Arc<CassetteWriter>,
+    /// Keys of `judge_duplicates` records already written by this process. A pair that gets no
+    /// definite verdict is not cached by the dedup adapter and is judged again on the next
+    /// chunk; appending the same key twice would make `load_records` reject the cassette.
+    judged_keys: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl RecordingExtractor {
@@ -322,6 +326,7 @@ impl RecordingExtractor {
             provider: provider.into(),
             model: model.into(),
             writer,
+            judged_keys: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -420,7 +425,12 @@ impl Extractor for RecordingExtractor {
         Box::pin(async move {
             let result = self.inner.judge_duplicates(pairs).await?;
             let response = serde_json::to_value(&result)?;
-            self.record("judge_duplicates", key, request, &response)?;
+            // First verdict per key wins: a repeat call is forwarded live (retries are not
+            // suppressed) but not re-recorded, which would duplicate the cassette key.
+            let first = self.judged_keys.lock().unwrap().insert(key.clone());
+            if first {
+                self.record("judge_duplicates", key, request, &response)?;
+            }
             Ok(result)
         })
     }
@@ -730,6 +740,9 @@ mod tests {
             replayer.judge_duplicates(&pairs).await.unwrap(),
             vec![DedupVerdict::Duplicate]
         );
+        // A repeated judgement of the same pair must not duplicate the cassette key.
+        recorder.judge_duplicates(&pairs).await.unwrap();
+        ReplayingExtractor::load(&path).expect("repeat judge call keeps the cassette loadable");
         let other = [judge_pair("Bob", "Alice")];
         assert!(matches!(
             replayer.judge_duplicates(&other).await,

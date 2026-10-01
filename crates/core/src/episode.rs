@@ -1006,9 +1006,13 @@ pub async fn add_episode(
                     make_insert_row(*i)
                 }
                 DedupVerdict::Unknown => {
-                    // Only the LLM adapter can fail to answer; a legacy per-pair adapter's `Err`
-                    // lands here too and is likewise an insert.
-                    dedup_paths.llm_unavailable += 1;
+                    // A legacy per-pair adapter's `Err` lands here too; it is likewise an insert,
+                    // but must not be reported as LLM activity while the mode is veto-only.
+                    if llm_mode {
+                        dedup_paths.llm_unavailable += 1;
+                    } else {
+                        dedup_paths.adapter_rejected += 1;
+                    }
                     make_insert_row(*i)
                 }
             });

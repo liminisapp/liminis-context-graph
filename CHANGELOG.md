@@ -41,7 +41,7 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   #652). `LCG_DEDUP_LLM` now works: when on (opt-in, off by default) and an extraction provider is
   configured, each embedding-path dedup candidate that survives the #650 identifier veto is judged
   by the **configured extractor** — the Anthropic API or the OpenAI-compatible
-  `--extractor-uds` / `--extractor-http` endpoint — in one batched call per chunk. Any error,
+  `--extractor-uds` / `--extractor-http` endpoint — in one batched call per chunk (groups of at most 16 pairs, each with a 30 s timeout). Any error,
   timeout or malformed/unattributable answer resolves to "not a duplicate" with a logged warning
   and never aborts the chunk; cancellation still propagates. Exact-name matches, vetoed pairs and
   identical-normalized-name pairs never cost a call; WAL replay never calls the LLM. Startup logs
