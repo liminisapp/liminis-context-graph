@@ -19,6 +19,7 @@ pub mod extraction_failures;
 pub mod extractor;
 pub mod group_purge;
 pub mod handlers;
+pub mod identifier_veto;
 pub mod identity_stamp;
 pub mod ipc;
 pub(crate) mod lbug_extension_home;
