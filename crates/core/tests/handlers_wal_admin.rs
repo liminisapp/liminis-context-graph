@@ -2035,6 +2035,9 @@ async fn test_knowledge_status_surfaces_lookup_key_migration_status_and_fallback
         v["result"]["name_index_fallback_scans"], 1,
         "status must reflect the fallback-scan count: {v}"
     );
+    // Issue #649: the FTS-backstop fields are always present; no repair has happened here.
+    assert_eq!(v["result"]["fts_repair_count"], 0, "{v}");
+    assert!(v["result"]["fts_last_repair_unix_ms"].is_null(), "{v}");
 }
 
 // ── Issue #352: re-derive WalWriter::global_seq after rebuild/clear ────────────
