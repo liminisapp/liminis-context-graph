@@ -1067,6 +1067,7 @@ async fn handle_knowledge_process_chunk(
         "entities_reclassified_unclassified": result.entities_reclassified_unclassified,
         "entities_dropped_malformed": result.entities_dropped_malformed,
         "edges_dropped_malformed": result.edges_dropped_malformed,
+        "dedup_paths": result.dedup_paths,
         "duration_seconds": start.elapsed().as_secs_f64(),
     });
 

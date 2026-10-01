@@ -18,6 +18,17 @@ pub trait DedupAdapter: Send + Sync {
     ) -> BoxFuture<'a, Result<bool, Error>>;
 }
 
+/// Human-readable description of the active extraction-time dedup mode, for the startup log
+/// (issue #650). Reads the same `LCG_DEDUP_LLM` switch as `AppState::from_env`. The
+/// identifier-mismatch veto (ADR-0650) is always on, in front of whichever adapter is selected.
+pub fn dedup_mode_description() -> &'static str {
+    if lcg_env_var("LCG_DEDUP_LLM", "GRAPHITI_DEDUP_LLM").is_ok() {
+        "local-adapter (LCG_DEDUP_LLM) + identifier veto"
+    } else {
+        "passthrough + identifier veto"
+    }
+}
+
 // ── PassthroughDedupAdapter ───────────────────────────────────────────────────
 
 /// Always returns `Ok(true)` — preserves cosine-only dedup behavior when LCG_DEDUP_LLM unset.

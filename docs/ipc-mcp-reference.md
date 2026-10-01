@@ -677,6 +677,31 @@ result fields exist for that, both introduced in 0.13.2.
   nothing is truncated, split, or rejected, and the call succeeds exactly as it did before.
   Splitting oversized input is the caller's responsibility (issue #407).
 
+- **`dedup_paths` reports how this chunk's entities were resolved.** An additive object of
+  per-path tallies for the chunk's Phase B entity resolution
+  ([ADR-0650](adr/0650-identifier-mismatch-veto-for-extraction-dedup.md)), always present:
+
+  ```json
+  {
+    "dedup_paths": {
+      "exact_name": 3,
+      "embedding_merge": 1,
+      "vetoed": 2,
+      "adapter_rejected": 0,
+      "salvage_vetoed": 0
+    }
+  }
+  ```
+
+  `exact_name` counts entities merged by the exact case-insensitive name match;
+  `embedding_merge` counts embedding-path merges where a candidate survived the identifier veto
+  and the dedup adapter confirmed it; `vetoed` counts entities that had above-threshold
+  embedding candidates, all of which were rejected by the identifier-mismatch veto (names
+  differing by a number or identifier, such as `ADR 2018` / `ADR 2019`), so a new entity was
+  inserted; `adapter_rejected` counts candidates that survived the veto but were rejected by
+  the dedup adapter; `salvage_vetoed` counts off-list edge endpoints whose salvage candidates
+  were all vetoed. The tallies are per chunk; sum them across chunks for a run total.
+
 ### Progress notifications
 
 The six long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,

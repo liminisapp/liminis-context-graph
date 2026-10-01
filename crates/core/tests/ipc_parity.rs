@@ -1438,6 +1438,18 @@ async fn test_knowledge_process_chunk_ok() {
         r["edges_dropped_malformed"].as_u64().is_some(),
         "expected numeric edges_dropped_malformed (issue #342 FR-003): {v}"
     );
+    for key in [
+        "exact_name",
+        "embedding_merge",
+        "vetoed",
+        "adapter_rejected",
+        "salvage_vetoed",
+    ] {
+        assert!(
+            r["dedup_paths"][key].as_u64().is_some(),
+            "expected numeric dedup_paths.{key} (issue #650): {v}"
+        );
+    }
     assert!(
         r["duration_seconds"].as_f64().is_some(),
         "expected numeric duration_seconds: {v}"
