@@ -33,7 +33,8 @@ pub struct DuplicatePair {
 
 /// The judge's answer for one pair. `Unknown` covers every failure mode and is treated as
 /// "not a duplicate" by the decision loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DedupVerdict {
     Duplicate,
     Distinct,

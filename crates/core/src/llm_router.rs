@@ -4,6 +4,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 
 use crate::{
+    dedup_judge::{DedupVerdict, DuplicatePair},
     env::lcg_env_var,
     error::Error,
     extractor::{AnthropicExtractor, ExtractOptions, Extractor},
@@ -295,6 +296,33 @@ impl LlmRouter {
             ))
         }
     }
+    /// Primary → fallback for the dedup judgement (#652). Unlike `extract`/`classify_*`, a
+    /// failure here never latches `primary_failed` or emits `LlmFallback`: dedup is advisory
+    /// (every failure resolves to "not a duplicate"), so a bad judge call must not permanently
+    /// reroute *extraction* to the fallback model. Once extraction has latched, dedup follows it.
+    async fn do_judge_duplicates(
+        &self,
+        pairs: &[DuplicatePair],
+    ) -> Result<Vec<DedupVerdict>, Error> {
+        if !self.primary_failed.load(Ordering::Acquire) {
+            match self.primary.judge_duplicates(pairs).await {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    return match &self.fallback {
+                        Some(fb) => fb.judge_duplicates(pairs).await,
+                        None => Err(err),
+                    };
+                }
+            }
+        }
+        match &self.fallback {
+            Some(fb) => fb.judge_duplicates(pairs).await,
+            // Unreachable: primary_failed is only set when fallback.is_some().
+            None => Err(Error::Ipc(
+                "BUG: primary_failed set without fallback".to_string(),
+            )),
+        }
+    }
 }
 
 impl Extractor for LlmRouter {
@@ -328,6 +356,17 @@ impl Extractor for LlmRouter {
         incoming: &'a str,
     ) -> BoxFuture<'a, Result<String, Error>> {
         Box::pin(self.do_consolidate_summary(entity_name, existing, incoming))
+    }
+
+    fn judge_duplicates<'a>(
+        &'a self,
+        pairs: &'a [DuplicatePair],
+    ) -> BoxFuture<'a, Result<Vec<DedupVerdict>, Error>> {
+        Box::pin(self.do_judge_duplicates(pairs))
+    }
+
+    fn is_configured(&self) -> bool {
+        self.primary.is_configured()
     }
 }
 
@@ -530,5 +569,25 @@ mod tests {
             sink.events().is_empty(),
             "no fallback means no LlmFallback event"
         );
+    }
+
+    #[tokio::test]
+    async fn judge_duplicates_falls_back_without_latching_extraction() {
+        let primary = Arc::new(FailingExtractor::new("judge boom"));
+        let fallback = Arc::new(SucceedingExtractor::new());
+        let sink = Arc::new(CaptureSink::new());
+        let router = LlmRouter::new(
+            Arc::clone(&primary) as Arc<dyn Extractor>,
+            "primary-model".to_string(),
+            Some(Arc::clone(&fallback) as Arc<dyn Extractor>),
+            "fallback-model".to_string(),
+            Arc::clone(&sink) as Arc<dyn TelemetrySink>,
+        );
+        // FailingExtractor / SucceedingExtractor use the trait default, which errors — so with a
+        // fallback both fail, but the router must not latch or emit a fallback event.
+        assert!(router.judge_duplicates(&[]).await.is_err());
+        assert!(!router.primary_failed.load(Ordering::Acquire));
+        assert!(sink.events().is_empty());
+        assert!(router.is_configured());
     }
 }
