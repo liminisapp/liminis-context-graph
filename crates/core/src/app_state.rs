@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     db::Db,
-    dedup_adapter::{DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter},
+    dedup_adapter::{build_dedup_adapter, DedupAdapter},
     embedder::Embedder,
     embedding_cache::EmbeddingCache,
     env::lcg_env_var,
@@ -179,7 +179,9 @@ pub struct AppState {
 impl AppState {
     /// Builds `AppState` from environment variables.
     ///
-    /// - `LCG_DEDUP_LLM`: if set, uses `LocalDedupAdapter`; otherwise `PassthroughDedupAdapter`.
+    /// - `LCG_DEDUP_LLM`: when on and `extractor` is configured, the extractor judges each
+    ///   surviving embedding-path dedup candidate (`ExtractorDedupAdapter`, #652); otherwise
+    ///   `PassthroughDedupAdapter` (veto-only).
     /// - `extractor`: already-resolved by the caller (mirrors `embedder`) — provider/transport
     ///   selection (Anthropic vs. local OpenAI-compatible) happens once in `main.rs`, not here.
     /// - `LCG_WAL_DIR`: WAL directory path (default `.lcg/wal`).
@@ -195,14 +197,7 @@ impl AppState {
         extractor: Arc<dyn Extractor>,
         embedding_cache: Arc<EmbeddingCache>,
     ) -> Self {
-        // deprecated: remove in Phase B (see #59)
-        let dedup: Arc<dyn DedupAdapter> =
-            if lcg_env_var("LCG_DEDUP_LLM", "GRAPHITI_DEDUP_LLM").is_ok() {
-                Arc::new(LocalDedupAdapter::from_env())
-            } else {
-                Arc::new(PassthroughDedupAdapter)
-            };
-        // deprecated: remove in Phase B (see #59)
+        let dedup: Arc<dyn DedupAdapter> = build_dedup_adapter(&extractor);
         // Default to `.lcg/wal` (CWD-relative, matches the convention used by
         // LCG_SOCKET_PATH and LCG_DB_PATH). Application WAL is essential for
         // the `knowledge_rebuild_from_wal` recovery path; without a default,
@@ -968,6 +963,7 @@ pub async fn build_indices_once(state: &Arc<AppState>) -> Result<(), Error> {
 mod tests {
     use super::*;
     use crate::embedder::MockEmbedder;
+    use crate::dedup_adapter::PassthroughDedupAdapter;
     use crate::extractor::MockExtractor;
     use crate::ontology::{EntityTypeDef, OntologyMode};
     use crate::telemetry::NoopSink;

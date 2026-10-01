@@ -50,7 +50,8 @@ pub use app_state::AppState;
 pub use cassette::{CassetteRecord, CassetteWriter, RecordingExtractor, ReplayingExtractor};
 pub use db::{Conn, Db, WalPositionRecord};
 pub use dedup_adapter::{
-    dedup_mode_description, DedupAdapter, LocalDedupAdapter, PassthroughDedupAdapter,
+    build_dedup_adapter, dedup_llm_requested, dedup_mode_description, deprecated_adapter_url_set,
+    effective_dedup_mode, DedupAdapter, DedupMode, ExtractorDedupAdapter, PassthroughDedupAdapter,
 };
 pub use embedder::{Embedder, MockEmbedder, NameMapEmbedder, OaiEmbedder};
 pub use embedding_cache::{EmbedderContext, EmbeddingCache};

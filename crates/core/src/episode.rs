@@ -7,6 +7,8 @@ use crate::{
     app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
     canonicalize::build_alias_map,
     db::Db,
+    dedup_adapter::{pair_from, DedupMode},
+    dedup_judge::{DedupVerdict, DuplicatePair},
     error::{is_missing_index_error, Error, MISSING_INDEX_USER_MSG},
     extractor::ExtractOptions,
     ontology::{normalize_entity_type, normalize_relation_type, OntologyMode},
@@ -23,20 +25,26 @@ use crate::{
 /// Per-chunk tally of Phase B entity-resolution outcomes by path (issue #650, ADR-0650). One
 /// named field per path so later work (#652's LLM-confirmed / LLM-rejected paths) can extend the
 /// struct without reshaping call sites. Each extracted entity increments exactly one of
-/// `exact_name`, `embedding_merge`, `vetoed`, `adapter_rejected`, or none (a plain insert with no
+/// `exact_name`, `embedding_merge`, `vetoed`, `llm_confirmed`, `llm_rejected`, `llm_unavailable`, or none (a plain insert with no
 /// above-threshold candidate); `salvage_vetoed` counts off-list edge endpoints, not entities.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct DedupPathCounts {
     /// Merged via the exact case-insensitive name match (no veto, no adapter).
     pub exact_name: usize,
-    /// Merged on the embedding path: a candidate survived the identifier veto and the dedup
-    /// adapter confirmed it.
+    /// Merged on the embedding path without an LLM verdict: a candidate survived the identifier
+    /// veto and either shared the incoming entity's normalized name or the (veto-only) adapter
+    /// confirmed it.
     pub embedding_merge: usize,
     /// Above-threshold candidates existed but every one was discarded by the identifier-mismatch
     /// veto, so the entity was inserted. Counted once per incoming entity.
     pub vetoed: usize,
-    /// A candidate survived the veto but the (legacy) dedup adapter said "not a duplicate".
-    pub adapter_rejected: usize,
+    /// The LLM dedup check (#652) judged a surviving candidate a duplicate and it merged.
+    pub llm_confirmed: usize,
+    /// The LLM dedup check judged a surviving candidate distinct, so the entity was inserted.
+    pub llm_rejected: usize,
+    /// The LLM dedup check could not give a verdict (error, timeout, malformed or unattributable
+    /// answer), so the entity was inserted.
+    pub llm_unavailable: usize,
     /// Off-list edge endpoints whose above-threshold salvage candidates were all vetoed.
     pub salvage_vetoed: usize,
 }
@@ -195,7 +203,9 @@ async fn merge_into(
     if let Some(next) = merged_summary_for(state, &existing.name, &entry.1, incoming).await? {
         entry.1 = next;
     }
-    entry.2 = decision_idx;
+    // Pass 2 of Phase B (#652) merges judged candidates after the pass-1 ones, so decision
+    // indices arrive out of order; the *highest* index is the last Phase C write for this uuid.
+    entry.2 = entry.2.max(decision_idx);
     Ok(DedupDecision::Merge {
         existing_uuid: existing.uuid.clone(),
         merged_summary: entry.1.clone(),
@@ -829,8 +839,10 @@ pub async fn add_episode(
         Err(e) => return Err(e),
     };
 
-    // Async dedup verification loop (no lock)
-    let mut decisions: Vec<DedupDecision> = Vec::with_capacity(extraction.entities.len());
+    // Async dedup verification (no lock), in two passes (#652). Pass 1 resolves everything that
+    // needs no judgement and collects the embedding-path candidates that do; pass 2 judges them
+    // in one batched extractor call. The LLM call therefore stays in Phase B, outside the Phase C
+    // write lock.
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
     // Per-existing-uuid running summary (issue #651): a second merge into the same entity within
@@ -840,54 +852,59 @@ pub async fn add_episode(
     // Merge decision for that uuid).
     let mut merge_state: std::collections::HashMap<String, (String, String, usize)> =
         std::collections::HashMap::new();
+    let make_insert_row = |i: usize| {
+        let extracted = &extraction.entities[i];
+        let name_embedding = name_embeddings[i].clone();
+        let summary_embedding = summary_embeddings[i].clone();
+        DedupDecision::Insert {
+            row: Box::new(EntityRow {
+                uuid: uuid::Uuid::new_v4().to_string(),
+                name: extracted.name.clone(),
+                group_id: gid_owned.clone(),
+                // Ontology-driven kind (issue #616): the primary type when identity-bearing,
+                // otherwise the default kind (issue #615, FR-010: extraction stays out of
+                // asserted kinds).
+                kind: entity_kinds[i].clone(),
+                labels: {
+                    let mut labels = vec!["Entity".to_string()];
+                    // An identity-bearing kind is spelled by its normalized type name, so
+                    // `kind ∈ labels` holds in open mode too, where the raw string is kept.
+                    let label_type = if entity_kinds[i] != crate::types::DEFAULT_KIND {
+                        entity_kinds[i].as_str()
+                    } else {
+                        extracted.entity_type.as_str()
+                    };
+                    if !label_type.is_empty() && label_type != "Entity" {
+                        if let Some(ancestors) =
+                            ontology_ref.and_then(|o| o.ancestor_map.get(label_type))
+                        {
+                            labels.extend(ancestors.iter().cloned());
+                        }
+                        labels.push(label_type.to_string());
+                    }
+                    labels
+                },
+                created_at: ref_time_owned.clone(),
+                name_embedding,
+                summary: extracted.summary.clone(),
+                attributes: match &extracted.original_entity_type {
+                    Some(orig) => serde_json::json!({ "original_entity_type": orig }).to_string(),
+                    None => "{}".to_string(),
+                },
+                episode_uuids: vec![],
+                source_descriptions: vec![],
+                summary_embedding,
+            }),
+        }
+    };
+    let mut decisions: Vec<Option<DedupDecision>> = Vec::with_capacity(extraction.entities.len());
+    // (entity index, pair) for each candidate that survived the veto and still needs a verdict.
+    let mut pending: Vec<(usize, DuplicatePair)> = Vec::new();
     for (i, extracted) in extraction.entities.iter().enumerate() {
         if state.cancel_token.is_cancelled() {
             state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Cancelled);
         }
-        let make_insert_row =
-            |name_embedding: Vec<f32>, summary_embedding: Vec<f32>| DedupDecision::Insert {
-                row: Box::new(EntityRow {
-                    uuid: uuid::Uuid::new_v4().to_string(),
-                    name: extracted.name.clone(),
-                    group_id: gid_owned.clone(),
-                    // Ontology-driven kind (issue #616): the primary type when identity-bearing,
-                    // otherwise the default kind (issue #615, FR-010: extraction stays out of
-                    // asserted kinds).
-                    kind: entity_kinds[i].clone(),
-                    labels: {
-                        let mut labels = vec!["Entity".to_string()];
-                        // An identity-bearing kind is spelled by its normalized type name, so
-                        // `kind ∈ labels` holds in open mode too, where the raw string is kept.
-                        let label_type = if entity_kinds[i] != crate::types::DEFAULT_KIND {
-                            entity_kinds[i].as_str()
-                        } else {
-                            extracted.entity_type.as_str()
-                        };
-                        if !label_type.is_empty() && label_type != "Entity" {
-                            if let Some(ancestors) =
-                                ontology_ref.and_then(|o| o.ancestor_map.get(label_type))
-                            {
-                                labels.extend(ancestors.iter().cloned());
-                            }
-                            labels.push(label_type.to_string());
-                        }
-                        labels
-                    },
-                    created_at: ref_time_owned.clone(),
-                    name_embedding,
-                    summary: extracted.summary.clone(),
-                    attributes: match &extracted.original_entity_type {
-                        Some(orig) => {
-                            serde_json::json!({ "original_entity_type": orig }).to_string()
-                        }
-                        None => "{}".to_string(),
-                    },
-                    episode_uuids: vec![],
-                    source_descriptions: vec![],
-                    summary_embedding,
-                }),
-            };
         let decision = match &phase_b_results[i] {
             PhaseBResult::NameMatch { existing } => {
                 // Exact name match — resolve immediately, no dedup-adapter check needed.
@@ -915,14 +932,8 @@ pub async fn add_episode(
                 candidate: Some(existing),
                 ..
             } => {
-                let is_dup = tokio::select! {
-                    r = state.dedup.is_duplicate(existing, extracted) => r?,
-                    _ = state.cancel_token.cancelled() => {
-                        state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
-                        return Err(Error::Cancelled);
-                    }
-                };
-                if is_dup {
+                if normalize_name(&existing.name) == normalize_name(&extracted.name) {
+                    // Identical normalized names: the same entity, no judgement needed (FR-005).
                     dedup_paths.embedding_merge += 1;
                     merge_into(
                         &state,
@@ -933,8 +944,9 @@ pub async fn add_episode(
                     )
                     .await?
                 } else {
-                    dedup_paths.adapter_rejected += 1;
-                    make_insert_row(name_embeddings[i].clone(), summary_embeddings[i].clone())
+                    pending.push((i, pair_from(existing, extracted)));
+                    decisions.push(None);
+                    continue;
                 }
             }
             PhaseBResult::EmbeddingCandidate {
@@ -944,11 +956,59 @@ pub async fn add_episode(
                 if *vetoed > 0 {
                     dedup_paths.vetoed += 1;
                 }
-                make_insert_row(name_embeddings[i].clone(), summary_embeddings[i].clone())
+                make_insert_row(i)
             }
         };
-        decisions.push(decision);
+        decisions.push(Some(decision));
     }
+
+    if !pending.is_empty() {
+        let pairs: Vec<DuplicatePair> = pending.iter().map(|(_, p)| p.clone()).collect();
+        let verdicts = tokio::select! {
+            v = state.dedup.judge_batch(&pairs) => v,
+            _ = state.cancel_token.cancelled() => {
+                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                return Err(Error::Cancelled);
+            }
+        };
+        let llm_mode = state.dedup.mode() == DedupMode::LlmVerified;
+        for ((i, _), verdict) in pending.iter().zip(
+            verdicts
+                .into_iter()
+                .chain(std::iter::repeat(DedupVerdict::Unknown)),
+        ) {
+            let PhaseBResult::EmbeddingCandidate {
+                candidate: Some(existing),
+                ..
+            } = &phase_b_results[*i]
+            else {
+                unreachable!("pending entries are embedding candidates");
+            };
+            let extracted = &extraction.entities[*i];
+            decisions[*i] = Some(match verdict {
+                DedupVerdict::Duplicate => {
+                    if llm_mode {
+                        dedup_paths.llm_confirmed += 1;
+                    } else {
+                        dedup_paths.embedding_merge += 1;
+                    }
+                    merge_into(&state, &mut merge_state, *i, existing, &extracted.summary).await?
+                }
+                DedupVerdict::Distinct => {
+                    dedup_paths.llm_rejected += 1;
+                    make_insert_row(*i)
+                }
+                DedupVerdict::Unknown => {
+                    dedup_paths.llm_unavailable += 1;
+                    make_insert_row(*i)
+                }
+            });
+        }
+    }
+    let mut decisions: Vec<DedupDecision> = decisions
+        .into_iter()
+        .map(|d| d.expect("every entity resolved by pass 2"))
+        .collect();
 
     // Re-embed every merged summary that actually changed — one lock-free, cancellable batch
     // (issue #651, FR-005), outside `write_lock` per ADR-0543. Only the latest merge into a uuid

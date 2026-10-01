@@ -930,6 +930,8 @@ async fn test_knowledge_status_empty_db() {
     assert_eq!(r["entity_count"], 0, "expected 0 entities: {v}");
     assert_eq!(r["relationship_count"], 0, "expected 0 relationships: {v}");
     assert_eq!(r["episode_count"], 0, "expected 0 episodes: {v}");
+    // issue #652: Queryable branch reports the dedup mode (PassthroughDedupAdapter = veto-only).
+    assert_eq!(r["dedup_mode"], "veto-only", "expected dedup_mode: {v}");
     assert_eq!(r["wal"]["exists"], false, "expected wal.exists:false: {v}");
     // issue #440 FR-007/FR-008: nothing has ever been applied for the default group on a fresh
     // DB, so the embedding-identity comparison is "not_applicable" rather than "unknown" — same
@@ -1060,6 +1062,8 @@ async fn test_knowledge_status_missing_entity_table_reports_not_queryable() {
         "expected queryable:false while Entity is renamed away: {v}"
     );
     assert_eq!(r["connected"], true, "expected connected:true: {v}");
+    // issue #652: the NotQueryable branch reports the dedup mode too.
+    assert_eq!(r["dedup_mode"], "veto-only", "expected dedup_mode: {v}");
     assert_eq!(
         r["context_graph_initialized"], true,
         "expected context_graph_initialized:true: {v}"
@@ -1442,7 +1446,9 @@ async fn test_knowledge_process_chunk_ok() {
         "exact_name",
         "embedding_merge",
         "vetoed",
-        "adapter_rejected",
+        "llm_confirmed",
+        "llm_rejected",
+        "llm_unavailable",
         "salvage_vetoed",
     ] {
         assert!(

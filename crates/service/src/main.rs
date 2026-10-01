@@ -749,7 +749,23 @@ async fn bootstrap_app_state(
 
     // Logged once here rather than from `AppState::from_env`, which also runs on the recovery and
     // attach paths (issue #650).
-    eprintln!("dedup: mode={}", lcg_core::dedup_mode_description());
+    let extractor_configured = extractor.is_configured();
+    eprintln!(
+        "dedup: mode={}",
+        lcg_core::dedup_mode_description(extractor_configured)
+    );
+    if lcg_core::dedup_llm_requested() && !extractor_configured {
+        eprintln!(
+            "dedup: warning: LCG_DEDUP_LLM is on but no extraction provider is configured, so \
+             the LLM dedup check cannot run; using veto-only dedup"
+        );
+    }
+    if lcg_core::deprecated_adapter_url_set() {
+        eprintln!(
+            "dedup: warning: LCG_DEDUP_ADAPTER_URL (and GRAPHITI_DEDUP_ADAPTER_URL) is deprecated \
+             and ignored; LCG_DEDUP_LLM now uses the configured extractor (see ADR-0652)"
+        );
+    }
 
     // Derive the WAL root using the same env-var logic as AppState::from_env (issue #378:
     // LCG_WAL_DIR now names a root containing one subdirectory per group_id, not a single
