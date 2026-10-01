@@ -70,8 +70,9 @@ per incoming entity, so it is testable against decisions), `adapter_rejected`, a
 `salvage_vetoed`. **Extensibility contract for #652:** add `llm_confirmed` / `llm_rejected`
 fields (and repurpose `adapter_rejected` if appropriate) without reshaping call sites. The
 counters are per chunk; there is no process-lifetime view, avoiding `AppState` churn. Startup
-logs `dedup: mode=<passthrough | local-adapter (LCG_DEDUP_LLM)> + identifier veto` once from
-`main.rs`.
+logs `dedup: mode=<veto-only | llm-verified> + identifier veto` once from
+`main.rs`. (As first written the modes were `passthrough | local-adapter`; ADR-0652 retired
+the local adapter and `LCG_DEDUP_ADAPTER_URL`.)
 
 ## Consequences
 

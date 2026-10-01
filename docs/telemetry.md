@@ -59,7 +59,7 @@ Emitted after every successful Anthropic API call from `extractor.rs`. This is a
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `role` | string | Which LLM use-case produced these tokens (`"extraction"`, future: `"dedup"`) |
+| `role` | string | Which LLM use-case produced these tokens (`"extraction"`, `"dedup"` — the LLM dedup check, #652) |
 | `model` | string | Anthropic model identifier (e.g. `claude-haiku-4-5-20251001`) |
 | `input_tokens` | u64 | Input tokens billed by the API |
 | `output_tokens` | u64 | Output tokens billed by the API |
