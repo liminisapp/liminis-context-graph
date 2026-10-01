@@ -288,23 +288,29 @@ one unlucky pair at the bottom (`proc-macro2`, `libc`) dirties everything above 
 mtime (`find target/release -exec touch -h -d "@$ts" {} +`): nothing is then newer than
 anything else, while it is still newer than the commit-time-stamped workspace sources and the
 registry sources, so `rerun-if-changed` and dep-info source comparisons stay fresh. This was
-the contingency the Plan named for an extraction-mtime effect. **Status: applied, not yet
-confirmed** — it is confirmed only by a `test` run whose `cargo test --release` prints zero
-`Compiling` lines; the temporary diagnostic is kept for exactly that run and is removed once
-it has been read.
+the contingency the Plan named for an extraction-mtime effect. **Status: confirmed.** CI run
+36940116660 (commit `8c650a2f`, with `.fingerprint/` restored and this step, and nothing
+else): `test`'s `cargo test --release` printed **0 `Compiling` lines**, `Finished release
+profile in 0.13s`, the step took **2m 23s** (about 11 min before), the colour-safe guard passed,
+the diagnostic read `Compiling lines: 0  Dirty lines: 0`, and every job succeeded with none
+cancelled.
 
 **A falsified hypothesis, recorded so it is not retried.** The first attempt at this second
 cause was that build-script `rerun-if-changed` paths into a freshly unpacked `~/.cargo/registry`
 were newer than the restored build-script outputs, and `test` was made to `cargo fetch` and stamp
-`registry/src` to the commit time. The same run showed the registry sources were never the
-problem: `proc-macro2`'s `build.rs` already carried mtime 2006 (crates.io tarballs preserve
-their own), older than the restored output both before and after the stamp, and the dirty
-reasons are dependency rebuilds, not build-script reruns. That step was removed.
+`registry/src` to the commit time. Run 36936445915, which had that stamp, still recompiled 131
+units, and it showed the registry sources were never the problem: `proc-macro2`'s `build.rs`
+already carried mtime 2006 (crates.io tarballs preserve their own), older than the restored
+output both before and after the stamp, and the dirty reasons are dependency rebuilds, not
+build-script reruns. The step was removed, and the confirming run above ran without it, so
+the registry stamp is not needed.
 
-**Diagnostic lesson.** `CARGO_LOG=cargo::core::compiler::fingerprint=info` printed zero lines on
-the CI toolchain (rustc/cargo 1.99) in a step that recompiled 130+ crates, while it works on
-cargo 1.95. The diagnostic now uses `cargo -v` (stable `Dirty` status lines) and fails loudly if
-cargo recompiled but explained nothing; a silent zero must never read as "no dirty units".
+**Diagnosing a recompile.** `CARGO_LOG=cargo::core::compiler::fingerprint=info` printed zero
+lines on the CI toolchain (rustc/cargo 1.99) in a step that recompiled 130+ crates, while it
+works on cargo 1.95, so do not rely on it. Run `cargo test --release --no-run -v` and read the
+`Dirty <unit>: <reason>` status lines, which are stable CLI output; and treat "recompiled but
+no reason captured" as an error, because a silent zero must never read as "no dirty units".
+The temporary step that did this (`TEMP #657`) was removed before merge.
 
 **Latent coupling.** Fingerprints embed absolute paths. The reuse works because `build-release`
 and `test` both run on `ubuntu-latest` with the same `/home/runner/work/<repo>/<repo>` checkout

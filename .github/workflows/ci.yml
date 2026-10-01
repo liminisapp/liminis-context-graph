@@ -529,47 +529,12 @@ jobs:
           ts="$(date +%s)"
           find target/release -exec touch -h -d "@$ts" {} +
 
-      # TEMPORARY (#657, FR-006/FR-011): evidence for why units are or are not fresh after
-      # the restore. Remove once a run has been read and the result recorded in ADR-0341.
-      # It uses `cargo -v`, whose `Dirty <unit>: <reason>` status lines are stable CLI
-      # output, rather than `CARGO_LOG=cargo::core::compiler::fingerprint=info`: the CI
-      # toolchain (rustc/cargo 1.99) printed zero such lines in a run that recompiled 130+
-      # crates, so that tracing target cannot be relied on there. The tracing output is still
-      # captured as a second source, and the step fails loudly if it recompiled but
-      # reported no reason at all. Non-blocking for cargo itself, but its non-fingerprint
-      # output is appended to /tmp/build.log so a recompile here cannot be masked from the
-      # FR-006 guard below (otherwise this step would warm the tree and the guard would
-      # pass vacuously).
-      - name: "TEMP #657: dirty-reason diagnostic (after restore + mtime normalisation)"
-        env:
-          CARGO_LOG: cargo::core::compiler::fingerprint=info
-          CARGO_TERM_COLOR: never
-          LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
-        run: |
-          cargo --version
-          cargo test --release --no-run -v > /tmp/fp.log 2>&1 || true
-          # Keep only status lines (not tracing, `Running` rustc command lines or `Dirty`
-          # reason lines) in the guard's log.
-          grep -Ev 'cargo::core::compiler::fingerprint|^[[:space:]]*(Running|Dirty|Fresh)[[:space:]]' /tmp/fp.log > /tmp/build.log || true
-          compiling=$(grep -Ec '^[[:space:]]*Compiling[[:space:]]' /tmp/fp.log || true)
-          dirty=$(grep -Ec '^[[:space:]]*Dirty[[:space:]]' /tmp/fp.log || true)
-          tracing=$(grep -c 'cargo::core::compiler::fingerprint' /tmp/fp.log || true)
-          echo "Compiling lines: $compiling  Dirty lines: $dirty  fingerprint tracing lines: $tracing"
-          if [ "$compiling" -gt 0 ] && [ "$dirty" -eq 0 ] && [ "$tracing" -eq 0 ]; then
-            echo "ERROR: cargo recompiled but neither -v 'Dirty' lines nor fingerprint tracing explained why; the diagnostic captured no evidence. A zero here must not be read as 'no dirty units'."
-            exit 1
-          fi
-          echo "--- first 60 Dirty reasons (full) ---"
-          grep -E '^[[:space:]]*Dirty[[:space:]]' /tmp/fp.log | head -n 60 || true
-          echo "--- first 30 tracing dirty reasons ---"
-          grep 'dirty:' /tmp/fp.log | cut -c1-400 | head -n 30 || true
-
       - name: cargo test --release (restored build; captured for recompile-regression check)
         env:
           # Greppable log; the guard below is colour-safe regardless.
           CARGO_TERM_COLOR: never
           LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
-        run: cargo test --release 2>&1 | tee -a /tmp/build.log
+        run: cargo test --release 2>&1 | tee /tmp/build.log
 
       # Issue #500 FR-006/SC-004: regression guard for leaked, orphaned liminis-context-graph
       # processes. crates/service/tests/ spawns the built binary as a subprocess in many
