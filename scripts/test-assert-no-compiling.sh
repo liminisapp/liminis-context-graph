@@ -55,6 +55,12 @@ if "$guard" "$tmp/does-not-exist" >/dev/null 2>&1; then
 else
   echo "  ok    missing log file fails"
 fi
+mkdir "$tmp/a-directory"
+if "$guard" "$tmp/a-directory" >/dev/null 2>&1; then
+  echo "  FAIL  a readable directory passed"; failures=$((failures + 1))
+else
+  echo "  ok    readable directory (not a log) fails"
+fi
 if "$guard" >/dev/null 2>&1; then
   echo "  FAIL  no argument passed"; failures=$((failures + 1))
 else
