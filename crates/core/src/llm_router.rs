@@ -162,16 +162,20 @@ impl LlmRouter {
         }
     }
 
+    /// Unlike the extraction/classification routes, a failed primary here does NOT latch
+    /// `primary_failed`: consolidation is best-effort (the merge path degrades to a deterministic
+    /// fallback on any error), so one transient failure must not demote the primary model for
+    /// every other role for the rest of the process. The fallback is tried for this call only.
     async fn do_consolidate_summary(
         &self,
         entity_name: &str,
         existing: &str,
         incoming: &str,
     ) -> Result<String, Error> {
-        if !self
+        let primary_ok = !self
             .primary_failed
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+            .load(std::sync::atomic::Ordering::Acquire);
+        if primary_ok {
             match self
                 .primary
                 .consolidate_summary(entity_name, existing, incoming)
@@ -179,40 +183,24 @@ impl LlmRouter {
             {
                 Ok(result) => return Ok(result),
                 Err(err) => {
-                    if let Some(fb) = &self.fallback {
-                        if self
-                            .primary_failed
-                            .compare_exchange(
-                                false,
-                                true,
-                                std::sync::atomic::Ordering::AcqRel,
-                                std::sync::atomic::Ordering::Acquire,
-                            )
-                            .is_ok()
-                        {
-                            self.sink.emit(TelemetryEvent::LlmFallback {
-                                ts_ms: now_ms(),
-                                role: "consolidation".to_string(),
-                                primary_model: self.primary_model_name.clone(),
-                                fallback_model: self.fallback_model_name.clone(),
-                                error_reason: err.to_string(),
-                            });
+                    return match &self.fallback {
+                        Some(fb) => {
+                            fb.consolidate_summary(entity_name, existing, incoming)
+                                .await
                         }
-                        return fb
-                            .consolidate_summary(entity_name, existing, incoming)
-                            .await;
-                    }
-                    return Err(err);
+                        None => Err(err),
+                    };
                 }
             }
         }
-        if let Some(fb) = &self.fallback {
-            fb.consolidate_summary(entity_name, existing, incoming)
-                .await
-        } else {
-            Err(Error::Ipc(
+        match &self.fallback {
+            Some(fb) => {
+                fb.consolidate_summary(entity_name, existing, incoming)
+                    .await
+            }
+            None => Err(Error::Ipc(
                 "BUG: primary_failed set without fallback".to_string(),
-            ))
+            )),
         }
     }
 

@@ -38,6 +38,10 @@
 //!   extractor's inline classification prompt will not invalidate a cassette recorded against
 //!   the other wording.
 //!
+//! - **`consolidate_summary`** (#651): the entity name, the existing and incoming summaries, and
+//!   the **rendered** consolidation system/user prompts (via
+//!   [`crate::summary_merge::consolidation_prompts`]), so a prompt edit invalidates stale entries.
+//!
 //! Explicitly **excluded** from every hash: wall-clock timestamps, request nonces/IDs, and
 //! anything provider/transport-specific (headers, API keys, URLs) — none of which ever reach
 //! this module, since the decorator operates at the [`Extractor`] trait boundary, strictly
@@ -125,6 +129,21 @@ fn classify_relations_request_value(
     })
 }
 
+fn consolidate_summary_request_value(entity_name: &str, existing: &str, incoming: &str) -> Value {
+    // The rendered prompts are hashed (like `extract`'s), so a wording change to the
+    // consolidation prompt invalidates stale entries loudly instead of silently diverging.
+    let (system, user) =
+        crate::summary_merge::consolidation_prompts(entity_name, existing, incoming);
+    json!({
+        "call_type": "consolidate_summary",
+        "entity_name": entity_name,
+        "existing": existing,
+        "incoming": incoming,
+        "system_prompt": system,
+        "user_prompt": user,
+    })
+}
+
 // ── CassetteRecord ───────────────────────────────────────────────────────────
 
 /// One JSONL line: a single recorded extraction exchange plus the metadata needed to interpret
@@ -133,8 +152,8 @@ fn classify_relations_request_value(
 pub struct CassetteRecord {
     /// SHA-256 hex digest of the canonical request value — see the module doc for scope.
     pub key: String,
-    /// Which `Extractor` method produced this record: `"extract"`, `"classify_entities"`, or
-    /// `"classify_relations"`.
+    /// Which `Extractor` method produced this record: `"extract"`, `"classify_entities"`,
+    /// `"classify_relations"`, or `"consolidate_summary"`.
     pub call_type: String,
     pub provider: String,
     pub model: String,
@@ -143,7 +162,7 @@ pub struct CassetteRecord {
     /// Human-readable request content (the same value the hash was computed over).
     pub request: Value,
     /// The call's return value, serialized (`ExtractionResult` for `extract`, `Vec<String>` for
-    /// the two classify methods).
+    /// the two classify methods, the consolidated `String` for `consolidate_summary`).
     pub response: Value,
 }
 
@@ -365,17 +384,23 @@ impl Extractor for RecordingExtractor {
         })
     }
 
-    /// Forwarded without recording (issue #651): consolidation is not part of the cassette
-    /// format, so a replayed run takes `ReplayingExtractor`'s default `Err` and falls back to the
-    /// deterministic bounded merge.
     fn consolidate_summary<'a>(
         &'a self,
         entity_name: &'a str,
         existing: &'a str,
         incoming: &'a str,
     ) -> BoxFuture<'a, Result<String, Error>> {
-        self.inner
-            .consolidate_summary(entity_name, existing, incoming)
+        let request = consolidate_summary_request_value(entity_name, existing, incoming);
+        let key = request_key(&request);
+        Box::pin(async move {
+            let result = self
+                .inner
+                .consolidate_summary(entity_name, existing, incoming)
+                .await?;
+            let response = serde_json::to_value(&result)?;
+            self.record("consolidate_summary", key, request, &response)?;
+            Ok(result)
+        })
     }
 }
 
@@ -449,6 +474,25 @@ impl Extractor for ReplayingExtractor {
         let key = request_key(&classify_relations_request_value(edges, allowed_types));
         Box::pin(async move {
             let response = self.pop("classify_relations", &key)?;
+            Ok(serde_json::from_value(response)?)
+        })
+    }
+
+    /// An unrecorded consolidation is a loud [`Error::CassetteMiss`] like any other call; the
+    /// merge path in `episode.rs` logs it and degrades to the deterministic fallback (FR-008).
+    fn consolidate_summary<'a>(
+        &'a self,
+        entity_name: &'a str,
+        existing: &'a str,
+        incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        let key = request_key(&consolidate_summary_request_value(
+            entity_name,
+            existing,
+            incoming,
+        ));
+        Box::pin(async move {
+            let response = self.pop("consolidate_summary", &key)?;
             Ok(serde_json::from_value(response)?)
         })
     }
@@ -607,6 +651,66 @@ mod tests {
             result.result.entities[0].name
         );
         assert_eq!(replayed.result.edges[0].fact, result.result.edges[0].fact);
+    }
+
+    #[tokio::test]
+    async fn consolidate_summary_record_then_replay_roundtrip_and_miss() {
+        struct Fixed;
+        impl Extractor for Fixed {
+            fn extract<'a>(
+                &'a self,
+                _: ExtractOptions<'a>,
+            ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
+                unimplemented!()
+            }
+            fn classify_entities<'a>(
+                &'a self,
+                _: &'a [(&'a str, &'a str)],
+                _: Option<&'a [String]>,
+            ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+                unimplemented!()
+            }
+            fn classify_relations<'a>(
+                &'a self,
+                _: &'a [(&'a str, &'a str)],
+                _: &'a [(String, Option<String>)],
+            ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+                unimplemented!()
+            }
+            fn consolidate_summary<'a>(
+                &'a self,
+                _: &'a str,
+                _: &'a str,
+                _: &'a str,
+            ) -> BoxFuture<'a, Result<String, Error>> {
+                Box::pin(async { Ok("Merged.".to_string()) })
+            }
+        }
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cassette.jsonl");
+        let writer = Arc::new(CassetteWriter::open(&path).unwrap());
+        let recorder = RecordingExtractor::new(Arc::new(Fixed), "mock", "m", writer);
+        assert_eq!(
+            recorder
+                .consolidate_summary("A", "old.", "new.")
+                .await
+                .unwrap(),
+            "Merged."
+        );
+
+        let replayer = ReplayingExtractor::load(&path).unwrap();
+        assert_eq!(
+            replayer
+                .consolidate_summary("A", "old.", "new.")
+                .await
+                .unwrap(),
+            "Merged."
+        );
+        let err = replayer
+            .consolidate_summary("A", "old.", "different.")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::CassetteMiss(_)), "got {err:?}");
     }
 
     #[tokio::test]

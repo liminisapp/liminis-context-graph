@@ -149,13 +149,20 @@ pub fn consolidation_prompts(
     (system, user)
 }
 
-/// Cleans a consolidation reply's summary text: trims whitespace and surrounding quotes, bounds
-/// it with [`cap_summary`]. Returns `None` for an empty reply so the caller falls back
-/// deterministically.
+/// Cleans a consolidation reply's summary text: trims whitespace, unwraps a *matching* pair of
+/// surrounding quotes or backticks (a lone edge quote belongs to the prose, as in
+/// `"Acme" is a company.`), and bounds it with [`cap_summary`]. Returns `None` for an empty reply
+/// so the caller falls back deterministically.
 pub fn finalize_consolidation(raw: &str) -> Option<String> {
-    let trimmed = raw
-        .trim()
-        .trim_matches(|c| c == '"' || c == '\'' || c == '`');
+    let mut trimmed = raw.trim();
+    while let Some(inner) = ['"', '\'', '`'].iter().find_map(|&q| {
+        trimmed
+            .strip_prefix(q)
+            .and_then(|r| r.strip_suffix(q))
+            .filter(|inner| !inner.contains(q))
+    }) {
+        trimmed = inner.trim();
+    }
     let capped = cap_summary(trimmed);
     (!capped.is_empty()).then_some(capped)
 }
@@ -302,6 +309,15 @@ mod tests {
         );
         assert_eq!(finalize_consolidation("   "), None);
         assert_eq!(finalize_consolidation("\"\""), None);
+        // A lone or non-wrapping edge quote is prose, not a wrapper.
+        assert_eq!(
+            finalize_consolidation("\"Acme\" is a company.").as_deref(),
+            Some("\"Acme\" is a company.")
+        );
+        assert_eq!(
+            finalize_consolidation("\"a\" and \"b\"").as_deref(),
+            Some("\"a\" and \"b\"")
+        );
         let long = format!("Keep. {}", "w".repeat(900));
         assert_eq!(finalize_consolidation(&long).as_deref(), Some("Keep."));
     }

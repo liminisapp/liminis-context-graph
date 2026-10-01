@@ -44,8 +44,12 @@ plain `SET` on an indexed column.
    capped; the substring skip leaves it untouched.
 4. **Failure degrades, never fails the chunk.** `Error::Config` (the trait's default impl, and
    `UnconfiguredExtractor`) falls back silently; any other error logs one `eprintln!` line and
-   falls back; an empty reply falls back. `ReplayingExtractor` (eval cassettes) uses the default, so
-   eval replays take the fallback; `RecordingExtractor` forwards without recording.
+   falls back; an empty reply falls back. Eval cassettes record and replay the call
+   like the other LLM calls (`call_type: consolidate_summary`, key hashed over the names, both
+   summaries and the rendered prompts); an unrecorded request is a loud `CassetteMiss`, which the
+   merge path logs and degrades to the fallback. `LlmRouter` tries the fallback model for a failed
+   consolidation call but does not latch `primary_failed`: consolidation is best-effort and must
+   not demote the primary model for extraction.
 5. **Always re-embed, in the same statement.** After the loop, one lock-free, cancellable
    `embed_batch` covers every merged summary that changed. An embedder error fails the chunk (as the
    pre-lock embedding pass does) rather than leaving a silently stale vector. Phase C then runs
