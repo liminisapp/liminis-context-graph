@@ -171,6 +171,17 @@ pub fn is_named_catalog_entry_already_exists_error(err: &Error, name: &str) -> b
     s.contains("Binder exception:") && s.contains(&format!("{name} already exists in catalog"))
 }
 
+/// True if `err` is lbug's FTS-index-maintenance failure
+/// `FTS index '<idx>' is inconsistent: term '<t>' is missing during delete. Drop and recreate the
+/// FTS index.` (issue #649). Raised when a write deletes or updates a row whose indexed term is
+/// absent from an index that was *built by an older lbug* — lbug 0.20 → 0.21 changed how
+/// non-ASCII terms are stored without bumping the storage version. Used by `Conn`'s statement-
+/// level backstop (ADR-0649) to rebuild all 3 FTS indexes and retry the statement once.
+pub fn is_fts_inconsistent_error(err: &Error) -> bool {
+    let s = err.to_string();
+    s.contains("FTS index '") && s.contains("is inconsistent")
+}
+
 /// True if `err` is lbug's "table does not exist" binder exception, raised when a query
 /// references a node/rel label that isn't present in the schema (e.g. `Entity` renamed or
 /// dropped out from under an otherwise-open database). Used by `handle_knowledge_status`
@@ -188,6 +199,35 @@ pub fn is_missing_table_error(err: &Error) -> bool {
     let re = RE.get_or_init(|| regex::Regex::new(r"Table \S+ does not exist").unwrap());
     let s = err.to_string();
     s.contains("Binder exception:") && re.is_match(&s)
+}
+
+#[cfg(test)]
+mod is_fts_inconsistent_error_tests {
+    use super::*;
+
+    /// Text as reported in issue #646 (lbug 0.21.0). The fixture test in
+    /// `tests/fts_lbug020_migration.rs` asserts the same classifier against the real engine.
+    #[test]
+    fn matches_reported_text() {
+        let err = Error::QueryFailed(
+            "Query execution failed: Runtime exception: FTS index 'episode_content' is \
+             inconsistent: term '\u{2014}' is missing during delete. Drop and recreate the FTS \
+             index."
+                .to_string(),
+        );
+        assert!(is_fts_inconsistent_error(&err));
+    }
+
+    #[test]
+    fn does_not_match_other_errors() {
+        for msg in [
+            "Query execution failed: Binder exception: Table Entity doesn't have an index with name x.",
+            "Query execution failed: Binder exception: Index a already exists in table Entity.",
+            "Query execution failed: Runtime exception: something is inconsistent",
+        ] {
+            assert!(!is_fts_inconsistent_error(&Error::QueryFailed(msg.to_string())));
+        }
+    }
 }
 
 #[cfg(test)]
