@@ -394,6 +394,19 @@ impl Db {
         Ok((db, stats))
     }
 
+    /// Number of backstop FTS rebuilds since this `Db` was opened (issue #649, ADR-0649).
+    pub fn fts_repair_count(&self) -> u64 {
+        self.fts_repair_status.count.load(Ordering::Relaxed)
+    }
+
+    /// Unix-ms timestamp of the last backstop FTS rebuild, or `None` if there has been none.
+    pub fn fts_last_repair_unix_ms(&self) -> Option<u64> {
+        match self.fts_repair_status.last_unix_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(ms),
+        }
+    }
+
     /// Opens a fresh connection against the already-set-up database.
     /// Extension setup happens once in `Db::open` because `INSTALL` and
     /// `LOAD EXTENSION` are both write transactions in lbug — running them
@@ -506,7 +519,7 @@ impl<'db> Conn<'db> {
         }
     }
 
-    /// Number of backstop FTS rebuilds since this `Db` was opened (issue #649).
+    /// Number of backstop FTS rebuilds since the owning `Db` was opened (issue #649).
     pub fn fts_repair_count(&self) -> u64 {
         self.fts_repair_status.count.load(Ordering::Relaxed)
     }

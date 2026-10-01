@@ -463,6 +463,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "indices_built": state.indices_built.load(Ordering::Acquire),
             "name_index_trusted": null,
             "name_index_fallback_scans": null,
+            "fts_repair_count": null,
+            "fts_last_repair_unix_ms": null,
             "cross_group_pointers": null,
         }));
     }
@@ -507,6 +509,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     }
 
     let _guard = state.write_lock.read().await;
+    let db_for_status = Arc::clone(&db);
     let outcome =
         tokio::task::spawn_blocking(move || -> Result<StatusOutcome, crate::error::Error> {
             let conn = db.connect()?;
@@ -690,6 +693,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "indices_built": state.indices_built.load(Ordering::Acquire),
                 "name_index_trusted": fields.name_index_trusted,
                 "name_index_fallback_scans": fields.name_index_fallback_scans,
+                "fts_repair_count": db_for_status.fts_repair_count(),
+                "fts_last_repair_unix_ms": db_for_status.fts_last_repair_unix_ms(),
                 "cross_group_pointers": {
                     "bound": fields.cross_group_pointers.bound,
                     "unbound": fields.cross_group_pointers.unbound,
@@ -763,6 +768,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "indices_built": false,
             "name_index_trusted": name_index_trusted,
             "name_index_fallback_scans": name_index_fallback_scans,
+            "fts_repair_count": db_for_status.fts_repair_count(),
+            "fts_last_repair_unix_ms": db_for_status.fts_last_repair_unix_ms(),
             "cross_group_pointers": {
                 "bound": null,
                 "unbound": null,
@@ -3557,6 +3564,13 @@ async fn clear_group_for_rebuild(
     let generation = crate::wal_generation::read_generation(wal_dir);
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
+        // Drop the FTS indexes *before* purging (issue #649, ADR-0649). The purge deletes rows
+        // inside an explicit transaction; deleting through a live FTS index built by an older
+        // lbug fails on any non-ASCII term (`FTS index ... is inconsistent`) and the statement-
+        // level backstop cannot repair inside a transaction. The replay's own drop (and
+        // `indices_built = false` below) still recreate them afterwards; the drop is idempotent
+        // and its entries are never flushed (this conn's `executed_mutations` is discarded).
+        crate::schema::drop_fts_indexes(&conn);
         let ts = chrono::Utc::now().to_rfc3339();
         let (_, mut grouped) = group_purge::purge_groups(&conn, &[gid.as_str()], &ts, false)?;
         // gid's own bucket (its own deletions, and any forced-rebind write that happened to
