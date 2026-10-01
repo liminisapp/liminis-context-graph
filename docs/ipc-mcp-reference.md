@@ -574,11 +574,13 @@ that predate the capability.
 - **A partially-completed backfill is not an error.** Entities not yet processed simply retrieve
   via existing name/lexical behavior, exactly as before this issue — running the tool again
   covers more of the group each time.
-- **`summary_embedding` stays write-once after backfill, same as on creation.** A later
-  `knowledge_assert_entity` re-assert that changes an entity's `summary` does not refresh its
-  `summary_embedding` — the vector reflects whichever summary was embedded last (at creation, or
-  at the most recent backfill run), not necessarily the current `summary` text. Re-run this tool
-  to bring a changed summary's vector back in sync.
+- **A `knowledge_assert_entity` re-assert does not refresh `summary_embedding`.** A re-assert
+  that changes an entity's `summary` leaves its `summary_embedding` as it was — the vector
+  reflects whichever summary was embedded last (at creation, at an extraction merge, or at the
+  most recent backfill run), not necessarily the current `summary` text. Re-run this tool to bring
+  a changed summary's vector back in sync. (Extraction merges *do* refresh it: when extraction
+  folds a new description into an existing entity the merged summary is consolidated into one
+  bounded description of at most 600 characters and re-embedded in the same write — ADR-0651.)
 
 ### Cross-group pointers (`add_cross_group_edge`, `rebind_pointers`)
 

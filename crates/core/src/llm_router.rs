@@ -162,6 +162,48 @@ impl LlmRouter {
         }
     }
 
+    /// Unlike the extraction/classification routes, a failed primary here does NOT latch
+    /// `primary_failed`: consolidation is best-effort (the merge path degrades to a deterministic
+    /// fallback on any error), so one transient failure must not demote the primary model for
+    /// every other role for the rest of the process. The fallback is tried for this call only.
+    async fn do_consolidate_summary(
+        &self,
+        entity_name: &str,
+        existing: &str,
+        incoming: &str,
+    ) -> Result<String, Error> {
+        let primary_ok = !self
+            .primary_failed
+            .load(std::sync::atomic::Ordering::Acquire);
+        if primary_ok {
+            match self
+                .primary
+                .consolidate_summary(entity_name, existing, incoming)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    return match &self.fallback {
+                        Some(fb) => {
+                            fb.consolidate_summary(entity_name, existing, incoming)
+                                .await
+                        }
+                        None => Err(err),
+                    };
+                }
+            }
+        }
+        match &self.fallback {
+            Some(fb) => {
+                fb.consolidate_summary(entity_name, existing, incoming)
+                    .await
+            }
+            None => Err(Error::Ipc(
+                "BUG: primary_failed set without fallback".to_string(),
+            )),
+        }
+    }
+
     async fn do_classify_relations(
         &self,
         edges: &[(&str, &str)],
@@ -277,6 +319,15 @@ impl Extractor for LlmRouter {
         allowed_types: &'a [(String, Option<String>)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(self.do_classify_relations(edges, allowed_types))
+    }
+
+    fn consolidate_summary<'a>(
+        &'a self,
+        entity_name: &'a str,
+        existing: &'a str,
+        incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(self.do_consolidate_summary(entity_name, existing, incoming))
     }
 }
 

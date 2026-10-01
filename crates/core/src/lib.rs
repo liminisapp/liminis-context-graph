@@ -35,6 +35,7 @@ pub mod replay;
 pub mod reprocess_relations;
 pub mod schema;
 pub mod search;
+pub mod summary_merge;
 pub mod telemetry;
 pub mod token_budget;
 pub mod types;
