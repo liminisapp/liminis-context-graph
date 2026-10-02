@@ -1280,24 +1280,99 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
 // RwLockReadGuard is not 'static so it cannot move into the closure.
 
 async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
-    let p = &req.params;
-    let group_id = p["group_id"]
-        .as_str()
-        .unwrap_or(DEFAULT_GROUP_ID)
-        .to_string();
-    let last_n = p["last_n"].as_u64().unwrap_or(50) as usize;
+    use crate::read_page as rp;
 
+    let p = &req.params;
+    let last_n = p["last_n"].as_u64().unwrap_or(50) as usize;
+    let opts = rp::parse_read_opts(p, rp::EPISODE_FIELDS)?;
+    // Issue #667: `group_ids` and the legacy single-group `group_id` alias are unioned; neither
+    // given ⇒ every group (reads broad, ADR-0615 D2), not the old `liminis` default.
+    let groups = episode_group_scope(p);
+    let shape = rp::shape_hash(
+        rp::EPISODES_TAG,
+        groups.as_deref(),
+        None,
+        opts.name_prefix.as_deref(),
+    );
+    let after: Option<(i64, String)> = match opts.cursor.as_deref() {
+        None => None,
+        Some(c) => {
+            let pos = rp::decode_cursor(c, rp::EPISODES_TAG, &shape)?;
+            match (pos["created_at_us"].as_i64(), pos["uuid"].as_str()) {
+                (Some(us), Some(uuid)) => Some((us, uuid.to_string())),
+                _ => return Err(Error::Ipc("invalid cursor: malformed".to_string())),
+            }
+        }
+    };
+
+    let name_prefix = opts.name_prefix.clone();
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
-    let episodes = tokio::task::spawn_blocking(move || {
+    let mut rows = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
-        conn.retrieve_episodes(&group_id, last_n)
+        let gid_refs: Vec<&str> = groups
+            .as_deref()
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let gid_slice = groups.as_deref().map(|_| gid_refs.as_slice());
+        // Fetch one extra row to learn whether another page exists.
+        conn.retrieve_episodes_page(
+            gid_slice,
+            last_n.saturating_add(1),
+            name_prefix.as_deref(),
+            after.as_ref().map(|(us, u)| (*us, u.as_str())),
+        )
     })
     .await??;
     drop(_guard);
 
-    let count = episodes.len();
-    Ok(json!({"episodes": episodes, "count": count}))
+    let next_cursor = if rows.len() > last_n {
+        rows.truncate(last_n);
+        rows.last().map(|(row, us)| {
+            rp::encode_cursor(
+                rp::EPISODES_TAG,
+                &shape,
+                json!({ "created_at_us": us, "uuid": row.uuid }),
+            )
+        })
+    } else {
+        None
+    };
+
+    let count = rows.len();
+    let episodes: Vec<Value> = rows
+        .into_iter()
+        .map(|(row, _)| {
+            let item = serde_json::to_value(row).unwrap_or(Value::Null);
+            match &opts.fields {
+                Some(fields) => rp::project(item, fields),
+                None => item,
+            }
+        })
+        .collect();
+    if opts.paged {
+        Ok(json!({"episodes": episodes, "count": count, "next_cursor": next_cursor}))
+    } else {
+        Ok(json!({"episodes": episodes, "count": count}))
+    }
+}
+
+/// Effective group scope for `knowledge_get_episodes` (issue #667): the deduplicated union of
+/// `group_ids` (array or string; an explicit `[]` collapses to "all groups" like the other
+/// `list_*` reads) and the legacy `group_id` alias (an empty string counts as absent).
+/// `None` means every group.
+fn episode_group_scope(p: &Value) -> Option<Vec<String>> {
+    let mut out = extract_optional_group_ids(&p["group_ids"]).unwrap_or_default();
+    if let Some(g) = p["group_id"].as_str().filter(|s| !s.is_empty()) {
+        out.push(g.to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|g| seen.insert(g.clone()));
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
@@ -1517,35 +1592,95 @@ async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
     // Optional kind filter (issue #615): omitted ⇒ all kinds.
     let kind = optional_kind_param(&p["kind"])?;
+    // Paging / projection / prefix filter (issue #667).
+    use crate::read_page as rp;
+    let opts = rp::parse_read_opts(p, rp::ENTITY_FIELDS)?;
+    let shape = rp::shape_hash(
+        rp::ENTITIES_TAG,
+        group_ids.as_deref(),
+        kind.as_deref(),
+        opts.name_prefix
+            .as_deref()
+            .map(str::to_lowercase)
+            .as_deref(),
+    );
+    let after_uuid: Option<String> = match opts.cursor.as_deref() {
+        None => None,
+        Some(c) => {
+            let pos = rp::decode_cursor(c, rp::ENTITIES_TAG, &shape)?;
+            match pos["uuid"].as_str() {
+                Some(u) => Some(u.to_string()),
+                None => return Err(Error::Ipc("invalid cursor: malformed".to_string())),
+            }
+        }
+    };
+    // The enrichment pass only feeds these two fields; skip it when they are projected away.
+    let needs_enrichment = opts.fields.as_ref().is_none_or(|f| {
+        f.iter()
+            .any(|n| n == "episode_uuids" || n == "source_descriptions")
+    });
 
+    let name_prefix = opts.name_prefix.clone();
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
-    let nodes = tokio::task::spawn_blocking(move || {
+    let (nodes, has_more) = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
         let gid_refs: Vec<&str> = group_ids
             .as_deref()
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
         let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
-        let mut nodes = conn.list_entities_of_kind(gid_slice, num_results, kind.as_deref())?;
-        let uuid_owned: Vec<String> = nodes.iter().map(|n| n.uuid.clone()).collect();
-        let uuid_refs: Vec<&str> = uuid_owned.iter().map(String::as_str).collect();
-        let mut ep_info = conn
-            .get_episode_info_for_entities(&uuid_refs, gid_slice)
-            .unwrap_or_default();
-        for node in &mut nodes {
-            if let Some((ep_uuids, src_descs)) = ep_info.remove(&node.uuid) {
-                node.episode_uuids = ep_uuids;
-                node.source_descriptions = src_descs;
+        // Fetch one extra row to learn whether another page exists.
+        let mut nodes = conn.list_entities_page(
+            gid_slice,
+            num_results.saturating_add(1),
+            kind.as_deref(),
+            name_prefix.as_deref(),
+            after_uuid.as_deref(),
+        )?;
+        let has_more = nodes.len() > num_results;
+        nodes.truncate(num_results);
+        if needs_enrichment {
+            let uuid_owned: Vec<String> = nodes.iter().map(|n| n.uuid.clone()).collect();
+            let uuid_refs: Vec<&str> = uuid_owned.iter().map(String::as_str).collect();
+            let mut ep_info = conn
+                .get_episode_info_for_entities(&uuid_refs, gid_slice)
+                .unwrap_or_default();
+            for node in &mut nodes {
+                if let Some((ep_uuids, src_descs)) = ep_info.remove(&node.uuid) {
+                    node.episode_uuids = ep_uuids;
+                    node.source_descriptions = src_descs;
+                }
             }
         }
-        Ok::<_, crate::error::Error>(nodes)
+        Ok::<_, crate::error::Error>((nodes, has_more))
     })
     .await??;
     drop(_guard);
 
+    let next_cursor = if has_more {
+        nodes
+            .last()
+            .map(|n| rp::encode_cursor(rp::ENTITIES_TAG, &shape, json!({ "uuid": n.uuid })))
+    } else {
+        None
+    };
     let count = nodes.len();
-    Ok(json!({ "nodes": nodes, "count": count }))
+    let nodes: Vec<Value> = nodes
+        .into_iter()
+        .map(|n| {
+            let item = serde_json::to_value(n).unwrap_or(Value::Null);
+            match &opts.fields {
+                Some(fields) => rp::project(item, fields),
+                None => item,
+            }
+        })
+        .collect();
+    if opts.paged {
+        Ok(json!({ "nodes": nodes, "count": count, "next_cursor": next_cursor }))
+    } else {
+        Ok(json!({ "nodes": nodes, "count": count }))
+    }
 }
 
 async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
