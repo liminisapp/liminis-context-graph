@@ -1033,10 +1033,10 @@ object — and it acts before fusion and per path rather than as a post-filter o
 ### group_ids semantics: omitted vs. empty
 
 Every read tool that accepts `group_ids` treats an **omitted or `null` `group_ids` uniformly as
-"all groups"** (issue #413) — this holds across all 9 read tools: `knowledge_find_entities`,
+"all groups"** (issue #413) — this holds across all 10 read tools: `knowledge_find_entities`,
 `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_list_entities`,
 `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`,
-`knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`.
+`knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_episodes`.
 
 **An explicit `group_ids: []` does not mean the same thing on every tool**, and this split is
 deliberate, not an inconsistency to be fixed here:
@@ -1044,15 +1044,15 @@ deliberate, not an inconsistency to be fixed here:
 - On `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_nodes_by_group`,
   and `knowledge_get_edges_by_group`, an explicit `group_ids: []` is preserved as "exactly these
   groups" — i.e. **zero rows**, a filter matching nothing.
-- On the other five read tools (`knowledge_search_passages`, `knowledge_list_entities`,
+- On the other six read tools (`knowledge_search_passages`, `knowledge_list_entities`,
   `knowledge_list_relationships`, `knowledge_get_entity_neighbors`,
-  `knowledge_get_entities_by_source`), an explicit `group_ids: []` collapses to the same
+  `knowledge_get_entities_by_source`, `knowledge_get_episodes`), an explicit `group_ids: []` collapses to the same
   behavior as omitting it — **all groups**.
 
 If you need "zero rows" as a filter result, use one of the four tools in the first list, or check
 the tool's own `ToolSpec` description in
 [`crates/service/src/mcp/tools.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs)
-before relying on `[]` to mean "nothing" — on the other five it doesn't.
+before relying on `[]` to mean "nothing" — on the other six it doesn't.
 
 This section is the single, central statement of that contract; individual tool entries on this
 page don't restate it.
