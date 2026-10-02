@@ -1190,28 +1190,79 @@ impl<'db> Conn<'db> {
         group_id: &str,
         last_n: usize,
     ) -> Result<Vec<EpisodicRow>, Error> {
-        let result = self.query_params(
-            "MATCH (ep:Episodic) WHERE ep.group_id = $gid \
+        Ok(self
+            .retrieve_episodes_page(Some(&[group_id]), last_n, None, None)?
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect())
+    }
+
+    /// Keyset-pageable episode read (issue #667), newest first with a `uuid` tiebreaker so the
+    /// order is total and deterministic. `groups` of `None` (or an empty slice) reads every
+    /// group; `name_prefix` is a literal, case-sensitive `STARTS WITH`; `after` is the
+    /// `(created_at_µs, uuid)` of the last row already returned. Each row is paired with its
+    /// `created_at` in microseconds since the epoch — the rendered `created_at` string is
+    /// second-precision, so a cursor must be built from this instead.
+    pub fn retrieve_episodes_page(
+        &self,
+        groups: Option<&[&str]>,
+        limit: usize,
+        name_prefix: Option<&str>,
+        after: Option<(i64, &str)>,
+    ) -> Result<Vec<(EpisodicRow, i64)>, Error> {
+        let mut preds: Vec<&str> = Vec::new();
+        let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
+        if let Some(gids) = groups.filter(|g| !g.is_empty()) {
+            preds.push("ep.group_id IN $gids");
+            params["gids"] = serde_json::json!(gids);
+        }
+        if let Some(prefix) = name_prefix {
+            preds.push("ep.name STARTS WITH $prefix");
+            params["prefix"] = serde_json::json!(prefix);
+        }
+        if let Some((us, uuid)) = after {
+            preds.push(
+                "(ep.created_at < $created_at \
+                 OR (ep.created_at = $created_at AND ep.uuid < $after_uuid))",
+            );
+            // `created_at` is a TIMESTAMP_PARAM_NAMES name, so this binds as a typed Timestamp
+            // and the keyset compares natively at microsecond precision.
+            let dt = time::OffsetDateTime::from_unix_timestamp_nanos(us as i128 * 1_000)
+                .map_err(|e| Error::Ipc(format!("invalid cursor: {e}")))?;
+            params["created_at"] = serde_json::json!(format_datetime_rfc3339_subsecond(dt));
+            params["after_uuid"] = serde_json::json!(uuid);
+        }
+        let where_clause = if preds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", preds.join(" AND "))
+        };
+        let cypher = format!(
+            "MATCH (ep:Episodic) {where_clause}\
              RETURN ep.uuid, ep.name, ep.group_id, ep.created_at, ep.source, \
              ep.source_description, ep.content, ep.valid_at, ep.entity_edges, ep.attributes \
-             ORDER BY ep.created_at DESC LIMIT $limit",
-            serde_json::json!({ "gid": group_id, "limit": last_n as i64 }),
-        )?;
+             ORDER BY ep.created_at DESC, ep.uuid DESC LIMIT $limit"
+        );
+        let result = self.query_params(&cypher, params)?;
         let mut rows = Vec::new();
         for row in result {
-            rows.push(EpisodicRow {
-                uuid: value_as_string(&row[0]),
-                name: value_as_string(&row[1]),
-                group_id: value_as_string(&row[2]),
-                created_at: value_as_timestamp_str(&row[3]),
-                source: value_as_string(&row[4]),
-                source_description: value_as_string(&row[5]),
-                content: value_as_string(&row[6]),
-                valid_at: value_as_timestamp_str(&row[7]),
-                entity_edges: value_as_str_list(&row[8]),
-                attributes: value_as_string(&row[9]),
-                ..Default::default()
-            });
+            let created_us = value_as_timestamp_micros(&row[3]);
+            rows.push((
+                EpisodicRow {
+                    uuid: value_as_string(&row[0]),
+                    name: value_as_string(&row[1]),
+                    group_id: value_as_string(&row[2]),
+                    created_at: value_as_timestamp_str(&row[3]),
+                    source: value_as_string(&row[4]),
+                    source_description: value_as_string(&row[5]),
+                    content: value_as_string(&row[6]),
+                    valid_at: value_as_timestamp_str(&row[7]),
+                    entity_edges: value_as_str_list(&row[8]),
+                    attributes: value_as_string(&row[9]),
+                    ..Default::default()
+                },
+                created_us,
+            ));
         }
         Ok(rows)
     }
@@ -1835,6 +1886,21 @@ impl<'db> Conn<'db> {
         limit: usize,
         kind: Option<&str>,
     ) -> Result<Vec<EntityRow>, Error> {
+        self.list_entities_page(group_ids, limit, kind, None, None)
+    }
+
+    /// Keyset-pageable entity read (issue #667), ordered by `uuid DESC` (unique, so the order is
+    /// total). `name_prefix` is a case-insensitive literal `STARTS WITH` via Cypher `lower()`
+    /// (ASCII-safe; non-ASCII folds only as far as lbug's `lower()` does). `after_uuid` is the
+    /// last uuid already returned.
+    pub fn list_entities_page(
+        &self,
+        group_ids: Option<&[&str]>,
+        limit: usize,
+        kind: Option<&str>,
+        name_prefix: Option<&str>,
+        after_uuid: Option<&str>,
+    ) -> Result<Vec<EntityRow>, Error> {
         const KIND_PRED: &str = "(e.kind = $kind OR (e.kind IS NULL AND $kind = 'Entity'))";
         let group_pred = match group_ids {
             Some(gids) if !gids.is_empty() => Some("e.group_id IN $gids"),
@@ -1844,6 +1910,12 @@ impl<'db> Conn<'db> {
         preds.extend(group_pred);
         if kind.is_some() {
             preds.push(KIND_PRED);
+        }
+        if name_prefix.is_some() {
+            preds.push("lower(e.name) STARTS WITH lower($prefix)");
+        }
+        if after_uuid.is_some() {
+            preds.push("e.uuid < $after_uuid");
         }
         let where_clause = if preds.is_empty() {
             String::new()
@@ -1855,12 +1927,18 @@ impl<'db> Conn<'db> {
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
              e.summary, e.attributes, e.kind ORDER BY e.uuid DESC LIMIT $limit"
         );
-        let mut params = serde_json::json!({ "limit": limit as i64 });
+        let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
         if group_pred.is_some() {
             params["gids"] = serde_json::json!(group_ids);
         }
         if let Some(k) = kind {
             params["kind"] = serde_json::json!(k);
+        }
+        if let Some(p) = name_prefix {
+            params["prefix"] = serde_json::json!(p);
+        }
+        if let Some(u) = after_uuid {
+            params["after_uuid"] = serde_json::json!(u);
         }
         let result = self.query_params(&cypher, params)?;
         let mut rows = Vec::new();
@@ -4029,6 +4107,18 @@ pub(crate) fn value_as_timestamp_str(v: &lbug::Value) -> String {
         lbug::Value::Null(_) => String::new(),
         _ => v.to_string(),
     }
+}
+
+/// Microseconds since the Unix epoch for a TIMESTAMP value (0 for NULL / unparseable). Keyset
+/// cursors need this because [`value_as_timestamp_str`] truncates to whole seconds.
+pub(crate) fn value_as_timestamp_micros(v: &lbug::Value) -> i64 {
+    let dt = match v {
+        lbug::Value::Timestamp(dt) => Some(*dt),
+        lbug::Value::String(s) => parse_timestamp_str(s),
+        _ => None,
+    };
+    dt.map(|dt| (dt.unix_timestamp_nanos() / 1_000) as i64)
+        .unwrap_or(0)
 }
 
 pub(crate) fn value_as_optional_timestamp_str(v: &lbug::Value) -> Option<String> {

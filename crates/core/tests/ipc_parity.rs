@@ -7177,3 +7177,489 @@ async fn parity_reload_ontology_shape_and_errors() {
     .await;
     assert!(v.get("error").is_some(), "{v}");
 }
+
+// ── #667: read-path ergonomics (group-aware episodes, paging, projection, prefix) ─────────
+
+fn insert_test_episode(db: &Arc<Db>, uuid: &str, name: &str, group: &str, created_at: &str) {
+    let conn = db.connect().unwrap();
+    conn.insert_episodic(&lcg_core::EpisodicRow {
+        uuid: uuid.to_string(),
+        name: name.to_string(),
+        group_id: group.to_string(),
+        created_at: created_at.to_string(),
+        source: "text".to_string(),
+        source_description: "doc".to_string(),
+        content: format!("content of {name} ").repeat(20),
+        content_embedding: vec![0.1, 0.2, 0.3, 0.4],
+        valid_at: created_at.to_string(),
+        entity_edges: vec![],
+        attributes: "{}".to_string(),
+    })
+    .unwrap();
+}
+
+fn result_uuids(v: &Value, key: &str) -> Vec<String> {
+    v["result"][key]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected {key} array: {v}"))
+        .iter()
+        .map(|e| e["uuid"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// Pages `method` to exhaustion with the given base params, returning every page's uuids.
+async fn page_all(
+    state: &Arc<AppState>,
+    method: &str,
+    key: &str,
+    page_param: &str,
+    page_size: i64,
+    base: Value,
+) -> Vec<String> {
+    let mut all = Vec::new();
+    let mut cursor = String::new();
+    for i in 0..100 {
+        let mut params = base.clone();
+        params[page_param] = json!(page_size);
+        params["cursor"] = json!(cursor);
+        let v = dispatch_val(9000 + i, method, params, Arc::clone(state)).await;
+        assert_ok_resp(&v, 9000 + i);
+        let page = result_uuids(&v, key);
+        assert_eq!(v["result"]["count"], page.len());
+        assert!(page.len() as i64 <= page_size);
+        all.extend(page);
+        match v["result"]["next_cursor"].as_str() {
+            Some(c) => cursor = c.to_string(),
+            None => {
+                assert!(v["result"]["next_cursor"].is_null(), "{v}");
+                return all;
+            }
+        }
+    }
+    panic!("paging did not terminate");
+}
+
+fn seed_667_episodes(db: &Arc<Db>) {
+    insert_test_episode(db, "667-a1", "doc-x chunk 1", "g1", "2026-02-01 00:00:01");
+    insert_test_episode(db, "667-a2", "doc-x chunk 2", "g1", "2026-02-01 00:00:02");
+    insert_test_episode(db, "667-b1", "doc-y chunk 1", "g2", "2026-02-01 00:00:03");
+    insert_test_episode(db, "667-b2", "doc-x chunk 3", "g2", "2026-02-01 00:00:04");
+}
+
+#[tokio::test]
+async fn get_episodes_group_scoping_667() {
+    let (db, _dir) = make_db(4);
+    seed_667_episodes(&db);
+    let state = make_state(db);
+
+    let g2 = |v: &Value| {
+        let mut u = result_uuids(v, "episodes");
+        u.sort();
+        u
+    };
+    let v = dispatch_val(
+        1,
+        "knowledge_get_episodes",
+        json!({"group_ids": ["g2"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(g2(&v), vec!["667-b1", "667-b2"]);
+
+    let v = dispatch_val(
+        2,
+        "knowledge_get_episodes",
+        json!({"group_id": "g2"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(g2(&v), vec!["667-b1", "667-b2"]);
+
+    // Neither ⇒ all groups, newest first.
+    let v = dispatch_val(3, "knowledge_get_episodes", json!({}), Arc::clone(&state)).await;
+    assert_eq!(
+        result_uuids(&v, "episodes"),
+        vec!["667-b2", "667-b1", "667-a2", "667-a1"]
+    );
+    // Byte-identical default envelope: only `episodes` and `count`.
+    let keys: Vec<&String> = v["result"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, vec!["episodes", "count"]);
+
+    // The app's existing shape, bounded by last_n.
+    let v = dispatch_val(
+        4,
+        "knowledge_get_episodes",
+        json!({"last_n": 3, "group_ids": ["g1", "g2"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(result_uuids(&v, "episodes").len(), 3);
+
+    // Both supplied ⇒ deduplicated union.
+    let v = dispatch_val(
+        5,
+        "knowledge_get_episodes",
+        json!({"group_id": "g1", "group_ids": ["g2", "g1"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(result_uuids(&v, "episodes").len(), 4);
+
+    // Explicit empty array ⇒ all groups; plus group_id ⇒ just that group.
+    let v = dispatch_val(
+        6,
+        "knowledge_get_episodes",
+        json!({"group_ids": []}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(result_uuids(&v, "episodes").len(), 4);
+    let v = dispatch_val(
+        7,
+        "knowledge_get_episodes",
+        json!({"group_ids": [], "group_id": "g1"}),
+        state,
+    )
+    .await;
+    assert_eq!(result_uuids(&v, "episodes").len(), 2);
+}
+
+#[tokio::test]
+async fn get_episodes_paging_projection_prefix_667() {
+    let (db, _dir) = make_db(4);
+    seed_667_episodes(&db);
+    let state = make_state(db);
+
+    let all = page_all(
+        &state,
+        "knowledge_get_episodes",
+        "episodes",
+        "last_n",
+        3,
+        json!({}),
+    )
+    .await;
+    assert_eq!(all, vec!["667-b2", "667-b1", "667-a2", "667-a1"]);
+    let one_at_a_time = page_all(
+        &state,
+        "knowledge_get_episodes",
+        "episodes",
+        "last_n",
+        1,
+        json!({}),
+    )
+    .await;
+    assert_eq!(one_at_a_time, all);
+
+    // name_prefix composes with paging and fields.
+    let v = dispatch_val(
+        10,
+        "knowledge_get_episodes",
+        json!({"name_prefix": "doc-x", "last_n": 2, "fields": ["uuid", "name"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 10);
+    assert_eq!(result_uuids(&v, "episodes"), vec!["667-b2", "667-a2"]);
+    let first = &v["result"]["episodes"][0];
+    assert_eq!(first.as_object().unwrap().len(), 2, "{first}");
+    let cursor = v["result"]["next_cursor"].as_str().unwrap().to_string();
+    let v = dispatch_val(
+        11,
+        "knowledge_get_episodes",
+        json!({"name_prefix": "doc-x", "last_n": 2, "fields": ["uuid"], "cursor": cursor}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(result_uuids(&v, "episodes"), vec!["667-a1"]);
+    assert!(v["result"]["next_cursor"].is_null());
+
+    // Embeddings are never returned, even without `fields`.
+    let v = dispatch_val(
+        12,
+        "knowledge_get_episodes",
+        json!({"cursor": ""}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(v["result"]["episodes"][0]
+        .get("content_embedding")
+        .is_none());
+
+    // Projection shrinks the payload substantially.
+    let full = dispatch_val(13, "knowledge_get_episodes", json!({}), Arc::clone(&state)).await;
+    let slim = dispatch_val(
+        14,
+        "knowledge_get_episodes",
+        json!({"fields": ["uuid", "name"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(
+        slim["result"].to_string().len() * 4 < full["result"].to_string().len(),
+        "projection should be well under a quarter of the full payload"
+    );
+
+    // Validation errors.
+    for (id, params) in [
+        (20, json!({"fields": ["nope"]})),
+        (21, json!({"fields": []})),
+        (22, json!({"fields": "uuid"})),
+        (23, json!({"cursor": "not-a-cursor"})),
+        (24, json!({"cursor": 5})),
+    ] {
+        let v = dispatch_val(id, "knowledge_get_episodes", params, Arc::clone(&state)).await;
+        assert_err_resp(&v, id, -32000);
+    }
+    let v = dispatch_val(
+        25,
+        "knowledge_get_episodes",
+        json!({"fields": ["nope"]}),
+        state,
+    )
+    .await;
+    assert!(v["error"]["message"].as_str().unwrap().contains("nope"));
+}
+
+#[tokio::test]
+async fn get_episodes_cursor_rejected_for_different_query_667() {
+    let (db, _dir) = make_db(4);
+    seed_667_episodes(&db);
+    let state = make_state(db);
+    let v = dispatch_val(
+        1,
+        "knowledge_get_episodes",
+        json!({"last_n": 1, "group_ids": ["g1"], "cursor": ""}),
+        Arc::clone(&state),
+    )
+    .await;
+    let cursor = v["result"]["next_cursor"].as_str().unwrap().to_string();
+    for (id, params) in [
+        (2, json!({"group_ids": ["g2"], "cursor": cursor})),
+        (3, json!({"cursor": cursor})),
+        (
+            4,
+            json!({"group_ids": ["g1"], "name_prefix": "doc", "cursor": cursor}),
+        ),
+    ] {
+        let v = dispatch_val(id, "knowledge_get_episodes", params, Arc::clone(&state)).await;
+        assert_err_resp(&v, id, -32000);
+        assert!(v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid cursor"));
+    }
+    // An episodes cursor is not an entities cursor.
+    let v = dispatch_val(
+        5,
+        "knowledge_list_entities",
+        json!({"group_ids": ["g1"], "cursor": cursor}),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 5, -32000);
+}
+
+/// Episodes sharing a second — or a whole timestamp — must page exactly once, and inserts and
+/// deletes between pages must neither repeat nor skip an item that existed throughout.
+#[tokio::test]
+async fn get_episodes_paging_is_stable_under_ties_inserts_and_deletes_667() {
+    let (db, _dir) = make_db(4);
+    // Sub-second-colliding rows (same rendered second) and one exact tie.
+    insert_test_episode(&db, "t1", "n", "g", "2026-03-01T00:00:00.100000Z");
+    insert_test_episode(&db, "t2", "n", "g", "2026-03-01T00:00:00.200000Z");
+    insert_test_episode(&db, "t3", "n", "g", "2026-03-01T00:00:00.200000Z");
+    insert_test_episode(&db, "t4", "n", "g", "2026-03-01T00:00:00.900000Z");
+    insert_test_episode(&db, "t5", "n", "g", "2026-03-01T00:00:00.900000Z");
+    let state = make_state(Arc::clone(&db));
+
+    let full = page_all(
+        &state,
+        "knowledge_get_episodes",
+        "episodes",
+        "last_n",
+        100,
+        json!({}),
+    )
+    .await;
+    assert_eq!(full, vec!["t5", "t4", "t3", "t2", "t1"]);
+    assert_eq!(
+        page_all(
+            &state,
+            "knowledge_get_episodes",
+            "episodes",
+            "last_n",
+            2,
+            json!({})
+        )
+        .await,
+        full
+    );
+
+    // Page 1, then a newer insert and a delete of an already-returned row, then page 2+.
+    let v = dispatch_val(
+        1,
+        "knowledge_get_episodes",
+        json!({"last_n": 2, "cursor": ""}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(result_uuids(&v, "episodes"), vec!["t5", "t4"]);
+    let mut cursor = v["result"]["next_cursor"].as_str().unwrap().to_string();
+    insert_test_episode(&db, "t6", "n", "g", "2026-03-02 00:00:00");
+    db.connect().unwrap().remove_episode("t4").unwrap();
+    let mut rest = Vec::new();
+    loop {
+        let v = dispatch_val(
+            2,
+            "knowledge_get_episodes",
+            json!({"last_n": 2, "cursor": cursor}),
+            Arc::clone(&state),
+        )
+        .await;
+        assert_ok_resp(&v, 2);
+        rest.extend(result_uuids(&v, "episodes"));
+        match v["result"]["next_cursor"].as_str() {
+            Some(c) => cursor = c.to_string(),
+            None => break,
+        }
+    }
+    assert_eq!(rest, vec!["t3", "t2", "t1"]);
+}
+
+fn seed_667_entities(db: &Arc<Db>) {
+    for (uuid, name, group) in [
+        ("667-e1", "Alice", "g1"),
+        ("667-e2", "ALPHA", "g1"),
+        ("667-e3", "alpha", "g2"),
+        ("667-e4", "Bob", "g2"),
+        ("667-e5", "Carol", "g1"),
+    ] {
+        insert_test_entity(db, uuid, name, group, vec!["Person".to_string()]);
+    }
+}
+
+#[tokio::test]
+async fn list_entities_paging_projection_prefix_667() {
+    let (db, _dir) = make_db(4);
+    seed_667_entities(&db);
+    let state = make_state(db);
+
+    // Default envelope unchanged.
+    let v = dispatch_val(1, "knowledge_list_entities", json!({}), Arc::clone(&state)).await;
+    let keys: Vec<&String> = v["result"].as_object().unwrap().keys().collect();
+    assert_eq!(keys, vec!["nodes", "count"]);
+    let full = result_uuids(&v, "nodes");
+    assert_eq!(full.len(), 5);
+
+    // Paging visits every item exactly once, in the same order.
+    for size in [1, 2, 3, 5, 7] {
+        let paged = page_all(
+            &state,
+            "knowledge_list_entities",
+            "nodes",
+            "num_results",
+            size,
+            json!({}),
+        )
+        .await;
+        assert_eq!(paged, full, "page size {size}");
+    }
+
+    // Case-insensitive prefix, composed with group_ids, paging and fields.
+    let v = dispatch_val(
+        2,
+        "knowledge_list_entities",
+        json!({"name_prefix": "al", "fields": ["uuid", "name"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    let mut names: Vec<String> = v["result"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["ALPHA", "Alice", "alpha"]);
+    assert_eq!(v["result"]["nodes"][0].as_object().unwrap().len(), 2, "{v}");
+    assert!(v["result"]["next_cursor"].is_null());
+
+    let paged_alpha = page_all(
+        &state,
+        "knowledge_list_entities",
+        "nodes",
+        "num_results",
+        1,
+        json!({"name_prefix": "AL", "group_ids": ["g1"]}),
+    )
+    .await;
+    assert_eq!(paged_alpha.len(), 2);
+
+    // Metacharacters match literally.
+    let v = dispatch_val(
+        3,
+        "knowledge_list_entities",
+        json!({"name_prefix": ".*"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(v["result"]["count"], 0);
+
+    // Enrichment fields still present when projected.
+    let v = dispatch_val(
+        4,
+        "knowledge_list_entities",
+        json!({"fields": ["uuid", "episode_uuids", "source_descriptions"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(v["result"]["nodes"][0].get("episode_uuids").is_some());
+
+    // Embeddings never leak; unknown field rejected.
+    let v = dispatch_val(
+        5,
+        "knowledge_list_entities",
+        json!({"cursor": ""}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(v["result"]["nodes"][0].get("name_embedding").is_none());
+    let v = dispatch_val(
+        6,
+        "knowledge_list_entities",
+        json!({"fields": ["name_embedding"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_err_resp(&v, 6, -32000);
+}
+
+#[tokio::test]
+async fn status_wal_block_labelled_only_with_wal_root_667() {
+    // No WAL root: block unchanged (no label keys).
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(1, "knowledge_status", json!({}), state).await;
+    let wal = v["result"]["wal"].as_object().unwrap();
+    assert_eq!(wal["exists"], false);
+    for k in ["scope", "default_group", "see"] {
+        assert!(
+            !wal.contains_key(k),
+            "unexpected {k} without a WAL root: {v}"
+        );
+    }
+
+    // WAL root configured, default group has no stream: the block stays (consumer
+    // compatibility) but is labelled as the default group's view, pointing to `wal_groups`.
+    let (db, _dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+    let v = dispatch_val(2, "knowledge_status", json!({}), state).await;
+    let wal = &v["result"]["wal"];
+    assert_eq!(wal["exists"], false, "{v}");
+    assert_eq!(wal["scope"], "default_group", "{v}");
+    assert_eq!(wal["default_group"], "liminis", "{v}");
+    assert_eq!(wal["see"], "wal_groups", "{v}");
+    assert!(v["result"]["wal_groups"].is_object(), "{v}");
+}

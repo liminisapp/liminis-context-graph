@@ -30,6 +30,7 @@ pub mod ontology;
 pub mod ontology_sidecar;
 pub mod pointer;
 pub mod prompts;
+pub mod read_page;
 pub mod rebuild_job;
 pub mod recovery;
 pub mod replay;

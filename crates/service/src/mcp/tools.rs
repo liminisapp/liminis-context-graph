@@ -47,6 +47,30 @@ fn kind_filter_prop() -> Value {
     })
 }
 
+fn cursor_prop() -> Value {
+    json!({
+        "type": "string",
+        "description": "Opaque paging cursor (issue #667). Pass an empty string to start \
+                         paging, then pass back each response's `next_cursor` until it is \
+                         null. Sending `cursor`, `fields` or `name_prefix` makes the response \
+                         carry `next_cursor`. A cursor is only valid for the same group, kind \
+                         and name_prefix filters it was issued for; anything else is rejected."
+    })
+}
+
+fn fields_prop(allowed: &str) -> Value {
+    json!({
+        "type": "array",
+        "items": {"type": "string"},
+        "minItems": 1,
+        "description": format!(
+            "Optional projection (issue #667): return only these keys per item. Allowed: \
+             {allowed}. Unknown names are rejected. Embeddings are never returned. Omitted: \
+             the full shape."
+        )
+    })
+}
+
 fn min_similarity_prop() -> Value {
     json!({
         "type": "number", "minimum": 0.0, "maximum": 1.0,
@@ -80,7 +104,12 @@ pub fn registry() -> Vec<ToolSpec> {
                            when the database is open but a core table is missing — check the \
                            `queryable` field (and `reason` when false) to distinguish that state \
                            from a genuinely empty graph, whose counts read as 0 rather than \
-                           null. Other query failures still surface as JSON-RPC errors.",
+                           null. Other query failures still surface as JSON-RPC errors. The flat \
+                           `wal` block always describes the DEFAULT group's own stream; when a \
+                           WAL root is configured it carries `scope: \"default_group\"`, \
+                           `default_group` and `see: \"wal_groups\"` (issue #667), so \
+                           `exists: false` there means the default group has no stream, not \
+                           that WAL is broken — read `wal_groups` for every group.",
             scope: Scope::Read,
             input_schema: empty_schema,
         },
@@ -184,23 +213,41 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_get_episodes",
-            description: "Retrieve the most recent episodes (ingested source documents) for \
-                           a group. Each returned episode includes its `attributes` (issue \
-                           #528), the caller-supplied structured metadata set via \
-                           `knowledge_process_chunk`/`knowledge_add_episode`.",
+            description: "Retrieve the most recent episodes (ingested source documents), \
+                           newest first. Scoped by `group_ids` (array) and/or the single-group \
+                           alias `group_id` (both given: their union); with neither, episodes \
+                           from EVERY group are returned (issue #667 — this used to default to \
+                           the `liminis` group). Each returned episode includes its \
+                           `attributes` (issue #528), the caller-supplied structured metadata \
+                           set via `knowledge_process_chunk`/`knowledge_add_episode`. Page \
+                           with `cursor`/`next_cursor`, drop large fields such as `content` \
+                           with `fields`, and fetch e.g. every chunk of one document with \
+                           `name_prefix` (issue #667).",
             scope: Scope::Read,
             input_schema: || {
                 json!({
                     "type": "object",
                     "properties": {
+                        "group_ids": group_ids_prop(),
                         "group_id": {
-                            "type": "string", "default": "liminis",
-                            "description": "Group to retrieve episodes from."
+                            "type": "string",
+                            "description": "Single-group alias for `group_ids`; unioned with it \
+                                             when both are given. Omit both for all groups."
                         },
                         "last_n": {
                             "type": "integer", "minimum": 1, "default": 50,
-                            "description": "Number of most recent episodes to return."
-                        }
+                            "description": "Page size: number of most recent episodes to return."
+                        },
+                        "name_prefix": {
+                            "type": "string",
+                            "description": "Only episodes whose name starts with this prefix \
+                                             (case-sensitive, matched literally)."
+                        },
+                        "cursor": cursor_prop(),
+                        "fields": fields_prop(
+                            "uuid, name, group_id, created_at, source, source_description, \
+                             content, valid_at, entity_edges, attributes"
+                        )
                     }
                 })
             },
@@ -286,7 +333,8 @@ pub fn registry() -> Vec<ToolSpec> {
                            never a full episode object. Every returned node carries its `kind` \
                            (issue #615); `kind` is an optional filter — omitted, ALL kinds are \
                            listed (same-named entities of different kinds appear as separate \
-                           nodes); given, only that kind.",
+                           nodes); given, only that kind. Page with `cursor`/`next_cursor`, \
+                           project with `fields`, and narrow by `name_prefix` (issue #667).",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -294,10 +342,20 @@ pub fn registry() -> Vec<ToolSpec> {
                     "properties": {
                         "num_results": {
                             "type": "integer", "minimum": 1, "default": 500,
-                            "description": "Maximum number of entities to return."
+                            "description": "Page size: maximum number of entities to return."
                         },
                         "group_ids": group_ids_prop(),
-                        "kind": kind_filter_prop()
+                        "kind": kind_filter_prop(),
+                        "name_prefix": {
+                            "type": "string",
+                            "description": "Only entities whose name starts with this prefix \
+                                             (case-insensitive, matched literally)."
+                        },
+                        "cursor": cursor_prop(),
+                        "fields": fields_prop(
+                            "uuid, name, group_id, labels, kind, created_at, summary, \
+                             attributes, episode_uuids, source_descriptions"
+                        )
                     }
                 })
             },
@@ -1464,6 +1522,31 @@ mod tests {
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_entity_types"));
         assert!(!is_streaming_method("knowledge_status"));
+    }
+
+    /// Issue #667: the two bulk reads advertise paging, projection and prefix filtering, and
+    /// `knowledge_get_episodes` documents `group_ids`, the `group_id` alias and all-groups default.
+    #[test]
+    fn bulk_reads_advertise_paging_projection_and_prefix() {
+        let r = registry();
+        for name in ["knowledge_get_episodes", "knowledge_list_entities"] {
+            let tool = r.iter().find(|t| t.name == name).unwrap();
+            let props = &(tool.input_schema)()["properties"];
+            for key in ["cursor", "fields", "name_prefix", "group_ids"] {
+                assert!(props.get(key).is_some(), "{name} missing {key}");
+            }
+        }
+        let ep = r
+            .iter()
+            .find(|t| t.name == "knowledge_get_episodes")
+            .unwrap();
+        let props = &(ep.input_schema)()["properties"];
+        assert!(props.get("group_id").is_some());
+        assert!(
+            props["group_id"].get("default").is_none(),
+            "group_id must no longer default to liminis"
+        );
+        assert!(ep.description.contains("EVERY group"));
     }
 
     #[test]

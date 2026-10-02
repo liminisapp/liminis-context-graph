@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [Unreleased]
+
+### Upgrading
+
+- **`knowledge_get_episodes` with no `group_id`/`group_ids` now returns episodes from every group**,
+  not just `liminis` (#667, fixes #648). Pass `group_ids: ["liminis"]` (or `group_id`) to keep the
+  old scope. `group_ids` is now honoured (it was silently ignored); `group_id` remains an alias.
+
+### Added
+
+- **Paging, projection and prefix filters on the two bulk reads** (#667, ADR-0667):
+  `knowledge_get_episodes` and `knowledge_list_entities` accept `cursor` (send `""` to start; follow
+  `next_cursor` until `null`), `fields` (return only the named keys; embeddings are never returned)
+  and `name_prefix` (case-insensitive for entities). Absent all three, responses are unchanged.
+- `knowledge_status.wal` carries `scope`, `default_group` and `see: "wal_groups"` when a WAL root is
+  configured, so `exists: false` for a default group with no stream no longer reads as an error.
+
+### Changed
+
+- `knowledge_get_episodes` orders ties on `created_at` by `uuid` (descending) so paging is
+  deterministic. Previously the order within a tie was arbitrary.
+
 ## [0.16.3] - 2026-10-01
 
 Full detail: [docs/releases/0.16.3.md](docs/releases/0.16.3.md).
