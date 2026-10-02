@@ -1078,7 +1078,7 @@ pages never repeat or skip an item that existed throughout. A cursor is bound to
 its `group_ids`, `kind` and `name_prefix`; a malformed cursor or one replayed against a different
 query fails with `invalid cursor: …` (JSON-RPC `-32000`, like every other validation error here).
 `count` is always the number of items in the page. Filtering episodes by `attributes` is not
-supported yet. See ADR-0667.
+supported yet. See [ADR-0667](adr/0667-read-path-paging-cursor-and-status-label.md).
 
 `knowledge_status`: the flat `wal` block always describes the **default group's** WAL stream. When
 a WAL root is configured it now also carries `"scope": "default_group"`, `"default_group":
@@ -4329,6 +4329,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0650](0650-identifier-mismatch-veto-for-extraction-dedup.md) | Identifier-Mismatch Veto for Extraction-Time Entity Dedup | 2026-10-01 |
 | [0651](0651-merge-consolidates-summaries-and-refreshes-embedding.md) | Entity Merge Consolidates Summaries and Always Re-embeds `summary_embedding` | 2026-10-01 |
 | [0652](0652-llm-verified-extraction-dedup-via-extractor.md) | LLM-Verified Extraction Dedup via the Configured Extractor | 2026-10-01 |
+| [0667](0667-read-path-paging-cursor-and-status-label.md) | Read-Path Paging Cursor, Projection, All-Groups Episode Default and Status Label | 2026-10-01 |
 
 ## Historical numbering
 
