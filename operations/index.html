@@ -362,6 +362,15 @@ Supervisor liveness probes should treat any response with <code dir="auto">ok: t
 <a href="../ipc-mcp-reference/#health-check-contract">IPC reference: Health check contract</a>.</p>
 <h2 id="knowledge_status-health-fields"><code dir="auto">knowledge_status</code> health fields</h2>
 <p>Beyond the <a href="../ontology/#knowledge_status-summary">ontology summary</a>, <code dir="auto">knowledge_status</code> reports:</p>
+<p><strong><code dir="auto">dedup_mode</code></strong> (string, always present, including when degraded) — what protects the graph from
+wrong embedding-path merges during extraction, beyond the cosine threshold (issue #652,
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0652-llm-verified-extraction-dedup-via-extractor.md">ADR-0652</a>). <code dir="auto">"veto-only"</code>: the
+deterministic identifier-mismatch veto (<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0650-identifier-mismatch-veto-for-extraction-dedup.md">ADR-0650</a>)
+is the only check, so any candidate that passes it merges. <code dir="auto">"llm-verified"</code>: the configured
+extractor additionally judges each surviving candidate (<code dir="auto">LCG_DEDUP_LLM</code>, off by default). If
+<code dir="auto">LCG_DEDUP_LLM</code> is on but no extraction provider is configured the field reads <code dir="auto">"veto-only"</code> and
+startup logged a warning. The same mode is logged once at startup as <code dir="auto">dedup: mode=…</code>; per-chunk
+path counts are on <code dir="auto">knowledge_process_chunk</code>’s <code dir="auto">dedup_paths</code>.</p>
 <p><strong><code dir="auto">indices_built</code></strong> (boolean) — whether the entity/relationship FTS + HNSW search indices are
 currently built and reflect the graph’s current contents. The service builds these indices
 <strong>eagerly at startup</strong> — immediately after schema init on a fresh DB, or as part of
@@ -429,6 +438,23 @@ while the service is degraded (no connected database). A rising <code dir="auto"
 count, or a <code dir="auto">name_index_trusted: false</code> that doesn’t clear on its own, signals <code dir="auto">lookup_key</code>
 staleness worth investigating — see
 <a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0221-secondary-art-index-for-entity-name-lookup.md">ADR-0221</a> for the mechanism.</p>
+<p><strong><code dir="auto">fts_repair_count</code></strong> (integer) and <strong><code dir="auto">fts_last_repair_unix_ms</code></strong> (integer or <code dir="auto">null</code>) — how many
+times, since this process opened the database, a write hit <code dir="auto">FTS index '&#x3C;idx>' is inconsistent</code> and
+the service rebuilt all three FTS indexes and retried that statement once, and when the last such
+repair finished (Unix ms; <code dir="auto">null</code> if none). Both are <code dir="auto">null</code> while the service is degraded. A
+non-zero count means a residual FTS inconsistency that the startup marker did not catch was
+detected and repaired (the classifier matches the error text, not its cause, so it does not by
+itself identify a version mismatch); it normally does not recur. The one-time startup rebuild (marker <code dir="auto">fts_built_by_lbug</code> in
+<code dir="auto">SchemaState</code>) is <em>not</em> counted here; it is logged on stderr
+(<code dir="auto">rebuilding full-text (FTS) indexes: they were not built by this lbug version</code>) and its time is
+proportional to corpus size. See
+<a href="https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/0649-fts-index-rebuild-on-lbug-version-change.md">ADR-0649</a>.</p>
+<p><strong>Troubleshooting <code dir="auto">FTS index '&#x3C;idx>' is inconsistent</code>.</strong> Raised by a delete/update on a row whose
+non-ASCII term is missing from an FTS index built by lbug 0.20 (0.15.x and earlier). Releases after
+0.16.2 rebuild the indexes automatically on first start. On 0.16.0–0.16.2, drop <strong>all three</strong> (not just
+the named one) with <code dir="auto">CALL DROP_FTS_INDEX('Entity','node_name_and_summary')</code>,
+<code dir="auto">CALL DROP_FTS_INDEX('RelatesToNode_','edge_name_and_fact')</code> and
+<code dir="auto">CALL DROP_FTS_INDEX('Episodic','episode_content')</code>, then call <code dir="auto">knowledge_build_indices</code>.</p>
 <p><strong><code dir="auto">wal_groups</code></strong> (issue #378) — an additive map, keyed by <code dir="auto">group_id</code>, of every group that
 currently has a WAL directory, each entry shaped like the flat <code dir="auto">wal</code> object below
 (<code dir="auto">{applied_seq, max_seq, generation, generation_status, hydration_status, embedding_model, embedding_dim, embedding_model_status}</code> — the last three added by issue #440, mirroring each
@@ -747,5 +773,5 @@ bridge and the list of operations that support it.</p>
 <code dir="auto">knowledge_rebuild_from_wal</code>, <code dir="auto">knowledge_recover</code>, and <code dir="auto">knowledge_recover_full</code> are all
 <code dir="auto">admin</code>-scope IPC/MCP tools — see
 <a href="../ipc-mcp-reference/#scopes">Scopes</a> for the full admin-scope list and the MCP <code dir="auto">--scope</code> flag.</p> </div> <footer class="sl-flex astro-u6a2umoc"> <div class="meta sl-flex astro-u6a2umoc"> <a href="https://github.com/verveguy/liminis-context-graph/edit/main/docs/operations.md" class="sl-flex print:hidden astro-dbs75ed6"><svg aria-hidden="true" class="astro-dbs75ed6 astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg> Edit page</a>  </div> <div class="pagination-links print:hidden astro-zcwzvqnq" dir="ltr"> <a href="/liminis-context-graph/ontology/" rel="prev" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg>  <span class="astro-zcwzvqnq"> Previous <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">Ontology</span> </span> </a> <a href="/liminis-context-graph/testing-and-evaluation/" rel="next" class="astro-zcwzvqnq"> <svg aria-hidden="true" class="astro-zcwzvqnq astro-64pj3kic" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg>  <span class="astro-zcwzvqnq"> Next <br class="astro-zcwzvqnq"> <span class="link-title astro-zcwzvqnq">Testing &amp; Evaluation</span> </span> </a> </div>   </footer>  <p class="lcg-version astro-sz7xmlte">
-Documents <code class="astro-sz7xmlte">liminis-context-graph</code> v0.16.2.
+Documents <code class="astro-sz7xmlte">liminis-context-graph</code> v0.16.3.
 <span id="version-switcher" class="astro-sz7xmlte"></span> </p>   </div> </div>   </main> </div> </div>  </div> </div>  </body></html>
