@@ -464,6 +464,9 @@ pub fn registry() -> Vec<ToolSpec> {
                            plus `unresolved_endpoint` (`source`, `target`, or `both`) naming \
                            which endpoint(s) failed to resolve — always present, empty when \
                            nothing was dropped. \
+                           `edges_dropped_self_loop` counts edges dropped because both \
+                           endpoints resolved to the same entity (they would have been \
+                           self-loops); these are not in `dropped_edges`. \
                            Recommended maximum `chunk_text` size is 8,000 characters (default, \
                            overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`) — extraction \
                            quality degrades well before any context-window limit is reached. \
