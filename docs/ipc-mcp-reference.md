@@ -340,6 +340,34 @@ before relying on `[]` to mean "nothing" — on the other five it doesn't.
 This section is the single, central statement of that contract; individual tool entries on this
 page don't restate it.
 
+### Bulk reads: group scope, paging, projection, prefix (issue #667)
+
+`knowledge_get_episodes` and `knowledge_list_entities` are the two bulk reads, and a large graph
+can overflow an MCP client's tool-result limit if read in one call. Both accept the same optional,
+additive parameters; with none of them the response is exactly `{<collection>, count}` as before.
+
+| Parameter | Tools | Meaning |
+|---|---|---|
+| `group_ids` (array) | both | Groups to read. `knowledge_get_episodes` also accepts the single-group alias `group_id`; both given ⇒ their deduplicated union. **Neither given ⇒ every group** (episodes used to default to `liminis`). An explicit `[]` also means all groups. |
+| `last_n` / `num_results` | episodes / entities | Page size (defaults 50 / 500, unchanged). |
+| `cursor` | both | Opaque keyset cursor. Send `""` for the first page, then send back each response's `next_cursor` until it is `null`. |
+| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, source, source_description, content, valid_at, entity_edges, attributes`. Entities: `uuid, name, group_id, labels, kind, created_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
+| `name_prefix` | both | Names starting with this prefix, matched literally. Case-insensitive for entities (via Cypher `lower()`, so non-ASCII folds only as far as lbug does); case-sensitive for episodes. |
+
+`next_cursor` appears only when the request contained `cursor`, `fields` or `name_prefix`; it is
+`null` on the last page. Order is deterministic (episodes newest first with a `uuid` tiebreaker;
+entities by `uuid` descending) and the cursor is a keyset position, so inserts and deletes between
+pages never repeat or skip an item that existed throughout. A cursor is bound to the tool and to
+its `group_ids`, `kind` and `name_prefix`; a malformed cursor or one replayed against a different
+query fails with `invalid cursor: …` (JSON-RPC `-32000`, like every other validation error here).
+`count` is always the number of items in the page. Filtering episodes by `attributes` is not
+supported yet. See [ADR-0667](adr/0667-read-path-paging-cursor-and-status-label.md).
+
+`knowledge_status`: the flat `wal` block always describes the **default group's** WAL stream. When
+a WAL root is configured it now also carries `"scope": "default_group"`, `"default_group":
+"liminis"` and `"see": "wal_groups"`, so `exists: false` there means the default group has no
+stream — read `wal_groups` for every group's position. With no WAL root the block is unchanged.
+
 ### Deletion (`delete_chunk_episode`, `delete_by_source`)
 
 **Breaking change in 0.13.2 (issue #406): `group_ids` is required and non-empty on both
