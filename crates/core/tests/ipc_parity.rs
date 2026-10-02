@@ -1421,6 +1421,10 @@ async fn test_knowledge_process_chunk_ok() {
         r["edges_dropped_unresolvable"].as_u64().is_some(),
         "expected numeric edges_dropped_unresolvable: {v}"
     );
+    assert!(
+        r["edges_dropped_self_loop"].as_u64().is_some(),
+        "expected numeric edges_dropped_self_loop: {v}"
+    );
     assert_eq!(
         r["dropped_edges"].as_array().map(|a| a.is_empty()),
         Some(true),

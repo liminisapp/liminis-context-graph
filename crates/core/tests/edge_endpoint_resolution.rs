@@ -329,9 +329,10 @@ async fn test_scan_fallback_miss_is_memoized_once_per_batch() {
     let conn = db.connect().unwrap();
     assert_eq!(
         conn.lookup_key_fallback_scan_count(),
-        1,
-        "two edges naming the same nonexistent entity in one batch must share a single \
-         fallback scan, not one per edge (FR-002)"
+        2,
+        "two edges naming the same nonexistent entity in one batch must share one fallback \
+         scan per phase (the pre-lock exact-match probe of #666, then Phase C's memoized \
+         lookup), not one per edge (FR-002)"
     );
 }
 
@@ -761,4 +762,65 @@ async fn test_edge_endpoint_resolves_when_entity_name_has_control_char() {
     let conn = db.connect().unwrap();
     let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
     assert_eq!(rels.len(), 1, "expected exactly one persisted edge");
+}
+
+// ── Issue #666: UUID-level self-loop guard ─────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_whose_endpoints_resolve_to_one_uuid_is_dropped_and_counted() {
+    let (db, _dir) = make_db();
+
+    // 'Alpha Inc' dedup-merges onto the stored 'Alpha' (same vector), so the differently named
+    // endpoints of Alpha Inc → Alpha resolve to one UUID. The name-level filter cannot see it.
+    let mut map = HashMap::new();
+    map.insert("Alpha".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("Alpha Inc".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("Beta".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
+    let embedder = NameMapEmbedder::new(EMB_DIM, map);
+
+    let ext = ConfigurableExtractor::new(vec![
+        batch(&["Alpha"], &[]),
+        batch(
+            &["Alpha Inc", "Beta"],
+            &[
+                ("Alpha Inc", "Alpha", "Alpha Inc is Alpha"),
+                ("Alpha Inc", "Beta", "Alpha Inc partners with Beta"),
+            ],
+        ),
+    ]);
+    let state = make_state_with(Arc::clone(&db), ext, embedder);
+
+    run_episode(&state, "ep-a", "Alpha.", GROUP_A).await;
+    let result = run_episode(&state, "ep-b", "Alpha Inc is Alpha.", GROUP_A).await;
+
+    assert_eq!(result.edges_dropped_self_loop, 1, "{result:?}");
+    assert_eq!(
+        result.edges_dropped_unresolvable, 0,
+        "a self-loop drop is not an unresolvable-endpoint drop"
+    );
+    assert!(
+        result.dropped_edges.is_empty(),
+        "dropped_edges is one entry per unresolvable drop only (ADR-0051)"
+    );
+    assert_eq!(
+        result.edges_extracted, 1,
+        "the distinct-UUID edge is inserted"
+    );
+
+    let conn = db.connect().unwrap();
+    let alpha = conn
+        .get_entity_by_name_ci("Alpha", GROUP_A, "Entity")
+        .unwrap()
+        .expect("Alpha must exist");
+    let beta = conn
+        .get_entity_by_name_ci("Beta", GROUP_A, "Entity")
+        .unwrap()
+        .expect("Beta must exist");
+    let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
+    assert_eq!(rels.len(), 1);
+    assert_eq!(rels[0].source_node_uuid, alpha.uuid);
+    assert_eq!(rels[0].target_node_uuid, beta.uuid);
+    assert!(rels
+        .iter()
+        .all(|r| r.source_node_uuid != r.target_node_uuid));
 }
