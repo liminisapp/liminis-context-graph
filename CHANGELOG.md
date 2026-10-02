@@ -7,9 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
-## [Unreleased]
+## [0.16.4] - 2026-10-02
+
+Full detail: [docs/releases/0.16.4.md](docs/releases/0.16.4.md).
 
 ### Upgrading
+
+- **Re-ingest graphs built by extraction on 0.16.3 or earlier** to remove endpoints already
+  re-pointed onto the wrong entity and stored self-loops (#666); they are not repaired in place.
 
 - **`knowledge_get_episodes` with no `group_id`/`group_ids` now returns episodes from every group**,
   not just `liminis` (#667, fixes #648). Pass `group_ids: ["liminis"]` (or `group_id`) to keep the
