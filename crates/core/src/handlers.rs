@@ -780,6 +780,17 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             },
         }),
     };
+    // Issue #667: with a WAL root configured the flat `wal` block describes only the default
+    // group's own stream, so it reads `exists: false` when that group has no directory even while
+    // `wal_groups` shows other groups hydrated. Label it (additively — every existing key is
+    // untouched, ADR-0378) rather than omit it. With no WAL root the block is unchanged.
+    if state.wal_root.is_some() {
+        if let Some(wal) = result["wal"].as_object_mut() {
+            wal.insert("scope".to_string(), json!("default_group"));
+            wal.insert("default_group".to_string(), json!(DEFAULT_GROUP_ID));
+            wal.insert("see".to_string(), json!("wal_groups"));
+        }
+    }
     result["ontology"] = ontology_summary;
     result["group_ontology_drift"] = group_ontology_drift;
     // Per-group identity-bearing-set refusals (issue #616, D1): only groups whose ontology

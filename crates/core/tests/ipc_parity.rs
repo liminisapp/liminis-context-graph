@@ -7634,3 +7634,32 @@ async fn list_entities_paging_projection_prefix_667() {
     .await;
     assert_err_resp(&v, 6, -32000);
 }
+
+#[tokio::test]
+async fn status_wal_block_labelled_only_with_wal_root_667() {
+    // No WAL root: block unchanged (no label keys).
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(1, "knowledge_status", json!({}), state).await;
+    let wal = v["result"]["wal"].as_object().unwrap();
+    assert_eq!(wal["exists"], false);
+    for k in ["scope", "default_group", "see"] {
+        assert!(
+            !wal.contains_key(k),
+            "unexpected {k} without a WAL root: {v}"
+        );
+    }
+
+    // WAL root configured, default group has no stream: the block stays (consumer
+    // compatibility) but is labelled as the default group's view, pointing to `wal_groups`.
+    let (db, _dir) = make_db(4);
+    let wal_dir = TempDir::new().unwrap();
+    let state = make_state_with_wal(db, wal_dir.path().to_path_buf(), "test.db".to_string());
+    let v = dispatch_val(2, "knowledge_status", json!({}), state).await;
+    let wal = &v["result"]["wal"];
+    assert_eq!(wal["exists"], false, "{v}");
+    assert_eq!(wal["scope"], "default_group", "{v}");
+    assert_eq!(wal["default_group"], "liminis", "{v}");
+    assert_eq!(wal["see"], "wal_groups", "{v}");
+    assert!(v["result"]["wal_groups"].is_object(), "{v}");
+}
