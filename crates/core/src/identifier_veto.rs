@@ -17,10 +17,22 @@
 //!   letter, except trailing-period initials (`Brett A.`) and a single-letter token in first
 //!   position of a multi-token name when it is the article `a` (`A Tale of Two Cities`); other
 //!   leading letters (`C Programming`, `X Corp`) remain designators.
+//!
+//! On top of the set-inequality rule, a separate **short all-caps code** rule (issue #666)
+//! covers digit-free distinct codes (`ACDS` vs `ACDM`) that the token sets above cannot see.
+//! A *code token* is, in the **original-case** name (so it is read before lowercasing), a
+//! whitespace-separated token that after trimming punctuation is 2–6 alphabetic characters, all
+//! uppercase, and not a Roman numeral (`II`/`III` stay the documented ADR-0650 gap). Because an
+//! acronym legitimately aliases its expansion (`IBM` / `International Business Machines`) and a
+//! shout-case name its normal-case form, the rule is a **mutual-exclusion** test: it vetoes only
+//! when *each* side has a code token the other lacks. `ACDS`/`ACDM`, `UK`/`USA` and
+//! `US Army`/`UK Army` are vetoed; `IBM`/`IBM Corp`, `NASA`/`nasa` and `PROJECT AURORA DOCS`/
+//! `Project Aurora` are not. A code against a name with no all-caps token (`Acme` vs `ACDM`)
+//! is a known gap left to the embedding and the opt-in LLM check (ADR-0652).
 
 use std::collections::BTreeSet;
 
-use crate::prompts::normalize_name;
+use crate::prompts::{normalize_name, strip_control_chars};
 
 fn is_dash(c: char) -> bool {
     matches!(c, '-' | '–' | '—')
@@ -66,10 +78,71 @@ pub fn distinguishing_tokens(name: &str) -> BTreeSet<String> {
     out
 }
 
+/// True for a well-formed Roman numeral (upper-case), e.g. `II`, `VIII`, `XL`.
+fn is_roman_numeral(s: &str) -> bool {
+    let mut rest = s;
+    // Strict grammar: M{0,3}(CM|CD|D?C{0,3})(XC|XL|L?X{0,3})(IX|IV|V?I{0,3})
+    for _ in 0..3 {
+        rest = rest.strip_prefix('M').unwrap_or(rest);
+    }
+    rest = if let Some(r) = rest.strip_prefix("CM").or_else(|| rest.strip_prefix("CD")) {
+        r
+    } else {
+        let r = rest.strip_prefix('D').unwrap_or(rest);
+        strip_up_to(r, 'C', 3)
+    };
+    rest = if let Some(r) = rest.strip_prefix("XC").or_else(|| rest.strip_prefix("XL")) {
+        r
+    } else {
+        let r = rest.strip_prefix('L').unwrap_or(rest);
+        strip_up_to(r, 'X', 3)
+    };
+    rest = if let Some(r) = rest.strip_prefix("IX").or_else(|| rest.strip_prefix("IV")) {
+        r
+    } else {
+        let r = rest.strip_prefix('V').unwrap_or(rest);
+        strip_up_to(r, 'I', 3)
+    };
+    rest.is_empty()
+}
+
+fn strip_up_to(s: &str, c: char, max: usize) -> &str {
+    let mut rest = s;
+    for _ in 0..max {
+        match rest.strip_prefix(c) {
+            Some(r) => rest = r,
+            None => break,
+        }
+    }
+    rest
+}
+
+/// The short all-caps code tokens of `name` (see the module docs), lowercased.
+fn code_tokens(name: &str) -> BTreeSet<String> {
+    strip_control_chars(name)
+        .split_whitespace()
+        .map(trim_punct)
+        .filter(|t| {
+            let n = t.chars().count();
+            (2..=6).contains(&n)
+                && t.chars().all(|c| c.is_alphabetic() && c.is_uppercase())
+                && !is_roman_numeral(t)
+        })
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// True when each of `a` and `b` has a code token the other lacks.
+fn code_mismatch(a: &str, b: &str) -> bool {
+    let (ca, cb) = (code_tokens(a), code_tokens(b));
+    !ca.is_subset(&cb) && !cb.is_subset(&ca)
+}
+
 /// True when `a` and `b` carry different distinguishing-token sets — including when only one
-/// side has any — i.e. when they must not be merged on embedding similarity alone.
+/// side has any — or distinct short all-caps codes, i.e. when they must not be merged on
+/// embedding similarity alone.
 pub fn identifier_mismatch(a: &str, b: &str) -> bool {
-    distinguishing_tokens(a) != distinguishing_tokens(b)
+    distinguishing_tokens(a) != distinguishing_tokens(b) || code_mismatch(a, b)
 }
 
 #[cfg(test)]
@@ -164,5 +237,51 @@ mod tests {
     fn cjk_digit_difference_is_vetoed() {
         assert!(vetoed("第2章", "第3章"));
         assert!(!vetoed("東京", "東京都"));
+    }
+
+    #[test]
+    fn distinct_short_codes_are_vetoed() {
+        for (a, b) in [
+            ("ACDS", "ACDM"),
+            ("UK", "USA"),
+            ("US Army", "UK Army"),
+            ("ACDS Platform", "ACDM Platform"),
+        ] {
+            assert!(vetoed(a, b), "{a:?} / {b:?} should be vetoed");
+        }
+    }
+
+    #[test]
+    fn acronym_and_case_aliases_are_not_vetoed_by_the_code_rule() {
+        for (a, b) in [
+            ("IBM", "International Business Machines"),
+            ("AWS", "Amazon Web Services"),
+            ("IBM", "IBM Corp"),
+            ("NASA", "nasa"),
+            ("NASA", "Nasa"),
+            ("PROJECT AURORA DOCS", "Project Aurora"),
+            ("REST API", "RESTful API"),
+            ("PostgreSQL", "Postgres"),
+            ("New York", "New York City"),
+            ("ACDS", "ACDS"),
+        ] {
+            assert!(!vetoed(a, b), "{a:?} / {b:?} should not be vetoed");
+        }
+    }
+
+    #[test]
+    fn code_rule_known_gaps_fall_back_to_the_embedding() {
+        // A code against a name with no all-caps token, and over-long shout-case words.
+        assert!(!vetoed("Acme", "ACDM"));
+        assert!(!vetoed("ACDMXYZ", "ACDSXYZ"));
+    }
+
+    #[test]
+    fn code_tokens_exclude_roman_numerals_and_caseless_scripts() {
+        assert!(code_tokens("World War II").is_empty());
+        assert!(code_tokens("Henry VIII").is_empty());
+        assert!(code_tokens("東京").is_empty());
+        let want: BTreeSet<String> = ["acds", "uk"].map(String::from).into();
+        assert_eq!(code_tokens("(ACDS) and UK, a Co."), want);
     }
 }

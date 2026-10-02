@@ -173,7 +173,7 @@ pub fn entity_user_prompt_for(
     }
 }
 
-fn strip_control_chars(s: &str) -> String {
+pub(crate) fn strip_control_chars(s: &str) -> String {
     s.chars().filter(|c| !c.is_control()).collect()
 }
 

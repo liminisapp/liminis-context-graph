@@ -556,6 +556,31 @@ async fn identifier_veto_does_not_block_genuine_aliases() {
 }
 
 #[tokio::test]
+async fn identifier_veto_keeps_distinct_short_codes_apart() {
+    // Issue #666: digit-free distinct all-caps codes are vetoed at cosine >= 0.85.
+    for (a, b) in [("ACDS", "ACDM"), ("UK", "USA"), ("US Army", "UK Army")] {
+        let (count, res) = run_pair(a, b).await;
+        assert_eq!(count, 2, "{a:?} / {b:?} must stay two entities");
+        assert_eq!(res.dedup_paths.vetoed, 1, "{a:?} / {b:?} counted as vetoed");
+        assert_eq!(res.dedup_paths.embedding_merge, 0);
+    }
+}
+
+#[tokio::test]
+async fn short_code_veto_does_not_block_acronym_or_case_aliases() {
+    for (a, b) in [
+        ("IBM", "International Business Machines"),
+        ("IBM", "IBM Corp"),
+        ("NASA", "National Aeronautics and Space Administration"),
+    ] {
+        let (count, res) = run_pair(a, b).await;
+        assert_eq!(count, 1, "{a:?} / {b:?} must still merge");
+        assert_eq!(res.dedup_paths.embedding_merge, 1);
+        assert_eq!(res.dedup_paths.vetoed, 0);
+    }
+}
+
+#[tokio::test]
 async fn identifier_veto_leaves_exact_name_match_untouched() {
     // Same name → exact-name path, never subject to the veto (FR-005).
     let (db, _dir) = make_db();

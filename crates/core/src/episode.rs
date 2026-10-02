@@ -60,6 +60,11 @@ pub struct AddEpisodeResult {
     /// Edges whose endpoint(s) could not be resolved against either this batch's entities or
     /// the persisted graph, and were dropped at Phase C commit time (issue #281 FR-004/FR-005).
     pub edges_dropped_unresolvable: usize,
+    /// Edges whose two differently named endpoints resolved to the same entity UUID at Phase C
+    /// commit time (dedup merges or salvage collapsing them onto one entity), dropped rather than
+    /// inserted as a self-loop (issue #666). Distinct from the name-level self-reference filter
+    /// (never counted) and from `edges_dropped_unresolvable`; carries no `dropped_edges` entry.
+    pub edges_dropped_self_loop: usize,
     /// Per-edge detail behind `edges_dropped_unresolvable` above — one entry per edge counted
     /// there, in extraction order, carrying the edge's extracted content and which endpoint(s)
     /// failed to resolve (issue #411 FR-001/FR-002/FR-003/FR-006). Always present, empty when
@@ -232,6 +237,40 @@ impl EndpointResolution {
             _ => None,
         }
     }
+}
+
+/// Looks an edge endpoint name up in the persisted graph (issue #666: shared by the pre-lock
+/// exact-match probe that precedes salvage and by Phase C's authoritative re-resolution, so the
+/// two cannot drift on eligibility). Same group, case-insensitive; with only the default kind it
+/// is the pre-#616 scan-fallback lookup, otherwise the multi-kind lookup where more than one hit
+/// is `Ambiguous` (issue #616).
+fn resolve_stored_endpoint(
+    conn: &crate::db::Conn<'_>,
+    raw_name: &str,
+    group_id: &str,
+    endpoint_kinds: &[String],
+) -> Result<EndpointResolution, Error> {
+    if endpoint_kinds.len() == 1 {
+        // No identity-bearing kinds in this group: exactly the pre-#616 lookup.
+        return Ok(
+            match conn.get_entity_by_name_ci_with_scan_fallback(
+                raw_name,
+                group_id,
+                crate::types::DEFAULT_KIND,
+            )? {
+                Some(existing) => EndpointResolution::Found(existing.uuid),
+                None => EndpointResolution::Missing,
+            },
+        );
+    }
+    // Default kind plus the group's identity-bearing kinds (issue #616). More than one hit is
+    // ambiguous — never picked between.
+    let mut hits = conn.resolve_entities_by_name_in_kinds(raw_name, group_id, endpoint_kinds)?;
+    Ok(match hits.len() {
+        0 => EndpointResolution::Missing,
+        1 => EndpointResolution::Found(hits.remove(0).uuid),
+        _ => EndpointResolution::Ambiguous,
+    })
 }
 
 /// Result of Phase B's per-entity resolution attempt.
@@ -649,6 +688,7 @@ pub async fn add_episode(
     // An off-list endpoint's name embedding is cosine-matched against the batch's entity
     // name_embeddings, reusing DEDUP_THRESHOLD (the same threshold already used for entity
     // dedup); a match rewrites the edge's endpoint to that entity's canonical name in place.
+    // An off-list endpoint that exactly matches the stored graph is not salvaged at all (#666).
     // Anything that doesn't salvage-match is left untouched and passed through to Phase C
     // (write-lock held), which is now the *sole* point that resolves an endpoint — falling back
     // to the persisted graph — or finally drops the edge, making `edges_dropped_unresolvable`
@@ -682,13 +722,23 @@ pub async fn add_episode(
         // embed+match, not one per edge.
         let mut missing_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        // Every distinct raw spelling behind a normalized key (issue #666): the normalized key
+        // strips control characters, but the stored-graph probe below uses the DB's
+        // `trim().to_lowercase()` identity, so `A\u{1}pple` and `Apple` share a key yet only
+        // one may be an exact stored hit. Probing all spellings keeps the exact-match-beats-
+        // salvage guarantee independent of which spelling the map happened to keep.
+        let mut missing_variants: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for edge in &extraction.edges {
             for name in [&edge.source_name, &edge.target_name] {
                 let key = normalize_name(name);
                 if !entity_name_set.contains(&key) {
-                    missing_names
-                        .entry(key)
-                        .or_insert_with(|| name.trim().to_string());
+                    let raw = name.trim().to_string();
+                    let variants = missing_variants.entry(key.clone()).or_default();
+                    if !variants.contains(&raw) {
+                        variants.push(raw.clone());
+                    }
+                    missing_names.entry(key).or_insert(raw);
                 }
             }
         }
@@ -699,12 +749,59 @@ pub async fn add_episode(
         // iterating the map twice (once to build the request, once to zip the response) could
         // silently misassign an embedding to the wrong endpoint name (#445 research/plan).
         let missing_names: Vec<(String, String)> = missing_names.into_iter().collect();
+
+        // Exact stored-graph match beats cosine salvage (issue #666). An off-list endpoint that
+        // already exists in the persisted graph — same group, eligible kinds, case-insensitive,
+        // the same lookup Phase C uses — is not a salvage candidate: rewriting it onto a merely
+        // similar batch entity would be a silent wrong re-point. An `Ambiguous` hit (same name
+        // under more than one kind) counts too: Phase C drops it, and salvaging it onto a batch
+        // entity would be the guess ADR-0615 forbids. The name is left untouched; Phase C
+        // re-resolves it under the write lock and stays the sole authority (ADR-0051). Lock-free
+        // like Phase B, so the same ADR-0029 TOCTOU caveat applies. Exact hits need no embedding.
+        let missing_names: Vec<(String, String)> = if missing_names.is_empty() {
+            missing_names
+        } else {
+            let probe_db = Arc::clone(&db_shared);
+            let probe_gid = group_id.to_string();
+            let probe_kinds = endpoint_kinds.clone();
+            tokio::task::spawn_blocking(move || -> Result<Vec<(String, String)>, Error> {
+                let conn = probe_db.connect()?;
+                let mut remaining = Vec::with_capacity(missing_names.len());
+                for (lower, original) in missing_names {
+                    // A key is an exact hit if any raw spelling behind it is: salvage rewrites
+                    // by key, so a hit on one spelling must not be salvaged over via another.
+                    let mut exact = None;
+                    for variant in missing_variants.get(&lower).into_iter().flatten() {
+                        match resolve_stored_endpoint(&conn, variant, &probe_gid, &probe_kinds)? {
+                            EndpointResolution::Missing => {}
+                            EndpointResolution::Found(_) | EndpointResolution::Ambiguous => {
+                                exact = Some(variant.clone());
+                                break;
+                            }
+                        }
+                    }
+                    match exact {
+                        None => remaining.push((lower, original)),
+                        Some(hit) => eprintln!(
+                            "liminis-context-graph: off-list edge endpoint '{hit}' matches the stored graph exactly — skipping salvage"
+                        ),
+                    }
+                }
+                Ok(remaining)
+            })
+            .await??
+        };
+
         let missing_refs: Vec<&str> = missing_names.iter().map(|(_, o)| o.as_str()).collect();
-        let missing_embeddings = tokio::select! {
-            r = state.embedder.embed_batch(&missing_refs) => r?,
-            _ = state.cancel_token.cancelled() => {
-                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
-                return Err(Error::Cancelled);
+        let missing_embeddings = if missing_refs.is_empty() {
+            Vec::new()
+        } else {
+            tokio::select! {
+                r = state.embedder.embed_batch(&missing_refs) => r?,
+                _ = state.cancel_token.cancelled() => {
+                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                    return Err(Error::Cancelled);
+                }
             }
         };
 
@@ -758,7 +855,9 @@ pub async fn add_episode(
             // previously-distinct endpoints collide (e.g. "Global Warming" and "Climate Change"
             // both salvage to the same batch entity) — re-run the self-referential filter after
             // salvage so a rewritten edge like that doesn't slip past the earlier check and get
-            // inserted as a self-loop in Phase C, which has no self-reference guard of its own.
+            // inserted as a self-loop in Phase C. Phase C's UUID-level guard (#666) would still
+            // catch it, but only as a counted `edges_dropped_self_loop`; this name-level filter
+            // drops such collisions silently, as it always has.
             extraction.edges.retain(|edge| {
                 if normalize_name(&edge.source_name) == normalize_name(&edge.target_name) {
                     eprintln!(
@@ -1120,12 +1219,18 @@ pub async fn add_episode(
     // falsely refuse the group though its ontology never changed. After such a purge the group
     // has no carriers, so this re-stamps; otherwise it is a cache hit.
     state.check_identity(group_id)?;
-    let (edges_inserted, edges_dropped_unresolvable, edges_reclassified_unclassified, dropped_edges) =
-        tokio::task::spawn_blocking(
-            move || -> Result<(usize, usize, usize, Vec<DroppedEdgeDetail>), Error> {
+    let (
+        edges_inserted,
+        edges_dropped_unresolvable,
+        edges_reclassified_unclassified,
+        dropped_edges,
+        edges_dropped_self_loop,
+    ) = tokio::task::spawn_blocking(
+            move || -> Result<(usize, usize, usize, Vec<DroppedEdgeDetail>, usize), Error> {
         let conn = db_c.connect()?;
         let mut edges_inserted = 0usize;
         let mut edges_dropped_unresolvable = 0usize;
+        let mut edges_dropped_self_loop = 0usize;
         let mut dropped_edges: Vec<DroppedEdgeDetail> = Vec::new();
         // Authoritative count of edges persisted with `relation_type = UNCLASSIFIED` (FR-005) —
         // taken here, not in the pre-lock strict-mode pass above, so an edge that was marked
@@ -1193,30 +1298,8 @@ pub async fn add_episode(
             if let Some(cached) = scan_cache.get(&key) {
                 return Ok(cached.clone());
             }
-            let resolution = if endpoint_kinds.len() == 1 {
-                // No identity-bearing kinds in this group: exactly the pre-#616 lookup.
-                match conn.get_entity_by_name_ci_with_scan_fallback(
-                    raw_name,
-                    &gid_owned,
-                    crate::types::DEFAULT_KIND,
-                )? {
-                    Some(existing) => EndpointResolution::Found(existing.uuid),
-                    None => EndpointResolution::Missing,
-                }
-            } else {
-                // Default kind plus the group's identity-bearing kinds (issue #616). More than
-                // one hit is ambiguous — never picked between.
-                let mut hits = conn.resolve_entities_by_name_in_kinds(
-                    raw_name,
-                    &gid_owned,
-                    &endpoint_kinds,
-                )?;
-                match hits.len() {
-                    0 => EndpointResolution::Missing,
-                    1 => EndpointResolution::Found(hits.remove(0).uuid),
-                    _ => EndpointResolution::Ambiguous,
-                }
-            };
+            let resolution =
+                resolve_stored_endpoint(&conn, raw_name, &gid_owned, &endpoint_kinds)?;
             scan_cache.insert(key, resolution.clone());
             Ok(resolution)
         };
@@ -1281,6 +1364,18 @@ pub async fn add_episode(
                     continue;
                 }
             };
+            // UUID-level self-loop guard (issue #666): two differently named endpoints can
+            // resolve to one entity (dedup merges, salvage), which the name-level filters above
+            // cannot see. Counted separately from unresolvable drops (ADR-0051's
+            // one-`dropped_edges`-entry-per-unresolvable-drop contract is unchanged).
+            if src_uuid == dst_uuid {
+                eprintln!(
+                    "liminis-context-graph: dropping edge at commit, endpoints resolve to the same entity ({}): '{}' → '{}'",
+                    src_uuid, edge.source_name, edge.target_name
+                );
+                edges_dropped_self_loop += 1;
+                continue;
+            }
             conn.insert_relates_to_edge(&RelatesToEdge {
                 uuid: uuid::Uuid::new_v4().to_string(),
                 name: format!("{} → {}", edge.source_name, edge.target_name),
@@ -1373,6 +1468,7 @@ pub async fn add_episode(
             edges_dropped_unresolvable,
             edges_reclassified_unclassified,
             dropped_edges,
+            edges_dropped_self_loop,
         ))
             },
         )
@@ -1457,6 +1553,7 @@ pub async fn add_episode(
         nodes_extracted,
         edges_extracted: edges_inserted,
         edges_dropped_unresolvable,
+        edges_dropped_self_loop,
         dropped_edges,
         edges_reclassified_unclassified,
         entities_reclassified_unclassified,

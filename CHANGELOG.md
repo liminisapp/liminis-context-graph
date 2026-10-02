@@ -29,6 +29,18 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 - `knowledge_get_episodes` orders ties on `created_at` by `uuid` (descending) so paging is
   deterministic. Previously the order within a tie was arbitrary.
 
+### Fixed
+
+- **An edge endpoint that exactly matches a stored entity is no longer re-pointed onto a similar
+  entity of the current chunk** (#666, remainder of #645, ADR-0666). Salvage now runs only for
+  names with no exact stored match.
+- **Edges whose two endpoints resolve to the same entity are dropped, not stored as self-loops**
+  (#666). New additive `edges_dropped_self_loop` field on `knowledge_process_chunk`.
+- **Extraction no longer merges distinct short all-caps codes** such as `ACDS` / `ACDM` (#666).
+  **Behaviour change:** the identifier veto now also fires on mutually exclusive 2–6 letter
+  upper-case tokens; acronym/expansion aliases still merge.
+- Identity-kind (`identity: true`) fuzzy matching is intentionally unchanged; see ADR-0666.
+
 ## [0.16.3] - 2026-10-01
 
 Full detail: [docs/releases/0.16.3.md](docs/releases/0.16.3.md).
