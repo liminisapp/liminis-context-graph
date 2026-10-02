@@ -61,7 +61,7 @@ fn ontology() -> Ontology {
 /// Bar is orthogonal.
 fn make_state(db: Arc<Db>, extractions: Vec<ExtractionResult>) -> Arc<AppState> {
     let mut map = HashMap::new();
-    for n in ["Foo", "foo", "Fooz"] {
+    for n in ["Foo", "foo", "Fooz", "Apple", "A\u{1}pple", "Applez"] {
         map.insert(n.to_string(), vec![1.0, 0.0, 0.0, 0.0]);
     }
     map.insert("Bar".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
@@ -262,4 +262,35 @@ async fn ambiguous_exact_hit_is_dropped_not_salvaged() {
     assert_eq!(r.edges_extracted, 0);
     assert_eq!(r.edges_dropped_unresolvable, 1, "{r:?}");
     assert!(source_uuids(&db).is_empty());
+}
+
+#[tokio::test]
+async fn control_char_spelling_does_not_hide_an_exact_hit_from_the_probe() {
+    let (db, _d) = make_db();
+    // `A\u{1}pple` and `Apple` share a normalized (control-char-stripped) key, but only `Apple`
+    // is a stored exact hit. The control-char spelling comes first, so a probe that kept just the
+    // first spelling would miss and salvage would rewrite the genuine `Apple` endpoint too.
+    let state = make_state(
+        Arc::clone(&db),
+        vec![
+            extraction(vec![ent("Apple", "Person")], vec![]),
+            extraction(
+                vec![ent("Applez", "Technology"), ent("Bar", "Technology")],
+                vec![edge("A\u{1}pple", "Bar"), edge("Apple", "Bar")],
+            ),
+        ],
+    );
+    ingest(&state, G, 1).await;
+    let r = ingest(&state, G, 2).await;
+
+    let apple = uuid_of(&db, G, "Apple", "Person");
+    let bar = uuid_of(&db, G, "Bar", "Entity");
+    assert!(
+        source_uuids(&db)
+            .iter()
+            .all(|pair| *pair == (apple.clone(), bar.clone())),
+        "no endpoint may be re-pointed onto Applez: {:?}",
+        source_uuids(&db)
+    );
+    assert!(r.edges_extracted >= 1, "{r:?}");
 }

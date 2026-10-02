@@ -722,13 +722,23 @@ pub async fn add_episode(
         // embed+match, not one per edge.
         let mut missing_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        // Every distinct raw spelling behind a normalized key (issue #666): the normalized key
+        // strips control characters, but the stored-graph probe below uses the DB's
+        // `trim().to_lowercase()` identity, so `A\u{1}pple` and `Apple` share a key yet only
+        // one may be an exact stored hit. Probing all spellings keeps the exact-match-beats-
+        // salvage guarantee independent of which spelling the map happened to keep.
+        let mut missing_variants: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for edge in &extraction.edges {
             for name in [&edge.source_name, &edge.target_name] {
                 let key = normalize_name(name);
                 if !entity_name_set.contains(&key) {
-                    missing_names
-                        .entry(key)
-                        .or_insert_with(|| name.trim().to_string());
+                    let raw = name.trim().to_string();
+                    let variants = missing_variants.entry(key.clone()).or_default();
+                    if !variants.contains(&raw) {
+                        variants.push(raw.clone());
+                    }
+                    missing_names.entry(key).or_insert(raw);
                 }
             }
         }
@@ -758,13 +768,23 @@ pub async fn add_episode(
                 let conn = probe_db.connect()?;
                 let mut remaining = Vec::with_capacity(missing_names.len());
                 for (lower, original) in missing_names {
-                    match resolve_stored_endpoint(&conn, &original, &probe_gid, &probe_kinds)? {
-                        EndpointResolution::Missing => remaining.push((lower, original)),
-                        EndpointResolution::Found(_) | EndpointResolution::Ambiguous => {
-                            eprintln!(
-                                "liminis-context-graph: off-list edge endpoint '{original}' matches the stored graph exactly — skipping salvage"
-                            );
+                    // A key is an exact hit if any raw spelling behind it is: salvage rewrites
+                    // by key, so a hit on one spelling must not be salvaged over via another.
+                    let mut exact = None;
+                    for variant in missing_variants.get(&lower).into_iter().flatten() {
+                        match resolve_stored_endpoint(&conn, variant, &probe_gid, &probe_kinds)? {
+                            EndpointResolution::Missing => {}
+                            EndpointResolution::Found(_) | EndpointResolution::Ambiguous => {
+                                exact = Some(variant.clone());
+                                break;
+                            }
                         }
+                    }
+                    match exact {
+                        None => remaining.push((lower, original)),
+                        Some(hit) => eprintln!(
+                            "liminis-context-graph: off-list edge endpoint '{hit}' matches the stored graph exactly — skipping salvage"
+                        ),
                     }
                 }
                 Ok(remaining)
@@ -835,7 +855,9 @@ pub async fn add_episode(
             // previously-distinct endpoints collide (e.g. "Global Warming" and "Climate Change"
             // both salvage to the same batch entity) — re-run the self-referential filter after
             // salvage so a rewritten edge like that doesn't slip past the earlier check and get
-            // inserted as a self-loop in Phase C, which has no self-reference guard of its own.
+            // inserted as a self-loop in Phase C. Phase C's UUID-level guard (#666) would still
+            // catch it, but only as a counted `edges_dropped_self_loop`; this name-level filter
+            // drops such collisions silently, as it always has.
             extraction.edges.retain(|edge| {
                 if normalize_name(&edge.source_name) == normalize_name(&edge.target_name) {
                     eprintln!(
