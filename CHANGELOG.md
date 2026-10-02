@@ -7,87 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
-## [Unreleased]
+## [0.16.3] - 2026-10-01
 
-### Fixed
-
-- **CI `test` job no longer recompiles the workspace** ([ADR-0341](docs/adr/0341-build-release-artifacts-once.md)
-  amendment, #657). The `release-build` artifact omitted `target/release/.fingerprint/`
-  (`upload-artifact` skips hidden files by default), so `test` rebuilt ~233 crates (~9 min) on every
-  run, and the "no `Compiling`" guard could not notice because cargo's coloured output has an ANSI
-  reset between `Compiling` and the space. The artifact now includes hidden files, `test` stamps every
-  restored `target/release` file with one identical mtime (artifact extraction stamps files in
-  extraction order, which cargo reads as stale dependencies), and the guard
-  (`scripts/assert-no-compiling.sh`, self-tested in `lint`) is colour-safe in `test` and all six e2e jobs.
-- **Extraction dedup no longer merges entities that differ only by a number or identifier**
-  ([ADR-0650](docs/adr/0650-identifier-mismatch-veto-for-extraction-dedup.md), #650).
-  Name embeddings score `ADR 2018` / `ADR 2019` (and versions, RFCs, quarters, issue numbers)
-  above the dedup threshold, so they were merged into one entity. A deterministic
-  identifier-mismatch veto now rejects embedding merges — and edge-endpoint salvage rewrites —
-  whose names carry different digit-bearing or standalone single-letter tokens. **Behaviour
-  change:** `Python 3` / `Python` and similar pairs no longer merge on the embedding path
-  (a missed merge is recoverable; a wrong one is not). Exact-name matches,
-  `knowledge_merge_entities` and WAL replay are unaffected. Existing bad merges are not
-  repaired; re-ingest.
-- **Databases built by 0.15.x or earlier: non-ASCII FTS terms were undeletable and silently
-  unsearchable** ([ADR-0649](docs/adr/0649-fts-index-rebuild-on-lbug-version-change.md), #649,
-  fixes #646). lbug 0.20 → 0.21 changed how non-ASCII terms (`→`, `—`, `é`, `東京`, emoji) are
-  stored in a full-text index without a storage-version change, so a 0.15-built database failed
-  deletes/updates/`knowledge_rebuild_from_wal {force_clear: true}` with
-  `FTS index '<idx>' is inconsistent` and returned zero rows for non-ASCII searches. The service
-  now records which lbug version built the FTS indexes and **rebuilds all three once on the first
-  start of the next release** (logged on stderr; time proportional to corpus size). A residual
-  `inconsistent` error on a write rebuilds all three and retries that statement once, reported as
-  `fts_repair_count` / `fts_last_repair_unix_ms` in `knowledge_status`. A forced full replay now
-  drops the FTS indexes before purging.
-
-### Changed
-
-- **`LCG_DEDUP_LLM` parsing.** It previously enabled the dead adapter when set to *any* value,
-  including `0`/`false`. `0`, `false`, `off`, `no` and the empty string are now off.
-
-### Deprecated
-
-- **`LCG_DEDUP_ADAPTER_URL` (and `GRAPHITI_DEDUP_ADAPTER_URL`) is ignored.** The bespoke
-  `{candidate, incoming}` HTTP protocol it configured was never implemented by any server shipped
-  with lcg and has been removed along with `LocalDedupAdapter`. Setting the variable logs a
-  deprecation warning at startup; nothing contacts the URL. Use `LCG_DEDUP_LLM`, which uses the
-  configured extractor.
-
-### Added
-
-- **LLM-verified extraction dedup** ([ADR-0652](docs/adr/0652-llm-verified-extraction-dedup-via-extractor.md),
-  #652). `LCG_DEDUP_LLM` now works: when on (opt-in, off by default) and an extraction provider is
-  configured, each embedding-path dedup candidate that survives the #650 identifier veto is judged
-  by the **configured extractor** — the Anthropic API or the OpenAI-compatible
-  `--extractor-uds` / `--extractor-http` endpoint — in one batched call per chunk (groups of at most 16 pairs, each with a 30 s timeout). Any error,
-  timeout or malformed/unattributable answer resolves to "not a duplicate" with a logged warning
-  and never aborts the chunk; cancellation still propagates. Exact-name matches, vetoed pairs and
-  identical-normalized-name pairs never cost a call; WAL replay never calls the LLM. Startup logs
-  the active mode and `knowledge_status` reports it as `dedup_mode` (`"veto-only"` |
-  `"llm-verified"`); `dedup_paths` gains `llm_confirmed`, `llm_rejected` and `llm_unavailable`.
-  Dedup token usage is reported with telemetry `role="dedup"`, and verdicts are recorded to / served
-  from LLM cassettes as `judge_duplicates` records. No schema or WAL change.
-
-- `knowledge_process_chunk` returns an additive `dedup_paths` object of per-path resolution
-  counts (`exact_name`, `embedding_merge`, `vetoed`, `adapter_rejected`, `salvage_vetoed`), and
-  startup logs `dedup: mode=…`.
+Full detail: [docs/releases/0.16.3.md](docs/releases/0.16.3.md).
 
 ### Upgrading
 
-- **From 0.15.x or earlier, or 0.16.0–0.16.2:** nothing to do. The first start after upgrading
-  rebuilds the three FTS indexes once (logged on stderr; time proportional to corpus size, so a
-  large notebook starts slower that one time). 0.16.0–0.16.2 never wrote the marker, so their
-  databases rebuild too. Later starts, and databases created after this change, don't rebuild.
-- **Staying pinned to 0.16.0–0.16.2:** you don't get the automatic fix. Drop **all three** indexes
-  (dropping only the one named in the error just moves the failure to the next), then recreate
-  them with `knowledge_build_indices`:
-  ```cypher
-  CALL DROP_FTS_INDEX('Entity', 'node_name_and_summary')
-  CALL DROP_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact')
-  CALL DROP_FTS_INDEX('Episodic', 'episode_content')
-  ```
-  (via `knowledge_query_cypher`, or the `cypher` MCP scope).
+- **The first start rebuilds the three FTS indexes once** (logged; time proportional to corpus size).
+  Nothing else to do. Pinned to 0.16.0–0.16.2? See the release notes for the manual workaround.
+- **Re-ingest if your graph was built with ≤ 0.16.2 extraction.** Entities wrongly merged by the old
+  dedup (e.g. `ADR 2018` = `ADR 2019`) and their concatenated summaries are not repaired in place.
+- **`LCG_DEDUP_ADAPTER_URL` is ignored** (deprecated; it configured a protocol nothing implemented).
+
+### Fixed
+
+- **Databases built by 0.15.x or earlier: non-ASCII FTS terms were undeletable and silently
+  unsearchable** after the lbug 0.20 → 0.21 upgrade (#649, fixes #646, ADR-0649). Rebuilt once on
+  first start; a residual "inconsistent" error rebuilds all three and retries once.
+- **Extraction no longer merges entities that differ only by a number or identifier** (#650,
+  ADR-0650). **Behaviour change:** `Python 3` / `Python`-style pairs no longer merge by embedding.
+- **Merged entity summaries are consolidated, not concatenated, and `summary_embedding` is
+  re-embedded on every merge** (#651, fixes #647, ADR-0651). Uses the configured extractor; capped
+  at 600 characters (bounded fallback without one); WAL replay never calls the LLM.
+- CI no longer recompiles the workspace in the `test` job (~9 min per run; #657).
+
+### Added
+
+- **`LCG_DEDUP_LLM` now works** (#652, ADR-0652): opt-in LLM-verified dedup using the configured
+  extractor, batched per chunk; any failure means "not a duplicate". `knowledge_status` reports
+  `dedup_mode`; `knowledge_process_chunk` returns `dedup_paths` counts.
+
+### Changed
+
+- `LCG_DEDUP_LLM` values `0`/`false`/`off`/`no`/empty now mean off (previously any value enabled it).
 
 ## [0.16.2] - 2026-09-30
 
