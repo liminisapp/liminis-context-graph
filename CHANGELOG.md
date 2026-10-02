@@ -11,6 +11,14 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Fixed
 
+- **CI `test` job no longer recompiles the workspace** ([ADR-0341](docs/adr/0341-build-release-artifacts-once.md)
+  amendment, #657). The `release-build` artifact omitted `target/release/.fingerprint/`
+  (`upload-artifact` skips hidden files by default), so `test` rebuilt ~233 crates (~9 min) on every
+  run, and the "no `Compiling`" guard could not notice because cargo's coloured output has an ANSI
+  reset between `Compiling` and the space. The artifact now includes hidden files, `test` stamps every
+  restored `target/release` file with one identical mtime (artifact extraction stamps files in
+  extraction order, which cargo reads as stale dependencies), and the guard
+  (`scripts/assert-no-compiling.sh`, self-tested in `lint`) is colour-safe in `test` and all six e2e jobs.
 - **Extraction dedup no longer merges entities that differ only by a number or identifier**
   ([ADR-0650](docs/adr/0650-identifier-mismatch-veto-for-extraction-dedup.md), #650).
   Name embeddings score `ADR 2018` / `ADR 2019` (and versions, RFCs, quarters, issue numbers)
