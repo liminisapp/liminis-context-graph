@@ -700,6 +700,17 @@ result fields exist for that, both introduced in 0.13.2.
   was dropped, so it can be iterated unconditionally. `edges_dropped_unresolvable`'s existing
   meaning is unchanged, and a caller reading only the count is unaffected (issue #411).
 
+- **`edges_dropped_self_loop` counts edges dropped because both endpoints resolved to one entity.**
+  Two differently named endpoints can resolve to the same entity UUID (through dedup merges or
+  salvage); inserting that edge would create a self-loop, so Phase C drops it. The count is a
+  separate top-level field, always present, and these edges are *not* in `dropped_edges` or
+  `edges_dropped_unresolvable`. (Edges whose endpoint *names* are identical are filtered earlier
+  and never counted.) Separately, an off-list edge endpoint that already exists exactly (same
+  group, case-insensitive) in the stored graph resolves to that entity and is never salvaged onto
+  a similar entity of the current chunk; a name stored under more than one eligible kind is dropped
+  as ambiguous rather than salvaged
+  ([ADR-0666](adr/0666-exact-graph-match-and-uuid-self-loop-guard.md)).
+
 - **`warning` reports oversized input.** A `chunk_text` longer than the advisory threshold
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see
   [Configuration](configuration.md)) adds a `warning` field naming the actual and recommended
@@ -730,7 +741,8 @@ result fields exist for that, both introduced in 0.13.2.
   `embedding_merge` counts embedding-path merges where a candidate survived the identifier veto
   and the dedup adapter confirmed it; `vetoed` counts entities that had above-threshold
   embedding candidates, all of which were rejected by the identifier-mismatch veto (names
-  differing by a number or identifier, such as `ADR 2018` / `ADR 2019`), so a new entity was
+  differing by a number or identifier, such as `ADR 2018` / `ADR 2019`, or by a distinct short
+  all-caps code such as `ACDS` / `ACDM`), so a new entity was
   inserted; `adapter_rejected` counts candidates that survived the veto but were rejected by
   a non-LLM (custom) dedup adapter; `llm_confirmed`, `llm_rejected` and `llm_unavailable` count
   candidates judged by the [LLM dedup check](configuration.md) (`LCG_DEDUP_LLM`,

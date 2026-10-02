@@ -688,6 +688,7 @@ pub async fn add_episode(
     // An off-list endpoint's name embedding is cosine-matched against the batch's entity
     // name_embeddings, reusing DEDUP_THRESHOLD (the same threshold already used for entity
     // dedup); a match rewrites the edge's endpoint to that entity's canonical name in place.
+    // An off-list endpoint that exactly matches the stored graph is not salvaged at all (#666).
     // Anything that doesn't salvage-match is left untouched and passed through to Phase C
     // (write-lock held), which is now the *sole* point that resolves an endpoint — falling back
     // to the persisted graph — or finally drops the edge, making `edges_dropped_unresolvable`

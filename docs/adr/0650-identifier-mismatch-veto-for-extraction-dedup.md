@@ -88,3 +88,10 @@ the local adapter and `LCG_DEDUP_ADAPTER_URL`.)
   `D Programming` and `X Corp` / `Y Corp` are vetoed.
 - Existing bad merges are not repaired; recovery is re-ingestion.
 - The concurrent-ingest TOCTOU residual risk of ADR-0029 is unchanged.
+
+## Amendment (#666)
+
+The tokenization above is extended by a short all-caps code rule (mutual exclusion on 2–6 letter
+upper-case tokens, Roman numerals excluded), which closes the `ACDS` / `ACDM` known gap. Salvage now
+also yields to an exact stored-graph match. See
+[ADR-0666](0666-exact-graph-match-and-uuid-self-loop-guard.md).

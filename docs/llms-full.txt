@@ -1417,6 +1417,17 @@ result fields exist for that, both introduced in 0.13.2.
   was dropped, so it can be iterated unconditionally. `edges_dropped_unresolvable`'s existing
   meaning is unchanged, and a caller reading only the count is unaffected (issue #411).
 
+- **`edges_dropped_self_loop` counts edges dropped because both endpoints resolved to one entity.**
+  Two differently named endpoints can resolve to the same entity UUID (through dedup merges or
+  salvage); inserting that edge would create a self-loop, so Phase C drops it. The count is a
+  separate top-level field, always present, and these edges are *not* in `dropped_edges` or
+  `edges_dropped_unresolvable`. (Edges whose endpoint *names* are identical are filtered earlier
+  and never counted.) Separately, an off-list edge endpoint that already exists exactly (same
+  group, case-insensitive) in the stored graph resolves to that entity and is never salvaged onto
+  a similar entity of the current chunk; a name stored under more than one eligible kind is dropped
+  as ambiguous rather than salvaged
+  ([ADR-0666](adr/0666-exact-graph-match-and-uuid-self-loop-guard.md)).
+
 - **`warning` reports oversized input.** A `chunk_text` longer than the advisory threshold
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see
   [Configuration](configuration.md)) adds a `warning` field naming the actual and recommended
@@ -1447,7 +1458,8 @@ result fields exist for that, both introduced in 0.13.2.
   `embedding_merge` counts embedding-path merges where a candidate survived the identifier veto
   and the dedup adapter confirmed it; `vetoed` counts entities that had above-threshold
   embedding candidates, all of which were rejected by the identifier-mismatch veto (names
-  differing by a number or identifier, such as `ADR 2018` / `ADR 2019`), so a new entity was
+  differing by a number or identifier, such as `ADR 2018` / `ADR 2019`, or by a distinct short
+  all-caps code such as `ACDS` / `ACDM`), so a new entity was
   inserted; `adapter_rejected` counts candidates that survived the veto but were rejected by
   a non-LLM (custom) dedup adapter; `llm_confirmed`, `llm_rejected` and `llm_unavailable` count
   candidates judged by the [LLM dedup check](configuration.md) (`LCG_DEDUP_LLM`,
@@ -2629,6 +2641,15 @@ extractor additionally judges each surviving candidate (`LCG_DEDUP_LLM`, off by 
 `LCG_DEDUP_LLM` is on but no extraction provider is configured the field reads `"veto-only"` and
 startup logged a warning. The same mode is logged once at startup as `dedup: mode=…`; per-chunk
 path counts are on `knowledge_process_chunk`'s `dedup_paths`.
+
+The veto also keeps distinct short all-caps codes apart (issue #666,
+[ADR-0666](adr/0666-exact-graph-match-and-uuid-self-loop-guard.md)): `ACDS` / `ACDM`, `UK` / `USA`
+and `US Army` / `UK Army` never merge by embedding. A token counts as a code when it is 2–6
+uppercase letters (not a Roman numeral) in the name as written, and the veto fires only when
+*each* name has a code the other lacks, so acronym/expansion aliases (`IBM` /
+`International Business Machines`) and case variants (`NASA` / `nasa`) still merge. Known gaps,
+left to the embedding and `LCG_DEDUP_LLM`: a shout-case name against a lone mixed-case one
+(`Acme` vs `ACDM`) and codes longer than six letters.
 
 **`indices_built`** (boolean) — whether the entity/relationship FTS + HNSW search indices are
 currently built and reflect the graph's current contents. The service builds these indices
@@ -4329,6 +4350,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0650](0650-identifier-mismatch-veto-for-extraction-dedup.md) | Identifier-Mismatch Veto for Extraction-Time Entity Dedup | 2026-10-01 |
 | [0651](0651-merge-consolidates-summaries-and-refreshes-embedding.md) | Entity Merge Consolidates Summaries and Always Re-embeds `summary_embedding` | 2026-10-01 |
 | [0652](0652-llm-verified-extraction-dedup-via-extractor.md) | LLM-Verified Extraction Dedup via the Configured Extractor | 2026-10-01 |
+| [0666](0666-exact-graph-match-and-uuid-self-loop-guard.md) | Exact Graph Match Before Salvage, UUID-Level Self-Loop Guard, Short-Code Veto | 2026-10-02 |
 | [0667](0667-read-path-paging-cursor-and-status-label.md) | Read-Path Paging Cursor, Projection, All-Groups Episode Default and Status Label | 2026-10-01 |
 
 ## Historical numbering

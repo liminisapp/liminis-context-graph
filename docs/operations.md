@@ -327,6 +327,15 @@ extractor additionally judges each surviving candidate (`LCG_DEDUP_LLM`, off by 
 startup logged a warning. The same mode is logged once at startup as `dedup: mode=…`; per-chunk
 path counts are on `knowledge_process_chunk`'s `dedup_paths`.
 
+The veto also keeps distinct short all-caps codes apart (issue #666,
+[ADR-0666](adr/0666-exact-graph-match-and-uuid-self-loop-guard.md)): `ACDS` / `ACDM`, `UK` / `USA`
+and `US Army` / `UK Army` never merge by embedding. A token counts as a code when it is 2–6
+uppercase letters (not a Roman numeral) in the name as written, and the veto fires only when
+*each* name has a code the other lacks, so acronym/expansion aliases (`IBM` /
+`International Business Machines`) and case variants (`NASA` / `nasa`) still merge. Known gaps,
+left to the embedding and `LCG_DEDUP_LLM`: a shout-case name against a lone mixed-case one
+(`Acme` vs `ACDM`) and codes longer than six letters.
+
 **`indices_built`** (boolean) — whether the entity/relationship FTS + HNSW search indices are
 currently built and reflect the graph's current contents. The service builds these indices
 **eagerly at startup** — immediately after schema init on a fresh DB, or as part of
