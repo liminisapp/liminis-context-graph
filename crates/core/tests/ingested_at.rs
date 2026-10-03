@@ -102,14 +102,14 @@ async fn ingest(state: &Arc<AppState>, chunk_id: &str, text: &str, reference_tim
     assert!(r.is_object(), "{r}");
 }
 
+type Snapshot = (
+    Vec<(String, String)>,
+    Vec<(String, String)>,
+    Vec<(String, String)>,
+);
+
 /// Everything the graph holds, keyed by uuid → ingested_at, per record type.
-fn snapshot(
-    db: &Db,
-) -> (
-    Vec<(String, String)>,
-    Vec<(String, String)>,
-    Vec<(String, String)>,
-) {
+fn snapshot(db: &Db) -> Snapshot {
     let conn = db.connect().unwrap();
     let mut ents: Vec<_> = conn
         .get_entities_by_group_ids(None)
@@ -601,7 +601,7 @@ async fn dump_then_replay_preserves_ingest_times() {
             .replay(&conn, lcg_core::zero_vector_embed_fn(DIM), DIM)
             .unwrap();
         // Dump lines are not a creating-line signal, so the WAL pass must leave them alone.
-        schema::backfill_ingested_at(&conn, &[target.clone()]).unwrap();
+        schema::backfill_ingested_at(&conn, std::slice::from_ref(&target)).unwrap();
     }
     assert_eq!(snapshot(&db2), original);
 }
