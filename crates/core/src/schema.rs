@@ -525,7 +525,17 @@ fn backfill_ingested_at_from_wal(conn: &Conn<'_>, wal_dir: &std::path::Path) -> 
     for (_, path) in files {
         let reader = std::io::BufReader::new(std::fs::File::open(&path)?);
         for line in reader.lines() {
-            let Ok(line) = line else { break };
+            let line = match line {
+                Ok(line) => line,
+                // A line that is not valid UTF-8 (a torn write) has already been consumed: skip
+                // just that line. Stopping here would still return `Ok`, the caller would record
+                // the marker `complete`, and every later creating line in this file would take
+                // the approximate `created_at` fallback with no retry.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+                // A genuine read failure: surface it so the status is recorded `failed` and the
+                // backfill is retried on the next open.
+                Err(e) => return Err(e.into()),
+            };
             // Cheap pre-filter before paying for a JSON parse of a (possibly vector-bearing) line.
             if !line.contains("\"cypher\"")
                 || !(line.contains("CREATE (:") || line.contains("ON CREATE SET"))

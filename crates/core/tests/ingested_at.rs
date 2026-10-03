@@ -535,6 +535,29 @@ fn upgrade_backfill_prefers_wal_creating_ts_then_created_at() {
     assert_eq!(get(&ents, "ent-wal"), "2026-09-01 10:00:00");
 }
 
+/// A torn / non-UTF-8 WAL line must be skipped, not end the pass: creating lines after it still
+/// supply their WAL `ts` rather than silently falling back to `created_at`.
+#[test]
+fn upgrade_backfill_skips_an_unreadable_wal_line() {
+    let (db, _dir) = make_db();
+    let wal_dir = TempDir::new().unwrap();
+    let conn = db.connect().unwrap();
+    conn.run_cypher("CREATE (:Entity {uuid: 'ent-after-bad', name: 'a', group_id: 'g', created_at: timestamp('2020-01-01 00:00:00')})").unwrap();
+    let good = json!({"seq":2,"ts":"2026-09-01T10:00:00.000000+00:00","db":"d",
+        "cypher":"CREATE (:Entity {uuid: $uuid, name: $name})","params":{"uuid":"ent-after-bad","name":"a"}});
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"{\"seq\":1,\"cypher\":\"CREATE (:Entity {\xff\xfe\n");
+    bytes.extend_from_slice(good.to_string().as_bytes());
+    bytes.push(b'\n');
+    std::fs::write(wal_dir.path().join("wal-0-0.jsonl"), bytes).unwrap();
+
+    schema::ensure_ingested_at_backfill(&conn, &[wal_dir.path().to_path_buf()]);
+
+    let (ents, _, _) = snapshot(&db);
+    let v = &ents.iter().find(|(x, _)| x == "ent-after-bad").unwrap().1;
+    assert_eq!(v, "2026-09-01 10:00:00");
+}
+
 /// `migrate` adds the column to a pre-feature database exactly once (probe-then-ALTER).
 #[test]
 fn migrate_adds_ingested_at_columns_idempotently() {
