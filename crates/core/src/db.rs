@@ -3328,6 +3328,7 @@ impl<'db> Conn<'db> {
         let mut rows = Vec::new();
         for row in result {
             rows.push(RelatesToEdge {
+                ingested_at: String::new(),
                 uuid: value_as_string(&row[0]),
                 name: value_as_string(&row[1]),
                 source_node_uuid: value_as_string(&row[2]),

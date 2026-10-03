@@ -4346,6 +4346,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                 }
                 let ts = chrono::Utc::now().to_rfc3339();
                 let row = EntityRow {
+                    ingested_at: String::new(),
                     uuid: Uuid::new_v4().to_string(),
                     name: name2,
                     group_id: group_id2,
@@ -4673,6 +4674,7 @@ async fn handle_assert_relationship(
                 }
                 let ts = chrono::Utc::now().to_rfc3339();
                 let edge = RelatesToEdge {
+                    ingested_at: String::new(),
                     uuid: Uuid::new_v4().to_string(),
                     name: predicate2,
                     source_node_uuid: source_uuid2,
