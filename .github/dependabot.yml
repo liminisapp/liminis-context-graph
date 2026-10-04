@@ -19,6 +19,11 @@ updates:
     groups:
       non-major:
         update-types: [minor, patch]
+        # lbug never merges as Dependabot opens it: the bump must also move
+        # LBUG_VERSION in .cargo/config.toml and the extension-version tripwire
+        # in lbug_extension_home.rs (see CLAUDE.md, ADR-0559, ADR-0593). Kept
+        # out of the group so it arrives alone instead of blocking the rest.
+        exclude-patterns: ["lbug"]
 
   - package-ecosystem: swift
     directory: /native/local-inference
