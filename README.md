@@ -11,7 +11,7 @@ Originally inspired by the knowledge-graph ideas in [graphiti](https://github.co
 - **One embedded engine.** [LadybugDB](https://github.com/lbugdb/lbug) (the community continuation of KuzuDB) provides the property graph, HNSW vector indices, and full-text search in a single embedded database — no server process, no network hop, data in ordinary files under your workspace.
 - **The write-ahead log is the source of truth — and it's just JSON.** Every mutation is appended to plain JSONL files under `.lcg/wal/` before it touches the database. The database is a derived index — delete it and `knowledge_rebuild_from_wal` reconstructs the entire graph from the log.
 - **One database, many graphs.** `.lcg/wal/` is a WAL *root*: each `group_id` owns its own stream in `.lcg/wal/<group_id>/`, independently replayable and independently discardable. One process can hold several graphs at once without them bleeding into each other, and because a stream is just a directory of JSONL files it can be versioned, shipped, and replayed somewhere else.
-- **Models stay out of process.** Embedding and LLM inference are reached through narrow adapters over the `/v1/embeddings` and `/v1/chat/completions` wire shapes OpenAI's API speaks. Embedding runs fully local out of the box on macOS; extraction can run fully local too, or against the hosted Anthropic API. The embedder also supports Bearer-token auth (`LCG_EMBEDDING_API_KEY`), so a hosted endpoint speaking that same shape and accepting a Bearer token is reachable too — OpenAI's own `/v1/embeddings` is the verified case; see [Configuration: Embedder sidecar](https://v3rv.com/liminis-context-graph/configuration#embedder-sidecar) or the full [Embedding Options](https://v3rv.com/liminis-context-graph/embedding-options) capability matrix for what to run on your platform.
+- **Models stay out of process.** Embedding and LLM inference are reached through narrow adapters over the `/v1/embeddings` and `/v1/chat/completions` wire shapes OpenAI's API speaks. Embedding runs fully local out of the box on macOS; extraction can run fully local too, or against the hosted Anthropic API. The embedder also supports Bearer-token auth (`LCG_EMBEDDING_API_KEY`), so a hosted endpoint speaking that same shape and accepting a Bearer token is reachable too — OpenAI's own `/v1/embeddings` is the verified case; see [Configuration: Embedder sidecar](https://docs.liminis.app/liminis-context-graph/configuration#embedder-sidecar) or the full [Embedding Options](https://docs.liminis.app/liminis-context-graph/embedding-options) capability matrix for what to run on your platform.
 
 The result is a context graph you can treat like the rest of your local tooling: a single process, a directory of files, versionable with git, rebuildable from its own log.
 
@@ -37,7 +37,7 @@ The result is a context graph you can treat like the rest of your local tooling:
                       └─────────────────────┴────────────┴──────────────┘
 ```
 
-**Ingestion**: `knowledge_process_chunk` sends a chunk of text through the extraction LLM, which returns typed entities and relationships (optionally constrained by your [ontology](https://v3rv.com/liminis-context-graph/ontology)). New facts are deduplicated against the existing graph, appended to the WAL, then written to the database with embeddings from the sidecar. Every chunk becomes a time-stamped **episode** linked to the facts it produced. Recommended maximum `chunk_text` size is 8,000 characters (default, overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` — see [Configuration](https://v3rv.com/liminis-context-graph/configuration)): extraction quality degrades well before any context-window limit is reached, and splitting oversized input into multiple `knowledge_process_chunk` calls is the caller's responsibility. The call still succeeds above the threshold — nothing is truncated, split, or rejected — but the result gains a `warning` field naming the actual size and the recommended maximum. Both `knowledge_process_chunk` and `knowledge_add_episode` also accept an optional `attributes` object — arbitrary structured metadata stored directly on the resulting episode, retrievable via `knowledge_get_episodes` and `knowledge_search_passages` alongside the facts extracted from the same chunk.
+**Ingestion**: `knowledge_process_chunk` sends a chunk of text through the extraction LLM, which returns typed entities and relationships (optionally constrained by your [ontology](https://docs.liminis.app/liminis-context-graph/ontology)). New facts are deduplicated against the existing graph, appended to the WAL, then written to the database with embeddings from the sidecar. Every chunk becomes a time-stamped **episode** linked to the facts it produced. Recommended maximum `chunk_text` size is 8,000 characters (default, overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` — see [Configuration](https://docs.liminis.app/liminis-context-graph/configuration)): extraction quality degrades well before any context-window limit is reached, and splitting oversized input into multiple `knowledge_process_chunk` calls is the caller's responsibility. The call still succeeds above the threshold — nothing is truncated, split, or rejected — but the result gains a `warning` field naming the actual size and the recommended maximum. Both `knowledge_process_chunk` and `knowledge_add_episode` also accept an optional `attributes` object — arbitrary structured metadata stored directly on the resulting episode, retrievable via `knowledge_get_episodes` and `knowledge_search_passages` alongside the facts extracted from the same chunk.
 
 **Search** is hybrid by default: `knowledge_find_entities` combines full-text search with two vector similarity signals (an entity's name and its summary, so a query that paraphrases an entity's summary — sharing no vocabulary with it — still finds it) via Reciprocal Rank Fusion; `knowledge_find_relationships` combines full-text and vector similarity; both return a per-result `search` object (`text_match`, `bm25_score`, cosine similarities) so you can tell a real match from top-k filler, and accept an optional `min_similarity` floor that drops distant vector neighbours before fusion; `knowledge_search_passages` does semantic passage retrieval; `knowledge_get_entity_neighbors` and `knowledge_query_cypher` traverse the graph directly. Entities created before this summary-vector capability existed become semantically retrievable by summary via the `knowledge_backfill_summary_embeddings` admin tool.
 
@@ -45,7 +45,7 @@ The result is a context graph you can treat like the rest of your local tooling:
 
 That is what makes **replication and layering** practical. A consumer can hydrate several upstream streams into one local database, each keeping its own `group_id`, and still query any one of them in isolation or all of them together. A stream carries a **generation identity** (`wal.generation`) so a consumer can tell a forward advance from a reset and never mistakes a rebuilt upstream for an extension of the one it already replayed. Because entities in different groups stay distinct at the graph layer, references *between* graphs are expressed as resolvable pointers (`knowledge_add_cross_group_edge`, `knowledge_rebind_pointers`) rather than raw edges — so a **layer graph** can carry its own `group_id` and connect entities across two source graphs without either source having to know about it, and without the link dangling when a source is re-ingested.
 
-**Two transport surfaces.** By default the engine serves the Unix-socket JSON-RPC protocol shown above. It can equally run as a native **[Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout** (`--mcp-stdio`), pointing any MCP client straight at the graph with no app or custom client in between. See the [IPC & MCP Reference](https://v3rv.com/liminis-context-graph/ipc-mcp-reference).
+**Two transport surfaces.** By default the engine serves the Unix-socket JSON-RPC protocol shown above. It can equally run as a native **[Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout** (`--mcp-stdio`), pointing any MCP client straight at the graph with no app or custom client in between. See the [IPC & MCP Reference](https://docs.liminis.app/liminis-context-graph/ipc-mcp-reference).
 
 ## Quickstart
 
@@ -54,7 +54,7 @@ That is what makes **replication and layering** practical. A consumer can hydrat
 No Rust toolchain required:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-context-graph/releases/latest/download/lcg-service-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/liminisapp/liminis-context-graph/releases/latest/download/lcg-service-installer.sh | sh
 ```
 
 Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**, and **Linux ARM64** on every tagged release. If macOS blocks the binary, clear the quarantine attribute: `xattr -d com.apple.quarantine ~/.cargo/bin/liminis-context-graph`.
@@ -66,7 +66,7 @@ Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**,
 >
 > If it is missing, the binary fails at launch with `Library not loaded: /opt/homebrew/opt/openssl@3/lib/libssl.3.dylib` (macOS) or `error while loading shared libraries: libssl.so.3` (Linux). See [Troubleshooting](#troubleshooting). Design rationale: [ADR-0550](docs/adr/0550-openssl-dynamic-linkage-via-rpath.md).
 
-> **An embedder is required at runtime** — see [Configuration: Embedder sidecar](https://v3rv.com/liminis-context-graph/configuration#embedder-sidecar).
+> **An embedder is required at runtime** — see [Configuration: Embedder sidecar](https://docs.liminis.app/liminis-context-graph/configuration#embedder-sidecar).
 
 ### Run it
 
@@ -132,7 +132,7 @@ cargo run --example basic_ingest -p lcg-core  # example: ingest 3 docs, search, 
 cargo run -p lcg-service                      # run the service binary
 ```
 
-See [Getting Started](https://v3rv.com/liminis-context-graph/getting-started) for downstream-app bundling and pinned-release tarball URLs.
+See [Getting Started](https://docs.liminis.app/liminis-context-graph/getting-started) for downstream-app bundling and pinned-release tarball URLs.
 
 ## Troubleshooting
 
@@ -217,16 +217,16 @@ terminal first — the real error appears there.
 
 ## Documentation
 
-Full reference documentation is published at **[v3rv.com/liminis-context-graph](https://v3rv.com/liminis-context-graph)**:
+Full reference documentation is published at **[docs.liminis.app/liminis-context-graph](https://docs.liminis.app/liminis-context-graph)**:
 
-- [Getting Started](https://v3rv.com/liminis-context-graph/getting-started) — install, run, build from source, bundle in downstream apps.
-- [Configuration](https://v3rv.com/liminis-context-graph/configuration) — every environment variable and CLI flag.
-- [IPC & MCP Reference](https://v3rv.com/liminis-context-graph/ipc-mcp-reference) — the JSON-RPC and Model Context Protocol method surface.
-- [Telemetry](https://v3rv.com/liminis-context-graph/telemetry) — structured JSONL events emitted on stderr.
-- [Ontology](https://v3rv.com/liminis-context-graph/ontology) — the optional entity/relation type vocabulary.
-- [Operations](https://v3rv.com/liminis-context-graph/operations) — WAL administration, degraded mode, and self-healing recovery.
-- [Testing & Evaluation](https://v3rv.com/liminis-context-graph/testing-and-evaluation) — LLM cassettes and the extraction-quality eval harness.
-- [ADR Index](https://v3rv.com/liminis-context-graph/adr/index) — architecture decision records (historical, not current-state, documentation).
+- [Getting Started](https://docs.liminis.app/liminis-context-graph/getting-started) — install, run, build from source, bundle in downstream apps.
+- [Configuration](https://docs.liminis.app/liminis-context-graph/configuration) — every environment variable and CLI flag.
+- [IPC & MCP Reference](https://docs.liminis.app/liminis-context-graph/ipc-mcp-reference) — the JSON-RPC and Model Context Protocol method surface.
+- [Telemetry](https://docs.liminis.app/liminis-context-graph/telemetry) — structured JSONL events emitted on stderr.
+- [Ontology](https://docs.liminis.app/liminis-context-graph/ontology) — the optional entity/relation type vocabulary.
+- [Operations](https://docs.liminis.app/liminis-context-graph/operations) — WAL administration, degraded mode, and self-healing recovery.
+- [Testing & Evaluation](https://docs.liminis.app/liminis-context-graph/testing-and-evaluation) — LLM cassettes and the extraction-quality eval harness.
+- [ADR Index](https://docs.liminis.app/liminis-context-graph/adr/index) — architecture decision records (historical, not current-state, documentation).
 
 The site documents the version stated on its home page and may lag `main` between releases; this README's quickstart always works against `main`.
 
@@ -239,7 +239,7 @@ crates/core/examples/    # standalone consumers demonstrating the library API
 crates/service/          # lcg-service: binary crate — IPC service (builds `liminis-context-graph`)
 crates/eval/             # lcg-eval: binary crate — extraction-quality eval harness
 native/local-inference/  # Swift CoreML embedding/LLM sidecar for macOS
-docs/                    # documentation site source (published at v3rv.com/liminis-context-graph)
+docs/                    # documentation site source (published at docs.liminis.app/liminis-context-graph)
 docs/adr/                # architecture decision records (index at docs/adr/index.md)
 specs/                   # feature specifications
 ```
@@ -263,4 +263,4 @@ Contributions are welcome. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to f
 
 ## Security
 
-To report a security vulnerability, please use [GitHub's private vulnerability reporting](https://github.com/verveguy/liminis-context-graph/security/advisories/new) rather than filing a public issue. See [`SECURITY.md`](SECURITY.md) for supported versions, response time, and disclosure policy.
+To report a security vulnerability, please use [GitHub's private vulnerability reporting](https://github.com/liminisapp/liminis-context-graph/security/advisories/new) rather than filing a public issue. See [`SECURITY.md`](SECURITY.md) for supported versions, response time, and disclosure policy.

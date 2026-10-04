@@ -124,12 +124,12 @@ Without it, the embedding-dependent IPC methods fail immediately with an embeddi
 ### macOS: Swift CoreML sidecar (default)
 
 The repository ships a Swift CoreML sidecar at
-[`native/local-inference/`](https://github.com/verveguy/liminis-context-graph/tree/main/native/local-inference)
+[`native/local-inference/`](https://github.com/liminisapp/liminis-context-graph/tree/main/native/local-inference)
 that serves OpenAI-compatible `/v1/embeddings` (BGE-base-en-v1.5) and `/v1/chat/completions`
 (Apple Foundation Models) over UDS at `/tmp/liminis-inference.sock` — fully local inference for
 embedding, and a fully local option for extraction: no API key, no network. macOS 26+ and Xcode
 command-line tools are required. See
-[`native/local-inference/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md)
+[`native/local-inference/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/README.md)
 for build and run instructions.
 
 `liminis-context-graph` discovers the sidecar's default UDS socket automatically for embedding —
@@ -145,7 +145,7 @@ backend is not recommended for extraction quality, so using it there requires th
 
 The sidecar's own `LOCAL_INFERENCE_MODE` environment variable (`embeddings` | `completions` |
 `both`, default `both`) selects which of its own two endpoints it serves — see
-[`native/local-inference/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md#selecting-a-mode)
+[`native/local-inference/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/README.md#selecting-a-mode)
 for the full table. Running `LOCAL_INFERENCE_MODE=completions` needs no CoreML model setup at
 all, since it serves only `/v1/chat/completions`. This mode selection is independent of, and does
 **not** change, the extraction-routing behavior above: Foundation-Models-backed completions are
