@@ -2,6 +2,7 @@
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'astro/config'
+import { unified } from '@astrojs/markdown-remark'
 import starlight from '@astrojs/starlight'
 import react from '@astrojs/react'
 import { remarkC4 } from '@liminis/diagrams/remark'
@@ -84,8 +85,9 @@ export default defineConfig({
   },
   // Turns ```c4 fences into live islands. The source pages stay readable as
   // plain markdown on GitHub, where the fence renders as a code block beside
-  // its committed SVG. See @liminis/diagrams/remark.
-  markdown: { remarkPlugins: [remarkC4] },
+  // its committed SVG. See @liminis/diagrams/remark. Astro 7's default
+  // processor (Sätteri) doesn't run remark plugins, so this pins the unified one.
+  markdown: { processor: unified({ remarkPlugins: [remarkC4] }) },
   site: 'https://v3rv.com',
   base: siteBase(),
   redirects: adrRedirects(),
@@ -96,7 +98,7 @@ export default defineConfig({
       title: 'liminis-context-graph',
       description:
         'A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes.',
-      social: { github: GITHUB },
+      social: [{ icon: 'github', label: 'GitHub', href: GITHUB }],
       // Adds the version switcher beneath the stock footer. See the component.
       components: { Footer: './src/components/Footer.astro' },
       // No site-wide editLink.baseUrl: Starlight builds that link from the
