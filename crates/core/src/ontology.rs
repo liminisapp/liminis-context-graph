@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use crate::error::Error;
 
@@ -777,8 +776,7 @@ pub fn content_hash(ontology: Option<&Ontology>) -> String {
         ));
     }
 
-    let digest = Sha256::digest(canonical.as_bytes());
-    format!("{:x}", digest)
+    crate::sha256_hex::sha256_hex(canonical.as_bytes())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1361,10 +1359,7 @@ relation_types:
         let o = make_ontology(OntologyMode::Open, &[("Person", None)], &[]);
         // Manually build the expected canonical string using the pre-#173 format
         let expected_canonical = "mode:open\nentity_types:Person\0\nrelation_types:";
-        let expected_hash = {
-            let digest = sha2::Sha256::digest(expected_canonical.as_bytes());
-            format!("{:x}", digest)
-        };
+        let expected_hash = { crate::sha256_hex::sha256_hex(expected_canonical.as_bytes()) };
         assert_eq!(
             content_hash(Some(&o)),
             expected_hash,
@@ -1416,10 +1411,9 @@ relation_types:
         write_ontology(&dir, "entity_types:\n  - name: Person\n");
         let flat = load_ontology(Some(dir.path())).unwrap();
         let expected = {
-            let d = sha2::Sha256::digest(
+            crate::sha256_hex::sha256_hex(
                 "mode:open\nentity_types:Person\0\nrelation_types:".as_bytes(),
-            );
-            format!("{:x}", d)
+            )
         };
         assert_eq!(content_hash(Some(&flat)), expected);
 

@@ -245,7 +245,7 @@ impl ExtractorDedupAdapter {
             h.update(side.summary.as_bytes());
             h.update([0x1e]);
         }
-        format!("{:x}", h.finalize())
+        crate::sha256_hex::to_hex(&h.finalize())
     }
 
     fn cache_get(&self, key: &str) -> Option<DedupVerdict> {
