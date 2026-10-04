@@ -1,6 +1,6 @@
 # liminis-context-graph
 
-Source: https://v3rv.com/liminis-context-graph/
+Source: https://docs.liminis.app/liminis-context-graph/
 
 
 A local-first context graph engine. One Rust binary that turns a stream of text into a
@@ -14,8 +14,8 @@ This page documents **v0.16.4**, built directly from that release tag's `docs/`
 tree — not from `main`. Unreleased changes merged to `main` since this tag are not reflected
 here; use the version switcher in the footer to browse other published releases.
 
-Source: [github.com/verveguy/liminis-context-graph](https://github.com/verveguy/liminis-context-graph). The
-[`README`](https://github.com/verveguy/liminis-context-graph/blob/main/README.md) has a short overview
+Source: [github.com/liminisapp/liminis-context-graph](https://github.com/liminisapp/liminis-context-graph). The
+[`README`](https://github.com/liminisapp/liminis-context-graph/blob/main/README.md) has a short overview
 and a standalone quickstart; this site is the full reference.
 
 ## How it fits together
@@ -81,7 +81,7 @@ repository) is referenced from `llms.txt` but is not itself published here.
 
 # Getting Started
 
-Source: https://v3rv.com/liminis-context-graph/getting-started
+Source: https://docs.liminis.app/liminis-context-graph/getting-started
 
 
 **Multi-graph, not multi-tenant.** One workspace's `liminis-context-graph` process can hold many
@@ -97,7 +97,7 @@ and [Operations](operations.md) for how groups work in practice.
 No Rust toolchain required:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-context-graph/releases/latest/download/lcg-service-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/liminisapp/liminis-context-graph/releases/latest/download/lcg-service-installer.sh | sh
 ```
 
 Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**, and **Linux ARM64** on every tagged release.
@@ -191,7 +191,7 @@ cargo run -p lcg-service                      # run the service binary
 For consumers (e.g. Electron apps or CI pipelines) that need a pinned binary version without running cargo, use the direct tarball URL from GitHub Releases:
 
 ```sh
-curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/lcg-service-aarch64-apple-darwin.tar.xz \
+curl -L https://github.com/liminisapp/liminis-context-graph/releases/download/<TAG>/lcg-service-aarch64-apple-darwin.tar.xz \
   -o lcg-service-aarch64-apple-darwin.tar.xz
 tar -xJf lcg-service-aarch64-apple-darwin.tar.xz
 # binary is at: lcg-service-aarch64-apple-darwin/liminis-context-graph
@@ -202,7 +202,7 @@ Release artifacts are named after the `lcg-service` package (`lcg-service-<targe
 Discover the latest release tag programmatically:
 
 ```sh
-curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/latest | jq -r '.tag_name'
+curl -s https://api.github.com/repos/liminisapp/liminis-context-graph/releases/latest | jq -r '.tag_name'
 ```
 
 ## Next steps
@@ -215,7 +215,7 @@ curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/lat
 
 # Configuration
 
-Source: https://v3rv.com/liminis-context-graph/configuration
+Source: https://docs.liminis.app/liminis-context-graph/configuration
 
 
 ## CLI flags
@@ -337,12 +337,12 @@ Without it, the embedding-dependent IPC methods fail immediately with an embeddi
 ### macOS: Swift CoreML sidecar (default)
 
 The repository ships a Swift CoreML sidecar at
-[`native/local-inference/`](https://github.com/verveguy/liminis-context-graph/tree/main/native/local-inference)
+[`native/local-inference/`](https://github.com/liminisapp/liminis-context-graph/tree/main/native/local-inference)
 that serves OpenAI-compatible `/v1/embeddings` (BGE-base-en-v1.5) and `/v1/chat/completions`
 (Apple Foundation Models) over UDS at `/tmp/liminis-inference.sock` — fully local inference for
 embedding, and a fully local option for extraction: no API key, no network. macOS 26+ and Xcode
 command-line tools are required. See
-[`native/local-inference/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md)
+[`native/local-inference/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/README.md)
 for build and run instructions.
 
 `liminis-context-graph` discovers the sidecar's default UDS socket automatically for embedding —
@@ -358,7 +358,7 @@ backend is not recommended for extraction quality, so using it there requires th
 
 The sidecar's own `LOCAL_INFERENCE_MODE` environment variable (`embeddings` | `completions` |
 `both`, default `both`) selects which of its own two endpoints it serves — see
-[`native/local-inference/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md#selecting-a-mode)
+[`native/local-inference/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/README.md#selecting-a-mode)
 for the full table. Running `LOCAL_INFERENCE_MODE=completions` needs no CoreML model setup at
 all, since it serves only `/v1/chat/completions`. This mode selection is independent of, and does
 **not** change, the extraction-routing behavior above: Foundation-Models-backed completions are
@@ -614,7 +614,7 @@ function-calling (the bundled sidecar has no `tools`/`tool_choice` support).
 
 # Embedding Options
 
-Source: https://v3rv.com/liminis-context-graph/embedding-options
+Source: https://docs.liminis.app/liminis-context-graph/embedding-options
 
 
 **What should I run, on my platform, and what will it cost me?** This page answers that
@@ -630,7 +630,7 @@ that backend over the OpenAI-compatible `POST /v1/embeddings` contract, selected
 
 | Option | Platform(s) | Install | Setup / model cost | Dimension | Flag | Offline? | Dimension auto-probe? | Unreachable at startup | Verification |
 |---|---|---|---|---|---|---|---|---|---|
-| **Swift CoreML sidecar** | macOS 26+ | Xcode command-line tools; build from [`native/local-inference/`](https://github.com/verveguy/liminis-context-graph/tree/main/native/local-inference) | ~500 MB disk for the BGE-base-en-v1.5 CoreML model, downloaded on first setup; no per-call cost | 768 (fixed, BGE-base-en-v1.5) | `--embedder-uds` (or no flag — auto-detected at `/tmp/liminis-inference.sock`) | Yes, fully local | Yes | Fail-fast (socket-service mode) or bounded retry-and-degrade (`--mcp-stdio`) — see [Embedder sidecar](configuration.md#embedder-sidecar) | Verified — the [`swift test`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md#tests) suite, and [`verify-embedding-parity.py`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/verify-embedding-parity.py) (cosine parity vs. the PyTorch reference, run manually — not yet wired into CI) |
+| **Swift CoreML sidecar** | macOS 26+ | Xcode command-line tools; build from [`native/local-inference/`](https://github.com/liminisapp/liminis-context-graph/tree/main/native/local-inference) | ~500 MB disk for the BGE-base-en-v1.5 CoreML model, downloaded on first setup; no per-call cost | 768 (fixed, BGE-base-en-v1.5) | `--embedder-uds` (or no flag — auto-detected at `/tmp/liminis-inference.sock`) | Yes, fully local | Yes | Fail-fast (socket-service mode) or bounded retry-and-degrade (`--mcp-stdio`) — see [Embedder sidecar](configuration.md#embedder-sidecar) | Verified — the [`swift test`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/README.md#tests) suite, and [`verify-embedding-parity.py`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/verify-embedding-parity.py) (cosine parity vs. the PyTorch reference, run manually — not yet wired into CI) |
 | **Infinity** (Python, sentence-transformers-based) | Linux, macOS, Windows | Install and run [Infinity](https://github.com/michaelfeil/infinity) yourself; no download bundled with this repo | Depends on the model you load; Infinity itself is free/open-source, no per-call cost | Varies (model-chosen) | `--embedder-http` | Yes, fully local | Yes | Fail-fast or retry-and-degrade, same as above | Not independently verified in this repo — relies on the generic OpenAI-compatible contract. Listed as an unauthenticated-compatible server in [Configuration](configuration.md#http-transport-ci--linux--custom-embedders--hosted-providers) |
 | **Ollama** | Linux, macOS, Windows | Install [Ollama](https://ollama.com), pull an embedding model (e.g. `nomic-embed-text`) | Model download only (varies by model, typically a few hundred MB); no per-call cost | Varies (model-chosen) | `--embedder-http` | Yes, fully local | Yes | Fail-fast or retry-and-degrade, same as above | Not independently verified in this repo — relies on the generic OpenAI-compatible contract. Listed with a concrete recipe in [Configuration: MCP client config recipes](configuration.md#mcp-client-config-recipes) |
 | **vLLM / text-embeddings-inference (TEI)** | Linux (GPU recommended); macOS/Windows via Docker | Install vLLM or TEI, load a model | Model download (varies); no per-call cost; GPU strongly recommended for throughput | Varies (model-chosen) | `--embedder-http` | Yes, fully local | Yes | Fail-fast or retry-and-degrade, same as above | Not independently verified in this repo — relies on the generic OpenAI-compatible contract. Listed in [Configuration: MCP client config recipes](configuration.md#mcp-client-config-recipes) |
@@ -662,7 +662,7 @@ options above (or any other OpenAI-compatible server) yourself and point
 
 This isn't an oversight: a native, in-process, cross-platform Rust embedder was evaluated and
 rejected. See
-[`docs/spikes/native-embedder-2026-05.md`](https://github.com/verveguy/liminis-context-graph/blob/main/docs/spikes/native-embedder-2026-05.md)
+[`docs/spikes/native-embedder-2026-05.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/spikes/native-embedder-2026-05.md)
 for the full spike — `candle` was a **NO-GO**, `ort` was **GO-with-caveats**, and neither was
 ever built into production. Out-of-process, over the same wire contract as every other row in
 the matrix above, remains the supported path on every platform.
@@ -719,12 +719,12 @@ assuming the app's is reachable at the well-known path.
 
 # IPC & MCP Reference
 
-Source: https://v3rv.com/liminis-context-graph/ipc-mcp-reference
+Source: https://docs.liminis.app/liminis-context-graph/ipc-mcp-reference
 
 
 `liminis-context-graph` serves the same graph over **two transport surfaces**, both routed
 through the same core dispatch in
-[`crates/core/src/handlers.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs) —
+[`crates/core/src/handlers.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/handlers.rs) —
 no graph logic is duplicated between them:
 
 - **JSON-RPC 2.0 over a local socket** (default). Newline-delimited requests/responses over `.lcg/service.sock` — a Unix domain socket on macOS/Linux, a named pipe on Windows (see [Windows: named pipe](#windows-named-pipe)).
@@ -784,7 +784,7 @@ not exposed as an MCP tool.
 | Recovery / lifecycle | `knowledge_recover`, `knowledge_recover_full`, `knowledge_close` |
 
 For request/response shapes and parameter details, the dispatch `match` arms in
-[`handlers.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs)
+[`handlers.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/handlers.rs)
 and their handler functions are the source of truth — this page is the method index, not a
 copy of each handler's parameter parsing.
 
@@ -875,7 +875,7 @@ Every MCP tool is derived from the `knowledge_*` dispatch methods above — tool
 IPC method names verbatim, and each `tools/call` is translated into an `IpcRequest` and routed
 straight through the same core dispatch the socket service uses. Tool descriptions and JSON
 schemas are maintained in the
-[`ToolSpec` registry in `crates/service/src/mcp/tools.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs) —
+[`ToolSpec` registry in `crates/service/src/mcp/tools.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs) —
 that file is the canonical source for per-tool descriptions; they are not duplicated here.
 
 ### Flags
@@ -1051,7 +1051,7 @@ deliberate, not an inconsistency to be fixed here:
 
 If you need "zero rows" as a filter result, use one of the four tools in the first list, or check
 the tool's own `ToolSpec` description in
-[`crates/service/src/mcp/tools.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs)
+[`crates/service/src/mcp/tools.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs)
 before relying on `[]` to mean "nothing" — on the other six it doesn't.
 
 This section is the single, central statement of that contract; individual tool entries on this
@@ -1568,7 +1568,7 @@ see [MCP client config recipes](configuration.md#mcp-client-config-recipes) in C
 
 # Telemetry
 
-Source: https://v3rv.com/liminis-context-graph/telemetry
+Source: https://docs.liminis.app/liminis-context-graph/telemetry
 
 
 The `liminis-context-graph` service emits structured JSON Lines (JSONL) telemetry events that give operators per-call timing, token usage with estimated cost, and WAL throughput counters.
@@ -1946,7 +1946,7 @@ Rates are in USD per million tokens. Models not present in the table produce `"e
 
 # Ontology
 
-Source: https://v3rv.com/liminis-context-graph/ontology
+Source: https://docs.liminis.app/liminis-context-graph/ontology
 
 
 `liminis-context-graph` supports an **optional workspace-scoped ontology** that declares the entity types and relation types the LLM should use during extraction. Without an ontology, the LLM derives types ad-hoc (free-form behavior). With one, vocabulary is consistent and queryable across all chunks.
@@ -2312,7 +2312,7 @@ declared.
   [`knowledge_reload_ontology`](#reloading-a-groups-ontology) accepts it. Ontologies with no
   `extract: false` type hash exactly as before.
 
-See [`docs/examples/ontology.example.yaml`](https://github.com/verveguy/liminis-context-graph/blob/main/docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
+See [`docs/examples/ontology.example.yaml`](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
 
 ## Modes
 
@@ -2367,7 +2367,7 @@ than ontology state. See [Operations](operations.md) for those fields.
 
 # Operations
 
-Source: https://v3rv.com/liminis-context-graph/operations
+Source: https://docs.liminis.app/liminis-context-graph/operations
 
 
 ## On-disk layout
@@ -3053,7 +3053,7 @@ bridge and the list of operations that support it.
 
 # Testing & Evaluation
 
-Source: https://v3rv.com/liminis-context-graph/testing-and-evaluation
+Source: https://docs.liminis.app/liminis-context-graph/testing-and-evaluation
 
 
 ## Record/replay cassettes
@@ -3107,7 +3107,7 @@ request nonces, and anything transport-specific (headers, API keys, URLs) are ne
 key, and never reach the cassette at all — the record/replay seam sits at the `Extractor` trait
 boundary, strictly above HTTP request construction, so there is nothing credential-shaped for it
 to see or need to scrub. See the
-[`crates/core/src/cassette.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/cassette.rs)
+[`crates/core/src/cassette.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/cassette.rs)
 module doc for the full, authoritative scope (including one documented, narrow gap around the
 edge extraction user prompt).
 
@@ -3116,7 +3116,7 @@ construction, so there's nothing transport-level for it to see. But a cassette's
 `response` fields are the actual episode text and model output, so **review content before
 committing or sharing a cassette**: source text drawn from a real workspace can carry
 proprietary or personal data that has nothing to do with authentication. See
-[`crates/core/tests/fixtures/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md)
+[`crates/core/tests/fixtures/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md)
 for this repo's fixture-capture conventions.
 
 ### Failure-record sidecar
@@ -3390,7 +3390,7 @@ nothing.
 
 # Full-corpus extraction benchmark runbook (#248)
 
-Source: https://v3rv.com/liminis-context-graph/eval-full-corpus-runbook
+Source: https://docs.liminis.app/liminis-context-graph/eval-full-corpus-runbook
 
 
 This is the maintainer-run procedure for producing #248's benchmark data: a full-228-article
@@ -3812,7 +3812,7 @@ whether or not it actually does.
 
 # Extraction-quality evaluation: methodology, model rankings, and local-LLM guidance
 
-Source: https://v3rv.com/liminis-context-graph/extraction-quality-evaluation
+Source: https://docs.liminis.app/liminis-context-graph/extraction-quality-evaluation
 
 
 This document answers the question `liminis-context-graph` has otherwise left unanswered: **can
@@ -4045,7 +4045,7 @@ flags and selection precedence.
 
 # Release process
 
-Source: https://v3rv.com/liminis-context-graph/release-process
+Source: https://docs.liminis.app/liminis-context-graph/release-process
 
 
 This is the maintainer procedure for verifying CI status before cutting a release. It
@@ -4175,10 +4175,10 @@ Either way, `docs-publish.yml`:
    `dispatch-docs` job in the release workflow run: a red job means the dispatch failed
    and docs were **not** triggered (the release itself is unaffected) — publish them
    with `gh workflow run docs-publish.yml -f version=<X.Y.Z>`.
-2. Visit the root URL (`https://v3rv.com/liminis-context-graph/`) and confirm the
+2. Visit the root URL (`https://docs.liminis.app/liminis-context-graph/`) and confirm the
    footer reads the new version.
 3. Visit the new version's own URL
-   (`https://v3rv.com/liminis-context-graph/v<version>/`) and confirm it's live.
+   (`https://docs.liminis.app/liminis-context-graph/v<version>/`) and confirm it's live.
 4. Spot-check that the previous version's URL is still reachable and unchanged.
 
 If the workflow run failed (e.g. a transient build error), re-run it with
@@ -4260,7 +4260,7 @@ step 1; the `gh-pages` branch itself is unaffected by that setting.
 
 # Architecture Decision Records
 
-Source: https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/index.md
+Source: https://github.com/liminisapp/liminis-context-graph/blob/main/docs/adr/index.md
 
 
 **These are historical decision records, not current-state documentation.** Each ADR captures
