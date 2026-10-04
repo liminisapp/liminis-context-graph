@@ -13,8 +13,6 @@
 
 use std::collections::HashMap;
 
-use sha2::{Digest, Sha256};
-
 use lcg_core::cassette::load_records;
 
 use crate::backend::{parse_backend_spec, BackendKind};
@@ -67,7 +65,7 @@ pub struct ResolvedPlan {
 /// pre-flight `resolve()` can't cover that case.
 pub fn hash_file(path: &str) -> Result<String, std::io::Error> {
     let bytes = std::fs::read(path)?;
-    Ok(format!("{:x}", Sha256::digest(&bytes)))
+    Ok(lcg_core::sha256_hex::sha256_hex(&bytes))
 }
 
 /// Resolves `cli`'s backends against `chunks_len` (the already-selected corpus subset —

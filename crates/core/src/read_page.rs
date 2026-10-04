@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::error::Error;
+use crate::sha256_hex::to_hex as hex_encode;
 
 /// Serialized keys of an episode item (embeddings are `#[serde(skip)]`, never projectable).
 pub const EPISODE_FIELDS: &[&str] = &[
@@ -167,15 +168,6 @@ pub fn decode_cursor(cursor: &str, tag: &str, shape: &str) -> Result<Value, Erro
         Some(pos) if pos.is_object() => Ok(pos.clone()),
         _ => Err(bad("malformed")),
     }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {

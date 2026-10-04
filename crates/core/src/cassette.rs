@@ -57,7 +57,6 @@ use std::sync::{Arc, Mutex};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::{
     dedup_judge::{self, DedupVerdict, DuplicatePair},
@@ -75,8 +74,7 @@ fn request_key(value: &Value) -> String {
     // value built below inserts keys in a fixed, hand-written order, so this serialization is
     // deterministic across processes and runs — no separate canonicalization pass is needed.
     let canonical = serde_json::to_string(value).expect("Value serialization is infallible");
-    let digest = Sha256::digest(canonical.as_bytes());
-    format!("{digest:x}")
+    crate::sha256_hex::sha256_hex(canonical.as_bytes())
 }
 
 fn extract_request_value(opts: &ExtractOptions<'_>) -> Value {
