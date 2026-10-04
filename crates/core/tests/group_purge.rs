@@ -147,7 +147,9 @@ fn assert_err(v: &Value, id: i64) {
 /// `failed` or a 10s timeout. Shared by every test that drives a background rebuild job via
 /// `knowledge_rebuild_from_wal`.
 async fn wait_for_rebuild(id: i64, job_id: &str, state: &Arc<AppState>) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // Hang detection only: the rebuild ends with a ~2.5s (debug) index build that overruns a
+    // tight deadline under parallel tests. See REBUILD_JOB_DEADLINE in handlers_wal_admin.rs.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch_val(
@@ -162,7 +164,7 @@ async fn wait_for_rebuild(id: i64, job_id: &str, state: &Arc<AppState>) {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 10s: {status_v}");
+                    panic!("rebuild did not complete within 60s: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),

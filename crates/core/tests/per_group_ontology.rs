@@ -832,7 +832,11 @@ async fn drift_clears_after_wal_rebuild_for_that_group_only() {
         .expect("expected job_id")
         .to_string();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // Hang detection only: the rebuild ends with a ~2.5s (debug) index build that overruns a
+
+    // tight deadline under parallel tests. See REBUILD_JOB_DEADLINE in handlers_wal_admin.rs.
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -847,7 +851,7 @@ async fn drift_clears_after_wal_rebuild_for_that_group_only() {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 5s: {status_v}");
+                    panic!("rebuild did not complete within 60s: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),
@@ -914,7 +918,11 @@ async fn wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache() {
         .expect("expected job_id")
         .to_string();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // Hang detection only: the rebuild ends with a ~2.5s (debug) index build that overruns a
+
+    // tight deadline under parallel tests. See REBUILD_JOB_DEADLINE in handlers_wal_admin.rs.
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -929,7 +937,7 @@ async fn wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache() {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 5s: {status_v}");
+                    panic!("rebuild did not complete within 60s: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),
