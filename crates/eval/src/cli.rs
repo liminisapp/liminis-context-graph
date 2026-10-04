@@ -158,7 +158,7 @@ OPTIONS:
                                  --record-cassette writes nothing.
     -h, --help                   Print this help and exit.
 
-Documentation: https://github.com/verveguy/liminis-context-graph — see README.md's
+Documentation: https://github.com/liminisapp/liminis-context-graph — see README.md's
 'Extraction-quality eval harness' section for cost implications before running.
 "
 }

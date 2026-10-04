@@ -9,7 +9,7 @@ import { remarkC4 } from '@liminis/diagrams/remark'
 import { PAGES } from './src/pages-order.mjs'
 
 const REPO = new URL('../', import.meta.url)
-const GITHUB = 'https://github.com/verveguy/liminis-context-graph'
+const GITHUB = 'https://github.com/liminisapp/liminis-context-graph'
 
 /**
  * The version this site documents, read from the workspace manifest.
@@ -65,10 +65,8 @@ function adrRedirects() {
   )
 }
 
-// Served as a GitHub Pages project site. The account carries a Pages custom
-// domain on the user site, so this resolves to
-// https://v3rv.com/liminis-context-graph/ rather than verveguy.github.io — the
-// subpath is the same either way.
+// Served from the dedicated docs host, https://docs.liminis.app, under the
+// /liminis-context-graph/ subpath (versioned copies live at /vX.Y.Z/ — ADR-0477).
 export default defineConfig({
   // `@site` so the import remarkC4 injects resolves from any page depth. The
   // plugin defaults to this alias; it lives in @liminis/diagrams/remark now.
@@ -88,7 +86,7 @@ export default defineConfig({
   // its committed SVG. See @liminis/diagrams/remark. Astro 7's default
   // processor (Sätteri) doesn't run remark plugins, so this pins the unified one.
   markdown: { processor: unified({ remarkPlugins: [remarkC4] }) },
-  site: 'https://v3rv.com',
+  site: 'https://docs.liminis.app',
   base: siteBase(),
   redirects: adrRedirects(),
   integrations: [

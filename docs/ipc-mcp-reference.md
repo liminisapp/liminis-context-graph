@@ -7,7 +7,7 @@ title: IPC & MCP Reference
 
 `liminis-context-graph` serves the same graph over **two transport surfaces**, both routed
 through the same core dispatch in
-[`crates/core/src/handlers.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs) —
+[`crates/core/src/handlers.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/handlers.rs) —
 no graph logic is duplicated between them:
 
 - **JSON-RPC 2.0 over a local socket** (default). Newline-delimited requests/responses over `.lcg/service.sock` — a Unix domain socket on macOS/Linux, a named pipe on Windows (see [Windows: named pipe](#windows-named-pipe)).
@@ -67,7 +67,7 @@ not exposed as an MCP tool.
 | Recovery / lifecycle | `knowledge_recover`, `knowledge_recover_full`, `knowledge_close` |
 
 For request/response shapes and parameter details, the dispatch `match` arms in
-[`handlers.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs)
+[`handlers.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/handlers.rs)
 and their handler functions are the source of truth — this page is the method index, not a
 copy of each handler's parameter parsing.
 
@@ -158,7 +158,7 @@ Every MCP tool is derived from the `knowledge_*` dispatch methods above — tool
 IPC method names verbatim, and each `tools/call` is translated into an `IpcRequest` and routed
 straight through the same core dispatch the socket service uses. Tool descriptions and JSON
 schemas are maintained in the
-[`ToolSpec` registry in `crates/service/src/mcp/tools.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs) —
+[`ToolSpec` registry in `crates/service/src/mcp/tools.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs) —
 that file is the canonical source for per-tool descriptions; they are not duplicated here.
 
 ### Flags
@@ -334,7 +334,7 @@ deliberate, not an inconsistency to be fixed here:
 
 If you need "zero rows" as a filter result, use one of the four tools in the first list, or check
 the tool's own `ToolSpec` description in
-[`crates/service/src/mcp/tools.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs)
+[`crates/service/src/mcp/tools.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs)
 before relying on `[]` to mean "nothing" — on the other six it doesn't.
 
 This section is the single, central statement of that contract; individual tool entries on this

@@ -85,7 +85,7 @@ OPTIONS:
     -h, --help                 Print this help and exit.
     -V, --version              Print version and exit.
 
-Documentation: https://github.com/verveguy/liminis-context-graph
+Documentation: https://docs.liminis.app/liminis-context-graph/
 "
 }
 

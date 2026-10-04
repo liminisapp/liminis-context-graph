@@ -17,7 +17,7 @@ For external contributors, the standard fork-branch-PR flow applies:
 
 ```bash
 # Fork the repo on GitHub, then clone your fork
-gh repo fork verveguy/liminis-context-graph --clone
+gh repo fork liminisapp/liminis-context-graph --clone
 cd liminis-context-graph
 
 # Create a branch for your change
@@ -259,7 +259,7 @@ never commit release prep directly to `main` — then tag the merge commit.
    reporters read the discussion, not the changelog.
 
    ```sh
-   gh api graphql -f query='query { repository(owner:"verveguy",name:"liminis-context-graph"){
+   gh api graphql -f query='query { repository(owner:"liminisapp",name:"liminis-context-graph"){
      discussions(first:20){ nodes { title category{name} createdAt } } } }'
    ```
 9. **Close the community reports the release resolves.** Comment on each with what shipped and

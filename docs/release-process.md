@@ -132,10 +132,10 @@ Either way, `docs-publish.yml`:
    `dispatch-docs` job in the release workflow run: a red job means the dispatch failed
    and docs were **not** triggered (the release itself is unaffected) — publish them
    with `gh workflow run docs-publish.yml -f version=<X.Y.Z>`.
-2. Visit the root URL (`https://v3rv.com/liminis-context-graph/`) and confirm the
+2. Visit the root URL (`https://docs.liminis.app/liminis-context-graph/`) and confirm the
    footer reads the new version.
 3. Visit the new version's own URL
-   (`https://v3rv.com/liminis-context-graph/v<version>/`) and confirm it's live.
+   (`https://docs.liminis.app/liminis-context-graph/v<version>/`) and confirm it's live.
 4. Spot-check that the previous version's URL is still reachable and unchanged.
 
 If the workflow run failed (e.g. a transient build error), re-run it with

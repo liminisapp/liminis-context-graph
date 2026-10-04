@@ -368,7 +368,7 @@ declared.
   [`knowledge_reload_ontology`](#reloading-a-groups-ontology) accepts it. Ontologies with no
   `extract: false` type hash exactly as before.
 
-See [`docs/examples/ontology.example.yaml`](https://github.com/verveguy/liminis-context-graph/blob/main/docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
+See [`docs/examples/ontology.example.yaml`](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
 
 ## Modes
 

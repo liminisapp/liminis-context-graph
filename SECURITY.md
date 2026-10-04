@@ -17,7 +17,7 @@ This project is pre-1.0. The latest commit on `main` is the only supported line.
 
 Use GitHub's private vulnerability reporting to disclose findings confidentially:
 
-**[Report a vulnerability](https://github.com/verveguy/liminis-context-graph/security/advisories/new)**
+**[Report a vulnerability](https://github.com/liminisapp/liminis-context-graph/security/advisories/new)**
 
 This creates a private advisory visible only to the maintainer and any collaborators you add.
 

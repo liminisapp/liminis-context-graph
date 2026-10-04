@@ -154,7 +154,7 @@ import urllib.request
 from typing import Optional
 
 WIKI_API = "https://simple.wikipedia.org/w/api.php"
-USER_AGENT = "liminis-context-graph-fixture-capture/1.0 (https://github.com/verveguy/liminis-context-graph)"
+USER_AGENT = "liminis-context-graph-fixture-capture/1.0 (https://github.com/liminisapp/liminis-context-graph)"
 
 # Bump this whenever `wikitext_to_prose` or any helper it calls (`strip_templates`,
 # `strip_file_links`, the ref/link/heading regexes) changes behavior. It's recorded in

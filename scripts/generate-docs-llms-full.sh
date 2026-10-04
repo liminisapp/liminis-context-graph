@@ -28,7 +28,7 @@ CARGO_TOML="${REPO_ROOT}/Cargo.toml"
 # ── Version, from the one place it is written down ──────────────────────────
 
 docs_version=$(awk -F'"' '/^\[workspace.package\]/{found=1} found && /^version = /{print $2; exit}' "${CARGO_TOML}")
-site_repository="verveguy/liminis-context-graph"
+site_repository="liminisapp/liminis-context-graph"
 
 if [[ -z "${docs_version}" ]]; then
   echo "error: could not find [workspace.package] version in ${CARGO_TOML}" >&2
@@ -63,10 +63,8 @@ strip_front_matter_to_tmp() {
     > "${TMPFILE}"
 }
 
-# Must match `url` + `baseurl` in docs/_config.yml. Not verveguy.github.io: the account
-# carries a Pages custom domain, so those URLs 301-redirect to v3rv.com (GitHub reports
-# html_url as http://v3rv.com/liminis-context-graph/ while this repo's cname is null).
-SITE_URL="https://v3rv.com/liminis-context-graph"
+# Canonical docs host + base path (matches `site` + `base` in site/astro.config.mjs).
+SITE_URL="https://docs.liminis.app/liminis-context-graph"
 
 # Pages in fixed order — do not reorder; CI drift checks require bitwise-identical output.
 # Format: "relative-path-from-docs:canonical-url"
@@ -87,7 +85,7 @@ ORDERED=(
   # /adr/* to GitHub. The index still belongs in this bundle, since it is real
   # documentation of how the records are meant to be read; only its canonical
   # URL moves.
-  "adr/index.md:https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/index.md"
+  "adr/index.md:https://github.com/liminisapp/liminis-context-graph/blob/main/docs/adr/index.md"
 )
 
 > "$OUT_TMP"
