@@ -33,6 +33,11 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+/// How long a background `knowledge_rebuild_from_wal` job may run before a test calls it hung.
+/// Hang detection only: every rebuild ends with a ~2.5s (debug) index build, which overran
+/// tighter deadlines under parallel tests. Same value and rationale as `handlers_wal_admin.rs`.
+const REBUILD_JOB_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 const EMB_DIM: usize = 4;
 
 fn make_db(dir: &TempDir) -> Arc<Db> {
@@ -832,11 +837,7 @@ async fn drift_clears_after_wal_rebuild_for_that_group_only() {
         .expect("expected job_id")
         .to_string();
 
-    // Hang detection only: the rebuild ends with a ~2.5s (debug) index build that overruns a
-
-    // tight deadline under parallel tests. See REBUILD_JOB_DEADLINE in handlers_wal_admin.rs.
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -851,7 +852,7 @@ async fn drift_clears_after_wal_rebuild_for_that_group_only() {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 60s: {status_v}");
+                    panic!("rebuild did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),
@@ -918,11 +919,7 @@ async fn wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache() {
         .expect("expected job_id")
         .to_string();
 
-    // Hang detection only: the rebuild ends with a ~2.5s (debug) index build that overruns a
-
-    // tight deadline under parallel tests. See REBUILD_JOB_DEADLINE in handlers_wal_admin.rs.
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -937,7 +934,7 @@ async fn wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache() {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 60s: {status_v}");
+                    panic!("rebuild did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),

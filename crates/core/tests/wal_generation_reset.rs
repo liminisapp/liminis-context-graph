@@ -28,6 +28,11 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+/// How long a background `knowledge_rebuild_from_wal` job may run before a test calls it hung.
+/// Hang detection only: every rebuild ends with a ~2.5s (debug) index build, which overran
+/// tighter deadlines under parallel tests. Same value and rationale as `handlers_wal_admin.rs`.
+const REBUILD_JOB_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
@@ -308,11 +313,7 @@ async fn sc002_shorter_reset_stream_takes_same_detection_path_via_background_job
         .expect("expected job_id")
         .to_string();
 
-    // Hang detection only: the rebuild ends with a ~2.5s (debug) index build that overruns a
-
-    // tight deadline under parallel tests. See REBUILD_JOB_DEADLINE in handlers_wal_admin.rs.
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     let job_result = loop {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let status_v = dispatch_val(
