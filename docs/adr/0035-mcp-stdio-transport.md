@@ -166,6 +166,10 @@ and the README's MCP section) — the MCP surface is not automatically derived b
 - New workspace dependency: `rmcp = { version = "2.2.0", features = ["server", "transport-io"] }`
   (default features disabled to skip `macros`/`base64`, which the hand-rolled `ServerHandler`
   doesn't need).
+  Since 2026-10-04 this is `version = "3.5.0"`: rmcp 3 renamed `ServerInfo` to `ServerConfig` and
+  `call_tool` now returns `CallToolResponse` (a `CallToolResult` wraps into it with `.into()`). The
+  `initialize` answer is unchanged: a requested handshake version is echoed, anything else gets
+  `2025-11-25`. rmcp 3.5 also accepts `2026-07-28` clients, which have no `initialize` handshake.
 - Nine new files under `crates/service/src/{cli.rs,mcp/}`; `main.rs`'s bootstrap sequence was
   refactored (not just extended) — reviewed against the full existing test suite for regressions.
 - SC-006 ("verified against the app's zod tool defs") is a manual, human-driven verification
