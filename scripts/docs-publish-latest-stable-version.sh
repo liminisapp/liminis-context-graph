@@ -23,7 +23,7 @@
 
 set -euo pipefail
 
-REPO="${DOCS_PUBLISH_REPO:-verveguy/liminis-context-graph}"
+REPO="${DOCS_PUBLISH_REPO:-liminisapp/liminis-context-graph}"
 
 TAG_PATTERN='^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$'
 
