@@ -112,11 +112,11 @@ See `Package.resolved` for the pinned dep tree.
 
 This sidecar is an **optional** component. The Rust binary (`liminis-context-graph`) does not depend on it being built or running — it only needs *some* OpenAI-compatible embedder reachable at startup. The sidecar happens to be the easiest such embedder on macOS.
 
-`liminis-context-graph` is the **sole source of truth** for this sidecar's source. The Liminis app (`verveguy/liminis`) does not carry its own copy of `native/local-inference/` — it obtains a built binary via the distribution mechanism below. See [ADR-0503](../../docs/adr/0503-swift-sidecar-source-of-truth.md) for the consolidation history and rationale.
+`liminis-context-graph` is the **sole source of truth** for this sidecar's source. The Liminis app (`shadoworg/liminis-notes`) does not carry its own copy of `native/local-inference/` — it obtains a built binary via the distribution mechanism below. See [ADR-0503](../../docs/adr/0503-swift-sidecar-source-of-truth.md) for the consolidation history and rationale.
 
 ## Distribution
 
-`verveguy/liminis` (or anyone else who wants a `LocalInference` binary without building it themselves) has three options, in order of convenience:
+The Liminis app (`shadoworg/liminis-notes`), or anyone else who wants a `LocalInference` binary without building it themselves, has three options, in order of convenience:
 
 1. **Download the latest release asset.** Every `local-inference-v*` [GitHub Release](../../releases) on this repo carries `local-inference-aarch64-apple-macos.tar.gz` (a single self-contained `local-inference` binary) and its `.sha256` checksum:
 
