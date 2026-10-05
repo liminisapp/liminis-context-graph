@@ -25,6 +25,15 @@ use serde_json::{json, Value};
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 
+/// How long a test waits on a background `knowledge_rebuild_from_wal` job before calling it hung.
+///
+/// This is hang detection, not a performance bound. Every rebuild ends with
+/// `build_indices_and_constraints()`, which takes ~2.5s in a debug build even over a near-empty
+/// database, and longer under `RUST_TEST_THREADS=4` while other tests build indexes too. The
+/// previous 5s deadline failed intermittently for exactly that reason: a job whose replay had
+/// finished was still `running` at 5.0s, in the index build.
+const REBUILD_JOB_DEADLINE: Duration = Duration::from_secs(60);
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn make_db(dim: usize) -> (Arc<Db>, TempDir) {
@@ -568,8 +577,8 @@ async fn test_rebuild_status_completed_after_background_job() {
         .expect("expected job_id")
         .to_string();
 
-    // Poll until completed (up to 5 seconds)
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // Poll until completed (up to REBUILD_JOB_DEADLINE)
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -596,7 +605,7 @@ async fn test_rebuild_status_completed_after_background_job() {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 5s: {status_v}");
+                    panic!("rebuild did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),
@@ -721,8 +730,8 @@ async fn test_rebuild_status_result_has_stat_fields() {
         .expect("expected job_id")
         .to_string();
 
-    // Poll until completed (up to 5 seconds), then check the stored result JSON
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // Poll until completed (up to REBUILD_JOB_DEADLINE), then check the stored result JSON
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -761,7 +770,7 @@ async fn test_rebuild_status_result_has_stat_fields() {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 5s: {status_v}");
+                    panic!("rebuild did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),
@@ -1128,8 +1137,8 @@ async fn test_production_scale_rebuild_leaves_search_immediately_queryable() {
         .expect("expected job_id")
         .to_string();
 
-    // Poll until completed (up to 30 seconds — 360 mutations at production scale is I/O-bound).
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // Poll until completed (up to REBUILD_JOB_DEADLINE — 360 mutations at production scale is I/O-bound).
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     let status_v = loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -1144,7 +1153,7 @@ async fn test_production_scale_rebuild_leaves_search_immediately_queryable() {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 30s: {status_v}");
+                    panic!("rebuild did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),
@@ -1406,7 +1415,7 @@ async fn test_rebuild_reports_lookup_key_backfill_failure_background() {
         .expect("expected job_id")
         .to_string();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     let status_v = loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -1421,7 +1430,7 @@ async fn test_rebuild_reports_lookup_key_backfill_failure_background() {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 30s: {status_v}");
+                    panic!("rebuild did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),
@@ -1603,8 +1612,8 @@ async fn test_rebuild_from_wal_non_empty_db_force_clear_succeeds() {
         .expect("expected job_id")
         .to_string();
 
-    // Poll until completed (up to 5 seconds).
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    // Poll until completed (up to REBUILD_JOB_DEADLINE).
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -1627,7 +1636,7 @@ async fn test_rebuild_from_wal_non_empty_db_force_clear_succeeds() {
             _ => {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "rebuild job did not complete within 5s: {status_v}"
+                    "rebuild job did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}"
                 );
             }
         }
@@ -1696,7 +1705,7 @@ async fn test_rebuild_from_wal_force_clear_zero_fills_legacy_entity_summary_embe
         .expect("expected job_id")
         .to_string();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -1713,7 +1722,7 @@ async fn test_rebuild_from_wal_force_clear_zero_fills_legacy_entity_summary_embe
             _ => {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "rebuild job did not complete within 5s: {status_v}"
+                    "rebuild job did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}"
                 );
             }
         }
@@ -1778,7 +1787,7 @@ async fn test_rebuild_from_wal_force_clear_zero_fills_legacy_episodic_attributes
         .expect("expected job_id")
         .to_string();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -1795,7 +1804,7 @@ async fn test_rebuild_from_wal_force_clear_zero_fills_legacy_episodic_attributes
             _ => {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "rebuild job did not complete within 5s: {status_v}"
+                    "rebuild job did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}"
                 );
             }
         }
@@ -2076,7 +2085,7 @@ fn all_seqs_in_wal_dir(dir: &std::path::Path) -> Vec<u64> {
 
 /// Dispatches `knowledge_rebuild_from_wal` (background-job path) and polls
 /// `knowledge_rebuild_status` until it completes, returning the final status response. Panics if
-/// the job fails or does not complete within 5 seconds — mirrors the polling pattern used by
+/// the job fails or does not complete within `REBUILD_JOB_DEADLINE` — mirrors the polling pattern used by
 /// `test_rebuild_from_wal_non_empty_db_force_clear_succeeds`.
 async fn rebuild_and_wait(id: i64, params: Value, state: Arc<AppState>) -> Value {
     let v = dispatch(id, "knowledge_rebuild_from_wal", params, Arc::clone(&state)).await;
@@ -2086,7 +2095,7 @@ async fn rebuild_and_wait(id: i64, params: Value, state: Arc<AppState>) -> Value
         .expect("expected job_id (background-job path)")
         .to_string();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -2103,7 +2112,7 @@ async fn rebuild_and_wait(id: i64, params: Value, state: Arc<AppState>) -> Value
             _ => {
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "rebuild job did not complete within 5s: {status_v}"
+                    "rebuild job did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}"
                 );
             }
         }

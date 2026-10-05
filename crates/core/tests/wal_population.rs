@@ -24,6 +24,11 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+/// How long a background `knowledge_rebuild_from_wal` job may run before a test calls it hung.
+/// Hang detection only: every rebuild ends with a ~2.5s (debug) index build, which overran
+/// tighter deadlines under parallel tests. Same value and rationale as `handlers_wal_admin.rs`.
+const REBUILD_JOB_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 const EMB_DIM: usize = 4;
@@ -123,10 +128,10 @@ async fn dispatch(id: i64, method: &str, params: Value, state: Arc<AppState>) ->
 }
 
 /// Polls `knowledge_rebuild_status` for `job_id` until it reports `completed`, panicking on
-/// `failed` or a 10s timeout. Shared by every test that drives a background rebuild job via
-/// `knowledge_rebuild_from_wal` (mirrors `group_purge.rs`'s identical helper).
+/// `failed` or after `REBUILD_JOB_DEADLINE`. Shared by every test that drives a background
+/// rebuild job via `knowledge_rebuild_from_wal` (mirrors `group_purge.rs`'s identical helper).
 async fn wait_for_rebuild_completion(job_id: &str, state: &Arc<AppState>) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -141,7 +146,7 @@ async fn wait_for_rebuild_completion(job_id: &str, state: &Arc<AppState>) {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 10s: {status_v}");
+                    panic!("rebuild did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),
