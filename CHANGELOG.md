@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
-## [Unreleased]
+## [0.17.0] - 2026-10-04
+
+Full detail: [docs/releases/0.17.0.md](docs/releases/0.17.0.md).
 
 ### Upgrading
+
+- **First start runs two one-time steps:** the `ingested_at` schema addition and backfill below, and an
+  FTS index rebuild, because lbug moved 0.21.0 → 0.21.1 and the #649 marker records the exact lbug
+  version. Both are logged; a large graph starts slower that once. Later starts do neither.
 
 - **Existing graphs get an `ingested_at` backfill on first start** (#673, ADR-0673): from the `ts` of
   the WAL entry that created each record where the WAL still has one, otherwise from `created_at`.
@@ -23,6 +29,16 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   checkpoint restore and dump compaction. Returned on every episode/entity/relationship read and
   accepted in the `fields` projection of `knowledge_get_episodes` and `knowledge_list_entities`.
   Additive only; `created_at` / `valid_at` and all ordering are unchanged.
+
+### Changed
+
+- **lbug 0.21.0 → 0.21.1** (#676). Extensions unchanged (still the `v0.21.0` path, same pinned bytes);
+  storage version stays 47.
+- **MCP library `rmcp` 2.2 → 3.5** (#680). The MCP tool surface is unchanged.
+- **Moved to the `liminisapp` org**: repository `liminisapp/liminis-context-graph`, docs at
+  https://docs.liminis.app/liminis-context-graph/ (#682). Old URLs redirect.
+- Dependency updates, including `quinn-proto` 0.11.19 (security advisory), `sha2` 0.11 and the docs
+  site's Astro 7.
 
 ## [0.16.4] - 2026-10-02
 
