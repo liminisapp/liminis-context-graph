@@ -4,6 +4,11 @@
 **Date**: 2026-06-01
 **Issue**: #124 (prebuilt binaries via cargo-dist)
 
+> **Superseded in part by [ADR-0690](0690-prefetch-and-cache-prebuilt-liblbug-for-release.md):** the
+> `LBUG_BUILD_FROM_SOURCE` injection and the lbug cache shared with CI described below are stale
+> (the source-build path is broken and the release workflow no longer uses that cache). The
+> `build-setup.yml` / `release.yml` split still holds.
+
 ## Context
 
 `cargo-dist` manages the release workflow (`.github/workflows/release.yml`) and regenerates it from `[workspace.metadata.dist]` config in `Cargo.toml`. The lbug crate requires `LBUG_BUILD_FROM_SOURCE=1` to be set during every build — without it, lbug's `build.rs` downloads a prebuilt `liblbug.a` that omits companion third-party static archives (fastpfor, brotli, lz4, zstd, yyjson), causing link failures.
