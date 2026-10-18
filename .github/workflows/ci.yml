@@ -148,6 +148,10 @@ jobs:
       - name: recompile-guard self-test
         run: scripts/test-assert-no-compiling.sh
 
+      # #690: the release workflow's prebuilt-liblbug prefetch (retry, key shape, fail-fast).
+      - name: fetch-lbug-prebuilt self-test
+        run: scripts/test-fetch-lbug-prebuilt.sh
+
       - name: check no ML runtime deps
         run: |
           # Capture `cargo tree` on its own (stderr kept) so a registry/network failure fails
