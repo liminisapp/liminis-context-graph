@@ -21,7 +21,8 @@
 # 2026-09-29 after upstream's 00:03 UTC republish (origin and edge agreed). Verified against an
 # lbug 0.21.0 core: macOS arm64 full lcg suite, Windows 11 vector 45/45 + fts 10/10
 # row-asserting pairing runs (issue #619). Bytes re-fetched 2026-10-04 and unchanged; the lbug 0.21.1 core still
-# resolves extension directory v0.21.0, so these same files pair with it.
+# resolves extension directory v0.21.0, so these same files pair with it. The lbug 0.21.2 core does too (issue #699):
+# its CMake build still defines LBUG_EXTENSION_VERSION="0.21.0" and v0.21.1/ and v0.21.2/ 404 on the CDN.
 #
 # Re-pinned 2026-10-26 (issue #709). Upstream served 0.22-built files at v0.21.0 from 2026-10-16
 # (LadybugDB/ladybug#1390), then on 2026-10-25 ~16:38 UTC restored the directory from the image
