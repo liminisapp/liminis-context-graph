@@ -21,7 +21,9 @@
 # 2026-09-29 after upstream's 00:03 UTC republish (origin and edge agreed). Verified against an
 # lbug 0.21.0 core: macOS arm64 full lcg suite, Windows 11 vector 45/45 + fts 10/10
 # row-asserting pairing runs (issue #619). Bytes re-fetched 2026-10-04 and unchanged; the lbug 0.21.1 core still
-# resolves extension directory v0.21.0, so these same files pair with it.
+# resolves extension directory v0.21.0, so these same files pair with it. Re-verified 2026-10-18 for lbug 0.21.2
+# (issue #699): its CMake build still defines LBUG_EXTENSION_VERSION="0.21.0", v0.21.1/ and v0.21.2/ 404 on the
+# CDN, and the v0.21.0 osx_arm64 vector bytes still hash to the value below.
 
 osx_arm64 vector 6f878f3c0a2320a34967ff568fcf6bbe9065666e95035f0eddfe28bbc73b53f4
 osx_arm64 fts 248332de781a7781f612a55b5397e88f58f1f1ba2a973836ada199eab0f6bf10

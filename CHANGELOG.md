@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [Unreleased]
+
+### Upgrading
+
+- **First start runs a one-time FTS index rebuild**, because lbug moved 0.21.1 → 0.21.2 and the #649
+  marker records the exact lbug version. It is logged; a large graph starts slower that once. Later
+  starts do not rebuild.
+
+### Changed
+
+- **lbug 0.21.1 → 0.21.2** (#699, supersedes #693). Takes upstream's scan-correctness fix
+  (`NodeGroup::scan` ran past a sub-node-group morsel's end) and buffer-manager race fix. Extensions
+  unchanged (still the `v0.21.0` path, same pinned bytes); storage version stays 47.
+
 ## [0.17.0] - 2026-10-04
 
 Full detail: [docs/releases/0.17.0.md](docs/releases/0.17.0.md).
