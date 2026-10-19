@@ -40,13 +40,15 @@ to hit.
 suffix appears **on Linux only** (`LBUG_LINUX_VARIANT` defaults to `compat`). If the staged
 directory name drifts from that, `build.rs` ignores the prefetch and downloads again, silently.
 `scripts/test-fetch-lbug-prebuilt.sh` pins the shape and CI runs it on every PR. Re-check the key
-function and the asset names in `scripts/download-liblbug.sh` on every `lbug` / `LBUG_VERSION`
-bump; the target-to-asset table lives at the top of the fetch script.
+function in the crate's `build.rs` and the asset names in the crate's `scripts/download-liblbug.sh`
+(both ship inside the `lbug` crate, e.g. `~/.cargo/registry/src/*/lbug-<version>/`, not in this
+repo) on every `lbug` / `LBUG_VERSION` bump; the target-to-asset table lives at the top of the
+fetch script.
 
 ### FR-004: no dependency on LadybugDB's `main`
 
 On 0.21.1, `download_lbug.sh` does not actually fetch anything from `refs/heads/main`, because the
-crate tarball already ships `scripts/download-liblbug.sh`. That dependency would only return if a
+crate tarball already ships its own `scripts/download-liblbug.sh`. That dependency would only return if a
 future crate version stopped shipping the script. The fetch script never invokes either of them, so
 FR-004 holds regardless.
 
