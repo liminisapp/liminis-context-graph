@@ -29,6 +29,8 @@ rebuild stability (WAL replay, dump, checkpoint restore).
   Each removed fact carries `still_believed`, true when another live episode outside the replacement
   still supports the edge (its belief interval is open), so "removed from the replacement" is not
   mistaken for "dropped from belief".
+  `added` means only "supported by the replacement and not by the old episode": such a fact may already
+  have been believed through another live episode before the correction.
 - `knowledge_get_affected_work {edge_uuid}` — for an edge no longer believed, the episodes ingested in
   its belief interval `[T1, T2)` that mention either endpoint entity.
 
@@ -72,7 +74,9 @@ dependence (that would need an audit trail of which facts an agent read). Every 
 the empty and non-closed ones, carries `basis: "entity_overlap"` and a note saying so, and the list is
 keyed `candidates` — never `episode_uuids` or `producing_episode_uuids`, which mean different things
 (ADR-0012, ADR-0705). The fact's own producing episodes are excluded: they are the belief, not work
-done under it. Candidates are ordered by ingest time and neither ranked nor truncated; a hub entity
+done under it. So are the units of the revision that superseded them (recovered as in
+`revision_unit_uuids`): a split revision's earlier units are ingested before its final unit closes
+the interval, but they are the correction, not work done under the old belief. Candidates are ordered by ingest time and neither ranked nor truncated; a hub entity
 over a long window returns a long list.
 
 **Edges are found by producing episode** with a per-episode `list_contains(rn.episodes, $uuid)` query

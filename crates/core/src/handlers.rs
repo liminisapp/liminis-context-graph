@@ -1740,7 +1740,18 @@ async fn handle_get_affected_work(req: &IpcRequest, state: Arc<AppState>) -> Res
                     .cloned()
                     .collect();
                 let mentioning = conn.get_mentioning_episodes(&edge.group_id, &endpoints)?;
-                cr::filter_window(mentioning, t1_us, t2_us, &row.episodes)
+                // The correction that closed the interval is not work done under the old belief,
+                // and a split revision's earlier units are ingested before its final unit (T2):
+                // exclude every unit of the revision that superseded each producer.
+                let mut excluded = row.episodes.clone();
+                for producer in conn.get_episode_rows(&row.episodes)?.values() {
+                    if producer.superseded_by.is_some() {
+                        let pool =
+                            conn.get_episode_rows_by_name(&producer.group_id, &producer.name)?;
+                        excluded.extend(cr::revision_unit_uuids(producer, &pool));
+                    }
+                }
+                cr::filter_window(mentioning, t1_us, t2_us, &excluded)
             }
             _ => Vec::new(),
         };

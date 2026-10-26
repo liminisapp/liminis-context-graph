@@ -371,6 +371,36 @@ async fn multi_unit_revision_replacement_includes_earlier_units() {
     assert_eq!(c["replacement"]["superseded_by"], ep(&u2));
 }
 
+/// A split revision's earlier units are ingested inside the old fact's belief window (before the
+/// final unit, which closes it) and mention the same entities, but they are the correction, not
+/// work done under the old belief.
+#[tokio::test]
+async fn affected_work_excludes_the_superseding_revisions_own_units() {
+    let (state, db, _d) = state_with(
+        vec![
+            extraction(&[("A", "B", "old")]),
+            extraction(&[("A", "B", "real work")]),
+            extraction(&[("A", "B", "unit 1")]),
+            extraction(&[("A", "B", "unit 2")]),
+        ],
+        None,
+    );
+    let old = chunk(&state, G, "x", json!({})).await;
+    let work = chunk(&state, G, "work", json!({})).await;
+    let u1 = chunk(&state, G, "x", json!({"supersede": false})).await;
+    chunk(
+        &state,
+        G,
+        "x",
+        json!({"same_revision_episode_uuids": [u1["episode_uuid"].clone()]}),
+    )
+    .await;
+    let a = affected(&state, &edge_uuid(&db, "old")).await;
+    assert_eq!(a["interval"]["state"], "closed", "{a}");
+    assert_eq!(uuids(&a["candidates"]), vec![ep(&work)], "{a}");
+    assert!(!uuids(&a["candidates"]).contains(&ep(&old)));
+}
+
 /// Chains: asking about E1 compares E1 with E2 (its direct superseder), not with E3.
 #[tokio::test]
 async fn chain_compares_with_the_direct_superseder() {

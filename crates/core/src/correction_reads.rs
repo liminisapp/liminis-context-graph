@@ -130,8 +130,8 @@ pub fn revision_unit_uuids(old: &EpisodeRecord, pool: &[EpisodeRecord]) -> Vec<S
     units.into_iter().map(|(_, u)| u).collect()
 }
 
-/// Keeps the candidates ingested inside `[t1_us, t2_us)` that are not among the edge's own
-/// producing episodes, ordered by ingest time then uuid (FR-002). The window is half-open: an
+/// Keeps the candidates ingested inside `[t1_us, t2_us)` that are not in `own_producers` (the
+/// edge's own producing episodes and the units of the revisions that superseded them), ordered by ingest time then uuid (FR-002). The window is half-open: an
 /// episode ingested at exactly `t2_us` — the correction itself — is outside. A candidate with no
 /// `ingested_at` cannot be placed in the window and is left out.
 pub fn filter_window(
