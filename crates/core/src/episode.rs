@@ -1246,11 +1246,6 @@ pub async fn add_episode_with_opts(
     let source_desc_owned = source_description.to_string();
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
-    // One service-clock instant for the whole commit (issue #705): it is the new episode's and
-    // every new edge's `ingested_at` *and* the `superseded_at` of the episodes this ingest
-    // supersedes, so the old facts lose belief at the very instant the new ones gain it — no gap
-    // and no overlap (SC-003). ADR-0673's stamp-only-when-empty rule allows pre-stamping.
-    let commit_instant = crate::db::ingested_at_or_now("");
     let supersede_policy = opts.supersede;
     let chunk_name_for_supersede = name.to_string();
     // `attributes` is expected to already be a serialized JSON object (handlers.rs's
@@ -1293,6 +1288,14 @@ pub async fn add_episode_with_opts(
     // falsely refuse the group though its ontology never changed. After such a purge the group
     // has no carriers, so this re-stamps; otherwise it is a cache hit.
     state.check_identity(group_id)?;
+    // One service-clock instant for the whole commit (issue #705): it is the new episode's and
+    // every new edge's `ingested_at` *and* the `superseded_at` of the episodes this ingest
+    // supersedes, so the old facts lose belief at the very instant the new ones gain it — no gap
+    // and no overlap (SC-003). ADR-0673's stamp-only-when-empty rule allows pre-stamping. Taken
+    // *after* the write lock is acquired so commit order and instant order agree: a concurrent
+    // resubmit that commits second can never supersede an episode at an instant before that
+    // episode's own `ingested_at`.
+    let commit_instant = crate::db::ingested_at_or_now("");
     let (
         edges_inserted,
         edges_dropped_unresolvable,

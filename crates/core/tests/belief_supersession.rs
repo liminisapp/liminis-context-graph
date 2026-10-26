@@ -851,6 +851,26 @@ async fn wal_replay_reproduces_belief_state() {
 #[tokio::test]
 async fn dump_then_replay_reproduces_belief_state() {
     let (state, db, _dir, _wal) = build_history().await;
+    // A pre-#705 row (no episodes, no warrant): the dump writes its unset `warrant` as "", which
+    // must still read back as legacy rather than as a warranted edge.
+    {
+        let conn = db.connect().unwrap();
+        let ents = conn.get_entities_by_group_ids(None).unwrap();
+        conn.insert_relates_to_edge(&RelatesToEdge {
+            uuid: "legacy-edge".into(),
+            name: "OLD".into(),
+            source_node_uuid: ents[0].uuid.clone(),
+            target_node_uuid: ents[1].uuid.clone(),
+            group_id: G.into(),
+            fact: "legacy fact".into(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            created_at: "2026-01-01 00:00:00".into(),
+            attributes: "{}".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(conn.count_legacy_edges(None).unwrap(), 1);
+    }
     let original = belief_snapshot(&db);
     let out = TempDir::new().unwrap();
     let target = out.path().join("dump");
@@ -872,6 +892,7 @@ async fn dump_then_replay_reproduces_belief_state() {
             .unwrap();
     }
     assert_eq!(belief_snapshot(&db2), original);
+    assert_eq!(db2.connect().unwrap().count_legacy_edges(None).unwrap(), 1);
 }
 
 /// The belief columns are added to a pre-#705 database by probe-then-`ALTER`, idempotently.

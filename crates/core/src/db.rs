@@ -1632,12 +1632,13 @@ impl<'db> Conn<'db> {
     pub fn count_legacy_edges(&self, group_ids: Option<&[&str]>) -> Result<u64, Error> {
         let (cypher, params) = match group_ids {
             Some(g) => (
-                "MATCH (rn:RelatesToNode_) WHERE rn.group_id IN $gids AND rn.warrant IS NULL \
+                "MATCH (rn:RelatesToNode_) WHERE rn.group_id IN $gids \
+                 AND (rn.warrant IS NULL OR rn.warrant = '') \
                  AND (rn.episodes IS NULL OR size(rn.episodes) = 0) RETURN count(rn)",
                 serde_json::json!({ "gids": g }),
             ),
             None => (
-                "MATCH (rn:RelatesToNode_) WHERE rn.warrant IS NULL \
+                "MATCH (rn:RelatesToNode_) WHERE (rn.warrant IS NULL OR rn.warrant = '') \
                  AND (rn.episodes IS NULL OR size(rn.episodes) = 0) RETURN count(rn)",
                 serde_json::json!({}),
             ),
