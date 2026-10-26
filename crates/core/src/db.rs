@@ -796,7 +796,10 @@ impl<'db> Conn<'db> {
             "CREATE (:Episodic {uuid: $uuid, name: $name, group_id: $group_id, \
              created_at: $created_at, source: $source, source_description: $source_description, \
              content: $content, content_embedding: $content_embedding, valid_at: $valid_at, \
-             entity_edges: $entity_edges, attributes: $attributes, ingested_at: $ingested_at})",
+             entity_edges: $entity_edges, attributes: $attributes, ingested_at: $ingested_at, \
+             superseded_at: $superseded_at, superseded_by: $superseded_by, \
+             superseded_by_kind: $superseded_by_kind, \
+             supersession_reason: $supersession_reason})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -810,6 +813,10 @@ impl<'db> Conn<'db> {
                 "entity_edges": row.entity_edges,
                 "attributes": row.attributes,
                 "ingested_at": ingested_at_or_now(&row.ingested_at),
+                "superseded_at": row.superseded_at,
+                "superseded_by": row.superseded_by,
+                "superseded_by_kind": row.superseded_by_kind,
+                "supersession_reason": row.supersession_reason,
             }),
         )
     }
@@ -824,7 +831,8 @@ impl<'db> Conn<'db> {
             "CREATE (:RelatesToNode_ {uuid: $uuid, name: $name, group_id: $group_id, \
              created_at: $created_at, fact: $fact, fact_embedding: $fact_embedding, \
              valid_at: $valid_at, invalid_at: $invalid_at, attributes: $attributes, \
-             relation_type: $relation_type, ingested_at: $ingested_at})",
+             relation_type: $relation_type, ingested_at: $ingested_at, \
+             episodes: $episodes, warrant: $warrant, valid_at_source: $valid_at_source})",
             serde_json::json!({
                 "uuid": edge.uuid,
                 "name": edge.name,
@@ -837,6 +845,9 @@ impl<'db> Conn<'db> {
                 "attributes": edge.attributes,
                 "relation_type": edge.relation_type,
                 "ingested_at": ingested_at_or_now(&edge.ingested_at),
+                "episodes": edge.episodes,
+                "warrant": edge.warrant,
+                "valid_at_source": edge.valid_at_source,
             }),
         )?;
 
@@ -894,7 +905,8 @@ impl<'db> Conn<'db> {
             "CREATE (:RelatesToNode_ {uuid: $uuid, name: $name, group_id: $group_id, \
              created_at: $created_at, fact: $fact, fact_embedding: $fact_embedding, \
              valid_at: $valid_at, invalid_at: $invalid_at, attributes: $attributes, \
-             relation_type: $relation_type, ingested_at: $ingested_at})",
+             relation_type: $relation_type, ingested_at: $ingested_at, \
+             episodes: $episodes, warrant: $warrant, valid_at_source: $valid_at_source})",
             serde_json::json!({
                 "uuid": edge.uuid,
                 "name": edge.name,
@@ -907,6 +919,9 @@ impl<'db> Conn<'db> {
                 "attributes": edge.attributes,
                 "relation_type": edge.relation_type,
                 "ingested_at": ingested_at_or_now(&edge.ingested_at),
+                "episodes": edge.episodes,
+                "warrant": edge.warrant,
+                "valid_at_source": edge.valid_at_source,
             }),
         )?;
 
@@ -1255,7 +1270,8 @@ impl<'db> Conn<'db> {
             "MATCH (ep:Episodic) {where_clause}\
              RETURN ep.uuid, ep.name, ep.group_id, ep.created_at, ep.source, \
              ep.source_description, ep.content, ep.valid_at, ep.entity_edges, ep.attributes, \
-             ep.ingested_at \
+             ep.ingested_at, ep.superseded_at, ep.superseded_by, ep.superseded_by_kind, \
+             ep.supersession_reason \
              ORDER BY ep.created_at DESC, ep.uuid DESC LIMIT $limit"
         );
         let result = self.query_params(&cypher, params)?;
@@ -1275,6 +1291,10 @@ impl<'db> Conn<'db> {
                     entity_edges: value_as_str_list(&row[8]),
                     attributes: value_as_string(&row[9]),
                     ingested_at: value_as_timestamp_str(&row[10]),
+                    superseded_at: value_as_optional_timestamp_str(&row[11]),
+                    superseded_by: value_as_optional_string(&row[12]),
+                    superseded_by_kind: value_as_optional_string(&row[13]),
+                    supersession_reason: value_as_optional_string(&row[14]),
                     ..Default::default()
                 },
                 created_us,
@@ -1449,6 +1469,188 @@ impl<'db> Conn<'db> {
         }
 
         Ok((all_uuids, grouped))
+    }
+
+    // ── Belief time: supersession and lookups (issue #705, ADR-0705) ───────────
+
+    /// UUIDs of `group_id`'s still-live (`superseded_at IS NULL`) episodes named `chunk_id`,
+    /// excluding `exclude`. Group-scoped by construction: supersession never crosses a group.
+    pub fn live_episode_uuids_for_chunk(
+        &self,
+        chunk_id: &str,
+        group_id: &str,
+        exclude: &[String],
+    ) -> Result<Vec<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) \
+             WHERE ep.name = $name AND ep.group_id = $gid AND ep.superseded_at IS NULL \
+             RETURN ep.uuid",
+            serde_json::json!({ "name": chunk_id, "gid": group_id }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| value_as_string(&r[0]))
+            .filter(|u| !exclude.contains(u))
+            .collect())
+    }
+
+    /// Marks the given episodes superseded. uuid-keyed, fixed-valued and guarded by
+    /// `superseded_at IS NULL`, so WAL tail replay over an overlapping seq range is idempotent
+    /// (ADR-0026) and a second supersession can never overwrite the first's timestamp. Never
+    /// touches `valid_at` / `invalid_at` (FR-008). `superseded_by` is `None` for
+    /// `chunk_removed`, which has no superseding episode; the column is then left NULL.
+    pub fn supersede_episodes_by_uuids(
+        &self,
+        uuids: &[String],
+        superseded_at: &str,
+        superseded_by: Option<&str>,
+        reason: &str,
+    ) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        match superseded_by {
+            Some(by) => self.exec_params(
+                "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids AND ep.superseded_at IS NULL \
+                 SET ep.superseded_at = $superseded_at, ep.superseded_by = $superseded_by, \
+                 ep.superseded_by_kind = 'episode', ep.supersession_reason = $reason",
+                serde_json::json!({
+                    "uuids": uuids,
+                    "superseded_at": superseded_at,
+                    "superseded_by": by,
+                    "reason": reason,
+                }),
+            ),
+            None => self.exec_params(
+                "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids AND ep.superseded_at IS NULL \
+                 SET ep.superseded_at = $superseded_at, ep.supersession_reason = $reason",
+                serde_json::json!({
+                    "uuids": uuids,
+                    "superseded_at": superseded_at,
+                    "reason": reason,
+                }),
+            ),
+        }
+    }
+
+    /// `knowledge_mark_chunk_removed`'s storage half: supersedes every live episode named
+    /// `chunk_id` in each of `group_ids` with reason `chunk_removed`, one group at a time, and
+    /// returns the superseded UUIDs alongside a [`GroupedMutations`] bucketing each group's
+    /// mutations (the shape of [`Self::remove_episodes_by_chunk_id`], whose explicit-deletion
+    /// contract this deliberately does not change). Deletes nothing.
+    pub fn supersede_chunk_episodes(
+        &self,
+        chunk_id: &str,
+        group_ids: &[&str],
+        superseded_at: &str,
+    ) -> Result<(Vec<String>, GroupedMutations), Error> {
+        if group_ids.is_empty() {
+            return Err(Error::Ipc(
+                "supersede_chunk_episodes requires a non-empty group_ids".to_string(),
+            ));
+        }
+        let mut grouped: GroupedMutations = GroupedMutations::new();
+        let mut all_uuids: Vec<String> = Vec::new();
+        for gid in group_ids {
+            let uuids = self.live_episode_uuids_for_chunk(chunk_id, gid, &[])?;
+            if uuids.is_empty() {
+                continue;
+            }
+            self.supersede_episodes_by_uuids(&uuids, superseded_at, None, "chunk_removed")?;
+            self.drain_mutations_into(&mut grouped, gid);
+            all_uuids.extend(uuids);
+        }
+        Ok((all_uuids, grouped))
+    }
+
+    /// Belief-relevant columns for the given edge UUIDs (one batched lookup, keyed by uuid so the
+    /// group scoping of whatever read produced the UUIDs carries over).
+    pub fn get_edge_belief_rows(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, crate::belief::EdgeBeliefRow>, Error> {
+        let mut out = std::collections::HashMap::new();
+        if uuids.is_empty() {
+            return Ok(out);
+        }
+        let rows = self.query_params(
+            "MATCH (rn:RelatesToNode_) WHERE rn.uuid IN $uuids \
+             RETURN rn.uuid, rn.ingested_at, rn.episodes, rn.warrant, rn.valid_at_source",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        for r in rows {
+            let uuid = value_as_string(&r[0]);
+            let ingested = match &r[1] {
+                lbug::Value::Null(_) => None,
+                other => Some(value_as_timestamp_micros(other)),
+            };
+            out.insert(
+                uuid.clone(),
+                crate::belief::EdgeBeliefRow {
+                    uuid,
+                    ingested_at_us: ingested,
+                    episodes: value_as_str_list(&r[2]),
+                    warrant: value_as_optional_string(&r[3]),
+                    valid_at_source: value_as_optional_string(&r[4]),
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// Supersession state for the given episode UUIDs. A UUID absent from the result no longer
+    /// exists (hard-deleted).
+    pub fn get_episode_supersession(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, crate::belief::EpisodeSupersession>, Error> {
+        let mut out = std::collections::HashMap::new();
+        if uuids.is_empty() {
+            return Ok(out);
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids RETURN ep.uuid, ep.superseded_at",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        for r in rows {
+            let superseded = match &r[1] {
+                lbug::Value::Null(_) => None,
+                other => Some(value_as_timestamp_micros(other)),
+            };
+            out.insert(
+                value_as_string(&r[0]),
+                crate::belief::EpisodeSupersession {
+                    superseded_at_us: superseded,
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// Count of legacy edges (no producing episode and no warrant marker — FR-007), for
+    /// `knowledge_status`. `group_ids: None` counts every group.
+    pub fn count_legacy_edges(&self, group_ids: Option<&[&str]>) -> Result<u64, Error> {
+        let (cypher, params) = match group_ids {
+            Some(g) => (
+                "MATCH (rn:RelatesToNode_) WHERE rn.group_id IN $gids \
+                 AND (rn.warrant IS NULL OR rn.warrant = '') \
+                 AND (rn.episodes IS NULL OR size(rn.episodes) = 0) RETURN count(rn)",
+                serde_json::json!({ "gids": g }),
+            ),
+            None => (
+                "MATCH (rn:RelatesToNode_) WHERE (rn.warrant IS NULL OR rn.warrant = '') \
+                 AND (rn.episodes IS NULL OR size(rn.episodes) = 0) RETURN count(rn)",
+                serde_json::json!({}),
+            ),
+        };
+        let rows = self.query_params(cypher, params)?;
+        Ok(rows
+            .first()
+            .map(|r| match &r[0] {
+                lbug::Value::Int64(i) => *i as u64,
+                _ => 0,
+            })
+            .unwrap_or(0))
     }
 
     // ── Group-scoped purge (issue #361) ─────────────────────────────────────────
@@ -3334,14 +3536,16 @@ impl<'db> Conn<'db> {
         let mut edges = self.collect_full_relates_to_edges(
             "MATCH (src:Entity {uuid: $uuid})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type, rn.ingested_at",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type, rn.ingested_at, \
+             rn.episodes, rn.warrant, rn.valid_at_source",
             serde_json::json!({ "uuid": entity_uuid }),
         )?;
         // Incoming edges (entity is target)
         edges.extend(self.collect_full_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type, rn.ingested_at",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type, rn.ingested_at, \
+             rn.episodes, rn.warrant, rn.valid_at_source",
             serde_json::json!({ "uuid": entity_uuid }),
         )?);
         Ok(edges)
@@ -3371,6 +3575,11 @@ impl<'db> Conn<'db> {
                 ingested_at: value_as_timestamp_str(&row[12]),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                // Belief-time provenance (issue #705): carried so corrections copies keep an
+                // extracted edge's producing episode instead of turning it into a legacy row.
+                episodes: value_as_str_list(&row[13]),
+                warrant: value_as_optional_string(&row[14]),
+                valid_at_source: value_as_optional_string(&row[15]),
             });
         }
         Ok(rows)
@@ -3656,7 +3865,8 @@ impl<'db> Conn<'db> {
 
     /// Page of Episodic rows for dump.
     /// Columns: [uuid, name, group_id, created_at, source, source_description, content,
-    ///            content_embedding, valid_at, entity_edges, attributes, ingested_at]
+    ///            content_embedding, valid_at, entity_edges, attributes, ingested_at,
+    ///            superseded_at, superseded_by, superseded_by_kind, supersession_reason]
     pub(crate) fn dump_episodics_page(
         &self,
         group_id: Option<&str>,
@@ -3668,7 +3878,8 @@ impl<'db> Conn<'db> {
                 "MATCH (n:Episodic) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
-                 n.attributes, n.ingested_at \
+                 n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
+                 n.superseded_by_kind, n.supersession_reason \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -3677,7 +3888,8 @@ impl<'db> Conn<'db> {
                 "MATCH (n:Episodic) \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
-                 n.attributes, n.ingested_at \
+                 n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
+                 n.superseded_by_kind, n.supersession_reason \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -3686,7 +3898,8 @@ impl<'db> Conn<'db> {
 
     /// Page of RelatesToNode_ rows for dump.
     /// Columns: [uuid, name, group_id, created_at, fact, fact_embedding, episodes,
-    ///            expired_at, valid_at, invalid_at, attributes, relation_type, ingested_at]
+    ///            expired_at, valid_at, invalid_at, attributes, relation_type, ingested_at,
+    ///            warrant, valid_at_source]
     pub(crate) fn dump_relatos_page(
         &self,
         group_id: Option<&str>,
@@ -3698,7 +3911,7 @@ impl<'db> Conn<'db> {
                 "MATCH (n:RelatesToNode_) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.fact, \
                  n.fact_embedding, n.episodes, n.expired_at, n.valid_at, n.invalid_at, \
-                 n.attributes, n.relation_type, n.ingested_at \
+                 n.attributes, n.relation_type, n.ingested_at, n.warrant, n.valid_at_source \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -3707,7 +3920,7 @@ impl<'db> Conn<'db> {
                 "MATCH (n:RelatesToNode_) \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.fact, \
                  n.fact_embedding, n.episodes, n.expired_at, n.valid_at, n.invalid_at, \
-                 n.attributes, n.relation_type, n.ingested_at \
+                 n.attributes, n.relation_type, n.ingested_at, n.warrant, n.valid_at_source \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -4012,6 +4225,7 @@ const TIMESTAMP_PARAM_NAMES: &[&str] = &[
     "invalid_at",
     "expired_at",
     "ingested_at",
+    "superseded_at",
 ];
 
 /// Maps a JSON param `(name, value)` to an lbug `Value`, applying timestamp typing only to
@@ -4038,7 +4252,7 @@ fn json_value_for_param(key: &str, v: &serde_json::Value) -> Value {
 /// read-back format (assumed UTC). Shared by `json_value_for_param`'s column-write coercion and
 /// [`validate_and_normalize_valid_at`]'s upfront call-time validation, so there is exactly one
 /// definition of "which formats we accept" rather than a second copy that could drift.
-fn parse_timestamp_str(s: &str) -> Option<time::OffsetDateTime> {
+pub(crate) fn parse_timestamp_str(s: &str) -> Option<time::OffsetDateTime> {
     if let Ok(odt) = time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
     {
         return Some(odt);

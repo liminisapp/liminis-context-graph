@@ -277,6 +277,9 @@ pub fn create_cross_group_edge(
         relation_type: params.relation_type,
         episode_uuids: vec![],
         source_descriptions: vec![],
+        episodes: vec![],
+        warrant: Some("cross_group".to_string()),
+        valid_at_source: None,
     };
 
     conn.insert_cross_group_edge(&edge)?;

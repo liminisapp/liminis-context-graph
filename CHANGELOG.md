@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Pre-1.0 development; see `git log` for history before 0.1.0.
 
+## [Unreleased]
+
+### Upgrading
+
+- **Re-ingest graphs written before this release** if you want belief time to cover them. Their edges
+  have no producing episode and cannot be soundly backfilled (endpoint co-occurrence is not
+  provenance, #404); they are treated as believed and reported as `legacy`
+  (`knowledge_status.legacy_edge_count`). New nullable columns are added on first start.
+
+### Added
+
+- **Corrections end belief without deleting evidence** (#705, ADR-0705). Resubmitting a `chunk_id` to
+  `knowledge_process_chunk` supersedes that chunk's earlier episodes in the same group once the new
+  ingest has succeeded; `superseded_at` / `superseded_by` / `superseded_by_kind` /
+  `supersession_reason` are recorded on the episode, in the WAL, and survive rebuild, recovery,
+  checkpoint restore and dump compaction. `valid_at` / `invalid_at` are never written.
+  Multi-unit chunks use `supersede: false` and `same_revision_episode_uuids`.
+- **`knowledge_mark_chunk_removed`** (write scope): records that a chunk no longer exists, superseding
+  its episodes with reason `chunk_removed`. `knowledge_delete_chunk_episode` keeps its
+  explicit-deletion contract.
+- **Edge provenance**: each extracted edge records its producing episode in `episodes`; edges with no
+  producing episode carry a `warrant` (`assertion`, `cross_group`); extracted edges record whether
+  `valid_at` came from the text or defaulted to `reference_time` (`valid_at_source`).
+- **`believed_only` and `as_of`** on `knowledge_find_relationships`, `list_relationships`,
+  `get_entity_neighbors`, `get_edges_by_group` and `get_edges_by_uuids`; opted-in reads add a `belief`
+  object per edge. Default reads are unchanged.
+- `knowledge_status.legacy_edge_count`.
+
+### Changed
+
+- `knowledge_assert_relationship` never overwrites an extracted edge's `fact` (#405); it creates a
+  separate edge with the `assertion` warrant.
+- `Episodic.entity_edges` is documented as holding entity UUIDs, not edge provenance.
+
 ## [0.17.0] - 2026-10-04
 
 Full detail: [docs/releases/0.17.0.md](docs/releases/0.17.0.md).

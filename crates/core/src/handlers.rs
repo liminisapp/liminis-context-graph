@@ -170,6 +170,7 @@ async fn handle(
         "knowledge_build_indices" => handle_build_indices(state).await,
         "knowledge_delete_by_source" => handle_delete_by_source(req, state).await,
         "knowledge_delete_chunk_episode" => handle_delete_chunk_episode(req, state).await,
+        "knowledge_mark_chunk_removed" => handle_mark_chunk_removed(req, state).await,
         "knowledge_delete_by_group" => handle_delete_by_group(req, state).await,
         "knowledge_reload_ontology" => handle_reload_ontology(req, state).await,
         "knowledge_clear_all" => handle_clear_all(req, state).await,
@@ -332,6 +333,7 @@ struct StatusFields {
     entity_count: u64,
     episode_count: u64,
     edge_count: u64,
+    legacy_edge_count: u64,
     wal_exists: bool,
     wal_file_count: u64,
     wal_byte_size: u64,
@@ -577,6 +579,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 let last_index_time = conn.get_latest_episode_time()?;
                 let index_created_at = conn.get_earliest_episode_time()?;
                 let cross_group_pointers = conn.count_cross_group_pointers()?;
+                let legacy_edge_count = conn.count_legacy_edges(None)?;
                 Ok((
                     entity_count,
                     episode_count,
@@ -584,6 +587,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     last_index_time,
                     index_created_at,
                     cross_group_pointers,
+                    legacy_edge_count,
                 ))
             })();
 
@@ -595,7 +599,9 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     last_index_time,
                     index_created_at,
                     cross_group_pointers,
+                    legacy_edge_count,
                 )) => Ok(StatusOutcome::Queryable(StatusFields {
+                    legacy_edge_count,
                     entity_count,
                     episode_count,
                     edge_count,
@@ -647,6 +653,10 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "embedding_dim": embedding_dim,
                 "entity_count": fields.entity_count,
                 "relationship_count": fields.edge_count,
+                // Issue #705, FR-007: edges with no producing episode and no warrant marker —
+                // written before belief time existed, so they cannot be soundly backfilled
+                // (endpoint co-occurrence is not provenance, #404). Believed, but reported.
+                "legacy_edge_count": fields.legacy_edge_count,
                 "episode_count": fields.episode_count,
                 "last_index_time": fields.last_index_time,
                 "context_graph_initialized": true,
@@ -1064,7 +1074,41 @@ async fn handle_knowledge_process_chunk(
     } else {
         SourceType::Text
     };
-    let result = episode::add_episode(
+    // Issue #705, FR-003: resubmitting a `chunk_id` supersedes that chunk's earlier live episodes in
+    // this group once this ingest has fully succeeded. A multi-unit revision (one chunk split into
+    // several calls under the same `chunk_id`) sends `supersede: false` on every non-final unit and
+    // passes the episode uuids those units returned as `same_revision_episode_uuids` on the final
+    // one, which are then kept live. Stateless: a unit that fails means the final call never
+    // happens and the old episodes stay live.
+    let supersede = match &p["supersede"] {
+        Value::Null => true,
+        Value::Bool(b) => *b,
+        _ => return Err(Error::Ipc("supersede must be a boolean".to_string())),
+    };
+    let keep: Vec<String> = match &p["same_revision_episode_uuids"] {
+        Value::Null => Vec::new(),
+        Value::Array(a) => a
+            .iter()
+            .map(|v| {
+                v.as_str().map(str::to_string).ok_or_else(|| {
+                    Error::Ipc("same_revision_episode_uuids must be an array of strings".into())
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        _ => {
+            return Err(Error::Ipc(
+                "same_revision_episode_uuids must be an array of strings".to_string(),
+            ))
+        }
+    };
+    let opts = episode::EpisodeOpts {
+        supersede: if supersede {
+            episode::SupersedePolicy::ReviseChunk { keep }
+        } else {
+            episode::SupersedePolicy::None
+        },
+    };
+    let result = episode::add_episode_with_opts(
         Arc::clone(&state),
         &chunk_id,
         &chunk_text,
@@ -1075,12 +1119,14 @@ async fn handle_knowledge_process_chunk(
         source_type,
         None,
         &attributes,
+        opts,
     )
     .await?;
 
     let mut response = json!({
         "success": true,
         "chunk_id": chunk_id,
+        "superseded_episode_uuids": result.superseded_episode_uuids,
         "source_file": source_file,
         "episode_uuid": result.episode_uuid,
         "nodes_extracted": result.nodes_extracted,
@@ -1237,12 +1283,103 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     Ok(json!({"nodes": entities, "count": count}))
 }
 
+// ── Belief-time reads (issue #705, ADR-0705) ──────────────────────────────────
+
+/// Over-fetch factor applied to a capped relationship read when a belief filter is active, so
+/// post-filtering still tends to fill `num_results`. Fewer results than requested remain possible.
+const BELIEF_OVERFETCH: usize = 3;
+
+/// The opt-in belief parameters of a relationship read (FR-009). `believed_only` filters out
+/// edges the graph did not believe at `as_of`; either parameter attaches a `belief` annotation to
+/// every returned edge. `as_of` alone implies the filter; `believed_only: false` with an `as_of`
+/// annotates without filtering.
+struct BeliefQuery {
+    filter: bool,
+    as_of_us: i64,
+}
+
+fn parse_belief_query(p: &Value) -> Result<Option<BeliefQuery>, Error> {
+    let believed_only = match &p["believed_only"] {
+        Value::Null => None,
+        Value::Bool(b) => Some(*b),
+        _ => return Err(Error::Ipc("believed_only must be a boolean".to_string())),
+    };
+    let as_of_us = match &p["as_of"] {
+        Value::Null => None,
+        Value::String(s) => {
+            let odt = crate::db::parse_timestamp_str(s).ok_or_else(|| {
+                Error::Ipc(format!(
+                    "as_of '{s}' is not a valid RFC-3339 or 'YYYY-MM-DD HH:MM:SS' timestamp"
+                ))
+            })?;
+            Some((odt.unix_timestamp_nanos() / 1_000) as i64)
+        }
+        _ => return Err(Error::Ipc("as_of must be a timestamp string".to_string())),
+    };
+    if believed_only.is_none() && as_of_us.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(BeliefQuery {
+        filter: believed_only.unwrap_or(true),
+        as_of_us: as_of_us.unwrap_or_else(|| chrono::Utc::now().timestamp_micros()),
+    }))
+}
+
+/// Evaluates belief for `edges` and returns them as JSON with a `belief` annotation, dropping the
+/// unbelieved ones when the query filters. Two batched uuid-keyed lookups, so the group scoping of
+/// the read that produced `edges` carries over.
+fn apply_belief<T: serde::Serialize>(
+    conn: &crate::db::Conn<'_>,
+    edges: Vec<T>,
+    uuid_of: impl Fn(&T) -> &str,
+    q: &BeliefQuery,
+) -> Result<Vec<Value>, Error> {
+    let uuids: Vec<String> = edges.iter().map(|e| uuid_of(e).to_string()).collect();
+    let rows = conn.get_edge_belief_rows(&uuids)?;
+    let mut ep_uuids: Vec<String> = rows
+        .values()
+        .flat_map(|r| r.episodes.iter().cloned())
+        .collect();
+    ep_uuids.sort();
+    ep_uuids.dedup();
+    let episodes = conn.get_episode_supersession(&ep_uuids)?;
+    let mut out = Vec::with_capacity(edges.len());
+    for edge in edges {
+        let uuid = uuid_of(&edge).to_string();
+        let row = rows
+            .get(&uuid)
+            .cloned()
+            .unwrap_or_else(|| crate::belief::EdgeBeliefRow {
+                uuid,
+                ..Default::default()
+            });
+        let state = crate::belief::evaluate(&row, &episodes, q.as_of_us);
+        if q.filter && !state.is_believed() {
+            continue;
+        }
+        let mut v = serde_json::to_value(&edge).unwrap_or(Value::Null);
+        v["belief"] = serde_json::to_value(crate::belief::BeliefAnnotation::new(&row, state))
+            .unwrap_or(Value::Null);
+        out.push(v);
+    }
+    Ok(out)
+}
+
 async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let query = p["query"].as_str().unwrap_or("").to_string();
     let group_ids = extract_optional_group_ids_preserve_empty(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
     let min_similarity = optional_min_similarity_param(&p["min_similarity"])?;
+    let belief = parse_belief_query(p)?;
+    let requested = limit;
+    // Belief filtering happens after fusion (the FTS/vector candidate pools know nothing about
+    // supersession), so over-fetch when it is on and truncate afterwards.
+    let limit = if belief.as_ref().is_some_and(|b| b.filter) {
+        limit.saturating_mul(BELIEF_OVERFETCH)
+    } else {
+        limit
+    };
 
     let result = search::hybrid_edge_search_scored(
         load_db(&state)?,
@@ -1281,6 +1418,18 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
         }
         Err(e) => return Err(e),
     };
+
+    if let Some(q) = belief {
+        let db = load_db(&state)?;
+        let mut edges = tokio::task::spawn_blocking(move || {
+            let conn = db.connect()?;
+            apply_belief(&conn, edges, |e| e.edge.uuid.as_str(), &q)
+        })
+        .await??;
+        edges.truncate(requested);
+        let count = edges.len();
+        return Ok(json!({"edges": edges, "count": count}));
+    }
 
     let count = edges.len();
     Ok(json!({"edges": edges, "count": count}))
@@ -1439,6 +1588,7 @@ async fn handle_get_nodes_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
 
 async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let group_ids = extract_optional_group_ids_preserve_empty(&req.params["group_ids"]);
+    let belief = parse_belief_query(&req.params)?;
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
@@ -1447,7 +1597,14 @@ async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
         let gid_refs: Option<Vec<&str>> = group_ids
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
-        conn.get_edges_by_group_ids(gid_refs.as_deref())
+        let edges = conn.get_edges_by_group_ids(gid_refs.as_deref())?;
+        match &belief {
+            Some(q) => apply_belief(&conn, edges, |e| e.uuid.as_str(), q),
+            None => Ok(edges
+                .into_iter()
+                .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+                .collect()),
+        }
     })
     .await??;
     drop(_guard);
@@ -1465,13 +1622,21 @@ async fn handle_get_edges_by_uuids(req: &IpcRequest, state: Arc<AppState>) -> Re
                 .collect()
         })
         .unwrap_or_default();
+    let belief = parse_belief_query(&req.params)?;
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let edges = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
         let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
-        conn.get_edges_by_uuids(&uuid_refs)
+        let edges = conn.get_edges_by_uuids(&uuid_refs)?;
+        match &belief {
+            Some(q) => apply_belief(&conn, edges, |e| e.uuid.as_str(), q),
+            None => Ok(edges
+                .into_iter()
+                .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+                .collect()),
+        }
     })
     .await??;
     drop(_guard);
@@ -1703,6 +1868,12 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     }
     let num_results = num_results_raw as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
+    let belief = parse_belief_query(p)?;
+    let fetch = if belief.as_ref().is_some_and(|b| b.filter) {
+        num_results.saturating_mul(BELIEF_OVERFETCH)
+    } else {
+        num_results
+    };
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
@@ -1713,7 +1884,7 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
         let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
-        let mut facts = conn.list_relationships(gid_slice, num_results)?;
+        let mut facts = conn.list_relationships(gid_slice, fetch)?;
         let entity_uuids_owned = edge_endpoint_uuids(&facts);
         let entity_uuid_refs: Vec<&str> = entity_uuids_owned.iter().map(String::as_str).collect();
         let ep_info = conn
@@ -1722,7 +1893,17 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
         for edge in &mut facts {
             enrich_edge_from_entity_ep_info(edge, &ep_info);
         }
-        Ok::<_, crate::error::Error>(facts)
+        match &belief {
+            Some(q) => {
+                let mut v = apply_belief(&conn, facts, |e| e.uuid.as_str(), q)?;
+                v.truncate(num_results);
+                Ok::<_, crate::error::Error>(v)
+            }
+            None => Ok(facts
+                .into_iter()
+                .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+                .collect()),
+        }
     })
     .await??;
     drop(_guard);
@@ -1743,6 +1924,12 @@ async fn handle_get_entity_neighbors(
         .to_string();
     let num_results = p["num_results"].as_u64().unwrap_or(50) as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
+    let belief = parse_belief_query(p)?;
+    let fetch = if belief.as_ref().is_some_and(|b| b.filter) {
+        num_results.saturating_mul(BELIEF_OVERFETCH)
+    } else {
+        num_results
+    };
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
@@ -1754,7 +1941,7 @@ async fn handle_get_entity_neighbors(
             .unwrap_or_default();
         let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
         let (mut edges, neighbor_uuids) =
-            conn.get_entity_neighbors(&entity_uuid, gid_slice, num_results)?;
+            conn.get_entity_neighbors(&entity_uuid, gid_slice, fetch)?;
         let mut nodes = conn.get_entities_by_uuids(&neighbor_uuids)?;
         // Collect all entity UUIDs: neighbor nodes + edge endpoints (for edge enrichment).
         let mut all_entity_uuids_owned = edge_endpoint_uuids(&edges);
@@ -1779,6 +1966,17 @@ async fn handle_get_entity_neighbors(
         for edge in &mut edges {
             enrich_edge_from_entity_ep_info(edge, &ep_info);
         }
+        let edges: Vec<Value> = match &belief {
+            Some(q) => {
+                let mut v = apply_belief(&conn, edges, |e| e.uuid.as_str(), q)?;
+                v.truncate(num_results);
+                v
+            }
+            None => edges
+                .into_iter()
+                .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+                .collect(),
+        };
         Ok::<_, crate::error::Error>((edges, nodes))
     })
     .await??;
@@ -1926,6 +2124,51 @@ async fn handle_delete_chunk_episode(
         "chunk_id": req.params["chunk_id"],
         "deleted_count": deleted_uuids.len(),
         "deleted_uuids": deleted_uuids,
+    }))
+}
+
+/// `knowledge_mark_chunk_removed` (issue #705, FR-004): records that a chunk no longer exists in
+/// its document. Supersedes the chunk's live episodes in each of `group_ids` with reason
+/// `chunk_removed` — the graph stops believing what they asserted, the episodes and the edges
+/// they produced stay readable as history, and `valid_at` / `invalid_at` are never written.
+/// Additive sibling of [`handle_delete_chunk_episode`], whose explicit-deletion contract is
+/// unchanged. `group_ids` is required, as there (issue #406). Idempotent: already-superseded
+/// episodes are not touched, so a repeat reports `superseded_count: 0`.
+async fn handle_mark_chunk_removed(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let chunk_id = p["chunk_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("chunk_id is required and must be non-empty".to_string()))?
+        .to_string();
+    let group_ids_owned = extract_required_group_ids(&p["group_ids"])?;
+
+    let db = load_db(&state)?;
+    let state_c = Arc::clone(&state);
+    let _guard = state.write_lock.write().await;
+    let (superseded_uuids, superseded_at) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<String>, String), Error> {
+            let conn = db.connect()?;
+            let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
+            let superseded_at = crate::db::ingested_at_or_now("");
+            let (uuids, grouped) =
+                conn.supersede_chunk_episodes(&chunk_id, &gid_refs, &superseded_at)?;
+            // Per-group attribution, as in `handle_delete_chunk_episode` (issue #402/#385).
+            for (group_id, mutations) in grouped {
+                let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+                wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+            }
+            Ok((uuids, superseded_at))
+        })
+        .await??;
+    drop(_guard);
+
+    Ok(json!({
+        "success": true,
+        "chunk_id": req.params["chunk_id"],
+        "superseded_count": superseded_uuids.len(),
+        "superseded_uuids": superseded_uuids,
+        "superseded_at": superseded_at,
     }))
 }
 
@@ -4458,6 +4701,18 @@ fn resolve_and_update_edge(
     else {
         return Ok((None, source_uuid, target_uuid));
     };
+    // FR-010 (issue #705, resolves #405): an assertion never overwrites an extracted edge's
+    // content. An edge with a producing episode records what that episode said; rewriting its
+    // `fact` in place would make the episode no longer back it. Treat it as "no match" so the
+    // caller creates a separate, `assertion`-warranted edge. Today the extracted `"A → B"` naming
+    // keeps this from matching by accident; this makes it structural.
+    if conn
+        .get_edge_belief_rows(std::slice::from_ref(&uuid))?
+        .get(&uuid)
+        .is_some_and(|r| !r.episodes.is_empty())
+    {
+        return Ok((None, source_uuid, target_uuid));
+    }
     conn.update_relates_to_core(&uuid, fact, valid_at, relation_type, attributes)?;
     let seq = wal_exec::wal_flush_ungrouped(state, gid_wal, conn.drain_mutations());
     wal_exec::advance_wal_position(conn, gid_wal, seq, state);
@@ -4701,6 +4956,9 @@ async fn handle_assert_relationship(
                     relation_type: relation_type2,
                     episode_uuids: vec![],
                     source_descriptions: vec![],
+                    episodes: vec![],
+                    warrant: Some("assertion".to_string()),
+                    valid_at_source: None,
                 };
                 conn.insert_relates_to_edge(&edge)?;
                 let seq = wal_exec::wal_flush_ungrouped(&state2, &gid2, conn.drain_mutations());

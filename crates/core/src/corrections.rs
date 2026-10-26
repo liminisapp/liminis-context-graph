@@ -595,6 +595,9 @@ fn apply_same_as(
                     relation_type: old_edge.relation_type.clone(),
                     episode_uuids: vec![],
                     source_descriptions: vec![],
+                    episodes: old_edge.episodes.clone(),
+                    warrant: old_edge.warrant.clone(),
+                    valid_at_source: old_edge.valid_at_source.clone(),
                 };
                 conn.insert_relates_to_edge(&new_edge)?;
 
@@ -973,6 +976,9 @@ fn merge_entities_inner(
                 relation_type: old_edge.relation_type.clone(),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                episodes: old_edge.episodes.clone(),
+                warrant: old_edge.warrant.clone(),
+                valid_at_source: old_edge.valid_at_source.clone(),
             };
             conn.insert_relates_to_edge(&new_edge)?;
             conn.invalidate_edge(&old_edge.uuid, ts)?;

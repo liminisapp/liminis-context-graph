@@ -54,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             valid_at: ts.to_string(),
             entity_edges: vec![],
             attributes: "{}".to_string(),
+            ..Default::default()
         })?;
 
         conn.create_vector_indexes()?;

@@ -38,7 +38,10 @@ const EPISODIC_CYPHER: &str = "\
     n.content_embedding = $content_embedding, \
     n.valid_at = CASE WHEN $valid_at IS NULL THEN NULL ELSE timestamp($valid_at) END, \
     n.entity_edges = $entity_edges, n.attributes = $attributes, \
-    n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END";
+    n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END, \
+    n.superseded_at = CASE WHEN $superseded_at IS NULL THEN NULL ELSE timestamp($superseded_at) END, \
+    n.superseded_by = $superseded_by, n.superseded_by_kind = $superseded_by_kind, \
+    n.supersession_reason = $supersession_reason";
 
 const RELATO_CYPHER: &str = "\
     MERGE (n:RelatesToNode_ {uuid: $uuid}) \
@@ -49,7 +52,8 @@ const RELATO_CYPHER: &str = "\
     n.valid_at = CASE WHEN $valid_at IS NULL THEN NULL ELSE timestamp($valid_at) END, \
     n.invalid_at = CASE WHEN $invalid_at IS NULL THEN NULL ELSE timestamp($invalid_at) END, \
     n.attributes = $attributes, n.relation_type = $relation_type, \
-    n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END";
+    n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END, \
+    n.warrant = $warrant, n.valid_at_source = $valid_at_source";
 
 const COMMUNITY_CYPHER: &str = "\
     MERGE (n:Community {uuid: $uuid}) \
@@ -224,7 +228,8 @@ fn dump_episodic_nodes(
             writer.with_chunk(|w| {
                 for row in &rows {
                     // cols: [uuid, name, group_id, created_at, source, source_description,
-                    //         content, content_embedding, valid_at, entity_edges, attributes, ingested_at]
+                    //         content, content_embedding, valid_at, entity_edges, attributes, ingested_at,
+                    //         superseded_at, superseded_by, superseded_by_kind, supersession_reason]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -237,6 +242,13 @@ fn dump_episodic_nodes(
                     let entity_edges = value_as_str_list(&row[9]);
                     let attributes = value_as_string(&row[10]);
                     let ingested_at = dump_ingested_at_json(&row[11], &created_at);
+                    // Belief time (issue #705): appended last so positional readers don't shift.
+                    // An unset string column dumps as "" (read back as absent), like
+                    // `relation_type` below.
+                    let superseded_at = dump_opt_ts_json(&row[12]);
+                    let superseded_by = value_as_string(&row[13]);
+                    let superseded_by_kind = value_as_string(&row[14]);
+                    let supersession_reason = value_as_string(&row[15]);
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -250,6 +262,10 @@ fn dump_episodic_nodes(
                         "entity_edges": entity_edges,
                         "attributes": attributes,
                         "ingested_at": ingested_at,
+                        "superseded_at": superseded_at,
+                        "superseded_by": superseded_by,
+                        "superseded_by_kind": superseded_by_kind,
+                        "supersession_reason": supersession_reason,
                     });
                     w.log_mutation(EPISODIC_CYPHER, params, "")?;
                 }
@@ -279,7 +295,8 @@ fn dump_relato_nodes(
             writer.with_chunk(|w| {
                 for row in &rows {
                     // cols: [uuid, name, group_id, created_at, fact, fact_embedding, episodes,
-                    //         expired_at, valid_at, invalid_at, attributes, relation_type, ingested_at]
+                    //         expired_at, valid_at, invalid_at, attributes, relation_type, ingested_at,
+                    //         warrant, valid_at_source]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -293,6 +310,8 @@ fn dump_relato_nodes(
                     let attributes = value_as_string(&row[10]);
                     let relation_type = value_as_string(&row[11]);
                     let ingested_at = dump_ingested_at_json(&row[12], &created_at);
+                    let warrant = value_as_string(&row[13]);
+                    let valid_at_source = value_as_string(&row[14]);
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -307,6 +326,8 @@ fn dump_relato_nodes(
                         "attributes": attributes,
                         "relation_type": relation_type,
                         "ingested_at": ingested_at,
+                        "warrant": warrant,
+                        "valid_at_source": valid_at_source,
                     });
                     w.log_mutation(RELATO_CYPHER, params, "")?;
                 }

@@ -101,7 +101,41 @@ pub struct AddEpisodeResult {
     pub edges_dropped_malformed: usize,
     /// Phase B resolution outcomes by path for this chunk (issue #650).
     pub dedup_paths: DedupPathCounts,
+    /// UUIDs of earlier episodes of the same chunk this ingest superseded (issue #705, FR-003).
+    /// Always empty under [`SupersedePolicy::None`].
+    pub superseded_episode_uuids: Vec<String>,
 }
+
+/// Whether an ingest ends belief in earlier episodes of the same chunk (issue #705, FR-003).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SupersedePolicy {
+    /// Pure append: nothing is superseded. `knowledge_add_episode` (whose `name` is free-form)
+    /// and every pre-#705 caller.
+    #[default]
+    None,
+    /// The episode `name` is a chunk id: once this ingest has fully succeeded, supersede the
+    /// chunk's other live episodes **in this group**, except those in `keep` (the earlier units
+    /// of the same multi-unit revision).
+    ReviseChunk { keep: Vec<String> },
+}
+
+/// Optional behaviours of [`add_episode_with_opts`]; `add_episode` uses the default.
+#[derive(Debug, Clone, Default)]
+pub struct EpisodeOpts {
+    pub supersede: SupersedePolicy,
+}
+
+/// Phase C's result: `(edges_inserted, edges_dropped_unresolvable,
+/// edges_reclassified_unclassified, dropped_edges, edges_dropped_self_loop,
+/// superseded_episode_uuids)`.
+type PhaseCOutcome = (
+    usize,
+    usize,
+    usize,
+    Vec<DroppedEdgeDetail>,
+    usize,
+    Vec<String>,
+);
 
 struct ActiveWriteGuard(Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for ActiveWriteGuard {
@@ -386,6 +420,38 @@ pub async fn add_episode(
     source_type: SourceType,
     custom_instructions: Option<&str>,
     attributes: &str,
+) -> Result<AddEpisodeResult, Error> {
+    add_episode_with_opts(
+        state,
+        name,
+        body,
+        source,
+        source_description,
+        reference_time,
+        group_id,
+        source_type,
+        custom_instructions,
+        attributes,
+        EpisodeOpts::default(),
+    )
+    .await
+}
+
+/// [`add_episode`] with [`EpisodeOpts`] — the entry point `knowledge_process_chunk` uses to
+/// supersede the chunk's earlier episodes (issue #705).
+#[allow(clippy::too_many_arguments)]
+pub async fn add_episode_with_opts(
+    state: Arc<AppState>,
+    name: &str,
+    body: &str,
+    source: &str,
+    source_description: &str,
+    reference_time: &str,
+    group_id: &str,
+    source_type: SourceType,
+    custom_instructions: Option<&str>,
+    attributes: &str,
+    opts: EpisodeOpts,
 ) -> Result<AddEpisodeResult, Error> {
     // Track write in flight so rebuild_from_wal can gate on active writes.
     state.active_writes.fetch_add(1, Ordering::Relaxed);
@@ -1180,6 +1246,8 @@ pub async fn add_episode(
     let source_desc_owned = source_description.to_string();
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
+    let supersede_policy = opts.supersede;
+    let chunk_name_for_supersede = name.to_string();
     // `attributes` is expected to already be a serialized JSON object (handlers.rs's
     // `attributes_param_to_string` guarantees this for the two IPC entry points), but
     // `add_episode` is a public library function — an internal/library caller passing `""` or
@@ -1220,14 +1288,23 @@ pub async fn add_episode(
     // falsely refuse the group though its ontology never changed. After such a purge the group
     // has no carriers, so this re-stamps; otherwise it is a cache hit.
     state.check_identity(group_id)?;
+    // One service-clock instant for the whole commit (issue #705): it is the new episode's and
+    // every new edge's `ingested_at` *and* the `superseded_at` of the episodes this ingest
+    // supersedes, so the old facts lose belief at the very instant the new ones gain it — no gap
+    // and no overlap (SC-003). ADR-0673's stamp-only-when-empty rule allows pre-stamping. Taken
+    // *after* the write lock is acquired so commit order and instant order agree: a concurrent
+    // resubmit that commits second can never supersede an episode at an instant before that
+    // episode's own `ingested_at`.
+    let commit_instant = crate::db::ingested_at_or_now("");
     let (
         edges_inserted,
         edges_dropped_unresolvable,
         edges_reclassified_unclassified,
         dropped_edges,
         edges_dropped_self_loop,
+        superseded_episode_uuids,
     ) = tokio::task::spawn_blocking(
-            move || -> Result<(usize, usize, usize, Vec<DroppedEdgeDetail>, usize), Error> {
+            move || -> Result<PhaseCOutcome, Error> {
         let conn = db_c.connect()?;
         let mut edges_inserted = 0usize;
         let mut edges_dropped_unresolvable = 0usize;
@@ -1377,8 +1454,16 @@ pub async fn add_episode(
                 edges_dropped_self_loop += 1;
                 continue;
             }
+            // FR-011: record whether `valid_at` came from the text or defaulted to the episode's
+            // reference time — the fallback was silent before.
+            let llm_valid_at = validate_llm_timestamp(edge.valid_at.clone());
+            let valid_at_source = if llm_valid_at.is_some() {
+                "text"
+            } else {
+                "reference_time"
+            };
             conn.insert_relates_to_edge(&RelatesToEdge {
-                ingested_at: String::new(),
+                ingested_at: commit_instant.clone(),
                 uuid: uuid::Uuid::new_v4().to_string(),
                 name: format!("{} → {}", edge.source_name, edge.target_name),
                 source_node_uuid: src_uuid,
@@ -1387,8 +1472,7 @@ pub async fn add_episode(
                 fact: edge.fact.clone(),
                 fact_embedding: fact_embeddings[i].clone(),
                 created_at: ref_time_owned.clone(),
-                valid_at: validate_llm_timestamp(edge.valid_at.clone())
-                    .or_else(|| Some(ref_time_owned.clone())),
+                valid_at: llm_valid_at.or_else(|| Some(ref_time_owned.clone())),
                 invalid_at: validate_llm_timestamp(edge.invalid_at.clone()),
                 attributes: match &edge.original_relation_type {
                     Some(orig) => {
@@ -1399,6 +1483,10 @@ pub async fn add_episode(
                 relation_type: edge.relation_type.clone(),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                // FR-005: the producing episode (exactly one — edges are not deduplicated).
+                episodes: vec![ep_uuid.clone()],
+                warrant: None,
+                valid_at_source: Some(valid_at_source.to_string()),
             })?;
             edges_inserted += 1;
             // Open mode only reclassifies `extract: false` labels (#637), which always set
@@ -1412,7 +1500,7 @@ pub async fn add_episode(
 
         // Insert episodic node
         conn.insert_episodic(&EpisodicRow {
-            ingested_at: String::new(),
+            ingested_at: commit_instant.clone(),
             uuid: ep_uuid.clone(),
             name: name_owned,
             group_id: gid_owned.clone(),
@@ -1424,6 +1512,7 @@ pub async fn add_episode(
             valid_at: ref_time_owned.clone(),
             entity_edges: entity_uuids.clone(),
             attributes: attributes_owned.clone(),
+            ..Default::default()
         })?;
 
         // Insert MENTIONS edges
@@ -1433,6 +1522,24 @@ pub async fn add_episode(
                 entity_uuid: entity_uuid.clone(),
                 group_id: gid_owned.clone(),
             })?;
+        }
+
+        // Supersede the chunk's earlier episodes (issue #705, FR-003) — last, so every unit of
+        // this ingest (extraction, dedup, edges, episode, MENTIONS) has already succeeded; any
+        // earlier `?` returns before this point and the old episodes stay live (belief ends late,
+        // never wrongly). The statements land in the same `wal_flush_chunk` as the new episode, so
+        // the pair is atomic in the WAL. Scoped to this group; excludes the new episode itself.
+        let mut superseded_episode_uuids: Vec<String> = Vec::new();
+        if let SupersedePolicy::ReviseChunk { keep } = &supersede_policy {
+            let mut exclude = keep.clone();
+            exclude.push(ep_uuid.clone());
+            let old = conn.live_episode_uuids_for_chunk(
+                &chunk_name_for_supersede,
+                &gid_owned,
+                &exclude,
+            )?;
+            conn.supersede_episodes_by_uuids(&old, &commit_instant, Some(&ep_uuid), "revision")?;
+            superseded_episode_uuids = old;
         }
 
         let flushed = wal_exec::wal_flush_chunk(&state_c, &gid_wal, conn.drain_mutations());
@@ -1472,6 +1579,7 @@ pub async fn add_episode(
             edges_reclassified_unclassified,
             dropped_edges,
             edges_dropped_self_loop,
+            superseded_episode_uuids,
         ))
             },
         )
@@ -1563,6 +1671,7 @@ pub async fn add_episode(
         entities_dropped_malformed,
         edges_dropped_malformed,
         dedup_paths,
+        superseded_episode_uuids,
     })
 }
 
