@@ -22,12 +22,20 @@
 # lbug 0.21.0 core: macOS arm64 full lcg suite, Windows 11 vector 45/45 + fts 10/10
 # row-asserting pairing runs (issue #619). Bytes re-fetched 2026-10-04 and unchanged; the lbug 0.21.1 core still
 # resolves extension directory v0.21.0, so these same files pair with it.
+#
+# Re-pinned 2026-10-26 (issue #709). Upstream served 0.22-built files at v0.21.0 from 2026-10-16
+# (LadybugDB/ladybug#1390), then on 2026-10-25 ~16:38 UTC restored the directory from the image
+# of its 0.21.2 release build (LadybugDB/ladybug#1403). The restored fts files (all platforms) and
+# win_amd64 vector differ from the earlier pins; the other three vector files are byte-identical.
+# Verified by loading both extensions and running an FTS and a vector-index query under lbug
+# 0.21.1 and 0.21.2 (Python wheels, empty home): osx_arm64 natively, linux_amd64 and linux_arm64
+# in python:3.12-slim. win_amd64 was not run locally.
 
 osx_arm64 vector 6f878f3c0a2320a34967ff568fcf6bbe9065666e95035f0eddfe28bbc73b53f4
-osx_arm64 fts 248332de781a7781f612a55b5397e88f58f1f1ba2a973836ada199eab0f6bf10
+osx_arm64 fts 777d9b606514d3c45c6196e7a44300b583af6513a34178bf1a7d030f4c888f03
 linux_amd64 vector 571726cc2ea0d202df1909ae5a3b0528c9dea3ea8d40be6c16b310ec14aa8821
-linux_amd64 fts 742f2756c2f80bcd1886b6ee0446483038cff0ecf6cf47f698bc6fe855cbaef6
+linux_amd64 fts 399c8d883fbe836c4b60bbe9440180cbc0c7fe27ef350a4e1570dccdb93695a7
 linux_arm64 vector 583101f5bf2d0e5d40de2ee8966018a3bdf0fb8ad8951ef51ef46cd59169445f
-linux_arm64 fts b8675b086664e3d6742330a517c5b619f0ac10dd094d250f12bef9822a8d5750
-win_amd64 vector 7bbceb965ecb3c0620eed794319532d9e241d1ebe577cd2c10153620f8000316
-win_amd64 fts 7b6132ae6a554e3eeb3c4b0da7e2eb5c483b258b31e848a0e3d6000ac29885ee
+linux_arm64 fts 59669d011d485667b7b884f40aa408da0b8f117819eb83ccfa4d935556f16ba5
+win_amd64 vector 73edbde85174b20baa8539be9a50923453eef713553b68d466cf082bd3de9a1c
+win_amd64 fts caa3e2a0ee17a7103702aa6a916cb5f1ab881efb5386b217fb153df4ac12850b
