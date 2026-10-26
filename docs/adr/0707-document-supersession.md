@@ -54,7 +54,8 @@ document-superseded episode is present, so default reads are unchanged.
 **Validation is Rust-side, under the write lock, before any mutation.** Same document, unknown
 document (no episode with that `doc_id` in the group), conflicting existing record, and cycle (walk
 the superseding document's chain of superseders, ADR-0012) are rejected with nothing written and no
-WAL entry. The record and episode statements share one WAL flush, so the WAL never holds half a
+WAL entry. The record and episode statements are written as one chunk-atomic WAL group
+(`wal_flush_chunk`, not the per-mutation `wal_flush_ungrouped`), so the WAL never holds half a
 supersession. An identical re-record is a no-op (`already_recorded`).
 
 **Durability follows ADR-0673 / ADR-0705.** The record's timestamp params are registered as timestamp

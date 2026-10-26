@@ -2352,7 +2352,8 @@ fn required_string_param(p: &Value, key: &str) -> Result<String, Error> {
 /// Every check (same document, unknown document, conflict, cycle) completes under the write lock
 /// before any mutation, so a rejection leaves the graph and the WAL untouched. Recording the
 /// identical relation again is a no-op reporting `already_recorded: true`. The record and the
-/// episode statements share one WAL flush, so the WAL never holds half a supersession.
+/// episode statements are flushed as one chunk (`wal_flush_chunk`, all-or-nothing), so the WAL
+/// never holds half a supersession.
 async fn handle_supersede_document(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let group_id = extract_required_group_id(&p["group_id"])?;
@@ -2451,7 +2452,7 @@ async fn handle_supersede_document(req: &IpcRequest, state: Arc<AppState>) -> Re
         conn.create_doc_supersession(&record, &effective_at, &recorded_at)?;
         let uuids = conn.live_episode_uuids_for_doc(&group_id, &superseded)?;
         conn.supersede_episodes_for_document(&uuids, &superseded_at, &superseding)?;
-        let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, conn.drain_mutations());
+        let seq = wal_exec::wal_flush_chunk(&state_c, &group_id, conn.drain_mutations());
         wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
         Ok(json!({
             "success": true,
