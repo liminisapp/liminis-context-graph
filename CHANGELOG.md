@@ -18,6 +18,15 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- **A new document can explicitly supersede an old one** (#707, ADR-0707). `knowledge_process_chunk`
+  and `knowledge_add_episode` accept an optional `doc_id`; the new `knowledge_supersede_document`
+  (write scope) records "A supersedes B, effective T" within a group. B's live episodes are
+  superseded (`document` / `document_superseded`), ending belief at the recording instant (or at a
+  future effective date), while the `belief` annotation reports `in_force` and a `supersession`
+  (`corrected` vs `document_superseded`, with `in_force_until`) so a corrected fact and a replaced
+  decision can be told apart. Rejected requests (same/unknown document, cycle, conflict) leave
+  nothing behind. `valid_at` / `invalid_at` are never written. Graphs written earlier have no
+  `doc_id`; re-ingest them.
 - **Corrections end belief without deleting evidence** (#705, ADR-0705). Resubmitting a `chunk_id` to
   `knowledge_process_chunk` supersedes that chunk's earlier episodes in the same group once the new
   ingest has succeeded; `superseded_at` / `superseded_by` / `superseded_by_kind` /
