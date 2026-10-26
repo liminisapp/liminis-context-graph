@@ -15,6 +15,9 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   have no producing episode and cannot be soundly backfilled (endpoint co-occurrence is not
   provenance, #404); they are treated as believed and reported as `legacy`
   (`knowledge_status.legacy_edge_count`). New nullable columns are added on first start.
+- **First start runs a one-time FTS index rebuild**, because lbug moved 0.21.1 → 0.21.2 and the #649
+  marker records the exact lbug version. It is logged; a large graph starts slower that once. Later
+  starts do not rebuild.
 
 ### Added
 
@@ -55,6 +58,9 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 - `knowledge_assert_relationship` never overwrites an extracted edge's `fact` (#405); it creates a
   separate edge with the `assertion` warrant.
 - `Episodic.entity_edges` is documented as holding entity UUIDs, not edge provenance.
+- **lbug 0.21.1 → 0.21.2** (#699, supersedes #693). Takes upstream's scan-correctness fix
+  (`NodeGroup::scan` ran past a sub-node-group morsel's end) and buffer-manager race fix. Extensions
+  unchanged (still the `v0.21.0` path, same pinned bytes); storage version stays 47.
 
 ## [0.17.0] - 2026-10-04
 
