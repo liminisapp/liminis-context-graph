@@ -70,10 +70,8 @@ pub fn diff_facts(
     old: Vec<RelatesToEdge>,
     new: Vec<RelatesToEdge>,
 ) -> (Vec<RelatesToEdge>, Vec<RelatesToEdge>) {
-    let old_keys: HashSet<(String, String, String, String)> =
-        old.iter().map(|e| owned_key(e)).collect();
-    let new_keys: HashSet<(String, String, String, String)> =
-        new.iter().map(|e| owned_key(e)).collect();
+    let old_keys: HashSet<(String, String, String, String)> = old.iter().map(owned_key).collect();
+    let new_keys: HashSet<(String, String, String, String)> = new.iter().map(owned_key).collect();
     let mut removed: Vec<RelatesToEdge> = old
         .into_iter()
         .filter(|e| !new_keys.contains(&owned_key(e)))

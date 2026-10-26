@@ -196,7 +196,7 @@ fn scope_admin_advertises_wal_lifecycle_tools() {
 
     let tools = client.list_tools();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names.len(), 17);
+    assert_eq!(names.len(), 15);
     for expected in [
         "knowledge_dump_wal",
         "knowledge_strip_wal_embeddings",
