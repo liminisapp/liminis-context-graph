@@ -43,8 +43,8 @@ fn standalone_lists_and_calls_read_and_write_tools() {
     let tools = client.list_tools();
     assert_eq!(
         tools.len(),
-        47,
-        "default --scope=all should advertise all 47 tools"
+        49,
+        "default --scope=all should advertise all 49 tools"
     );
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"knowledge_status"));
@@ -150,8 +150,8 @@ fn scope_read_advertises_only_read_tools_and_rejects_write() {
     let tools = client.list_tools();
     assert_eq!(
         tools.len(),
-        15,
-        "read scope should advertise exactly 15 tools"
+        17,
+        "read scope should advertise exactly 17 tools"
     );
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"knowledge_status"));
@@ -249,7 +249,7 @@ fn scope_union_advertises_both_sets() {
     client.initialize();
 
     let tools = client.list_tools();
-    assert_eq!(tools.len(), 30, "read(15) + admin(15) = 30");
+    assert_eq!(tools.len(), 32, "read(17) + admin(15) = 32");
 
     client.shutdown();
 }

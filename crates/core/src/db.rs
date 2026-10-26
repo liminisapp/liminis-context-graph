@@ -1627,6 +1627,132 @@ impl<'db> Conn<'db> {
         Ok(out)
     }
 
+    // ── Correction reads (issue #706, ADR-0706) ───────────────────────────────
+
+    /// Full belief-relevant episode rows for the given UUIDs. A UUID absent from the result was
+    /// hard-deleted. Timestamps are microseconds (see [`value_as_timestamp_micros`]).
+    pub fn get_episode_rows(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, crate::correction_reads::EpisodeRecord>, Error>
+    {
+        let mut out = std::collections::HashMap::new();
+        if uuids.is_empty() {
+            return Ok(out);
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids RETURN ep.uuid, ep.name, ep.group_id, \
+             ep.ingested_at, ep.superseded_at, ep.superseded_by, ep.supersession_reason",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        for r in rows {
+            let rec = episode_record_from_row(&r);
+            out.insert(rec.uuid.clone(), rec);
+        }
+        Ok(out)
+    }
+
+    /// Every episode (live or superseded) named `name` in `group_id` — the candidate pool for
+    /// recovering a revision's units (see `correction_reads::revision_unit_uuids`).
+    pub fn get_episode_rows_by_name(
+        &self,
+        group_id: &str,
+        name: &str,
+    ) -> Result<Vec<crate::correction_reads::EpisodeRecord>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.name = $name AND ep.group_id = $gid \
+             RETURN ep.uuid, ep.name, ep.group_id, ep.ingested_at, ep.superseded_at, \
+             ep.superseded_by, ep.supersession_reason",
+            serde_json::json!({ "name": name, "gid": group_id }),
+        )?;
+        Ok(rows.iter().map(|r| episode_record_from_row(r)).collect())
+    }
+
+    /// Edges in `group_id` whose producing-episode list contains any of `episode_uuids`, with
+    /// `episodes` populated. One group-scoped list-membership query per episode (the sets are a
+    /// revision's units — a handful), deduplicated by edge uuid, ordered by uuid.
+    pub fn get_edges_produced_by_episodes(
+        &self,
+        group_id: &str,
+        episode_uuids: &[String],
+    ) -> Result<Vec<RelatesToEdge>, Error> {
+        let mut seen = std::collections::BTreeMap::new();
+        for ep in episode_uuids {
+            let rows = self.query_params(
+                "MATCH (rn:RelatesToNode_) \
+                 WHERE rn.group_id = $gid AND list_contains(rn.episodes, $ep) \
+                 OPTIONAL MATCH (src:Entity)-[:RELATES_TO]->(rn) \
+                 OPTIONAL MATCH (rn)-[:RELATES_TO]->(dst:Entity) \
+                 RETURN rn.uuid, rn.name, coalesce(src.uuid, ''), coalesce(dst.uuid, ''), \
+                 rn.group_id, rn.fact, rn.episodes",
+                serde_json::json!({ "gid": group_id, "ep": ep }),
+            )?;
+            for r in rows {
+                let uuid = value_as_string(&r[0]);
+                seen.entry(uuid.clone()).or_insert_with(|| RelatesToEdge {
+                    uuid,
+                    name: value_as_string(&r[1]),
+                    source_node_uuid: value_as_string(&r[2]),
+                    target_node_uuid: value_as_string(&r[3]),
+                    group_id: value_as_string(&r[4]),
+                    fact: value_as_string(&r[5]),
+                    episodes: value_as_str_list(&r[6]),
+                    ..Default::default()
+                });
+            }
+        }
+        Ok(seen.into_values().collect())
+    }
+
+    /// Episodes in `group_id` that MENTION any of `entity_uuids`, with the entities each one
+    /// matched. `ingested_at` is read in microseconds so the caller can apply an exact half-open
+    /// window (a Cypher timestamp parameter would lose that precision, ADR-0705). Ordered by
+    /// ingest time then uuid.
+    pub fn get_mentioning_episodes(
+        &self,
+        group_id: &str,
+        entity_uuids: &[String],
+    ) -> Result<Vec<crate::correction_reads::MentioningEpisode>, Error> {
+        if entity_uuids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
+             WHERE n.uuid IN $uuids AND ep.group_id = $gid \
+             RETURN ep.uuid, ep.name, ep.ingested_at, ep.source_description, n.uuid",
+            serde_json::json!({ "uuids": entity_uuids, "gid": group_id }),
+        )?;
+        let mut by_uuid: std::collections::BTreeMap<
+            String,
+            crate::correction_reads::MentioningEpisode,
+        > = std::collections::BTreeMap::new();
+        for r in rows {
+            let uuid = value_as_string(&r[0]);
+            let entity = value_as_string(&r[4]);
+            let entry = by_uuid.entry(uuid.clone()).or_insert_with(|| {
+                crate::correction_reads::MentioningEpisode {
+                    uuid,
+                    name: value_as_string(&r[1]),
+                    ingested_at_us: match &r[2] {
+                        lbug::Value::Null(_) => None,
+                        other => Some(value_as_timestamp_micros(other)),
+                    },
+                    source_description: value_as_string(&r[3]),
+                    matched_entity_uuids: vec![],
+                }
+            });
+            if !entry.matched_entity_uuids.contains(&entity) {
+                entry.matched_entity_uuids.push(entity);
+            }
+        }
+        let mut out: Vec<_> = by_uuid.into_values().collect();
+        for ep in &mut out {
+            ep.matched_entity_uuids.sort();
+        }
+        out.sort_by(|a, b| (a.ingested_at_us, &a.uuid).cmp(&(b.ingested_at_us, &b.uuid)));
+        Ok(out)
+    }
+
     /// Count of legacy edges (no producing episode and no warrant marker — FR-007), for
     /// `knowledge_status`. `group_ids: None` counts every group.
     pub fn count_legacy_edges(&self, group_ids: Option<&[&str]>) -> Result<u64, Error> {
@@ -4357,6 +4483,24 @@ fn logical_type_of(v: &serde_json::Value) -> LogicalType {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Row shape: `uuid, name, group_id, ingested_at, superseded_at, superseded_by,
+/// supersession_reason` (issue #706).
+fn episode_record_from_row(r: &[lbug::Value]) -> crate::correction_reads::EpisodeRecord {
+    let micros = |v: &lbug::Value| match v {
+        lbug::Value::Null(_) => None,
+        other => Some(value_as_timestamp_micros(other)),
+    };
+    crate::correction_reads::EpisodeRecord {
+        uuid: value_as_string(&r[0]),
+        name: value_as_string(&r[1]),
+        group_id: value_as_string(&r[2]),
+        ingested_at_us: micros(&r[3]),
+        superseded_at_us: micros(&r[4]),
+        superseded_by: value_as_optional_string(&r[5]),
+        supersession_reason: value_as_optional_string(&r[6]),
+    }
+}
 
 pub(crate) fn value_as_string(v: &lbug::Value) -> String {
     match v {

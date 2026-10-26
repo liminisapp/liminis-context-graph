@@ -42,11 +42,11 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (48)
+## IPC methods (50)
 
-The socket dispatch handles **48 methods**: 47 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **50 methods**: 49 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (48) and the MCP tool registry (47, below) differ by exactly one — `health_check` is
+surface (50) and the MCP tool registry (49, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -57,6 +57,7 @@ not exposed as an MCP tool.
 | Direct assertion | `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | Search | `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
+| Correction reads | `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_delete_by_group`, `knowledge_clear_all` |
 | Supersession | `knowledge_mark_chunk_removed` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
@@ -221,7 +222,7 @@ union of all active scopes.
 
 | Scope | Methods |
 |-------|---------|
-| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
+| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
 | `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` |
@@ -454,6 +455,54 @@ cannot be soundly backfilled (endpoint co-occurrence is not provenance, #404), s
 graphs. Separately, an edge whose producing episodes were all hard-deleted
 (`knowledge_delete_episode`, `delete_by_source`, `delete_chunk_episode`) is `support_deleted` and
 unbelieved at every time.
+
+### Reviewing a correction: what changed, and what was written under the old belief (issue #706)
+
+Ending belief is half the job. After a correction you also want to see what it changed, and review
+work that may have leaned on the fact you dropped. Both reads below are **read-only** (no `valid_at` /
+`invalid_at`, no WAL entry, no schema change) and give the same answers after a rebuild. See
+[ADR-0706](adr/0706-correction-diff-and-affected-work-reads.md).
+
+The workflow: find the superseded episode (`knowledge_get_episodes` shows `superseded_at`,
+`superseded_by` and `supersession_reason`), run the changed-facts read, then run the affected-work
+read on each dropped fact.
+
+**`knowledge_get_correction_changes {episode_uuid}`** (MCP `read`). Compares a superseded episode with
+its direct superseder (E1 → E2 even if E2 was later superseded by E3):
+
+| Field | Meaning |
+|---|---|
+| `status` | `superseded`, or `not_superseded` (nothing to compare; both lists empty) |
+| `episode` | `uuid`, `name`, `group_id`, `ingested_at`, `superseded_at`, `reason` |
+| `replacement` | `{superseded_by, unit_episode_uuids}`, or `null` for `chunk_removed` (no replacement exists) |
+| `removed` / `added` (+ `*_count`) | Facts the old episode supports that the replacement does not / the replacement supports that the old episode does not, each with `uuid`, `source_node_uuid`, `target_node_uuid`, `name`, `fact`, `episodes`. Each `removed` fact also carries `still_believed`: `true` when another live episode outside the replacement still supports the edge, so it left the replacement but is not dropped from belief (`knowledge_get_affected_work` on it returns `open`). An `added` fact means only that the old episode did not support it: it may already have been believed through another live episode before the correction |
+
+A fact present on both sides appears on neither. Two edges are the same fact when they share source
+entity, target entity, relation name and fact text, so a **reworded fact is one removal plus one
+addition**. For a chunk ingested as several units, the replacement side is the whole revision, not only
+its final unit; the units are recovered from episodes of the same group and `name`, so a free-form
+`knowledge_add_episode` episode that reuses a chunk id as its name in that window is swept in. A heading
+rename supersedes one chunk and creates another, so a per-episode diff shows only removals for the old
+chunk — a whole-document diff needs document identity (#707).
+
+**`knowledge_get_affected_work {edge_uuid}`** (MCP `read`). For an edge no longer believed, lists the
+episodes ingested inside its belief interval `[start, end)` that mention either endpoint entity,
+ordered by ingest time:
+
+| Field | Meaning |
+|---|---|
+| `interval.state` | `closed` (candidates returned), `open` (still believed; affected work is not defined), `no_record` (`cause`: `legacy` or `support_deleted`) or `not_defined` (`cause`: `warranted`) |
+| `interval.start` / `end` | Microsecond RFC 3339; `end` is when the last producing episode was superseded. `derived_from_surviving_support` is true when some producers were hard-deleted and ignored |
+| `basis` | Always `entity_overlap` |
+| `candidates` (+ `count`) | `uuid`, `name`, `ingested_at`, `source_description`, `matched_entity_uuids` |
+
+**Candidates are not dependents.** The list is built from entity overlap, not recorded dependence, so
+review it rather than treating it as proof the work used the fact. The window is half-open (an episode
+ingested at exactly the superseding instant is outside it), the fact's own producing episodes and the
+units of the revision that superseded them are excluded, and the list is neither ranked nor truncated — a hub entity over a long window returns many
+episodes. Any state other than `closed` returns no candidates *and says why*, so an empty list never
+means "nothing affected" by accident. Both reads take a uuid, derive the group from the record, and
+return an error for a missing or unknown uuid.
 
 ### Bulk reads: group scope, paging, projection, prefix (issue #667)
 

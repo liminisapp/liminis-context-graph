@@ -34,6 +34,12 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `get_entity_neighbors`, `get_edges_by_group` and `get_edges_by_uuids`; opted-in reads add a `belief`
   object per edge. Default reads are unchanged.
 - `knowledge_status.legacy_edge_count`.
+- **`knowledge_get_correction_changes {episode_uuid}`** and **`knowledge_get_affected_work {edge_uuid}`**
+  (#706, ADR-0706; MCP `read` scope, 49 tools total): for a superseded episode, the facts it supported
+  versus the facts its replacement supports; for a dropped fact, the episodes ingested inside its belief
+  interval that mention either endpoint entity. Affected work is labelled `basis: entity_overlap`
+  (candidates, not dependents) and non-closed intervals (`open`, `no_record`, `not_defined`) are named
+  rather than returned as an empty list. Both are read-only and additive.
 
 ### Changed
 

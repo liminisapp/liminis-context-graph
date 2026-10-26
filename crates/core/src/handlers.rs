@@ -166,6 +166,8 @@ async fn handle(
         "knowledge_get_nodes_by_group" => handle_get_nodes_by_group(req, state).await,
         "knowledge_get_edges_by_group" => handle_get_edges_by_group(req, state).await,
         "knowledge_get_edges_by_uuids" => handle_get_edges_by_uuids(req, state).await,
+        "knowledge_get_correction_changes" => handle_get_correction_changes(req, state).await,
+        "knowledge_get_affected_work" => handle_get_affected_work(req, state).await,
         "knowledge_query_cypher" => handle_query_cypher(req, state).await,
         "knowledge_build_indices" => handle_build_indices(state).await,
         "knowledge_delete_by_source" => handle_delete_by_source(req, state).await,
@@ -1643,6 +1645,126 @@ async fn handle_get_edges_by_uuids(req: &IpcRequest, state: Arc<AppState>) -> Re
 
     let count = edges.len();
     Ok(json!({"edges": edges, "count": count}))
+}
+
+/// A required, non-empty string parameter.
+fn required_uuid_param(p: &Value, key: &str) -> Result<String, Error> {
+    match &p[key] {
+        Value::String(s) if !s.is_empty() => Ok(s.clone()),
+        Value::Null => Err(Error::Ipc(format!("{key} is required"))),
+        _ => Err(Error::Ipc(format!("{key} must be a non-empty string"))),
+    }
+}
+
+/// `knowledge_get_correction_changes` (issue #706, ADR-0706): the facts a superseded episode
+/// supported that its replacement does not, and the reverse. Read-only: no write lock, no WAL.
+async fn handle_get_correction_changes(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let episode_uuid = required_uuid_param(&req.params, "episode_uuid")?;
+
+    let db = load_db(&state)?;
+    let _guard = state.write_lock.read().await;
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, Error> {
+        use crate::correction_reads as cr;
+        let conn = db.connect()?;
+        let ep = conn
+            .get_episode_rows(std::slice::from_ref(&episode_uuid))?
+            .remove(&episode_uuid)
+            .ok_or_else(|| Error::Ipc(format!("episode '{episode_uuid}' not found")))?;
+        if ep.superseded_at_us.is_none() {
+            return Ok(cr::changes_not_superseded(&ep));
+        }
+        let pool = conn.get_episode_rows_by_name(&ep.group_id, &ep.name)?;
+        let units = cr::revision_unit_uuids(&ep, &pool);
+        let old = conn.get_edges_produced_by_episodes(&ep.group_id, &[episode_uuid])?;
+        let new = conn.get_edges_produced_by_episodes(&ep.group_id, &units)?;
+        let (removed, added) = cr::diff_facts(old, new);
+        // A removed fact can still be supported by a live episode outside the replacement.
+        let removed_uuids: Vec<String> = removed.iter().map(|e| e.uuid.clone()).collect();
+        let rows = conn.get_edge_belief_rows(&removed_uuids)?;
+        let producer_uuids: Vec<String> = rows
+            .values()
+            .flat_map(|r| r.episodes.iter().cloned())
+            .collect();
+        let producers = conn.get_episode_supersession(&producer_uuids)?;
+        let still_believed: std::collections::HashSet<String> = rows
+            .iter()
+            .filter(|(_, r)| {
+                crate::belief::belief_interval(r, &producers) == crate::belief::BeliefInterval::Open
+            })
+            .map(|(u, _)| u.clone())
+            .collect();
+        Ok(cr::changes_superseded(
+            &ep,
+            &units,
+            &removed,
+            &added,
+            &still_believed,
+        ))
+    })
+    .await??;
+    drop(_guard);
+    Ok(result)
+}
+
+/// `knowledge_get_affected_work` (issue #706, ADR-0706): for an edge no longer believed, the
+/// episodes ingested inside its belief interval that mention either endpoint entity. Candidates
+/// by entity overlap, not dependents. Read-only: no write lock, no WAL.
+async fn handle_get_affected_work(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let edge_uuid = required_uuid_param(&req.params, "edge_uuid")?;
+
+    let db = load_db(&state)?;
+    let _guard = state.write_lock.read().await;
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, Error> {
+        use crate::belief::{belief_interval, BeliefInterval};
+        use crate::correction_reads as cr;
+        let conn = db.connect()?;
+        let edge = conn
+            .get_relates_to_by_uuids(std::slice::from_ref(&edge_uuid))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Ipc(format!("edge '{edge_uuid}' not found")))?;
+        let row = conn
+            .get_edge_belief_rows(std::slice::from_ref(&edge_uuid))?
+            .remove(&edge_uuid)
+            .ok_or_else(|| Error::Ipc(format!("edge '{edge_uuid}' not found")))?;
+        let producers = conn.get_episode_supersession(&row.episodes)?;
+        let interval = belief_interval(&row, &producers);
+        let candidates = match interval {
+            BeliefInterval::Closed { t1_us, t2_us, .. } => {
+                let endpoints: Vec<String> = [&edge.source_node_uuid, &edge.target_node_uuid]
+                    .into_iter()
+                    .filter(|u| !u.is_empty())
+                    .cloned()
+                    .collect();
+                let mentioning = conn.get_mentioning_episodes(&edge.group_id, &endpoints)?;
+                // The correction that closed the interval is not work done under the old belief,
+                // and a split revision's earlier units are ingested before its final unit (T2):
+                // exclude every unit of the revision that superseded each producer.
+                let mut excluded = row.episodes.clone();
+                for producer in conn.get_episode_rows(&row.episodes)?.values() {
+                    if producer.superseded_by.is_some() {
+                        let pool =
+                            conn.get_episode_rows_by_name(&producer.group_id, &producer.name)?;
+                        excluded.extend(cr::revision_unit_uuids(producer, &pool));
+                    }
+                }
+                cr::filter_window(mentioning, t1_us, t2_us, &excluded)
+            }
+            _ => Vec::new(),
+        };
+        Ok(cr::affected_work_response(
+            &edge.uuid,
+            &edge.group_id,
+            &interval,
+            &candidates,
+        ))
+    })
+    .await??;
+    drop(_guard);
+    Ok(result)
 }
 
 async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
