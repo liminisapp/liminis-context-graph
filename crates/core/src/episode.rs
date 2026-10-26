@@ -7,6 +7,8 @@ use crate::{
     app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
     canonicalize::build_alias_map,
     db::Db,
+    dedup_adapter::{pair_from, DedupMode},
+    dedup_judge::{DedupVerdict, DuplicatePair},
     error::{is_missing_index_error, Error, MISSING_INDEX_USER_MSG},
     extractor::ExtractOptions,
     ontology::{normalize_entity_type, normalize_relation_type, OntologyMode},
@@ -20,6 +22,36 @@ use crate::{
     wal_exec,
 };
 
+/// Per-chunk tally of Phase B entity-resolution outcomes by path (issue #650, ADR-0650). One
+/// named field per path so later work (#652's LLM-confirmed / LLM-rejected paths) can extend the
+/// struct without reshaping call sites. Each extracted entity increments exactly one of
+/// `exact_name`, `embedding_merge`, `vetoed`, `adapter_rejected`, `llm_confirmed`, `llm_rejected`, `llm_unavailable`, or none (a plain insert with no
+/// above-threshold candidate); `salvage_vetoed` counts off-list edge endpoints, not entities.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct DedupPathCounts {
+    /// Merged via the exact case-insensitive name match (no veto, no adapter).
+    pub exact_name: usize,
+    /// Merged on the embedding path without an LLM verdict: a candidate survived the identifier
+    /// veto and either shared the incoming entity's normalized name or the (veto-only) adapter
+    /// confirmed it.
+    pub embedding_merge: usize,
+    /// Above-threshold candidates existed but every one was discarded by the identifier-mismatch
+    /// veto, so the entity was inserted. Counted once per incoming entity.
+    pub vetoed: usize,
+    /// A candidate survived the veto but a non-LLM (custom/legacy) dedup adapter said "not a
+    /// duplicate", so the entity was inserted.
+    pub adapter_rejected: usize,
+    /// The LLM dedup check (#652) judged a surviving candidate a duplicate and it merged.
+    pub llm_confirmed: usize,
+    /// The LLM dedup check judged a surviving candidate distinct, so the entity was inserted.
+    pub llm_rejected: usize,
+    /// The LLM dedup check could not give a verdict (error, timeout, malformed or unattributable
+    /// answer), so the entity was inserted.
+    pub llm_unavailable: usize,
+    /// Off-list edge endpoints whose above-threshold salvage candidates were all vetoed.
+    pub salvage_vetoed: usize,
+}
+
 #[derive(Debug)]
 pub struct AddEpisodeResult {
     pub episode_uuid: String,
@@ -28,6 +60,11 @@ pub struct AddEpisodeResult {
     /// Edges whose endpoint(s) could not be resolved against either this batch's entities or
     /// the persisted graph, and were dropped at Phase C commit time (issue #281 FR-004/FR-005).
     pub edges_dropped_unresolvable: usize,
+    /// Edges whose two differently named endpoints resolved to the same entity UUID at Phase C
+    /// commit time (dedup merges or salvage collapsing them onto one entity), dropped rather than
+    /// inserted as a self-loop (issue #666). Distinct from the name-level self-reference filter
+    /// (never counted) and from `edges_dropped_unresolvable`; carries no `dropped_edges` entry.
+    pub edges_dropped_self_loop: usize,
     /// Per-edge detail behind `edges_dropped_unresolvable` above — one entry per edge counted
     /// there, in extraction order, carrying the edge's extracted content and which endpoint(s)
     /// failed to resolve (issue #411 FR-001/FR-002/FR-003/FR-006). Always present, empty when
@@ -62,7 +99,46 @@ pub struct AddEpisodeResult {
     /// reaches the Phase C resolution code that populates `edges_dropped_unresolvable` anyway.
     /// An edge with multiple blank fields is counted once, not once per field.
     pub edges_dropped_malformed: usize,
+    /// Phase B resolution outcomes by path for this chunk (issue #650).
+    pub dedup_paths: DedupPathCounts,
+    /// UUIDs of earlier episodes of the same chunk this ingest superseded (issue #705, FR-003).
+    /// Always empty under [`SupersedePolicy::None`].
+    pub superseded_episode_uuids: Vec<String>,
 }
+
+/// Whether an ingest ends belief in earlier episodes of the same chunk (issue #705, FR-003).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum SupersedePolicy {
+    /// Pure append: nothing is superseded. `knowledge_add_episode` (whose `name` is free-form)
+    /// and every pre-#705 caller.
+    #[default]
+    None,
+    /// The episode `name` is a chunk id: once this ingest has fully succeeded, supersede the
+    /// chunk's other live episodes **in this group**, except those in `keep` (the earlier units
+    /// of the same multi-unit revision).
+    ReviseChunk { keep: Vec<String> },
+}
+
+/// Optional behaviours of [`add_episode_with_opts`]; `add_episode` uses the default.
+#[derive(Debug, Clone, Default)]
+pub struct EpisodeOpts {
+    pub supersede: SupersedePolicy,
+    /// Stable identity of the logical document the episode came from (issue #707). `None` leaves
+    /// the episode outside document supersession.
+    pub doc_id: Option<String>,
+}
+
+/// Phase C's result: `(edges_inserted, edges_dropped_unresolvable,
+/// edges_reclassified_unclassified, dropped_edges, edges_dropped_self_loop,
+/// superseded_episode_uuids)`.
+type PhaseCOutcome = (
+    usize,
+    usize,
+    usize,
+    Vec<DroppedEdgeDetail>,
+    usize,
+    Vec<String>,
+);
 
 struct ActiveWriteGuard(Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for ActiveWriteGuard {
@@ -92,7 +168,14 @@ fn hybrid_threshold() -> usize {
 enum DedupDecision {
     Merge {
         existing_uuid: String,
+        /// The summary this merge leaves the entity with (consolidated or fallback, always
+        /// within `MERGED_SUMMARY_CAP`) — issue #651.
         merged_summary: String,
+        /// `Some` only on the *last* merge into a uuid within a chunk whose final summary differs
+        /// from the stored one: Phase C then writes `summary` and `summary_embedding` in a single
+        /// `SET`. `None` means "nothing to write" (summary unchanged, or superseded by a later
+        /// merge into the same uuid in this chunk).
+        summary_embedding: Option<Vec<f32>>,
     },
     Insert {
         // Boxed: `EntityRow` grew past clippy::large_enum_variant's threshold once
@@ -101,13 +184,144 @@ enum DedupDecision {
     },
 }
 
+/// Produces the summary a merge leaves behind (issue #651): `Ok(None)` when the stored summary
+/// stays as it is (empty or already-contained incoming), otherwise the new bounded summary.
+///
+/// Runs in Phase B — lock-free and cancellable, exactly like `dedup.is_duplicate`. The extractor
+/// is consulted only when both sides carry text and the incoming one adds information. Any
+/// failure — `Unconfigured` (silent), a transport/parse error, an empty reply — degrades to the
+/// deterministic `fallback_merge`; a failed consolidation never fails the chunk.
+async fn merged_summary_for(
+    state: &AppState,
+    entity_name: &str,
+    current: &str,
+    incoming: &str,
+) -> Result<Option<String>, Error> {
+    use crate::summary_merge::{
+        decide_consolidation, fallback_merge, finalize_consolidation, ConsolidationPlan,
+    };
+    let merged = match decide_consolidation(current, incoming) {
+        ConsolidationPlan::Keep => return Ok(None),
+        ConsolidationPlan::UseIncoming(s) => s,
+        ConsolidationPlan::Consolidate => {
+            let reply = tokio::select! {
+                r = state.extractor.consolidate_summary(entity_name, current, incoming) => r,
+                _ = state.cancel_token.cancelled() => {
+                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                    return Err(Error::Cancelled);
+                }
+            };
+            match reply {
+                Ok(text) => finalize_consolidation(&text)
+                    .unwrap_or_else(|| fallback_merge(current, incoming)),
+                Err(Error::Config(_)) => fallback_merge(current, incoming),
+                Err(e) => {
+                    eprintln!(
+                        "liminis-context-graph: summary consolidation failed for '{entity_name}', \
+                         using bounded fallback: {e}"
+                    );
+                    fallback_merge(current, incoming)
+                }
+            }
+        }
+    };
+    Ok((merged != current).then_some(merged))
+}
+
+/// Resolves one merge decision in Phase B: advances the per-uuid running summary through
+/// [`merged_summary_for`] and returns the `Merge` decision with no embedding yet (the post-loop
+/// batch attaches it to the latest merge per uuid). Records `decision_idx` as that uuid's latest.
+async fn merge_into(
+    state: &AppState,
+    merge_state: &mut std::collections::HashMap<String, (String, String, usize)>,
+    decision_idx: usize,
+    existing: &EntityRow,
+    incoming: &str,
+) -> Result<DedupDecision, Error> {
+    let entry = merge_state.entry(existing.uuid.clone()).or_insert_with(|| {
+        (
+            existing.summary.clone(),
+            existing.summary.clone(),
+            decision_idx,
+        )
+    });
+    if let Some(next) = merged_summary_for(state, &existing.name, &entry.1, incoming).await? {
+        entry.1 = next;
+    }
+    // Pass 2 of Phase B (#652) merges judged candidates after the pass-1 ones, so decision
+    // indices arrive out of order; the *highest* index is the last Phase C write for this uuid.
+    entry.2 = entry.2.max(decision_idx);
+    Ok(DedupDecision::Merge {
+        existing_uuid: existing.uuid.clone(),
+        merged_summary: entry.1.clone(),
+        summary_embedding: None,
+    })
+}
+
+/// Outcome of resolving one edge endpoint name in Phase C (issue #616). `Ambiguous` means the
+/// name maps to entities of more than one kind; the edge is dropped rather than guessed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EndpointResolution {
+    Found(String),
+    Missing,
+    Ambiguous,
+}
+
+impl EndpointResolution {
+    fn into_uuid(self) -> Option<String> {
+        match self {
+            EndpointResolution::Found(u) => Some(u),
+            _ => None,
+        }
+    }
+}
+
+/// Looks an edge endpoint name up in the persisted graph (issue #666: shared by the pre-lock
+/// exact-match probe that precedes salvage and by Phase C's authoritative re-resolution, so the
+/// two cannot drift on eligibility). Same group, case-insensitive; with only the default kind it
+/// is the pre-#616 scan-fallback lookup, otherwise the multi-kind lookup where more than one hit
+/// is `Ambiguous` (issue #616).
+fn resolve_stored_endpoint(
+    conn: &crate::db::Conn<'_>,
+    raw_name: &str,
+    group_id: &str,
+    endpoint_kinds: &[String],
+) -> Result<EndpointResolution, Error> {
+    if endpoint_kinds.len() == 1 {
+        // No identity-bearing kinds in this group: exactly the pre-#616 lookup.
+        return Ok(
+            match conn.get_entity_by_name_ci_with_scan_fallback(
+                raw_name,
+                group_id,
+                crate::types::DEFAULT_KIND,
+            )? {
+                Some(existing) => EndpointResolution::Found(existing.uuid),
+                None => EndpointResolution::Missing,
+            },
+        );
+    }
+    // Default kind plus the group's identity-bearing kinds (issue #616). More than one hit is
+    // ambiguous — never picked between.
+    let mut hits = conn.resolve_entities_by_name_in_kinds(raw_name, group_id, endpoint_kinds)?;
+    Ok(match hits.len() {
+        0 => EndpointResolution::Missing,
+        1 => EndpointResolution::Found(hits.remove(0).uuid),
+        _ => EndpointResolution::Ambiguous,
+    })
+}
+
 /// Result of Phase B's per-entity resolution attempt.
 /// Name-matched entities skip the async dedup-adapter check entirely.
 enum PhaseBResult {
     /// Exact case-insensitive name match found in the persisted graph.
     NameMatch { existing: EntityRow },
     /// No name match; embedding-based candidate (may be None if no similar entity exists).
-    EmbeddingCandidate { candidate: Option<EntityRow> },
+    /// `vetoed` is the number of above-threshold candidates the identifier-mismatch veto
+    /// discarded (issue #650).
+    EmbeddingCandidate {
+        candidate: Option<EntityRow>,
+        vetoed: usize,
+    },
 }
 
 /// Validates and returns a timestamp string from LLM output.
@@ -142,6 +356,7 @@ async fn resolve_phase_b(
     db: Arc<Db>,
     group_id: String,
     entity_names: Vec<String>,
+    entity_kinds: Vec<String>,
     name_embeddings: Vec<Vec<f32>>,
     use_hybrid: bool,
 ) -> Result<Vec<PhaseBResult>, Error> {
@@ -151,18 +366,38 @@ async fn resolve_phase_b(
         for (i, name) in entity_names.iter().enumerate() {
             let trimmed = name.trim();
             // Name-first resolution: case-insensitive exact match short-circuits embedding lookup.
-            if let Some(existing) = conn.get_entity_by_name_ci(trimmed, &group_id)? {
+            // Resolution is scoped to the entity's own kind (issue #616): an identity-bearing
+            // kind only ever matches its own kind, and the default kind only the default kind.
+            let kind = entity_kinds[i].as_str();
+            if let Some(existing) = conn.get_entity_by_name_ci(trimmed, &group_id, kind)? {
                 out.push(PhaseBResult::NameMatch { existing });
                 continue;
             }
             // Embedding-based resolution fallback.
             let emb = &name_embeddings[i];
-            let candidate = if use_hybrid {
-                conn.hybrid_dedup_similar_entity(emb, trimmed, &group_id, DEDUP_THRESHOLD)?
+            // Name-aware selection: candidates failing the identifier-mismatch veto are discarded
+            // before the best is picked (issue #650, ADR-0650).
+            let selection = if use_hybrid {
+                conn.hybrid_dedup_similar_entity_kind_for_name(
+                    emb,
+                    trimmed,
+                    &group_id,
+                    DEDUP_THRESHOLD,
+                    kind,
+                )?
             } else {
-                conn.brute_force_similar_entity(emb, &group_id, DEDUP_THRESHOLD)?
+                conn.brute_force_similar_entity_kind_for_name(
+                    emb,
+                    trimmed,
+                    &group_id,
+                    DEDUP_THRESHOLD,
+                    kind,
+                )?
             };
-            out.push(PhaseBResult::EmbeddingCandidate { candidate });
+            out.push(PhaseBResult::EmbeddingCandidate {
+                candidate: selection.candidate,
+                vetoed: selection.vetoed,
+            });
         }
         Ok::<_, Error>(out)
     })
@@ -189,9 +424,46 @@ pub async fn add_episode(
     custom_instructions: Option<&str>,
     attributes: &str,
 ) -> Result<AddEpisodeResult, Error> {
+    add_episode_with_opts(
+        state,
+        name,
+        body,
+        source,
+        source_description,
+        reference_time,
+        group_id,
+        source_type,
+        custom_instructions,
+        attributes,
+        EpisodeOpts::default(),
+    )
+    .await
+}
+
+/// [`add_episode`] with [`EpisodeOpts`] — the entry point `knowledge_process_chunk` uses to
+/// supersede the chunk's earlier episodes (issue #705).
+#[allow(clippy::too_many_arguments)]
+pub async fn add_episode_with_opts(
+    state: Arc<AppState>,
+    name: &str,
+    body: &str,
+    source: &str,
+    source_description: &str,
+    reference_time: &str,
+    group_id: &str,
+    source_type: SourceType,
+    custom_instructions: Option<&str>,
+    attributes: &str,
+    opts: EpisodeOpts,
+) -> Result<AddEpisodeResult, Error> {
     // Track write in flight so rebuild_from_wal can gate on active writes.
     state.active_writes.fetch_add(1, Ordering::Relaxed);
     let _active_guard = ActiveWriteGuard(Arc::clone(&state.active_writes));
+
+    // Identity-bearing-set guard (issue #616, D1): a group whose ontology changed the
+    // identity-bearing set in a way that would reinterpret existing entities is refused here,
+    // before any extraction, without touching data or other groups.
+    state.check_identity(group_id)?;
 
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
     // Resolves this group's own ontology file if one exists, else falls back to the
@@ -282,9 +554,29 @@ pub async fn add_episode(
     // entity tally is counted directly here: because the empty-name retain above already ran,
     // every entity reaching this loop is guaranteed to be persisted, so there's no desync risk.
     let mut entities_reclassified_unclassified = 0usize;
+    //
+    // `extract: false` types (#637, ADR-0637) are excluded from the strict-mode vocabulary, so a
+    // stray label naming one is reclassified here like any other off-vocabulary type. The same
+    // reclassification also applies in open mode (below), where the raw label would otherwise be
+    // stamped on the entity verbatim — the only open-mode labels touched are `extract: false` ones.
     if let Some(onto) = ontology_ref {
-        if onto.mode == OntologyMode::Strict && onto.has_entity_types() {
-            let vocab = onto.entity_type_names();
+        // Strict mode with no extractable entity type has no vocabulary to filter against (the
+        // prompt falls back to the default one), so it takes the same direct-label path as open mode.
+        if onto.mode != OntologyMode::Strict || onto.extractable_entity_types().next().is_none() {
+            for e in extraction.entities.iter_mut() {
+                if onto.is_extract_false_entity(&e.entity_type) {
+                    eprintln!(
+                        "liminis-context-graph: ontology: reclassifying entity '{}' to Unclassified (type '{}' is extract: false)",
+                        e.name, e.entity_type
+                    );
+                    e.original_entity_type = Some(e.entity_type.clone());
+                    e.entity_type = ENTITY_UNCLASSIFIED.to_string();
+                    entities_reclassified_unclassified += 1;
+                }
+            }
+        }
+        if onto.mode == OntologyMode::Strict && onto.extractable_entity_types().next().is_some() {
+            let vocab = onto.extractable_entity_type_names();
             for e in extraction.entities.iter_mut() {
                 let normalized = normalize_entity_type(&e.entity_type);
                 if normalized.is_empty() || normalized == "Entity" {
@@ -323,8 +615,27 @@ pub async fn add_episode(
     // here would desync the tally from what's actually persisted — the same failure mode
     // ADR-0051 fixed for `edges_dropped_unresolvable` by making Phase C the sole authoritative
     // counting point. The tally is instead taken in Phase C, alongside `edges_inserted`.
+    //
+    // `extract: false` relation types (#637, ADR-0637) are absent from `build_alias_map`, so in
+    // strict mode a stray label naming one falls through to `UNCLASSIFIED` here. In open mode only
+    // those labels are reclassified (the tally in Phase C keys on `original_relation_type`).
     if let Some(onto) = ontology_ref {
-        if onto.mode == OntologyMode::Strict && onto.has_relation_types() {
+        if onto.mode != OntologyMode::Strict || onto.extractable_relation_types().next().is_none() {
+            for e in extraction.edges.iter_mut() {
+                let Some(original) = e.relation_type.clone() else {
+                    continue;
+                };
+                if onto.is_extract_false_relation(&original) {
+                    eprintln!(
+                        "liminis-context-graph: ontology: reclassifying edge '{}' → '{}' to UNCLASSIFIED (relation_type '{}' is extract: false)",
+                        e.source_name, e.target_name, original
+                    );
+                    e.relation_type = Some(UNCLASSIFIED.to_string());
+                    e.original_relation_type = Some(original);
+                }
+            }
+        }
+        if onto.mode == OntologyMode::Strict && onto.extractable_relation_types().next().is_some() {
             let alias_map = build_alias_map(onto);
             for e in extraction.edges.iter_mut() {
                 let original = e.relation_type.clone();
@@ -383,6 +694,33 @@ pub async fn add_episode(
     // position so the batch's output (dense, in submission order) can be scattered back to the
     // right index — the one non-mechanical step in this conversion (see #445 research/plan).
     let entity_names: Vec<String> = extraction.entities.iter().map(|e| e.name.clone()).collect();
+    // Per-entity kind (issue #616, FR-002/FR-003): the entity's *primary* extracted type, if and
+    // only if the group's resolved ontology marks that type identity-bearing; otherwise the
+    // default kind. Decided here, once, from the primary type alone — parent-hierarchy ancestors
+    // never confer kind and no label or declaration order is consulted. `Unclassified` (the
+    // strict-mode catch-all) is never identity-bearing.
+    let entity_kinds: Vec<String> = extraction
+        .entities
+        .iter()
+        .map(|e| {
+            if e.entity_type == ENTITY_UNCLASSIFIED {
+                return crate::types::DEFAULT_KIND.to_string();
+            }
+            ontology_ref
+                .and_then(|o| o.identity_kind(&e.entity_type))
+                .unwrap_or_else(|| crate::types::DEFAULT_KIND.to_string())
+        })
+        .collect();
+    // Kinds an edge endpoint that is not in this batch may resolve against (cross-batch
+    // resolution): the default kind plus this group's identity-bearing kinds. Never asserted
+    // kinds extraction did not create (#615: extraction stays out of them).
+    let endpoint_kinds: Vec<String> = {
+        let mut k = vec![crate::types::DEFAULT_KIND.to_string()];
+        if let Some(o) = ontology_ref {
+            k.extend(o.identity_set());
+        }
+        k
+    };
     let name_refs: Vec<&str> = entity_names.iter().map(|s| s.as_str()).collect();
     let summary_indices: Vec<usize> = extraction
         .entities
@@ -419,6 +757,7 @@ pub async fn add_episode(
     // An off-list endpoint's name embedding is cosine-matched against the batch's entity
     // name_embeddings, reusing DEDUP_THRESHOLD (the same threshold already used for entity
     // dedup); a match rewrites the edge's endpoint to that entity's canonical name in place.
+    // An off-list endpoint that exactly matches the stored graph is not salvaged at all (#666).
     // Anything that doesn't salvage-match is left untouched and passed through to Phase C
     // (write-lock held), which is now the *sole* point that resolves an endpoint — falling back
     // to the persisted graph — or finally drops the edge, making `edges_dropped_unresolvable`
@@ -433,6 +772,8 @@ pub async fn add_episode(
         }
         true
     });
+
+    let mut dedup_paths = DedupPathCounts::default();
 
     if !extraction.edges.is_empty() {
         // Keyed by the same normalization applied to a name before it ever reaches the model
@@ -450,13 +791,23 @@ pub async fn add_episode(
         // embed+match, not one per edge.
         let mut missing_names: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        // Every distinct raw spelling behind a normalized key (issue #666): the normalized key
+        // strips control characters, but the stored-graph probe below uses the DB's
+        // `trim().to_lowercase()` identity, so `A\u{1}pple` and `Apple` share a key yet only
+        // one may be an exact stored hit. Probing all spellings keeps the exact-match-beats-
+        // salvage guarantee independent of which spelling the map happened to keep.
+        let mut missing_variants: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
         for edge in &extraction.edges {
             for name in [&edge.source_name, &edge.target_name] {
                 let key = normalize_name(name);
                 if !entity_name_set.contains(&key) {
-                    missing_names
-                        .entry(key)
-                        .or_insert_with(|| name.trim().to_string());
+                    let raw = name.trim().to_string();
+                    let variants = missing_variants.entry(key.clone()).or_default();
+                    if !variants.contains(&raw) {
+                        variants.push(raw.clone());
+                    }
+                    missing_names.entry(key).or_insert(raw);
                 }
             }
         }
@@ -467,12 +818,59 @@ pub async fn add_episode(
         // iterating the map twice (once to build the request, once to zip the response) could
         // silently misassign an embedding to the wrong endpoint name (#445 research/plan).
         let missing_names: Vec<(String, String)> = missing_names.into_iter().collect();
+
+        // Exact stored-graph match beats cosine salvage (issue #666). An off-list endpoint that
+        // already exists in the persisted graph — same group, eligible kinds, case-insensitive,
+        // the same lookup Phase C uses — is not a salvage candidate: rewriting it onto a merely
+        // similar batch entity would be a silent wrong re-point. An `Ambiguous` hit (same name
+        // under more than one kind) counts too: Phase C drops it, and salvaging it onto a batch
+        // entity would be the guess ADR-0615 forbids. The name is left untouched; Phase C
+        // re-resolves it under the write lock and stays the sole authority (ADR-0051). Lock-free
+        // like Phase B, so the same ADR-0029 TOCTOU caveat applies. Exact hits need no embedding.
+        let missing_names: Vec<(String, String)> = if missing_names.is_empty() {
+            missing_names
+        } else {
+            let probe_db = Arc::clone(&db_shared);
+            let probe_gid = group_id.to_string();
+            let probe_kinds = endpoint_kinds.clone();
+            tokio::task::spawn_blocking(move || -> Result<Vec<(String, String)>, Error> {
+                let conn = probe_db.connect()?;
+                let mut remaining = Vec::with_capacity(missing_names.len());
+                for (lower, original) in missing_names {
+                    // A key is an exact hit if any raw spelling behind it is: salvage rewrites
+                    // by key, so a hit on one spelling must not be salvaged over via another.
+                    let mut exact = None;
+                    for variant in missing_variants.get(&lower).into_iter().flatten() {
+                        match resolve_stored_endpoint(&conn, variant, &probe_gid, &probe_kinds)? {
+                            EndpointResolution::Missing => {}
+                            EndpointResolution::Found(_) | EndpointResolution::Ambiguous => {
+                                exact = Some(variant.clone());
+                                break;
+                            }
+                        }
+                    }
+                    match exact {
+                        None => remaining.push((lower, original)),
+                        Some(hit) => eprintln!(
+                            "liminis-context-graph: off-list edge endpoint '{hit}' matches the stored graph exactly — skipping salvage"
+                        ),
+                    }
+                }
+                Ok(remaining)
+            })
+            .await??
+        };
+
         let missing_refs: Vec<&str> = missing_names.iter().map(|(_, o)| o.as_str()).collect();
-        let missing_embeddings = tokio::select! {
-            r = state.embedder.embed_batch(&missing_refs) => r?,
-            _ = state.cancel_token.cancelled() => {
-                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
-                return Err(Error::Cancelled);
+        let missing_embeddings = if missing_refs.is_empty() {
+            Vec::new()
+        } else {
+            tokio::select! {
+                r = state.embedder.embed_batch(&missing_refs) => r?,
+                _ = state.cancel_token.cancelled() => {
+                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                    return Err(Error::Cancelled);
+                }
             }
         };
 
@@ -480,15 +878,28 @@ pub async fn add_episode(
             std::collections::HashMap::new();
         for ((lower, original), emb) in missing_names.into_iter().zip(missing_embeddings) {
             let mut best: Option<(f32, &str)> = None;
+            let mut any_vetoed = false;
             for (i, candidate_emb) in name_embeddings.iter().enumerate() {
                 let score = crate::db::cosine_similarity(&emb, candidate_emb);
                 let is_better = match best {
                     Some((b, _)) => score > b,
                     None => true,
                 };
-                if score >= DEDUP_THRESHOLD && is_better {
-                    best = Some((score, extraction.entities[i].name.as_str()));
+                if score >= DEDUP_THRESHOLD {
+                    // Identifier-mismatch veto (issue #650): `ADR 2018` must not be rewritten
+                    // onto a batch entity `ADR 2019`.
+                    if crate::identifier_veto::identifier_mismatch(
+                        &original,
+                        &extraction.entities[i].name,
+                    ) {
+                        any_vetoed = true;
+                    } else if is_better {
+                        best = Some((score, extraction.entities[i].name.as_str()));
+                    }
                 }
+            }
+            if best.is_none() && any_vetoed {
+                dedup_paths.salvage_vetoed += 1;
             }
             if let Some((score, canonical)) = best {
                 eprintln!(
@@ -513,7 +924,9 @@ pub async fn add_episode(
             // previously-distinct endpoints collide (e.g. "Global Warming" and "Climate Change"
             // both salvage to the same batch entity) — re-run the self-referential filter after
             // salvage so a rewritten edge like that doesn't slip past the earlier check and get
-            // inserted as a self-loop in Phase C, which has no self-reference guard of its own.
+            // inserted as a self-loop in Phase C. Phase C's UUID-level guard (#666) would still
+            // catch it, but only as a counted `edges_dropped_self_loop`; this name-level filter
+            // drops such collisions silently, as it always has.
             extraction.edges.retain(|edge| {
                 if normalize_name(&edge.source_name) == normalize_name(&edge.target_name) {
                     eprintln!(
@@ -561,6 +974,7 @@ pub async fn add_episode(
         Arc::clone(&db_shared),
         group_id.to_string(),
         entity_names.clone(),
+        entity_kinds.clone(),
         name_embeddings.clone(),
         use_hybrid,
     )
@@ -580,6 +994,7 @@ pub async fn add_episode(
                 db_retry,
                 group_id.to_string(),
                 entity_names.clone(),
+                entity_kinds.clone(),
                 name_embeddings.clone(),
                 use_hybrid,
             )
@@ -595,47 +1010,73 @@ pub async fn add_episode(
         Err(e) => return Err(e),
     };
 
-    // Async dedup verification loop (no lock)
-    let mut decisions: Vec<DedupDecision> = Vec::with_capacity(extraction.entities.len());
+    // Async dedup verification (no lock), in two passes (#652). Pass 1 resolves everything that
+    // needs no judgement and collects the embedding-path candidates that do; pass 2 judges them
+    // in one batched extractor call. The LLM call therefore stays in Phase B, outside the Phase C
+    // write lock.
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
+    // Per-existing-uuid running summary (issue #651): a second merge into the same entity within
+    // this chunk consolidates on top of the first result, not on the stale pre-chunk summary
+    // (which would let the last Phase C `SET` silently discard the earlier merge).
+    // `merge_state` maps uuid → (summary before this chunk, running summary, index of the latest
+    // Merge decision for that uuid).
+    let mut merge_state: std::collections::HashMap<String, (String, String, usize)> =
+        std::collections::HashMap::new();
+    let make_insert_row = |i: usize| {
+        let extracted = &extraction.entities[i];
+        let name_embedding = name_embeddings[i].clone();
+        let summary_embedding = summary_embeddings[i].clone();
+        DedupDecision::Insert {
+            row: Box::new(EntityRow {
+                ingested_at: String::new(),
+                uuid: uuid::Uuid::new_v4().to_string(),
+                name: extracted.name.clone(),
+                group_id: gid_owned.clone(),
+                // Ontology-driven kind (issue #616): the primary type when identity-bearing,
+                // otherwise the default kind (issue #615, FR-010: extraction stays out of
+                // asserted kinds).
+                kind: entity_kinds[i].clone(),
+                labels: {
+                    let mut labels = vec!["Entity".to_string()];
+                    // An identity-bearing kind is spelled by its normalized type name, so
+                    // `kind ∈ labels` holds in open mode too, where the raw string is kept.
+                    let label_type = if entity_kinds[i] != crate::types::DEFAULT_KIND {
+                        entity_kinds[i].as_str()
+                    } else {
+                        extracted.entity_type.as_str()
+                    };
+                    if !label_type.is_empty() && label_type != "Entity" {
+                        if let Some(ancestors) =
+                            ontology_ref.and_then(|o| o.ancestor_map.get(label_type))
+                        {
+                            labels.extend(ancestors.iter().cloned());
+                        }
+                        labels.push(label_type.to_string());
+                    }
+                    labels
+                },
+                created_at: ref_time_owned.clone(),
+                name_embedding,
+                summary: extracted.summary.clone(),
+                attributes: match &extracted.original_entity_type {
+                    Some(orig) => serde_json::json!({ "original_entity_type": orig }).to_string(),
+                    None => "{}".to_string(),
+                },
+                episode_uuids: vec![],
+                source_descriptions: vec![],
+                summary_embedding,
+            }),
+        }
+    };
+    let mut decisions: Vec<Option<DedupDecision>> = Vec::with_capacity(extraction.entities.len());
+    // (entity index, pair) for each candidate that survived the veto and still needs a verdict.
+    let mut pending: Vec<(usize, DuplicatePair)> = Vec::new();
     for (i, extracted) in extraction.entities.iter().enumerate() {
         if state.cancel_token.is_cancelled() {
             state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Cancelled);
         }
-        let make_insert_row =
-            |name_embedding: Vec<f32>, summary_embedding: Vec<f32>| DedupDecision::Insert {
-                row: Box::new(EntityRow {
-                    uuid: uuid::Uuid::new_v4().to_string(),
-                    name: extracted.name.clone(),
-                    group_id: gid_owned.clone(),
-                    labels: {
-                        let mut labels = vec!["Entity".to_string()];
-                        if !extracted.entity_type.is_empty() && extracted.entity_type != "Entity" {
-                            if let Some(ancestors) = ontology_ref
-                                .and_then(|o| o.ancestor_map.get(&extracted.entity_type))
-                            {
-                                labels.extend(ancestors.iter().cloned());
-                            }
-                            labels.push(extracted.entity_type.clone());
-                        }
-                        labels
-                    },
-                    created_at: ref_time_owned.clone(),
-                    name_embedding,
-                    summary: extracted.summary.clone(),
-                    attributes: match &extracted.original_entity_type {
-                        Some(orig) => {
-                            serde_json::json!({ "original_entity_type": orig }).to_string()
-                        }
-                        None => "{}".to_string(),
-                    },
-                    episode_uuids: vec![],
-                    source_descriptions: vec![],
-                    summary_embedding,
-                }),
-            };
         let decision = match &phase_b_results[i] {
             PhaseBResult::NameMatch { existing } => {
                 // Exact name match — resolve immediately, no dedup-adapter check needed.
@@ -649,35 +1090,140 @@ pub async fn add_episode(
                         existing.name, existing.labels, extracted.entity_type
                     );
                 }
-                DedupDecision::Merge {
-                    existing_uuid: existing.uuid.clone(),
-                    merged_summary: format!("{} {}", existing.summary, extracted.summary),
-                }
+                dedup_paths.exact_name += 1;
+                merge_into(
+                    &state,
+                    &mut merge_state,
+                    decisions.len(),
+                    existing,
+                    &extracted.summary,
+                )
+                .await?
             }
             PhaseBResult::EmbeddingCandidate {
                 candidate: Some(existing),
+                ..
             } => {
-                let is_dup = tokio::select! {
-                    r = state.dedup.is_duplicate(existing, extracted) => r?,
-                    _ = state.cancel_token.cancelled() => {
-                        state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
-                        return Err(Error::Cancelled);
-                    }
-                };
-                if is_dup {
-                    DedupDecision::Merge {
-                        existing_uuid: existing.uuid.clone(),
-                        merged_summary: format!("{} {}", existing.summary, extracted.summary),
-                    }
+                if normalize_name(&existing.name) == normalize_name(&extracted.name) {
+                    // Identical normalized names: the same entity, no judgement needed (FR-005).
+                    dedup_paths.embedding_merge += 1;
+                    merge_into(
+                        &state,
+                        &mut merge_state,
+                        decisions.len(),
+                        existing,
+                        &extracted.summary,
+                    )
+                    .await?
                 } else {
-                    make_insert_row(name_embeddings[i].clone(), summary_embeddings[i].clone())
+                    pending.push((i, pair_from(existing, extracted)));
+                    decisions.push(None);
+                    continue;
                 }
             }
-            PhaseBResult::EmbeddingCandidate { candidate: None } => {
-                make_insert_row(name_embeddings[i].clone(), summary_embeddings[i].clone())
+            PhaseBResult::EmbeddingCandidate {
+                candidate: None,
+                vetoed,
+            } => {
+                if *vetoed > 0 {
+                    dedup_paths.vetoed += 1;
+                }
+                make_insert_row(i)
             }
         };
-        decisions.push(decision);
+        decisions.push(Some(decision));
+    }
+
+    if !pending.is_empty() {
+        let pairs: Vec<DuplicatePair> = pending.iter().map(|(_, p)| p.clone()).collect();
+        let verdicts = tokio::select! {
+            v = state.dedup.judge_batch(&pairs) => v,
+            _ = state.cancel_token.cancelled() => {
+                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                return Err(Error::Cancelled);
+            }
+        };
+        let llm_mode = state.dedup.mode() == DedupMode::LlmVerified;
+        for ((i, _), verdict) in pending.iter().zip(
+            verdicts
+                .into_iter()
+                .chain(std::iter::repeat(DedupVerdict::Unknown)),
+        ) {
+            let PhaseBResult::EmbeddingCandidate {
+                candidate: Some(existing),
+                ..
+            } = &phase_b_results[*i]
+            else {
+                unreachable!("pending entries are embedding candidates");
+            };
+            let extracted = &extraction.entities[*i];
+            decisions[*i] = Some(match verdict {
+                DedupVerdict::Duplicate => {
+                    if llm_mode {
+                        dedup_paths.llm_confirmed += 1;
+                    } else {
+                        dedup_paths.embedding_merge += 1;
+                    }
+                    merge_into(&state, &mut merge_state, *i, existing, &extracted.summary).await?
+                }
+                DedupVerdict::Distinct => {
+                    if llm_mode {
+                        dedup_paths.llm_rejected += 1;
+                    } else {
+                        dedup_paths.adapter_rejected += 1;
+                    }
+                    make_insert_row(*i)
+                }
+                DedupVerdict::Unknown => {
+                    // A legacy per-pair adapter's `Err` lands here too; it is likewise an insert,
+                    // but must not be reported as LLM activity while the mode is veto-only.
+                    if llm_mode {
+                        dedup_paths.llm_unavailable += 1;
+                    } else {
+                        dedup_paths.adapter_rejected += 1;
+                    }
+                    make_insert_row(*i)
+                }
+            });
+        }
+    }
+    let mut decisions: Vec<DedupDecision> = decisions
+        .into_iter()
+        .map(|d| d.expect("every entity resolved by pass 2"))
+        .collect();
+
+    // Re-embed every merged summary that actually changed — one lock-free, cancellable batch
+    // (issue #651, FR-005), outside `write_lock` per ADR-0543. Only the latest merge into a uuid
+    // carries the embedding; an embedder error fails the chunk (as the pre-lock embedding pass
+    // does) rather than leaving a silently stale vector.
+    let mut changed: Vec<(usize, &str)> = merge_state
+        .values()
+        .filter(|(before, running, _)| before != running)
+        .map(|(_, running, idx)| (*idx, running.as_str()))
+        .collect();
+    changed.sort_by_key(|(idx, _)| *idx);
+    if !changed.is_empty() {
+        let refs: Vec<&str> = changed.iter().map(|(_, s)| *s).collect();
+        let embeddings = tokio::select! {
+            r = state.embedder.embed_batch(&refs) => r?,
+            _ = state.cancel_token.cancelled() => {
+                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                return Err(Error::Cancelled);
+            }
+        };
+        let targets: Vec<(usize, String)> =
+            changed.iter().map(|(i, s)| (*i, s.to_string())).collect();
+        for ((idx, summary), emb) in targets.into_iter().zip(embeddings) {
+            if let DedupDecision::Merge {
+                merged_summary,
+                summary_embedding,
+                ..
+            } = &mut decisions[idx]
+            {
+                *merged_summary = summary;
+                *summary_embedding = Some(emb);
+            }
+        }
     }
 
     // Capture counts before extraction moves into the Phase C closure. `edges_extracted` is
@@ -689,7 +1235,10 @@ pub async fn add_episode(
     // mode, where the strict-mode reclassify filter never runs) would be miscounted as a
     // strict-mode reclassification. Captured now since `ontology_ref` isn't 'static and can't
     // move into the spawn_blocking closure.
-    let is_strict_mode = ontology_ref.is_some_and(|o| o.mode == OntologyMode::Strict);
+    // The strict relation filter only runs when some relation type is extractable (#637).
+    let is_strict_mode = ontology_ref.is_some_and(|o| {
+        o.mode == OntologyMode::Strict && o.extractable_relation_types().next().is_some()
+    });
 
     // ── Phase C: commit under write lock ─────────────────────────────────────
     let episode_uuid = uuid::Uuid::new_v4().to_string();
@@ -700,6 +1249,9 @@ pub async fn add_episode(
     let source_desc_owned = source_description.to_string();
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
+    let supersede_policy = opts.supersede;
+    let doc_id_owned = opts.doc_id;
+    let chunk_name_for_supersede = name.to_string();
     // `attributes` is expected to already be a serialized JSON object (handlers.rs's
     // `attributes_param_to_string` guarantees this for the two IPC entry points), but
     // `add_episode` is a public library function — an internal/library caller passing `""` or
@@ -733,12 +1285,34 @@ pub async fn add_episode(
             return Err(Error::Cancelled);
         }
     };
-    let (edges_inserted, edges_dropped_unresolvable, edges_reclassified_unclassified, dropped_edges) =
-        tokio::task::spawn_blocking(
-            move || -> Result<(usize, usize, usize, Vec<DroppedEdgeDetail>), Error> {
+    // Re-run the D1 guard now that the write lock is held (issue #616). The check at the top ran
+    // before extraction, lock-free; a `knowledge_delete_by_group` / `knowledge_clear_all` that
+    // completed in between removed this group's stamp and dropped its cached ontology. Without
+    // this, Phase C would write identity-kind entities with no stamp, and the next resolve would
+    // falsely refuse the group though its ontology never changed. After such a purge the group
+    // has no carriers, so this re-stamps; otherwise it is a cache hit.
+    state.check_identity(group_id)?;
+    // One service-clock instant for the whole commit (issue #705): it is the new episode's and
+    // every new edge's `ingested_at` *and* the `superseded_at` of the episodes this ingest
+    // supersedes, so the old facts lose belief at the very instant the new ones gain it — no gap
+    // and no overlap (SC-003). ADR-0673's stamp-only-when-empty rule allows pre-stamping. Taken
+    // *after* the write lock is acquired so commit order and instant order agree: a concurrent
+    // resubmit that commits second can never supersede an episode at an instant before that
+    // episode's own `ingested_at`.
+    let commit_instant = crate::db::ingested_at_or_now("");
+    let (
+        edges_inserted,
+        edges_dropped_unresolvable,
+        edges_reclassified_unclassified,
+        dropped_edges,
+        edges_dropped_self_loop,
+        superseded_episode_uuids,
+    ) = tokio::task::spawn_blocking(
+            move || -> Result<PhaseCOutcome, Error> {
         let conn = db_c.connect()?;
         let mut edges_inserted = 0usize;
         let mut edges_dropped_unresolvable = 0usize;
+        let mut edges_dropped_self_loop = 0usize;
         let mut dropped_edges: Vec<DroppedEdgeDetail> = Vec::new();
         // Authoritative count of edges persisted with `relation_type = UNCLASSIFIED` (FR-005) —
         // taken here, not in the pre-lock strict-mode pass above, so an edge that was marked
@@ -752,11 +1326,23 @@ pub async fn add_episode(
                 DedupDecision::Merge {
                     existing_uuid,
                     merged_summary,
+                    summary_embedding,
                 } => {
-                    conn.exec_params(
-                        "MATCH (e:Entity {uuid: $uuid}) SET e.summary = $summary",
-                        serde_json::json!({ "uuid": &existing_uuid, "summary": &merged_summary }),
-                    )?;
+                    // `summary` and `summary_embedding` go in ONE statement (issue #651): the
+                    // logged WAL template then names `$summary_embedding`, `log_mutation` strips
+                    // the vector, and replay recomputes it from the co-located `summary`
+                    // (ADR-0526) — so a rebuilt database embeds exactly what this one does.
+                    if let Some(emb) = summary_embedding {
+                        conn.exec_params(
+                            "MATCH (e:Entity {uuid: $uuid}) \
+                             SET e.summary = $summary, e.summary_embedding = $summary_embedding",
+                            serde_json::json!({
+                                "uuid": &existing_uuid,
+                                "summary": &merged_summary,
+                                "summary_embedding": emb,
+                            }),
+                        )?;
+                    }
                     entity_uuids.push(existing_uuid);
                 }
                 DedupDecision::Insert { row } => {
@@ -772,40 +1358,40 @@ pub async fn add_episode(
         // the model — so neither a batch-internal case mismatch (#209) nor a control character
         // in the original entity name causes a genuine batch-local match to fall through to the
         // global fallback unnecessarily.
-        let name_to_uuid: std::collections::HashMap<String, String> = extraction
-            .entities
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (normalize_name(&e.name), entity_uuids[i].clone()))
-            .collect();
-
-        // Per-batch memo of scan-fallback resolutions. Self-healing the row's `lookup_key` on a
-        // scan *hit* (see `get_entity_by_name_ci_with_scan_fallback`) only bounds the cost of a
-        // name that exists; a name that doesn't (a hallucinated or otherwise never-persisted
-        // extraction) has nothing to self-heal, so without this memo every edge referencing
-        // that same missing name in this batch would re-run its own full scan.
-        // This closure caches both outcomes locally, for this Phase C pass only, so a batch
-        // pays at most one scan per unique unresolved name regardless of whether it resolves
-        // (FR-002).
         //
-        // Keyed by `raw_name.trim().to_lowercase()` — the exact normalization
-        // `get_entity_by_name_ci`/`scan_entity_by_name_ci` match on — not `normalize_name`
-        // (which additionally strips control characters). Keying on the stricter
-        // `normalize_name` would conflate e.g. `"Apple"` and `"A\u{0001}pple"` into one cache
-        // entry despite the DB layer treating them as distinct names, letting a cached result
-        // for one silently serve the other.
-        let mut scan_cache: std::collections::HashMap<String, Option<String>> =
+        // Multi-kind (issue #616): edges carry names only, so a name can map to one entity per
+        // kind in this batch (e.g. a `Person` "Aurora" and a default-kind "Aurora"). Within one
+        // kind a later duplicate replaces the earlier (the pre-#616 behaviour); across kinds the
+        // name is *ambiguous* and the edge is dropped rather than guessed at (#414 / ADR-0615).
+        let mut name_to_uuid: std::collections::HashMap<String, Vec<(String, String)>> =
             std::collections::HashMap::new();
-        let mut resolve_via_scan = |raw_name: &str| -> Result<Option<String>, Error> {
+        for (i, e) in extraction.entities.iter().enumerate() {
+            let slot = name_to_uuid.entry(normalize_name(&e.name)).or_default();
+            match slot.iter_mut().find(|(k, _)| *k == entity_kinds[i]) {
+                Some(existing) => existing.1 = entity_uuids[i].clone(),
+                None => slot.push((entity_kinds[i].clone(), entity_uuids[i].clone())),
+            }
+        }
+
+        let mut scan_cache: std::collections::HashMap<String, EndpointResolution> =
+            std::collections::HashMap::new();
+        let mut resolve_via_scan = |raw_name: &str| -> Result<EndpointResolution, Error> {
             let key = raw_name.trim().to_lowercase();
             if let Some(cached) = scan_cache.get(&key) {
                 return Ok(cached.clone());
             }
-            let uuid = conn
-                .get_entity_by_name_ci_with_scan_fallback(raw_name, &gid_owned)?
-                .map(|existing| existing.uuid);
-            scan_cache.insert(key, uuid.clone());
-            Ok(uuid)
+            let resolution =
+                resolve_stored_endpoint(&conn, raw_name, &gid_owned, &endpoint_kinds)?;
+            scan_cache.insert(key, resolution.clone());
+            Ok(resolution)
+        };
+        // Resolves one edge endpoint: this batch first, then the persisted graph.
+        let mut resolve_endpoint = |raw_name: &str| -> Result<EndpointResolution, Error> {
+            match name_to_uuid.get(&normalize_name(raw_name)).map(Vec::as_slice) {
+                Some([(_, uuid)]) => Ok(EndpointResolution::Found(uuid.clone())),
+                Some(several) if several.len() > 1 => Ok(EndpointResolution::Ambiguous),
+                _ => resolve_via_scan(raw_name),
+            }
         };
 
         // Insert relationship edges. This is the sole, authoritative point at which an edge's
@@ -824,17 +1410,21 @@ pub async fn add_episode(
             // unique unresolved name in the batch, for both hits (also self-healed via a
             // `lookup_key` write for future requests) and misses (memoized only for this pass,
             // since there's nothing to persist for a name that doesn't exist).
-            let src_uuid = match name_to_uuid.get(&normalize_name(&edge.source_name)) {
-                Some(u) => Some(u.clone()),
-                None => resolve_via_scan(&edge.source_name)?,
-            };
-            let dst_uuid = match name_to_uuid.get(&normalize_name(&edge.target_name)) {
-                Some(u) => Some(u.clone()),
-                None => resolve_via_scan(&edge.target_name)?,
-            };
+            let src_res = resolve_endpoint(&edge.source_name)?;
+            let dst_res = resolve_endpoint(&edge.target_name)?;
+            let ambiguous = src_res == EndpointResolution::Ambiguous
+                || dst_res == EndpointResolution::Ambiguous;
+            let src_uuid = src_res.into_uuid();
+            let dst_uuid = dst_res.into_uuid();
             let (src_uuid, dst_uuid) = match (src_uuid, dst_uuid) {
                 (Some(s), Some(d)) => (s, d),
                 (src, dst) => {
+                    if ambiguous {
+                        eprintln!(
+                            "liminis-context-graph: dropping edge at commit, ambiguous endpoint (same name under more than one kind): '{}' → '{}'",
+                            edge.source_name, edge.target_name
+                        );
+                    }
                     eprintln!(
                         "liminis-context-graph: dropping edge at commit, unresolvable endpoint: '{}' → '{}' (src_resolved={}, dst_resolved={})",
                         edge.source_name, edge.target_name, src.is_some(), dst.is_some()
@@ -856,7 +1446,28 @@ pub async fn add_episode(
                     continue;
                 }
             };
+            // UUID-level self-loop guard (issue #666): two differently named endpoints can
+            // resolve to one entity (dedup merges, salvage), which the name-level filters above
+            // cannot see. Counted separately from unresolvable drops (ADR-0051's
+            // one-`dropped_edges`-entry-per-unresolvable-drop contract is unchanged).
+            if src_uuid == dst_uuid {
+                eprintln!(
+                    "liminis-context-graph: dropping edge at commit, endpoints resolve to the same entity ({}): '{}' → '{}'",
+                    src_uuid, edge.source_name, edge.target_name
+                );
+                edges_dropped_self_loop += 1;
+                continue;
+            }
+            // FR-011: record whether `valid_at` came from the text or defaulted to the episode's
+            // reference time — the fallback was silent before.
+            let llm_valid_at = validate_llm_timestamp(edge.valid_at.clone());
+            let valid_at_source = if llm_valid_at.is_some() {
+                "text"
+            } else {
+                "reference_time"
+            };
             conn.insert_relates_to_edge(&RelatesToEdge {
+                ingested_at: commit_instant.clone(),
                 uuid: uuid::Uuid::new_v4().to_string(),
                 name: format!("{} → {}", edge.source_name, edge.target_name),
                 source_node_uuid: src_uuid,
@@ -865,8 +1476,7 @@ pub async fn add_episode(
                 fact: edge.fact.clone(),
                 fact_embedding: fact_embeddings[i].clone(),
                 created_at: ref_time_owned.clone(),
-                valid_at: validate_llm_timestamp(edge.valid_at.clone())
-                    .or_else(|| Some(ref_time_owned.clone())),
+                valid_at: llm_valid_at.or_else(|| Some(ref_time_owned.clone())),
                 invalid_at: validate_llm_timestamp(edge.invalid_at.clone()),
                 attributes: match &edge.original_relation_type {
                     Some(orig) => {
@@ -877,15 +1487,24 @@ pub async fn add_episode(
                 relation_type: edge.relation_type.clone(),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                // FR-005: the producing episode (exactly one — edges are not deduplicated).
+                episodes: vec![ep_uuid.clone()],
+                warrant: None,
+                valid_at_source: Some(valid_at_source.to_string()),
             })?;
             edges_inserted += 1;
-            if is_strict_mode && edge.relation_type.as_deref() == Some(UNCLASSIFIED) {
+            // Open mode only reclassifies `extract: false` labels (#637), which always set
+            // `original_relation_type`; a literal "UNCLASSIFIED" from the extractor never does.
+            if (is_strict_mode || edge.original_relation_type.is_some())
+                && edge.relation_type.as_deref() == Some(UNCLASSIFIED)
+            {
                 edges_reclassified_unclassified += 1;
             }
         }
 
         // Insert episodic node
         conn.insert_episodic(&EpisodicRow {
+            ingested_at: commit_instant.clone(),
             uuid: ep_uuid.clone(),
             name: name_owned,
             group_id: gid_owned.clone(),
@@ -897,6 +1516,8 @@ pub async fn add_episode(
             valid_at: ref_time_owned.clone(),
             entity_edges: entity_uuids.clone(),
             attributes: attributes_owned.clone(),
+            doc_id: doc_id_owned,
+            ..Default::default()
         })?;
 
         // Insert MENTIONS edges
@@ -906,6 +1527,25 @@ pub async fn add_episode(
                 entity_uuid: entity_uuid.clone(),
                 group_id: gid_owned.clone(),
             })?;
+        }
+
+        // Supersede the chunk's earlier episodes (issue #705, FR-003) — last, so every unit of
+        // this ingest (extraction, dedup, edges, episode, MENTIONS) has already succeeded; any
+        // earlier `?` returns before this point and the old episodes stay live (belief ends late,
+        // never wrongly). The statements land in the same `wal_flush_chunk` as the new episode, so
+        // the pair is atomic in the WAL. Scoped to this group; excludes the new episode itself.
+        let mut superseded_episode_uuids: Vec<String> = Vec::new();
+        if let SupersedePolicy::ReviseChunk { keep } = &supersede_policy {
+            let mut exclude = keep.clone();
+            exclude.push(ep_uuid.clone());
+            let old = conn.live_episode_uuids_for_chunk(
+                &chunk_name_for_supersede,
+                &gid_owned,
+                &exclude,
+                &commit_instant,
+            )?;
+            conn.supersede_episodes_by_uuids(&old, &commit_instant, Some(&ep_uuid), "revision")?;
+            superseded_episode_uuids = old;
         }
 
         let flushed = wal_exec::wal_flush_chunk(&state_c, &gid_wal, conn.drain_mutations());
@@ -944,11 +1584,16 @@ pub async fn add_episode(
             edges_dropped_unresolvable,
             edges_reclassified_unclassified,
             dropped_edges,
+            edges_dropped_self_loop,
+            superseded_episode_uuids,
         ))
             },
         )
         .await??;
-    drop(_write_guard);
+    // The write lock stays held through the sidecar/drift block below (issue #627): it makes the
+    // `reloaded_since_extraction` check and the sidecar write atomic with respect to
+    // `knowledge_reload_ontology`, which takes the same lock. Dropping it first would let a reload
+    // land between the check and the write and have this episode's stale hash overwrite it.
 
     // After a successful DB commit, persist the current ontology hash to `.lcg/ontology-hash.json`
     // and clear the drift flag. Errors are non-fatal — a missed write means drift stays reported
@@ -969,7 +1614,19 @@ pub async fn add_episode(
         // handle_rebuild_from_wal — extend the clear to this group specifically, using the same
         // resolved ontology (`resolved_ontology`, Phase A above) that just guided this episode's
         // extraction, so the recorded hash matches what the DB now actually reflects.
-        if let Err(e) =
+        //
+        // Skipped when a `knowledge_reload_ontology` (issue #627) swapped the group's cached
+        // ontology between Phase A and here: recording this episode's (now stale) hash would
+        // overwrite the reloaded ontology's sidecar and clear its drift. The episode's own
+        // entities stay typed by the ontology it was extracted under.
+        let reloaded_since_extraction = state
+            .cached_ontology_hash(group_id)
+            .is_some_and(|h| h != crate::ontology::content_hash(resolved_ontology.as_deref()));
+        if reloaded_since_extraction {
+            eprintln!(
+                "liminis-context-graph: ontology-sidecar: group {group_id:?} ontology was reloaded during this episode's extraction — not recording the stale ontology hash"
+            );
+        } else if let Err(e) =
             ontology_sidecar::write_group_sidecar(root, group_id, resolved_ontology.as_deref())
         {
             eprintln!(
@@ -980,6 +1637,7 @@ pub async fn add_episode(
             state.clear_group_drift(group_id, resolved_ontology.clone());
         }
     }
+    drop(_write_guard);
 
     // Publish the ontology that guided this episode's extraction as a documentation-only sidecar
     // in the group's own WAL directory (FR-007) — travels automatically under the existing
@@ -1012,11 +1670,14 @@ pub async fn add_episode(
         nodes_extracted,
         edges_extracted: edges_inserted,
         edges_dropped_unresolvable,
+        edges_dropped_self_loop,
         dropped_edges,
         edges_reclassified_unclassified,
         entities_reclassified_unclassified,
         entities_dropped_malformed,
         edges_dropped_malformed,
+        dedup_paths,
+        superseded_episode_uuids,
     })
 }
 
@@ -1053,6 +1714,7 @@ mod tests {
             db,
             "test-group".to_string(),
             vec!["Someone".to_string()],
+            vec![crate::types::DEFAULT_KIND.to_string()],
             vec![wrong_dim_embedding],
             true, // use_hybrid
         )

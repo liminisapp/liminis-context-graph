@@ -13,6 +13,20 @@
 //! (vendored lbug C++) only special-cases a name that matches its `OFFICIAL_EXTENSION` table by
 //! exact string equality (`"VECTOR"`, `"FTS"`, ...) — a filesystem path never matches, so it
 //! `dlopen`s the given path directly and never touches `home_directory` or the CDN.
+//!
+//! **The versioned extension directory this module resolves must only ever be produced by
+//! `scripts/stage-lbug-extensions.sh` — never hand-copied or hand-renamed.** [`check_candidate`]
+//! below can only confirm a directory named `<LBUG_EXTENSION_VERSION>/<platform>` exists and
+//! contains non-empty files; it has no way to verify those bytes actually correspond to the
+//! version the directory name claims (issue #561 Background: staging correct-but-differently-
+//! versioned bytes under a directory renamed to match a wrong `LBUG_EXTENSION_VERSION` would
+//! resolve and load "successfully" while silently defeating this module's whole purpose, and no
+//! test can catch it after the fact — the only ground truth is the CDN, which a unit test can't
+//! assume network access to). The safety property here is structural, not test-driven:
+//! `stage-lbug-extensions.sh` derives both the download URL and the destination directory name
+//! from the same `$version` shell variable, read once from this repo's `LBUG_EXTENSION_VERSION`
+//! file, so a script-driven mismatch between a directory's name and its contents is impossible by
+//! construction. The dangerous scenario requires a human bypassing the script entirely.
 
 use std::path::{Path, PathBuf};
 
@@ -24,7 +38,7 @@ use crate::error::Error;
 ///
 /// **Not derivable from `lbug::VERSION` at the crate-semver level.** Research for issue #559
 /// found the mapping isn't always exact-match — a `0.19.1` crate pin resolved to extension
-/// directory `0.19.0`, and `0.20.1`/`0.20.2` both resolved to `0.20.0` — so this must be
+/// directory `0.19.0`, and `0.20.1` through `0.20.4` all resolve to `0.20.0`; `0.21.0`, `0.21.1` and `0.21.2` all resolve to `0.21.0` (current pin: 0.21.2) — so this must be
 /// re-verified empirically (probe a real `INSTALL vector` against the pinned version, or check
 /// `https://extension.ladybugdb.com/v<N>/...`) every time the `lbug` workspace dependency pin
 /// moves, and updated by hand. See ADR-0559 and `extension_version_was_verified_against_current_lbug_pin`
@@ -55,14 +69,15 @@ fn extension_version() -> &'static str {
 /// `lbug` workspace pin, and this must be hand-updated to match it (independently of whatever
 /// `LBUG_EXTENSION_VERSION` ends up being set to), or the test fails.
 #[allow(dead_code)] // only read by the `#[cfg(test)]` tripwire below
-const LBUG_CRATE_VERSION_VERIFIED_AGAINST: &str = "0.18.1";
+const LBUG_CRATE_VERSION_VERIFIED_AGAINST: &str = "0.21.2";
 
 const EXTENSION_NAMES: [&str; 2] = ["vector", "fts"];
 
 /// Maps the running binary's OS/arch to lbug's own extension-directory platform string.
-/// Empirically confirmed (issue #559 Research) against the three release targets configured
-/// in `Cargo.toml`'s `workspace.metadata.dist.targets`. Any other OS/arch combination
-/// (including Windows, not currently a release target) returns `None`, which makes
+/// Empirically confirmed (issue #559 Research) against the release targets configured in
+/// `Cargo.toml`'s `workspace.metadata.dist.targets`; `win_amd64` was confirmed against the
+/// extension CDN for #581 (`windows_amd64` and `windows_x86_64` both 404 — the string is
+/// exactly `win_amd64`). Any other OS/arch combination returns `None`, which makes
 /// `resolve_extension_files` a no-op there — falling straight through to lbug's own default
 /// behavior, same as if no bundle were found.
 fn platform_string() -> Option<&'static str> {
@@ -70,6 +85,7 @@ fn platform_string() -> Option<&'static str> {
         ("macos", "aarch64") => Some("osx_arm64"),
         ("linux", "x86_64") => Some("linux_amd64"),
         ("linux", "aarch64") => Some("linux_arm64"),
+        ("windows", "x86_64") => Some("win_amd64"),
         _ => None,
     }
 }
@@ -80,6 +96,55 @@ fn platform_string() -> Option<&'static str> {
 pub(crate) struct ExtensionFiles {
     pub(crate) vector: PathBuf,
     pub(crate) fts: PathBuf,
+}
+
+impl ExtensionFiles {
+    /// The `<root>/.lbdb/extension/<version>/<platform>/` directory both files live under
+    /// (each sits in its own `vector/` or `fts/` subdirectory of it).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) fn platform_dir(&self) -> Option<&Path> {
+        self.vector.parent().and_then(Path::parent)
+    }
+}
+
+/// Makes the extension libraries' own DLL dependencies resolvable from the bundle (Windows, #581).
+///
+/// lbug's `win_amd64` `libvector`/`libfts` extensions import `libssl-3-x64.dll` and
+/// `libcrypto-3-x64.dll`, and lbug loads them with a plain `LoadLibraryW(<absolute path>)`
+/// (`lbug-src/src/extension/extension.cpp`). That resolves an extension's dependencies through the
+/// standard search order — the exe's directory, the system directories, `PATH` — never the
+/// extension's own directory. So the release bundle ships those two DLLs in the platform directory,
+/// and this adds that directory to the process DLL search path with `SetDllDirectoryW` (searched
+/// right after the exe's directory) before `LOAD EXTENSION`.
+///
+/// Without it the extensions load only where OpenSSL DLLs happen to be on `PATH`. Git for Windows'
+/// `mingw64\bin` is one such place, which is how the gap went unnoticed through every Git Bash test
+/// run. The main binary links OpenSSL statically (ADR-0581); the extensions, being lbug's prebuilt
+/// DLLs, cannot. On other platforms the extensions resolve OpenSSL through the dynamic loader
+/// exactly as the main binary does (ADR-0550), so this is a no-op there.
+#[cfg(windows)]
+pub(crate) fn expose_extension_dependencies(files: &ExtensionFiles) -> Result<(), Error> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let Some(dir) = files.platform_dir() else {
+        return Ok(());
+    };
+    let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: `wide` is a NUL-terminated UTF-16 path that outlives the call.
+    let ok = unsafe { windows_sys::Win32::System::LibraryLoader::SetDllDirectoryW(wide.as_ptr()) };
+    if ok == 0 {
+        return Err(Error::Config(format!(
+            "SetDllDirectoryW({}) failed: {}",
+            dir.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn expose_extension_dependencies(_files: &ExtensionFiles) -> Result<(), Error> {
+    Ok(())
 }
 
 /// Checks whether `root/.lbdb/extension/<LBUG_EXTENSION_VERSION>/<platform>/` is a usable
@@ -155,9 +220,10 @@ fn resolve_from(
 ///
 /// 1. `LCG_LBUG_HOME` env var override (Story 2) — the operator's escape hatch for a
 ///    non-standard layout.
-/// 2. A directory derived from `std::env::current_exe()`'s parent — the layout a release
-///    archive bundles files under (Story 1, FR-004): the binary sits at the archive's top
-///    level, with a `.lbdb/` sibling directory.
+/// 2. The directory of the *real* running binary — `std::env::current_exe()` canonicalized
+///    through any symlink it was launched via (see [`exe_dir`]) — the layout a release archive
+///    bundles files under (Story 1, FR-004): the binary sits at the archive's top level, with a
+///    `.lbdb/` sibling directory.
 /// 3. Neither resolves: `Ok(None)`. `Db::open` falls back to lbug's own default (`INSTALL`,
 ///    user home directory, download on demand) — Story 3, the required non-regression path.
 pub(crate) fn resolve_extension_files() -> Result<Option<ExtensionFiles>, Error> {
@@ -179,17 +245,105 @@ pub(crate) fn resolve_extension_files() -> Result<Option<ExtensionFiles>, Error>
             )));
         }
     };
-    let exe_root = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    resolve_from(env_root.as_deref(), exe_dir().as_deref(), platform)
+}
 
-    resolve_from(env_root.as_deref(), exe_root.as_deref(), platform)
+/// The directory of the *real* running binary. `current_exe()` alone is not enough: on macOS
+/// and Windows it reports the path the process was launched as, so a binary started through a
+/// symlink (e.g. a stable `~/bin/lcg-service` pointing into a versioned install) resolved tier 2
+/// against the link's directory, never found the `.lbdb` bundle beside the real binary, and lbug
+/// silently fell back to downloading from the CDN — voiding #559's offline guarantee with no
+/// error.
+fn exe_dir() -> Option<PathBuf> {
+    exe_dir_from(std::env::current_exe().ok()?)
+}
+
+/// [`exe_dir`] over an explicit launched path, so the symlink handling is testable (the test
+/// binary itself can't be re-launched through a link). Canonicalizing follows the link; if that
+/// fails, the launched path is still the best remaining guess.
+fn exe_dir_from(exe: PathBuf) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(&exe)
+        .map(strip_verbatim_prefix)
+        .unwrap_or(exe);
+    real.parent().map(Path::to_path_buf)
+}
+
+/// `std::fs::canonicalize` on Windows returns a verbatim `\\?\C:\…` path. The extension paths
+/// built from it are handed to lbug's `LOAD EXTENSION` as strings, so return the ordinary
+/// drive-letter form when there is one (verbatim UNC paths are left as they are).
+#[cfg(windows)]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with(r"UNC\") => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
+#[cfg(not(windows))]
+fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
+    path
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    /// The regression the fix targets: a binary launched through a symlink must resolve the
+    /// bundle directory beside the *target*, not beside the link.
+    #[cfg(unix)]
+    #[test]
+    fn exe_dir_follows_a_symlink_to_the_real_binary() {
+        let real_dir = tempfile::tempdir().unwrap();
+        let link_dir = tempfile::tempdir().unwrap();
+        let binary = real_dir.path().join("liminis-context-graph");
+        fs::write(&binary, b"stub").unwrap();
+        let link = link_dir.path().join("lcg-service");
+        std::os::unix::fs::symlink(&binary, &link).unwrap();
+
+        // Canonical on both sides: macOS temp dirs live under the /var -> /private/var symlink.
+        let expected = fs::canonicalize(real_dir.path()).unwrap();
+        assert_eq!(exe_dir_from(link), Some(expected));
+    }
+
+    #[test]
+    fn exe_dir_falls_back_to_the_launched_path_when_it_cannot_be_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir").join("liminis-context-graph");
+        assert_eq!(
+            exe_dir_from(missing.clone()),
+            missing.parent().map(Path::to_path_buf)
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_prefix_is_stripped_from_drive_paths_only() {
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\lcg\bin")),
+            PathBuf::from(r"C:\lcg\bin")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\lcg")),
+            PathBuf::from(r"\\?\UNC\server\share\lcg")
+        );
+    }
+
+    /// The directory `expose_extension_dependencies` puts on the Windows DLL search path must be
+    /// the `<version>/<platform>` directory the bundle's OpenSSL DLLs are staged into — the
+    /// parent of the per-extension subdirectories, not one of them.
+    #[test]
+    fn platform_dir_is_the_versioned_platform_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        write_stub_bundle(dir.path(), extension_version(), "win_amd64");
+        let files = resolve_from(Some(dir.path()), None, "win_amd64")
+            .unwrap()
+            .expect("stub bundle resolves");
+        assert_eq!(
+            files.platform_dir(),
+            Some(versioned_dir(dir.path(), extension_version(), "win_amd64").as_path())
+        );
+    }
 
     fn write_stub_bundle(root: &Path, version: &str, platform: &str) {
         let dir = root
@@ -273,6 +427,14 @@ mod tests {
         );
     }
 
+    /// Proves only that a *missing* versioned directory falls through safely to the next
+    /// precedence tier — it does not and structurally cannot prove that a *present* directory's
+    /// staged bytes actually correspond to the version its name claims. Distinguishing "bytes
+    /// staged under a mismatched directory name" from "bytes staged under a correct directory
+    /// name" is impossible from inside this module: both look identical to `check_candidate`
+    /// (a directory exists, the files inside it are non-empty). That gap is closed structurally,
+    /// not by a test — see this module's doc comment above and `stage-lbug-extensions.sh`, the
+    /// only legitimate writer of this directory tree.
     #[test]
     fn version_drift_falls_through_cleanly_instead_of_erroring() {
         let dir = tempfile::tempdir().unwrap();

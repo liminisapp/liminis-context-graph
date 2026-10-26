@@ -721,6 +721,7 @@ async fn test_dump_wal_preserves_episodic_attributes() {
     {
         let conn = db1.connect().unwrap();
         conn.insert_episodic(&EpisodicRow {
+            ingested_at: String::new(),
             uuid: UUID.to_string(),
             name: "Test episode".to_string(),
             group_id: "attrs-group".to_string(),
@@ -732,6 +733,7 @@ async fn test_dump_wal_preserves_episodic_attributes() {
             valid_at: "2026-01-01 00:00:00".to_string(),
             entity_edges: vec![],
             attributes: attrs.to_string(),
+            ..Default::default()
         })
         .unwrap();
     }

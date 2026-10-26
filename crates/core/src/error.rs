@@ -88,6 +88,41 @@ pub enum Error {
     /// bypasses this check (Out of Scope).
     #[error("WAL stream generation unknown: {0}")]
     WalGenerationUnknown(String),
+
+    /// A caller-supplied entity `kind` is empty/whitespace-only, contains the key separator
+    /// U+001F (issue #615, FR-012), or is a reserved structural label (`Merged`).
+    #[error(
+        "invalid kind {0:?}: must be non-empty, must not contain U+001F, and must not be the \
+         reserved label \"Merged\""
+    )]
+    InvalidKind(String),
+
+    /// A name-only resolution matched more than one kind (issue #615, D2/FR-006). Never resolved
+    /// by picking a candidate; `candidates` lists every match's kind and uuid.
+    #[error("ambiguous entity {name:?} in group {group_id:?}: {}", format_candidates(.candidates))]
+    AmbiguousEntity {
+        name: String,
+        group_id: String,
+        candidates: Vec<crate::types::KindCandidate>,
+    },
+
+    /// A group's ontology changes the identity-bearing type set in a way that would
+    /// reinterpret existing entities (issue #616, D1). Refused rather than guessed at; the
+    /// remedy is restoring the recorded set or re-ingesting the group from source.
+    #[error("{message}")]
+    IdentitySetChangeRefused {
+        group_id: String,
+        label: String,
+        count: usize,
+        message: String,
+    },
+}
+
+fn format_candidates(c: &[crate::types::KindCandidate]) -> String {
+    c.iter()
+        .map(|k| format!("{} ({})", k.kind, k.uuid))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl From<tokio::task::JoinError> for Error {
@@ -136,6 +171,17 @@ pub fn is_named_catalog_entry_already_exists_error(err: &Error, name: &str) -> b
     s.contains("Binder exception:") && s.contains(&format!("{name} already exists in catalog"))
 }
 
+/// True if `err` is lbug's FTS-index-maintenance failure
+/// `FTS index '<idx>' is inconsistent: term '<t>' is missing during delete. Drop and recreate the
+/// FTS index.` (issue #649). Raised when a write deletes or updates a row whose indexed term is
+/// absent from an index that was *built by an older lbug* — lbug 0.20 → 0.21 changed how
+/// non-ASCII terms are stored without bumping the storage version. Used by `Conn`'s statement-
+/// level backstop (ADR-0649) to rebuild all 3 FTS indexes and retry the statement once.
+pub fn is_fts_inconsistent_error(err: &Error) -> bool {
+    let s = err.to_string();
+    s.contains("FTS index '") && s.contains("is inconsistent")
+}
+
 /// True if `err` is lbug's "table does not exist" binder exception, raised when a query
 /// references a node/rel label that isn't present in the schema (e.g. `Entity` renamed or
 /// dropped out from under an otherwise-open database). Used by `handle_knowledge_status`
@@ -153,6 +199,35 @@ pub fn is_missing_table_error(err: &Error) -> bool {
     let re = RE.get_or_init(|| regex::Regex::new(r"Table \S+ does not exist").unwrap());
     let s = err.to_string();
     s.contains("Binder exception:") && re.is_match(&s)
+}
+
+#[cfg(test)]
+mod is_fts_inconsistent_error_tests {
+    use super::*;
+
+    /// Text as reported in issue #646 (lbug 0.21.0). The fixture test in
+    /// `tests/fts_lbug020_migration.rs` asserts the same classifier against the real engine.
+    #[test]
+    fn matches_reported_text() {
+        let err = Error::QueryFailed(
+            "Query execution failed: Runtime exception: FTS index 'episode_content' is \
+             inconsistent: term '\u{2014}' is missing during delete. Drop and recreate the FTS \
+             index."
+                .to_string(),
+        );
+        assert!(is_fts_inconsistent_error(&err));
+    }
+
+    #[test]
+    fn does_not_match_other_errors() {
+        for msg in [
+            "Query execution failed: Binder exception: Table Entity doesn't have an index with name x.",
+            "Query execution failed: Binder exception: Index a already exists in table Entity.",
+            "Query execution failed: Runtime exception: something is inconsistent",
+        ] {
+            assert!(!is_fts_inconsistent_error(&Error::QueryFailed(msg.to_string())));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -75,3 +75,87 @@ fn hybrid_dedup_returns_best_match_above_threshold() {
     assert!(result.is_some(), "expected a match for identical embedding");
     assert_eq!(result.unwrap().uuid, "entity-0001");
 }
+
+// ---- identifier-mismatch veto at candidate selection (issue #650, ADR-0650) ----
+
+fn insert_named(conn: &lcg_core::Conn<'_>, uuid: &str, name: &str, emb: Vec<f32>) {
+    conn.insert_entity(&EntityRow {
+        uuid: uuid.to_string(),
+        name: name.to_string(),
+        group_id: "g".to_string(),
+        labels: vec!["Entity".to_string()],
+        created_at: "2026-01-01 00:00:00".to_string(),
+        name_embedding: emb,
+        summary: String::new(),
+        attributes: "{}".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+}
+
+#[test]
+fn name_aware_selection_vetoes_and_recovers_lower_ranked_alias_on_both_paths() {
+    let dim = 4;
+    let (db, _dir) = setup_dedup_db(dim);
+    let conn = db.connect().unwrap();
+    // "Postgres 15" is the best match (cos 1.0) but carries an identifier the incoming name lacks;
+    // "PostgreSQL" (cos 0.9) is a valid alias; "Postgres 16" is a second vetoed candidate.
+    insert_named(&conn, "a", "Postgres 15", vec![1.0, 0.0, 0.0, 0.0]);
+    insert_named(&conn, "b", "PostgreSQL", vec![0.9, 0.435_889_9, 0.0, 0.0]);
+    insert_named(&conn, "c", "Postgres 16", vec![0.95, 0.0, 0.312_249_9, 0.0]);
+    conn.build_indices_and_constraints().unwrap();
+    let emb = vec![1.0, 0.0, 0.0, 0.0];
+
+    // Old signatures keep returning the raw best match.
+    let plain = conn
+        .brute_force_similar_entity(&emb, "g", 0.85)
+        .unwrap()
+        .unwrap();
+    assert_eq!(plain.uuid, "a");
+
+    let bf = conn
+        .brute_force_similar_entity_kind_for_name(&emb, "Postgres", "g", 0.85, "Entity")
+        .unwrap();
+    let hy = conn
+        .hybrid_dedup_similar_entity_kind_for_name(&emb, "Postgres", "g", 0.85, "Entity")
+        .unwrap();
+    for (label, sel) in [("brute", &bf), ("hybrid", &hy)] {
+        assert_eq!(
+            sel.candidate.as_ref().map(|r| r.uuid.as_str()),
+            Some("b"),
+            "{label}: lower-ranked alias must be recovered"
+        );
+        assert_eq!(
+            sel.vetoed, 2,
+            "{label}: both vetoed candidates ranked ahead"
+        );
+    }
+}
+
+#[test]
+fn name_aware_selection_returns_none_with_vetoed_count_when_all_vetoed() {
+    let dim = 4;
+    let (db, _dir) = setup_dedup_db(dim);
+    let conn = db.connect().unwrap();
+    insert_named(&conn, "a", "ADR 2018", vec![1.0, 0.0, 0.0, 0.0]);
+    conn.build_indices_and_constraints().unwrap();
+    let emb = vec![1.0, 0.0, 0.0, 0.0];
+
+    let bf = conn
+        .brute_force_similar_entity_kind_for_name(&emb, "ADR 2019", "g", 0.85, "Entity")
+        .unwrap();
+    let hy = conn
+        .hybrid_dedup_similar_entity_kind_for_name(&emb, "ADR 2019", "g", 0.85, "Entity")
+        .unwrap();
+    for sel in [&bf, &hy] {
+        assert!(sel.candidate.is_none());
+        assert_eq!(sel.vetoed, 1);
+    }
+
+    // A non-conflicting name still selects it, with nothing vetoed.
+    let ok = conn
+        .brute_force_similar_entity_kind_for_name(&emb, "ADR 2018", "g", 0.85, "Entity")
+        .unwrap();
+    assert_eq!(ok.candidate.unwrap().uuid, "a");
+    assert_eq!(ok.vetoed, 0);
+}

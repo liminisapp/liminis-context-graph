@@ -126,6 +126,29 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0543](0543-narrow-write-lock-around-embedder-round-trip.md) | Narrow `state.write_lock`'s Critical Section Around the Embedder Round Trip | 2026-09-05 |
 | [0550](0550-openssl-dynamic-linkage-via-rpath.md) | Link OpenSSL Dynamically, Resolved Through `@rpath` on macOS | 2026-09-03 |
 | [0559](0559-bundle-lbug-extensions.md) | Bundle lbug vector/fts extensions so startup never downloads from the CDN | 2026-09-05 |
+| [0575](0575-lazy-connect-for-attached-mcp-stdio.md) | Lazy-Dial the Attached `--connect` Socket by Default, With `--connect-eager` Opt-Out | 2026-09-09 |
+| [0577](0577-strip-wal-embeddings.md) | `knowledge_strip_wal_embeddings` — Two-Pass In-Place Stripping of Pre-0.14 WAL Vectors | 2026-09-09 |
+| [0581](0581-windows-static-openssl.md) | Link OpenSSL Statically on Windows | 2026-09-15 |
+| [0593](0593-pin-lbug-extension-bytes.md) | Pin lbug extension bytes; treat embedded version strings as a diagnostic, not an oracle | 2026-09-16 |
+| [0615](0615-kind-scoped-entity-identity.md) | Kind-Scoped Entity Identity — `Entity.kind` and `lookup_key = group_id ␟ kind ␟ name` | 2026-09-29 |
+| [0616](0616-ontology-driven-kind-assignment.md) | Ontology-Driven Kind Assignment — identity-bearing entity types during extraction | 2026-09-29 |
+| [0627](0627-per-group-ontology-reload.md) | Per-Group Ontology Reload Without a Restart — `knowledge_reload_ontology` | 2026-09-30 |
+| [0637](0637-extract-false-assert-only-types.md) | Assert-Only Ontology Types — `extract: false` excludes a type from the LLM extractor | 2026-09-30 |
+| [0628](0628-health-check-busy-state.md) | `health_check` Reports `busy` Instead of Blocking Behind `write_lock` | 2026-09-29 |
+| [0629](0629-find-search-evidence-and-similarity-floor.md) | Search Evidence and a `min_similarity` Floor for `find_entities` / `find_relationships` | 2026-09-30 |
+| [0639](0639-post-merge-release-packaging-verification.md) | Verify Release Packaging Post-Merge on `main`, Not on Every PR Push | 2026-09-30 |
+| [0640](0640-ci-cheap-checks-first-and-fail-fast.md) | CI Cheap-Checks-First Pre-Gate and Run-Wide Fail-Fast | 2026-09-30 |
+| [0649](0649-fts-index-rebuild-on-lbug-version-change.md) | Rebuild FTS Indexes When the Building lbug Version Changes | 2026-10-01 |
+| [0650](0650-identifier-mismatch-veto-for-extraction-dedup.md) | Identifier-Mismatch Veto for Extraction-Time Entity Dedup | 2026-10-01 |
+| [0651](0651-merge-consolidates-summaries-and-refreshes-embedding.md) | Entity Merge Consolidates Summaries and Always Re-embeds `summary_embedding` | 2026-10-01 |
+| [0652](0652-llm-verified-extraction-dedup-via-extractor.md) | LLM-Verified Extraction Dedup via the Configured Extractor | 2026-10-01 |
+| [0666](0666-exact-graph-match-and-uuid-self-loop-guard.md) | Exact Graph Match Before Salvage, UUID-Level Self-Loop Guard, Short-Code Veto | 2026-10-02 |
+| [0667](0667-read-path-paging-cursor-and-status-label.md) | Read-Path Paging Cursor, Projection, All-Groups Episode Default and Status Label | 2026-10-01 |
+| [0673](0673-ingest-time-separate-from-event-time.md) | Ingest Time Is Stored Separately From Event Time (`ingested_at`) | 2026-10-03 |
+| [0690](0690-prefetch-and-cache-prebuilt-liblbug-for-release.md) | Prefetch and Cache the Pinned Prebuilt liblbug for Release Builds | 2026-10-18 |
+| [0705](0705-belief-time-separate-from-validity.md) | Belief Time Is Separate From Validity — Corrections Supersede Episodes | 2026-10-26 |
+| [0706](0706-correction-diff-and-affected-work-reads.md) | Correction Reads — What a Correction Changed, and What Was Written While the Old Belief Held | 2026-10-26 |
+| [0707](0707-document-supersession.md) | Document Supersession — A New Document Explicitly Replaces an Old One | 2026-10-26 |
 
 ## Historical numbering
 

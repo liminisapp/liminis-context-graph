@@ -162,11 +162,11 @@ async fn test_cross_batch_edge_endpoint_is_resolved_and_persisted() {
     );
 
     let apple = conn
-        .get_entity_by_name_ci("Apple", GROUP_A)
+        .get_entity_by_name_ci("Apple", GROUP_A, "Entity")
         .unwrap()
         .expect("Apple entity must exist");
     let creator_studio = conn
-        .get_entity_by_name_ci("Creator Studio", GROUP_A)
+        .get_entity_by_name_ci("Creator Studio", GROUP_A, "Entity")
         .unwrap()
         .expect("Creator Studio entity must exist");
 
@@ -204,11 +204,11 @@ async fn test_global_fallback_resolution_is_scoped_to_group_id() {
 
     let conn = db.connect().unwrap();
     let apple_a = conn
-        .get_entity_by_name_ci("Apple", GROUP_A)
+        .get_entity_by_name_ci("Apple", GROUP_A, "Entity")
         .unwrap()
         .expect("group A's Apple must exist");
     let apple_b = conn
-        .get_entity_by_name_ci("Apple", GROUP_B)
+        .get_entity_by_name_ci("Apple", GROUP_B, "Entity")
         .unwrap()
         .expect("group B's Apple must exist");
     assert_ne!(
@@ -270,7 +270,7 @@ async fn test_edge_resolves_to_entity_created_via_raw_cypher() {
     );
 
     let apple = conn
-        .get_entity_by_name_ci("Apple", GROUP_A)
+        .get_entity_by_name_ci("Apple", GROUP_A, "Entity")
         .unwrap()
         .expect("'Apple' must be resolvable via the plain lookup too, once self-healed");
     assert_eq!(apple.uuid, "raw-apple");
@@ -329,9 +329,10 @@ async fn test_scan_fallback_miss_is_memoized_once_per_batch() {
     let conn = db.connect().unwrap();
     assert_eq!(
         conn.lookup_key_fallback_scan_count(),
-        1,
-        "two edges naming the same nonexistent entity in one batch must share a single \
-         fallback scan, not one per edge (FR-002)"
+        2,
+        "two edges naming the same nonexistent entity in one batch must share one fallback \
+         scan per phase (the pre-lock exact-match probe of #666, then Phase C's memoized \
+         lookup), not one per edge (FR-002)"
     );
 }
 
@@ -475,17 +476,17 @@ async fn test_off_list_endpoint_salvaged_via_name_embedding_similarity() {
 
     let conn = db.connect().unwrap();
     assert!(
-        conn.get_entity_by_name_ci("Global Warming", GROUP_A)
+        conn.get_entity_by_name_ci("Global Warming", GROUP_A, "Entity")
             .unwrap()
             .is_none(),
         "salvage must not create a new entity for the off-list name"
     );
     let climate_change = conn
-        .get_entity_by_name_ci("Climate Change", GROUP_A)
+        .get_entity_by_name_ci("Climate Change", GROUP_A, "Entity")
         .unwrap()
         .expect("Climate Change entity must exist");
     let ocean_acidification = conn
-        .get_entity_by_name_ci("Ocean Acidification", GROUP_A)
+        .get_entity_by_name_ci("Ocean Acidification", GROUP_A, "Entity")
         .unwrap()
         .expect("Ocean Acidification entity must exist");
 
@@ -496,6 +497,46 @@ async fn test_off_list_endpoint_salvaged_via_name_embedding_similarity() {
         "the salvaged edge must attach to 'Climate Change', not a new entity"
     );
     assert_eq!(rels[0].target_node_uuid, ocean_acidification.uuid);
+}
+
+// ── Issue #650: the identifier-mismatch veto also gates endpoint salvage ───────
+
+#[tokio::test]
+async fn test_salvage_does_not_rewrite_endpoint_onto_identifier_mismatched_entity() {
+    let (db, _dir) = make_db();
+
+    // 'ADR 2018' is off-list and embeds identically to the batch entity 'ADR 2019' (cosine 1.0,
+    // well above DEDUP_THRESHOLD), but the names differ only by an identifier — the veto must
+    // stop salvage rewriting the endpoint onto 'ADR 2019'.
+    let mut map = HashMap::new();
+    map.insert("ADR 2019".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("ADR 2018".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("Ocean Acidification".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
+    let embedder = NameMapEmbedder::new(EMB_DIM, map);
+
+    let ext = ConfigurableExtractor::new(vec![batch(
+        &["ADR 2019", "Ocean Acidification"],
+        &[(
+            "ADR 2018",
+            "Ocean Acidification",
+            "ADR 2018 concerns acidification",
+        )],
+    )]);
+    let state = make_state_with(Arc::clone(&db), ext, embedder);
+
+    let result = run_episode(&state, "ep-a", "ADR 2018 concerns acidification.", GROUP_A).await;
+
+    assert_eq!(
+        result.edges_extracted, 0,
+        "vetoed endpoint must not be salvaged"
+    );
+    assert_eq!(result.edges_dropped_unresolvable, 1);
+    assert_eq!(result.dedup_paths.salvage_vetoed, 1);
+    let conn = db.connect().unwrap();
+    assert!(conn
+        .list_relationships(Some(&[GROUP_A]), 10)
+        .unwrap()
+        .is_empty());
 }
 
 // ── Edge case: adversarial pairs must not cross-resolve below the similarity threshold ──
@@ -721,4 +762,65 @@ async fn test_edge_endpoint_resolves_when_entity_name_has_control_char() {
     let conn = db.connect().unwrap();
     let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
     assert_eq!(rels.len(), 1, "expected exactly one persisted edge");
+}
+
+// ── Issue #666: UUID-level self-loop guard ─────────────────────────────────────
+
+#[tokio::test]
+async fn test_edge_whose_endpoints_resolve_to_one_uuid_is_dropped_and_counted() {
+    let (db, _dir) = make_db();
+
+    // 'Alpha Inc' dedup-merges onto the stored 'Alpha' (same vector), so the differently named
+    // endpoints of Alpha Inc → Alpha resolve to one UUID. The name-level filter cannot see it.
+    let mut map = HashMap::new();
+    map.insert("Alpha".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("Alpha Inc".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    map.insert("Beta".to_string(), vec![0.0, 1.0, 0.0, 0.0]);
+    let embedder = NameMapEmbedder::new(EMB_DIM, map);
+
+    let ext = ConfigurableExtractor::new(vec![
+        batch(&["Alpha"], &[]),
+        batch(
+            &["Alpha Inc", "Beta"],
+            &[
+                ("Alpha Inc", "Alpha", "Alpha Inc is Alpha"),
+                ("Alpha Inc", "Beta", "Alpha Inc partners with Beta"),
+            ],
+        ),
+    ]);
+    let state = make_state_with(Arc::clone(&db), ext, embedder);
+
+    run_episode(&state, "ep-a", "Alpha.", GROUP_A).await;
+    let result = run_episode(&state, "ep-b", "Alpha Inc is Alpha.", GROUP_A).await;
+
+    assert_eq!(result.edges_dropped_self_loop, 1, "{result:?}");
+    assert_eq!(
+        result.edges_dropped_unresolvable, 0,
+        "a self-loop drop is not an unresolvable-endpoint drop"
+    );
+    assert!(
+        result.dropped_edges.is_empty(),
+        "dropped_edges is one entry per unresolvable drop only (ADR-0051)"
+    );
+    assert_eq!(
+        result.edges_extracted, 1,
+        "the distinct-UUID edge is inserted"
+    );
+
+    let conn = db.connect().unwrap();
+    let alpha = conn
+        .get_entity_by_name_ci("Alpha", GROUP_A, "Entity")
+        .unwrap()
+        .expect("Alpha must exist");
+    let beta = conn
+        .get_entity_by_name_ci("Beta", GROUP_A, "Entity")
+        .unwrap()
+        .expect("Beta must exist");
+    let rels = conn.list_relationships(Some(&[GROUP_A]), 10).unwrap();
+    assert_eq!(rels.len(), 1);
+    assert_eq!(rels[0].source_node_uuid, alpha.uuid);
+    assert_eq!(rels[0].target_node_uuid, beta.uuid);
+    assert!(rels
+        .iter()
+        .all(|r| r.source_node_uuid != r.target_node_uuid));
 }

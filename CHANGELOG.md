@@ -9,6 +9,381 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Re-ingest graphs written before this release** if you want belief time to cover them. Their edges
+  have no producing episode and cannot be soundly backfilled (endpoint co-occurrence is not
+  provenance, #404); they are treated as believed and reported as `legacy`
+  (`knowledge_status.legacy_edge_count`). New nullable columns are added on first start.
+- **First start runs a one-time FTS index rebuild**, because lbug moved 0.21.1 → 0.21.2 and the #649
+  marker records the exact lbug version. It is logged; a large graph starts slower that once. Later
+  starts do not rebuild.
+
+### Added
+
+- **A new document can explicitly supersede an old one** (#707, ADR-0707). `knowledge_process_chunk`
+  and `knowledge_add_episode` accept an optional `doc_id`; the new `knowledge_supersede_document`
+  (write scope) records "A supersedes B, effective T" within a group. B's live episodes are
+  superseded (`document` / `document_superseded`), ending belief at the recording instant (or at a
+  future effective date), while the `belief` annotation reports `in_force` and a `supersession`
+  (`corrected` vs `document_superseded`, with `in_force_until`) so a corrected fact and a replaced
+  decision can be told apart. Rejected requests (same/unknown document, cycle, conflict) leave
+  nothing behind. `valid_at` / `invalid_at` are never written. Graphs written earlier have no
+  `doc_id`; re-ingest them.
+- **Corrections end belief without deleting evidence** (#705, ADR-0705). Resubmitting a `chunk_id` to
+  `knowledge_process_chunk` supersedes that chunk's earlier episodes in the same group once the new
+  ingest has succeeded; `superseded_at` / `superseded_by` / `superseded_by_kind` /
+  `supersession_reason` are recorded on the episode, in the WAL, and survive rebuild, recovery,
+  checkpoint restore and dump compaction. `valid_at` / `invalid_at` are never written.
+  Multi-unit chunks use `supersede: false` and `same_revision_episode_uuids`.
+- **`knowledge_mark_chunk_removed`** (write scope): records that a chunk no longer exists, superseding
+  its episodes with reason `chunk_removed`. `knowledge_delete_chunk_episode` keeps its
+  explicit-deletion contract.
+- **Edge provenance**: each extracted edge records its producing episode in `episodes`; edges with no
+  producing episode carry a `warrant` (`assertion`, `cross_group`); extracted edges record whether
+  `valid_at` came from the text or defaulted to `reference_time` (`valid_at_source`).
+- **`believed_only` and `as_of`** on `knowledge_find_relationships`, `list_relationships`,
+  `get_entity_neighbors`, `get_edges_by_group` and `get_edges_by_uuids`; opted-in reads add a `belief`
+  object per edge. Default reads are unchanged.
+- `knowledge_status.legacy_edge_count`.
+- **`knowledge_get_correction_changes {episode_uuid}`** and **`knowledge_get_affected_work {edge_uuid}`**
+  (#706, ADR-0706; MCP `read` scope, 49 tools total): for a superseded episode, the facts it supported
+  versus the facts its replacement supports; for a dropped fact, the episodes ingested inside its belief
+  interval that mention either endpoint entity. Affected work is labelled `basis: entity_overlap`
+  (candidates, not dependents) and non-closed intervals (`open`, `no_record`, `not_defined`) are named
+  rather than returned as an empty list. Both are read-only and additive.
+
+### Changed
+
+- `knowledge_assert_relationship` never overwrites an extracted edge's `fact` (#405); it creates a
+  separate edge with the `assertion` warrant.
+- `Episodic.entity_edges` is documented as holding entity UUIDs, not edge provenance.
+- **lbug 0.21.1 → 0.21.2** (#699, supersedes #693). Takes upstream's scan-correctness fix
+  (`NodeGroup::scan` ran past a sub-node-group morsel's end) and buffer-manager race fix. Extensions
+  unchanged (still the `v0.21.0` path, same pinned bytes); storage version stays 47.
+
+## [0.17.0] - 2026-10-04
+
+Full detail: [docs/releases/0.17.0.md](docs/releases/0.17.0.md).
+
+### Upgrading
+
+- **First start runs two one-time steps:** the `ingested_at` schema addition and backfill below, and an
+  FTS index rebuild, because lbug moved 0.21.0 → 0.21.1 and the #649 marker records the exact lbug
+  version. Both are logged; a large graph starts slower that once. Later starts do neither.
+
+- **Existing graphs get an `ingested_at` backfill on first start** (#673, ADR-0673): from the `ts` of
+  the WAL entry that created each record where the WAL still has one, otherwise from `created_at`.
+  The `created_at` fallback is approximate (for pre-existing records it was the event time).
+
+### Added
+
+- **`ingested_at` on episodes, entities and edges** (#673, ADR-0673): the service-clock time the
+  record was first written, kept separately from the caller-supplied event time (`reference_time` →
+  `valid_at` / `created_at`). Never caller-supplied, set once, preserved across WAL rebuild, recovery,
+  checkpoint restore and dump compaction. Returned on every episode/entity/relationship read and
+  accepted in the `fields` projection of `knowledge_get_episodes` and `knowledge_list_entities`.
+  Additive only; `created_at` / `valid_at` and all ordering are unchanged.
+
+### Changed
+
+- **lbug 0.21.0 → 0.21.1** (#676). Extensions unchanged (still the `v0.21.0` path, same pinned bytes);
+  storage version stays 47.
+- **MCP library `rmcp` 2.2 → 3.5** (#680). The MCP tool surface is unchanged.
+- **Moved to the `liminisapp` org**: repository `liminisapp/liminis-context-graph`, docs at
+  https://docs.liminis.app/liminis-context-graph/ (#682). Old URLs redirect.
+- Dependency updates, including `quinn-proto` 0.11.19 (security advisory), `sha2` 0.11 and the docs
+  site's Astro 7.
+
+## [0.16.4] - 2026-10-02
+
+Full detail: [docs/releases/0.16.4.md](docs/releases/0.16.4.md).
+
+### Upgrading
+
+- **Re-ingest graphs built by extraction on 0.16.3 or earlier** to remove endpoints already
+  re-pointed onto the wrong entity and stored self-loops (#666); they are not repaired in place.
+
+- **`knowledge_get_episodes` with no `group_id`/`group_ids` now returns episodes from every group**,
+  not just `liminis` (#667, fixes #648). Pass `group_ids: ["liminis"]` (or `group_id`) to keep the
+  old scope. `group_ids` is now honoured (it was silently ignored); `group_id` remains an alias.
+
+### Added
+
+- **Paging, projection and prefix filters on the two bulk reads** (#667, ADR-0667):
+  `knowledge_get_episodes` and `knowledge_list_entities` accept `cursor` (send `""` to start; follow
+  `next_cursor` until `null`), `fields` (return only the named keys; embeddings are never returned)
+  and `name_prefix` (case-insensitive for entities). Absent all three, responses are unchanged.
+- `knowledge_status.wal` carries `scope`, `default_group` and `see: "wal_groups"` when a WAL root is
+  configured, so `exists: false` for a default group with no stream no longer reads as an error.
+
+### Changed
+
+- `knowledge_get_episodes` orders ties on `created_at` by `uuid` (descending) so paging is
+  deterministic. Previously the order within a tie was arbitrary.
+
+### Fixed
+
+- **An edge endpoint that exactly matches a stored entity is no longer re-pointed onto a similar
+  entity of the current chunk** (#666, remainder of #645, ADR-0666). Salvage now runs only for
+  names with no exact stored match.
+- **Edges whose two endpoints resolve to the same entity are dropped, not stored as self-loops**
+  (#666). New additive `edges_dropped_self_loop` field on `knowledge_process_chunk`.
+- **Extraction no longer merges distinct short all-caps codes** such as `ACDS` / `ACDM` (#666).
+  **Behaviour change:** the identifier veto now also fires on mutually exclusive 2–6 letter
+  upper-case tokens; acronym/expansion aliases still merge.
+- Identity-kind (`identity: true`) fuzzy matching is intentionally unchanged; see ADR-0666.
+
+## [0.16.3] - 2026-10-01
+
+Full detail: [docs/releases/0.16.3.md](docs/releases/0.16.3.md).
+
+### Upgrading
+
+- **The first start rebuilds the three FTS indexes once** (logged; time proportional to corpus size).
+  Nothing else to do. Pinned to 0.16.0–0.16.2? See the release notes for the manual workaround.
+- **Re-ingest if your graph was built with ≤ 0.16.2 extraction.** Entities wrongly merged by the old
+  dedup (e.g. `ADR 2018` = `ADR 2019`) and their concatenated summaries are not repaired in place.
+- **`LCG_DEDUP_ADAPTER_URL` is ignored** (deprecated; it configured a protocol nothing implemented).
+
+### Fixed
+
+- **Databases built by 0.15.x or earlier: non-ASCII FTS terms were undeletable and silently
+  unsearchable** after the lbug 0.20 → 0.21 upgrade (#649, fixes #646, ADR-0649). Rebuilt once on
+  first start; a residual "inconsistent" error rebuilds all three and retries once.
+- **Extraction no longer merges entities that differ only by a number or identifier** (#650,
+  ADR-0650). **Behaviour change:** `Python 3` / `Python`-style pairs no longer merge by embedding.
+- **Merged entity summaries are consolidated, not concatenated, and `summary_embedding` is
+  re-embedded on every merge** (#651, fixes #647, ADR-0651). Uses the configured extractor; capped
+  at 600 characters (bounded fallback without one); WAL replay never calls the LLM.
+- CI no longer recompiles the workspace in the `test` job (~9 min per run; #657).
+
+### Added
+
+- **`LCG_DEDUP_LLM` now works** (#652, ADR-0652): opt-in LLM-verified dedup using the configured
+  extractor, batched per chunk; any failure means "not a duplicate". `knowledge_status` reports
+  `dedup_mode`; `knowledge_process_chunk` returns `dedup_paths` counts.
+
+### Changed
+
+- `LCG_DEDUP_LLM` values `0`/`false`/`off`/`no`/empty now mean off (previously any value enabled it).
+
+## [0.16.2] - 2026-09-30
+
+Full detail: [docs/releases/0.16.2.md](docs/releases/0.16.2.md).
+
+### Added
+
+- **Assert-only ontology types: `extract: false`** ([ADR-0637](docs/adr/0637-extract-false-assert-only-types.md),
+  #637, implements #636). An entity or relation type marked `extract: false` is omitted from the
+  extraction prompts and never accepted from the extractor — a stray extracted label is
+  reclassified to `Unclassified` / `UNCLASSIFIED` (original label kept) in both strict and open
+  mode and never receives the type's identity `kind` — while staying fully declared for
+  `knowledge_assert_*`, the identity set and its `-32003` guard, ancestry and drift. Reprocess and
+  canonicalize never retype into one. Defaults to `true`; an ontology without the flag renders
+  identical prompts and hashes identically. See
+  [docs/ontology.md](docs/ontology.md#assert-only-types-extract-false).
+
+## [0.16.1] - 2026-09-30
+
+Full detail: [docs/releases/0.16.1.md](docs/releases/0.16.1.md).
+
+### Added
+
+- **`knowledge_reload_ontology`** ([ADR-0627](docs/adr/0627-per-group-ontology-reload.md), #627,
+  implements #611). An `admin`-scope IPC method and MCP tool that reloads **one group's** ontology
+  without a service restart: it re-resolves the group through the normal precedence, honours the
+  identity-set guard (a reload that would reinterpret existing entities is reported in
+  `identity_refusal` and enforced as `-32003` on writes, and clears when the previous set is
+  restored and reloaded), and returns `{group_id, previous_hash, new_hash, changed, drift,
+  identity_refusal}`. An unchanged file is a no-op. Other groups and stored data are untouched.
+  See [docs/ontology.md](docs/ontology.md#reloading-a-groups-ontology).
+- **Relevance evidence and a similarity floor on `knowledge_find_entities` /
+  `knowledge_find_relationships`** ([ADR-0629](docs/adr/0629-find-search-evidence-and-similarity-floor.md),
+  #629, implements #613). Each result carries a `search` object — `rrf_score`, `text_match`,
+  `bm25_score`, and per-path cosine similarities (`null` when that path didn't retrieve it) — and
+  an optional `min_similarity` (clamped 0–1, no default) drops distant vector candidates before
+  fusion; full-text hits stay eligible. Unset, results and order are unchanged.
+
+### Fixed
+
+- **`health_check` no longer blocks behind the write lock** ([ADR-0628](docs/adr/0628-health-check-busy-state.md),
+  #628, reported in #612). While a write is pending or in progress — notably a long
+  `knowledge_rebuild_from_wal` — it now answers immediately with `state: "busy"`,
+  `ok: true`, `healthy: false` and an `activity` (`rebuilding` with `job_id` and `progress`, or
+  `writing`), instead of queueing until the write finished. Supervisors with short probe timeouts
+  no longer mistake a rebuilding daemon for a dead one and restart it mid-rebuild. The `healthy`
+  and `degraded` responses are unchanged. Out-of-repo callers that treat any `ok: true` as ready
+  should gate on `healthy` instead.
+- The docs site now republishes automatically on release (#626); since 0.14.0 it had only been
+  updated by manual dispatch.
+- An episode whose extraction straddles an ontology reload no longer records its stale ontology
+  hash in the group's drift sidecar or clears the reloaded group's drift.
+
+## [0.16.0] - 2026-09-29
+
+Full detail: [docs/releases/0.16.0.md](docs/releases/0.16.0.md).
+
+### Upgrading
+
+- **First start migrates entities (issue #615).** `Entity` gains a `kind` column and `lookup_key`
+  becomes `group_id ␟ kind ␟ lower(name)`. A one-time backfill sets every existing entity to kind
+  `Entity` and re-keys it (O(N), automatic). It also normalizes `labels` to put `Entity` first
+  (e.g. `[Object, Entity]` → `[Entity, Object]`); the label set is unchanged. **Downgrade is
+  unsupported:** a pre-#615 binary cannot replay a WAL written after this change (`lookup_key` is
+  no longer written to the WAL).
+
+### Added
+
+- **Ontology-driven kind assignment** ([ADR-0616](docs/adr/0616-ontology-driven-kind-assignment.md),
+  #616, follows #615). An entity type marked `identity: true` in the ontology is assigned as the
+  `kind` of entities extracted with that primary type, so `Person "Aurora"` and `Technology
+  "Aurora"` stay distinct; unflagged types (and every existing ontology) merge by name exactly as
+  before. Per group, the identity-bearing set is recorded in `.lcg/identity-set/<group>.json`, and
+  a change that would reinterpret existing entities (flag added or removed for a type the group
+  already holds) is refused for that group's `knowledge_add_episode` with JSON-RPC `-32003` —
+  restore the set or re-ingest from source. `knowledge_reprocess_entity_types` never changes kind
+  and reports `kind_disagreements`; `knowledge_status` gains `group_identity_refusals`.
+  Edge endpoints whose name is ambiguous across kinds are dropped rather than guessed.
+- **Kind-scoped entity identity** ([ADR-0615](docs/adr/0615-kind-scoped-entity-identity.md), #615,
+  implements #614). Same-named entities of different kinds now coexist instead of the second
+  `knowledge_assert_entity` overwriting the first. `knowledge_assert_entity` takes `kind`
+  (omitted ⇒ default kind `Entity` only — writes are scoped); `knowledge_assert_relationship` takes
+  `source_kind`/`target_kind`; new read tool `knowledge_resolve_entity`; `kind` filter on
+  `knowledge_find_entities`/`knowledge_list_entities`; `kind` on `knowledge_merge_entities`;
+  `source_kind`/`target_kind` (stored as pointer `endpoint_kind`) on
+  `knowledge_add_cross_group_edge`. A name-only resolution matching several kinds fails with
+  JSON-RPC `-32002` and a candidate list. Merges never cross kinds. Every entity node now carries
+  `kind` (additive).
+
+### Changed
+
+- **lbug 0.20.3 → 0.21.0, with version-matched `v0.21.0` extensions** (#619). Upstream's 2026-09-29
+  republish of the `v0.20.0` extensions left 0.20.3 with no safe Windows fts pairing (see ADR-0593
+  addendum). 0.21.0 extensions are published per-version and pinned in `LBUG_EXTENSION_HASHES`.
+  Storage version stays 47: **no database migration.**
+- Release builds verify the staged lbug extension bytes against pinned sha256 (#593); Windows CI
+  now creates and queries vector/FTS indexes rather than only loading the extensions (#587).
+
+- `lookup_key` is a derived value: stripped from WAL records on write, recomputed on replay; a
+  literal `lookup_key` in an older WAL is ignored. Old WALs replay as kind `Entity`.
+
+## [0.15.0] - 2026-09-15
+
+lbug 0.18.1 → 0.20.3. **One-way storage migration (42 → 47) — read Upgrading.** No API changes.
+Full detail: [docs/releases/0.15.0.md](docs/releases/0.15.0.md).
+
+### Upgrading
+
+1. **One-way migration.** A database at storage version 42 — written by 0.18.1, which is
+   everything 0.14.x shipped — opens directly under the new binary, with no export and the WAL
+   untouched. The first checkpoint rewrites it to storage 47, **after which an older binary will
+   not open it**. To roll back: stop the service, move `.lcg/db/` aside, start the old binary; it
+   rebuilds from the WAL.
+2. No API changes and no other manual step.
+
+### Changed
+
+- **lbug 0.18.1 → 0.20.3.** Picks up the fixes the 0.18.1 rollback deferred — `ladybug#845` (FTS
+  heap corruption under concurrent scan/write, a path this service exercises live), `#837`,
+  `#864`, `#894`, `#884` — and `ladybug#883`, a SIGSEGV in the cached-prepared-statement path,
+  fixed outright in 0.20.3 rather than merely mitigated. Also forward-fixes a stale-row bug on the
+  cached-plan fast path (`ladybug#877`/`#878`) that 0.18.1 does not appear to exhibit.
+- **0.20.3 rather than 0.20.4**, because lbug 0.20.4 crashes on Windows in the published
+  `vector`/`fts` extensions. Upstream publishes those per *minor*, and the `v0.20.0/win_amd64`
+  files are 0.20.2-era builds — ABI-compatible with a 0.20.3 core, not a 0.20.4 one. Reported
+  upstream as [`LadybugDB/ladybug#971`](https://github.com/LadybugDB/ladybug/issues/971). Linux
+  and macOS are unaffected by the choice.
+
+## [0.14.3] - 2026-09-15
+
+**Windows is now a supported platform**, and hybrid search returns results in ranked order rather
+than insertion order. No migration; `lbug` stays pinned at 0.18.1.
+
+### Added
+
+- **Windows (x64) support.** `lcg-service` builds and runs on Windows, using a **named-pipe** IPC
+  transport in place of the Unix domain socket. Every pipe instance carries a protected DACL
+  granting only the service's own user and SYSTEM (the default pipe DACL grants Everyone read),
+  refuses remote clients, and claims its name with `FILE_FLAG_FIRST_PIPE_INSTANCE`. The service
+  writes the pipe name to `.lcg/service.endpoint` so clients in other languages can discover it,
+  and Windows console-control events drive clean shutdown. (#581, #582)
+- **A published Windows artifact**, `x86_64-pc-windows-msvc`, installable via a new PowerShell
+  installer or the `.zip`. OpenSSL is linked **statically** into the executable — a deliberate
+  Windows-only exception to ADR-0550's dynamic posture, since an archive cannot carry DLLs for one
+  target and no Windows package manager would patch a DLL we shipped. The two OpenSSL DLLs that
+  lbug's own extensions import are bundled beside them and resolved at load time. Consequence: an
+  OpenSSL CVE fix requires a new lcg release on Windows, where macOS and Linux pick it up from the
+  system. See [ADR-0581](docs/adr/0581-windows-static-openssl.md). (#585, #586)
+
+### Fixed
+
+- **`find_entities` and `find_relationships` returned results in insertion order, not ranked
+  order.** Both fetch rows with a `WHERE uuid IN` lookup carrying no `ORDER BY`, so the RRF-fused
+  ranking computed immediately beforehand was discarded — every hybrid search returned the correct
+  top-k *set* in an arbitrary order. Rows now follow the fused ranking. (#584)
+- **Bundled lbug extensions were not found when lcg was launched through a symlink.** On macOS and
+  Windows `current_exe()` reports the path the process was launched as, so a stable symlink into a
+  versioned install resolved the bundle against the link's directory, missed the `.lbdb` tree beside
+  the real binary, and silently fell back to downloading from the CDN — voiding 0.14.2's offline
+  guarantee with no error. The executable path is now canonicalized. (#583)
+
+### Windows notes
+
+- **Requires the Microsoft Visual C++ Redistributable (x64, 2015–2022).** It is not bundled and is
+  present on most machines; without it the executable fails to start with a loader error.
+- **Verified on Windows 11 x64.** Windows 10 and Windows ARM are untested; no Windows ARM build is
+  published.
+- **Downstream clients must read `.lcg/service.endpoint`** to locate the pipe. `orac` does; the
+  Liminis app and `liminis-framework` do not yet.
+- **`lbug` stays at 0.18.1.** The published Windows `vector` and `fts` extensions for the entire
+  lbug 0.20.x line crash the process — a regression from 0.19.0, reproducible with LadybugDB's own
+  CLI and unrelated to lcg. The lbug upgrade is deferred until that is fixed upstream, so all four
+  platforms can move together. See [docs/releases/0.14.3.md](docs/releases/0.14.3.md).
+
+## [0.14.2] - 2026-09-10
+
+A maintenance release: the MCP front-end no longer hard-fails when the daemon is down, and a new
+admin operation reclaims the dead weight a pre-0.14 WAL is still carrying. No migration, no API
+changes.
+
+### Added
+
+- **`knowledge_strip_wal_embeddings {group_id, dry_run}`** reclaims the space a WAL written before
+  0.14.0 still carries. 0.14.0 stopped *writing* embedding vectors to the WAL and made replay
+  ignore any it finds, but left existing WALs untouched — on the reference corpus those vectors
+  were **89.9% of WAL bytes**, parsed and discarded on every replay, rebuild and hydration. This
+  rewrites each qualifying `.jsonl` in place to drop `params` entries keyed by an embedding column,
+  leaving every other field, record ordering and sequence number alone. Because replay never reads
+  a stored vector, it cannot change what a rebuild produces. Idempotent (a re-run is a zero-I/O
+  no-op), crash-safe per file (tmp-then-atomic-rename), and `dry_run` reports what would change
+  without touching anything. `admin` scope. See
+  [ADR-0577](docs/adr/0577-strip-wal-embeddings.md) (#577).
+- **`--connect-eager`** restores the pre-0.14.2 startup behaviour for `--mcp-stdio --connect` —
+  dial at startup and exit if the socket is unreachable — for operators relying on that as a
+  health-check signal (#575).
+
+### Fixed
+
+- **`--mcp-stdio --connect` no longer hard-fails when the daemon socket is unreachable at launch.**
+  `initialize` and `tools/list` now complete immediately from the compiled-in tool registry without
+  dialling; the first `tools/call` dials lazily, and an unreachable daemon returns a tool result
+  with `isError: true` naming the socket rather than exiting. A later call succeeds once the daemon
+  comes up, and a daemon restart that rebinds the socket is transparently re-dialled — both without
+  any client-side reconnect. Previously the client cached the failed attach for roughly 15 minutes,
+  leaving the reader showing *disconnected* long after the cause was fixed, and a restart orphaned
+  live connections until a manual `/mcp`. Reported from downstream MCP use (#574). `--scope`
+  enforcement is unchanged. See
+  [ADR-0575](docs/adr/0575-lazy-connect-for-attached-mcp-stdio.md) (#575).
+
+### Internal
+
+- Corrected a false claim in the 0.14.0 release notes that lbug 0.18.1 carries `ladybug#845`,
+  `#837` and `#864`. Those landed in 0.20.x, after 0.18.1 shipped; the document had said both
+  things in different sections. `ladybug#845` is FTS heap corruption on a path this project
+  queries concurrently, so the error understated a known risk. Moving to 0.20.2 is tracked in
+  #561 (#569).
+
 ## [0.14.1] - 2026-09-06
 
 A maintenance release: startup no longer depends on a third-party CDN, and two unbounded-wait

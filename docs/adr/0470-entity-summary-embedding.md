@@ -36,6 +36,8 @@ as a column to remove rather than a genuine, additive local improvement.
 
 ## Decision 2: `summary_embedding` is write-once, matching `name_embedding`/`fact_embedding` — not "always current" as the spec's Edge Cases text literally asked for
 
+> **Partially superseded by [ADR-0651](0651-merge-consolidates-summaries-and-refreshes-embedding.md)** (#651): extraction *merges* now re-embed `summary_embedding` in the same `SET` as `summary`. A probe on lbug 0.21.0 found that a plain `SET` on the HNSW-indexed column succeeds and the index follows, so the constraint described below no longer holds there; the re-assert path is left unchanged.
+
 **Chosen**: `summary_embedding` is set only at `CREATE` time (both `knowledge_assert_entity`'s
 create branch and the extraction pipeline's entity-insert path). `update_entity_core` (the
 re-assert/update path) never touches it, exactly as it already never touches `name_embedding`.

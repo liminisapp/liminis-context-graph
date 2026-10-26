@@ -4,6 +4,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 
 use crate::{
+    dedup_judge::{DedupVerdict, DuplicatePair},
     env::lcg_env_var,
     error::Error,
     extractor::{AnthropicExtractor, ExtractOptions, Extractor},
@@ -162,6 +163,48 @@ impl LlmRouter {
         }
     }
 
+    /// Unlike the extraction/classification routes, a failed primary here does NOT latch
+    /// `primary_failed`: consolidation is best-effort (the merge path degrades to a deterministic
+    /// fallback on any error), so one transient failure must not demote the primary model for
+    /// every other role for the rest of the process. The fallback is tried for this call only.
+    async fn do_consolidate_summary(
+        &self,
+        entity_name: &str,
+        existing: &str,
+        incoming: &str,
+    ) -> Result<String, Error> {
+        let primary_ok = !self
+            .primary_failed
+            .load(std::sync::atomic::Ordering::Acquire);
+        if primary_ok {
+            match self
+                .primary
+                .consolidate_summary(entity_name, existing, incoming)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    return match &self.fallback {
+                        Some(fb) => {
+                            fb.consolidate_summary(entity_name, existing, incoming)
+                                .await
+                        }
+                        None => Err(err),
+                    };
+                }
+            }
+        }
+        match &self.fallback {
+            Some(fb) => {
+                fb.consolidate_summary(entity_name, existing, incoming)
+                    .await
+            }
+            None => Err(Error::Ipc(
+                "BUG: primary_failed set without fallback".to_string(),
+            )),
+        }
+    }
+
     async fn do_classify_relations(
         &self,
         edges: &[(&str, &str)],
@@ -253,6 +296,54 @@ impl LlmRouter {
             ))
         }
     }
+    /// Primary → fallback for the dedup judgement (#652). Unlike `extract`/`classify_*`, a
+    /// failure here never latches `primary_failed` or emits `LlmFallback`: dedup is advisory
+    /// (every failure resolves to "not a duplicate"), so a bad judge call must not permanently
+    /// reroute *extraction* to the fallback model. Once extraction has latched, dedup follows it.
+    async fn do_judge_duplicates(
+        &self,
+        pairs: &[DuplicatePair],
+    ) -> Result<Vec<DedupVerdict>, Error> {
+        if !self.primary_failed.load(Ordering::Acquire) {
+            let mut verdicts = match self.primary.judge_duplicates(pairs).await {
+                Ok(v) if v.len() == pairs.len() => v,
+                Ok(_) => vec![DedupVerdict::Unknown; pairs.len()],
+                Err(err) => {
+                    return match &self.fallback {
+                        Some(fb) => fb.judge_duplicates(pairs).await,
+                        None => Err(err),
+                    };
+                }
+            };
+            // A malformed primary answer parses to `Unknown` rather than an error: re-ask the
+            // fallback only for those pairs, keeping the primary's definite verdicts.
+            if let Some(fb) = &self.fallback {
+                let unresolved: Vec<usize> = (0..pairs.len())
+                    .filter(|&i| verdicts[i] == DedupVerdict::Unknown)
+                    .collect();
+                if !unresolved.is_empty() {
+                    let subset: Vec<DuplicatePair> =
+                        unresolved.iter().map(|&i| pairs[i].clone()).collect();
+                    // A failed or short fallback answer leaves the pairs `Unknown` (not a duplicate).
+                    if let Ok(fv) = fb.judge_duplicates(&subset).await {
+                        if fv.len() == subset.len() {
+                            for (&i, v) in unresolved.iter().zip(fv) {
+                                verdicts[i] = v;
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(verdicts);
+        }
+        match &self.fallback {
+            Some(fb) => fb.judge_duplicates(pairs).await,
+            // Unreachable: primary_failed is only set when fallback.is_some().
+            None => Err(Error::Ipc(
+                "BUG: primary_failed set without fallback".to_string(),
+            )),
+        }
+    }
 }
 
 impl Extractor for LlmRouter {
@@ -277,6 +368,26 @@ impl Extractor for LlmRouter {
         allowed_types: &'a [(String, Option<String>)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(self.do_classify_relations(edges, allowed_types))
+    }
+
+    fn consolidate_summary<'a>(
+        &'a self,
+        entity_name: &'a str,
+        existing: &'a str,
+        incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(self.do_consolidate_summary(entity_name, existing, incoming))
+    }
+
+    fn judge_duplicates<'a>(
+        &'a self,
+        pairs: &'a [DuplicatePair],
+    ) -> BoxFuture<'a, Result<Vec<DedupVerdict>, Error>> {
+        Box::pin(self.do_judge_duplicates(pairs))
+    }
+
+    fn is_configured(&self) -> bool {
+        self.primary.is_configured()
     }
 }
 
@@ -479,5 +590,104 @@ mod tests {
             sink.events().is_empty(),
             "no fallback means no LlmFallback event"
         );
+    }
+
+    /// Judge that answers a fixed verdict vector (cycled to the pair count), counting its calls.
+    struct FixedJudge {
+        verdicts: Vec<DedupVerdict>,
+        calls: AtomicUsize,
+    }
+
+    impl Extractor for FixedJudge {
+        fn extract<'a>(
+            &'a self,
+            _opts: ExtractOptions<'a>,
+        ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
+            Box::pin(async { Err(Error::Ipc("unused".into())) })
+        }
+
+        fn classify_entities<'a>(
+            &'a self,
+            _entities: &'a [(&'a str, &'a str)],
+            _allowed_types: Option<&'a [String]>,
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+
+        fn classify_relations<'a>(
+            &'a self,
+            _edges: &'a [(&'a str, &'a str)],
+            _allowed_types: &'a [(String, Option<String>)],
+        ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+
+        fn judge_duplicates<'a>(
+            &'a self,
+            pairs: &'a [DuplicatePair],
+        ) -> BoxFuture<'a, Result<Vec<DedupVerdict>, Error>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let out = (0..pairs.len())
+                .map(|i| self.verdicts[i % self.verdicts.len()])
+                .collect();
+            Box::pin(async move { Ok(out) })
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_duplicates_retries_only_unknown_pairs_on_fallback() {
+        use crate::dedup_judge::DedupSide;
+        let side = |n: &str| DedupSide {
+            name: n.to_string(),
+            entity_type: String::new(),
+            summary: String::new(),
+        };
+        let pairs: Vec<DuplicatePair> = ["a", "b"]
+            .iter()
+            .map(|n| DuplicatePair {
+                existing: side(n),
+                incoming: side("x"),
+            })
+            .collect();
+        // Primary: pair 0 definite "duplicate", pair 1 malformed (Unknown).
+        let primary = Arc::new(FixedJudge {
+            verdicts: vec![DedupVerdict::Duplicate, DedupVerdict::Unknown],
+            calls: AtomicUsize::new(0),
+        });
+        let fallback = Arc::new(FixedJudge {
+            verdicts: vec![DedupVerdict::Distinct],
+            calls: AtomicUsize::new(0),
+        });
+        let router = LlmRouter::new(
+            Arc::clone(&primary) as Arc<dyn Extractor>,
+            "p".to_string(),
+            Some(Arc::clone(&fallback) as Arc<dyn Extractor>),
+            "f".to_string(),
+            Arc::new(CaptureSink::new()) as Arc<dyn TelemetrySink>,
+        );
+        let v = router.judge_duplicates(&pairs).await.unwrap();
+        assert_eq!(v, vec![DedupVerdict::Duplicate, DedupVerdict::Distinct]);
+        assert_eq!(fallback.calls.load(Ordering::SeqCst), 1);
+        assert!(!router.primary_failed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn judge_duplicates_falls_back_without_latching_extraction() {
+        let primary = Arc::new(FailingExtractor::new("judge boom"));
+        let fallback = Arc::new(SucceedingExtractor::new());
+        let sink = Arc::new(CaptureSink::new());
+        let router = LlmRouter::new(
+            Arc::clone(&primary) as Arc<dyn Extractor>,
+            "primary-model".to_string(),
+            Some(Arc::clone(&fallback) as Arc<dyn Extractor>),
+            "fallback-model".to_string(),
+            Arc::clone(&sink) as Arc<dyn TelemetrySink>,
+        );
+        // FailingExtractor / SucceedingExtractor use the trait default, which errors — so with a
+        // fallback both fail, but the router must not latch or emit a fallback event.
+        assert!(router.judge_duplicates(&[]).await.is_err());
+        assert!(!router.primary_failed.load(Ordering::Acquire));
+        assert!(sink.events().is_empty());
+        assert!(router.is_configured());
     }
 }

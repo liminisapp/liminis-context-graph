@@ -39,11 +39,90 @@ fn group_ids_prop() -> Value {
     })
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (42 total),
+fn kind_filter_prop() -> Value {
+    json!({
+        "type": "string",
+        "description": "Optional entity kind filter (issue #615). Omitted: all kinds are \
+                         returned (reads are broad). Given: only entities of that kind."
+    })
+}
+
+fn cursor_prop() -> Value {
+    json!({
+        "type": "string",
+        "description": "Opaque paging cursor (issue #667). Pass an empty string to start \
+                         paging, then pass back each response's `next_cursor` until it is \
+                         null. Sending `cursor`, `fields` or `name_prefix` makes the response \
+                         carry `next_cursor`. A cursor is only valid for the same group, kind \
+                         and name_prefix filters it was issued for; anything else is rejected."
+    })
+}
+
+fn fields_prop(allowed: &str) -> Value {
+    json!({
+        "type": "array",
+        "items": {"type": "string"},
+        "minItems": 1,
+        "description": format!(
+            "Optional projection (issue #667): return only these keys per item. Allowed: \
+             {allowed}. Unknown names are rejected. Embeddings are never returned. Omitted: \
+             the full shape."
+        )
+    })
+}
+
+fn min_similarity_prop() -> Value {
+    json!({
+        "type": "number", "minimum": 0.0, "maximum": 1.0,
+        "description": "Optional minimum cosine similarity (clamped 0.0-1.0) for vector \
+                         candidates, applied before fusion. Full-text matches are never \
+                         dropped. No default: omitted means no floor."
+    })
+}
+
+/// Belief-time parameters (issue #705) shared by the five relationship reads, spread into each
+/// tool's `properties`.
+fn belief_props() -> [(&'static str, Value); 2] {
+    [
+        (
+            "believed_only",
+            json!({
+                "type": "boolean",
+                "description": "Opt in to belief filtering (issue #705): drop edges the graph did \
+                                 not believe at `as_of` (default now) — e.g. a fact whose only \
+                                 source episode was superseded by a correction. Superseded edges \
+                                 stay readable without this flag. Every returned edge also gains \
+                                 a `belief` object (state, producing_episode_uuids, warrant, \
+                                 valid_at_source). With `as_of` set and this false, edges are \
+                                 annotated but not filtered. Capped reads over-fetch, so fewer \
+                                 than `num_results` edges may come back."
+            }),
+        ),
+        (
+            "as_of",
+            json!({
+                "type": "string", "format": "date-time",
+                "description": "Evaluate belief as of this time (RFC 3339) instead of now. Implies \
+                                 `believed_only` unless that is explicitly false. Belief is \
+                                 transaction time, distinct from `valid_at`/`invalid_at`."
+            }),
+        ),
+    ]
+}
+
+/// `props` plus the [`belief_props`] entries, as a JSON object.
+fn with_belief(mut props: Value) -> Value {
+    for (k, v) in belief_props() {
+        props[k] = v;
+    }
+    props
+}
+
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (49 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
-        // ── read (14) ──────────────────────────────────────────────────────────────
+        // ── read (17) ──────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_status",
             description: "Get knowledge graph status: entity/episode/relationship counts, \
@@ -53,8 +132,9 @@ pub fn registry() -> Vec<ToolSpec> {
                            per-group ontology drift (group_ontology_drift — issue #451, an array \
                            of {group_id, drifted, drift_summary} for every group this process has \
                            resolved an ontology for; a group not yet used in this process is \
-                           simply absent, not falsely reported as not drifted), and whether \
-                           search indices are built. generation_status is \
+                           simply absent, not falsely reported as not drifted), the \
+                           extraction-time dedup mode (dedup_mode — issue #652, \"veto-only\" or \
+                           \"llm-verified\"), and whether search indices are built. generation_status is \
                            \"not_applicable\" (no WAL stream yet), \"unknown\" (stream exists but \
                            .wal-generation.json is missing or corrupt — knowledge_rebuild_from_wal \
                            will refuse once a position is recorded), or \"known\". Returns a \
@@ -62,13 +142,37 @@ pub fn registry() -> Vec<ToolSpec> {
                            when the database is open but a core table is missing — check the \
                            `queryable` field (and `reason` when false) to distinguish that state \
                            from a genuinely empty graph, whose counts read as 0 rather than \
-                           null. Other query failures still surface as JSON-RPC errors.",
+                           null. Other query failures still surface as JSON-RPC errors. The flat \
+                           `wal` block always describes the DEFAULT group's own stream; when a \
+                           WAL root is configured it carries `scope: \"default_group\"`, \
+                           `default_group` and `see: \"wal_groups\"` (issue #667), so \
+                           `exists: false` there means the default group has no stream, not \
+                           that WAL is broken — read `wal_groups` for every group.",
             scope: Scope::Read,
             input_schema: empty_schema,
         },
         ToolSpec {
             name: "knowledge_find_entities",
-            description: "Hybrid (full-text + vector) search for entities matching a query.",
+            description: "Hybrid (full-text + vector) search for entities matching a query. \
+                           Every returned node carries its `kind` (issue #615). `kind` is an \
+                           optional filter: omitted, the search spans ALL kinds and returns \
+                           same-named entities of different kinds as separate nodes (a multi-row \
+                           read never picks one and never errors on ambiguity — use \
+                           `knowledge_resolve_entity` when exactly one entity is needed); given, \
+                           only entities of that kind are returned. Every node also carries a \
+                           `search` object (issue #629) explaining why it matched: `rrf_score` \
+                           (fused, rank-based — NOT a relevance measure on its own), \
+                           `text_match` (true iff the full-text path retrieved it), `bm25_score`, \
+                           `name_similarity` and `summary_similarity` (cosine similarity, \
+                           1 - distance). A path that did not retrieve the node reports null \
+                           (`text_match` false). Optional `min_similarity` (0-1, clamped, no \
+                           default) drops vector candidates below that cosine similarity \
+                           before fusion, per vector path (name, summary); full-text matches \
+                           stay eligible regardless, so an exact-name query still returns its \
+                           match while a gibberish query returns nothing. Unset, there is no \
+                           floor. With `kind`, the floor applies on top of the kind path's \
+                           bounded nearest-neighbour probe, which can already miss a rare \
+                           kind.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -76,12 +180,39 @@ pub fn registry() -> Vec<ToolSpec> {
                     "properties": {
                         "query": {"type": "string", "description": "Search text."},
                         "group_ids": group_ids_prop(),
+                        "kind": kind_filter_prop(),
                         "num_results": {
                             "type": "integer", "minimum": 1, "default": 10,
                             "description": "Maximum number of entities to return."
-                        }
+                        },
+                        "min_similarity": min_similarity_prop()
                     },
                     "required": ["query"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_resolve_entity",
+            description: "Resolve ONE entity by `(group_id, name[, kind])` (issue #615) — exact, \
+                           case-insensitive, whitespace-normalized name match, following a \
+                           Merged tombstone to its canonical. With `kind`, the lookup is exact \
+                           and can never be ambiguous. WITHOUT `kind` it spans ALL kinds (reads \
+                           are broad): if exactly one kind has an entity of that name it is \
+                           returned; if more than one does, the call fails with JSON-RPC error \
+                           code -32002 (`error.data.reason` = \"ambiguous_entity\", \
+                           `error.data.candidates` = [{uuid, kind}, ...]) — it never silently \
+                           picks one. Returns `{found, node}`; `found` is false (node null) when \
+                           nothing matches.",
+            scope: Scope::Read,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Entity name (required)."},
+                        "group_id": {"type": "string", "default": "liminis"},
+                        "kind": {"type": "string", "description": "Optional kind for an exact lookup. Omitted: spans all kinds and errors (-32002) if more than one kind matches."}
+                    },
+                    "required": ["name"]
                 })
             },
         },
@@ -92,42 +223,70 @@ pub fn registry() -> Vec<ToolSpec> {
                            empty on this read path (not populated). The response returns \
                            the relationship list under the `edges` key. Does not include \
                            episode `attributes` (issue #528) — this path returns edges, \
-                           never a full episode object.",
+                           never a full episode object. Every edge also carries a `search` \
+                           object (issue #629): `rrf_score` (fused, rank-based — NOT a \
+                           relevance measure on its own), `text_match` (true iff the \
+                           full-text path retrieved it), `bm25_score` and `fact_similarity` \
+                           (cosine similarity, 1 - distance); a path that did not retrieve \
+                           the edge reports null (`text_match` false). Optional \
+                           `min_similarity` (0-1, clamped, no default) drops fact-vector \
+                           candidates below that cosine similarity before fusion; full-text \
+                           matches stay eligible regardless. Unset, there is no floor.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {
+                    "properties": with_belief(json!({
                         "query": {"type": "string", "description": "Search text."},
                         "group_ids": group_ids_prop(),
                         "num_results": {
                             "type": "integer", "minimum": 1, "default": 10,
                             "description": "Maximum number of relationships to return."
-                        }
-                    },
+                        },
+                        "min_similarity": min_similarity_prop()
+                    })),
                     "required": ["query"]
                 })
             },
         },
         ToolSpec {
             name: "knowledge_get_episodes",
-            description: "Retrieve the most recent episodes (ingested source documents) for \
-                           a group. Each returned episode includes its `attributes` (issue \
-                           #528), the caller-supplied structured metadata set via \
-                           `knowledge_process_chunk`/`knowledge_add_episode`.",
+            description: "Retrieve the most recent episodes (ingested source documents), \
+                           newest first. Scoped by `group_ids` (array) and/or the single-group \
+                           alias `group_id` (both given: their union); with neither, episodes \
+                           from EVERY group are returned (issue #667 — this used to default to \
+                           the `liminis` group). Each returned episode includes its \
+                           `attributes` (issue #528), the caller-supplied structured metadata \
+                           set via `knowledge_process_chunk`/`knowledge_add_episode`. Page \
+                           with `cursor`/`next_cursor`, drop large fields such as `content` \
+                           with `fields`, and fetch e.g. every chunk of one document with \
+                           `name_prefix` (issue #667).",
             scope: Scope::Read,
             input_schema: || {
                 json!({
                     "type": "object",
                     "properties": {
+                        "group_ids": group_ids_prop(),
                         "group_id": {
-                            "type": "string", "default": "liminis",
-                            "description": "Group to retrieve episodes from."
+                            "type": "string",
+                            "description": "Single-group alias for `group_ids`; unioned with it \
+                                             when both are given. Omit both for all groups."
                         },
                         "last_n": {
                             "type": "integer", "minimum": 1, "default": 50,
-                            "description": "Number of most recent episodes to return."
-                        }
+                            "description": "Page size: number of most recent episodes to return."
+                        },
+                        "name_prefix": {
+                            "type": "string",
+                            "description": "Only episodes whose name starts with this prefix \
+                                             (case-sensitive, matched literally)."
+                        },
+                        "cursor": cursor_prop(),
+                        "fields": fields_prop(
+                            "uuid, name, group_id, created_at, ingested_at, source, source_description, \
+                             content, valid_at, entity_edges, attributes, superseded_at, superseded_by, \
+                             superseded_by_kind, supersession_reason"
+                        )
                     }
                 })
             },
@@ -155,7 +314,7 @@ pub fn registry() -> Vec<ToolSpec> {
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {"group_ids": group_ids_prop()}
+                    "properties": with_belief(json!({"group_ids": group_ids_prop()}))
                 })
             },
         },
@@ -169,13 +328,70 @@ pub fn registry() -> Vec<ToolSpec> {
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {
+                    "properties": with_belief(json!({
                         "uuids": {
                             "type": "array", "items": {"type": "string"},
                             "description": "Edge UUIDs to fetch."
                         }
-                    },
+                    })),
                     "required": ["uuids"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_get_correction_changes",
+            description: "What a correction changed (issue #706). For a SUPERSEDED episode, \
+                           returns the facts it supported that its replacement does not \
+                           (`removed`) and the facts the replacement supports that it did not \
+                           (`added`); a fact on both sides appears on neither. Facts match on \
+                           (source entity, target entity, relation name, fact text), so a \
+                           reworded fact is one removal plus one addition. For a `chunk_removed` \
+                           episode `replacement` is null and `added` is empty. A split chunk's \
+                           replacement is the whole revision, not only its final unit. An episode \
+                           that was never superseded returns `status: \"not_superseded\"` and no \
+                           facts. Compares an episode with its direct superseder only (not later \
+                           generations). Read-only: writes nothing, including no \
+                           `valid_at`/`invalid_at`. Heading renames and whole-document diffs need \
+                           document identity (#707).",
+            scope: Scope::Read,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "episode_uuid": {
+                            "type": "string",
+                            "description": "UUID of the superseded episode to explain (required)."
+                        }
+                    },
+                    "required": ["episode_uuid"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_get_affected_work",
+            description: "What was written while a dropped belief held (issue #706). For an edge \
+                           that is no longer believed, returns `candidates`: episodes ingested \
+                           within the edge's belief interval [start, end) that MENTION either of \
+                           its endpoint entities, ordered by ingest time. They are candidates by \
+                           ENTITY OVERLAP (`basis: \"entity_overlap\"`), not proof that the work \
+                           used the fact; review them. The edge's own producing episodes are not \
+                           reported. `interval.state` is `closed` (candidates returned), `open` \
+                           (still believed; affected work is not defined), `no_record` (legacy \
+                           edge, or its support was hard-deleted) or `not_defined` (warranted \
+                           direct assertion); every state other than `closed` returns no \
+                           candidates and says why, so an empty list is never ambiguous. \
+                           Read-only: writes nothing.",
+            scope: Scope::Read,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "edge_uuid": {
+                            "type": "string",
+                            "description": "UUID of the dropped edge (required)."
+                        }
+                    },
+                    "required": ["edge_uuid"]
                 })
             },
         },
@@ -210,7 +426,11 @@ pub fn registry() -> Vec<ToolSpec> {
             description: "List entity nodes, optionally scoped to specific group IDs, with \
                            episode provenance attached. Does not include episode `attributes` \
                            (issue #528) — this path surfaces only entity-scoped provenance, \
-                           never a full episode object.",
+                           never a full episode object. Every returned node carries its `kind` \
+                           (issue #615); `kind` is an optional filter — omitted, ALL kinds are \
+                           listed (same-named entities of different kinds appear as separate \
+                           nodes); given, only that kind. Page with `cursor`/`next_cursor`, \
+                           project with `fields`, and narrow by `name_prefix` (issue #667).",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -218,9 +438,20 @@ pub fn registry() -> Vec<ToolSpec> {
                     "properties": {
                         "num_results": {
                             "type": "integer", "minimum": 1, "default": 500,
-                            "description": "Maximum number of entities to return."
+                            "description": "Page size: maximum number of entities to return."
                         },
-                        "group_ids": group_ids_prop()
+                        "group_ids": group_ids_prop(),
+                        "kind": kind_filter_prop(),
+                        "name_prefix": {
+                            "type": "string",
+                            "description": "Only entities whose name starts with this prefix \
+                                             (case-insensitive, matched literally)."
+                        },
+                        "cursor": cursor_prop(),
+                        "fields": fields_prop(
+                            "uuid, name, group_id, labels, kind, created_at, ingested_at, summary, \
+                             attributes, episode_uuids, source_descriptions"
+                        )
                     }
                 })
             },
@@ -238,13 +469,13 @@ pub fn registry() -> Vec<ToolSpec> {
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {
+                    "properties": with_belief(json!({
                         "num_results": {
                             "type": "integer", "minimum": 1, "default": 1000,
                             "description": "Maximum number of relationships to return."
                         },
                         "group_ids": group_ids_prop()
-                    }
+                    }))
                 })
             },
         },
@@ -260,14 +491,14 @@ pub fn registry() -> Vec<ToolSpec> {
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {
+                    "properties": with_belief(json!({
                         "entity_uuid": {"type": "string", "description": "Center entity UUID (required)."},
                         "num_results": {
                             "type": "integer", "minimum": 1, "default": 50,
                             "description": "Maximum number of neighbors to return."
                         },
                         "group_ids": group_ids_prop()
-                    },
+                    })),
                     "required": ["entity_uuid"]
                 })
             },
@@ -329,6 +560,9 @@ pub fn registry() -> Vec<ToolSpec> {
                            plus `unresolved_endpoint` (`source`, `target`, or `both`) naming \
                            which endpoint(s) failed to resolve — always present, empty when \
                            nothing was dropped. \
+                           `edges_dropped_self_loop` counts edges dropped because both \
+                           endpoints resolved to the same entity (they would have been \
+                           self-loops); these are not in `dropped_edges`. \
                            Recommended maximum `chunk_text` size is 8,000 characters (default, \
                            overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`) — extraction \
                            quality degrades well before any context-window limit is reached. \
@@ -340,7 +574,18 @@ pub fn registry() -> Vec<ToolSpec> {
                            episode node — structured metadata co-located with, but independent \
                            of, the facts extracted from the chunk's prose (reachable from the \
                            episode via a MENTIONS hop). Returned by `knowledge_get_episodes` and \
-                           `knowledge_search_passages`.",
+                           `knowledge_search_passages`. \
+                           Resubmitting a `chunk_id` is a correction (issue #705): once the new \
+                           ingest has fully succeeded, the chunk's earlier live episodes in this \
+                           group are superseded, so the graph stops believing the facts they \
+                           asserted. Nothing is deleted and `valid_at`/`invalid_at` are never \
+                           written — read the old facts with `as_of`, or hide them with \
+                           `believed_only`, on the relationship reads. The result lists the \
+                           `superseded_episode_uuids`. To submit one chunk as several calls, send \
+                           `supersede: false` on every unit but the last, and pass the earlier \
+                           units' `episode_uuid`s as `same_revision_episode_uuids` on the last. \
+                           Commit your own record of a chunk as ingested only after this call \
+                           succeeds.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -354,7 +599,10 @@ pub fn registry() -> Vec<ToolSpec> {
                             "type": "string", "format": "date-time",
                             "description": "ISO 8601 timestamp; defaults to now."
                         },
-                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."}
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."},
+                        "doc_id": {"type": "string", "description": "Stable identity of the logical document this episode came from, unique within the group (issue #707). Optional; an episode without one cannot take part in document supersession. Never defaulted from source_file."},
+                        "supersede": {"type": "boolean", "default": true, "description": "Set false on every non-final unit of a chunk submitted as several calls under one chunk_id, so a unit does not supersede the previous one."},
+                        "same_revision_episode_uuids": {"type": "array", "items": {"type": "string"}, "description": "On the final unit of a multi-unit revision: episode_uuids returned by the earlier units. They stay live; the chunk's older episodes are superseded."}
                     },
                     "required": ["chunk_text", "chunk_id", "source_file"]
                 })
@@ -379,7 +627,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "source_description": {"type": "string"},
                         "reference_time": {"type": "string", "format": "date-time"},
                         "group_id": {"type": "string", "default": "liminis"},
-                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."}
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."},
+                        "doc_id": {"type": "string", "description": "Stable identity of the logical document this episode came from, unique within the group (issue #707). Optional; an episode without one cannot take part in document supersession. Never defaulted from source_file."}
                     },
                     "required": ["name", "episode_body"]
                 })
@@ -439,6 +688,59 @@ pub fn registry() -> Vec<ToolSpec> {
             },
         },
         ToolSpec {
+            name: "knowledge_mark_chunk_removed",
+            description: "Record that a chunk no longer exists in its document (issue #705). \
+                           Supersedes the chunk's live episodes with reason `chunk_removed`: the \
+                           graph stops believing the facts they asserted, but nothing is deleted \
+                           — the episodes and edges stay readable as history, and \
+                           `valid_at`/`invalid_at` are never written. Prefer this to \
+                           `knowledge_delete_chunk_episode` for a section that was removed from \
+                           a document; that method keeps its explicit-deletion contract. \
+                           Idempotent.",
+            scope: Scope::Write,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "chunk_id": {"type": "string", "description": "Chunk ID that no longer exists (required, non-empty)."},
+                        "group_ids": {
+                            "type": "array", "items": {"type": "string"}, "minItems": 1,
+                            "description": "Non-empty array of groups to restrict the supersession to (required). An unscoped, all-groups call is not supported."
+                        }
+                    },
+                    "required": ["chunk_id", "group_ids"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_supersede_document",
+            description: "Record that one document replaces another (issue #707): document \
+                           `superseding_doc_id` supersedes `superseded_doc_id` in `group_id`, \
+                           effective at `effective_at`. Always explicit — supersession is never \
+                           inferred. The old document's live episodes stop being believed at the \
+                           recording instant (or at `effective_at` when that is later), but the \
+                           facts are reported as in force until `effective_at`: unlike a \
+                           correction, the old decision was true until it was replaced. \
+                           `valid_at`/`invalid_at` are never written. Rejected, with no side \
+                           effects, when the documents are the same, either is unknown in the \
+                           group, the relation would form a cycle, or the old document is \
+                           already superseded differently; recording the identical relation \
+                           again is a no-op (`already_recorded`).",
+            scope: Scope::Write,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "description": "Group both documents belong to (required, non-empty)."},
+                        "superseding_doc_id": {"type": "string", "description": "doc_id of the new document (required)."},
+                        "superseded_doc_id": {"type": "string", "description": "doc_id of the document being replaced (required)."},
+                        "effective_at": {"type": "string", "description": "When the replacement took effect: an RFC 3339 timestamp with a timezone offset (required). May be earlier than now (retroactive) or in the future."}
+                    },
+                    "required": ["group_id", "superseding_doc_id", "superseded_doc_id", "effective_at"]
+                })
+            },
+        },
+        ToolSpec {
             name: "knowledge_clear_all",
             description: "Irreversibly delete the entire graph and reinitialize an empty \
                            schema. Requires explicit confirmation.",
@@ -476,7 +778,13 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_merge_entities",
             description: "Merge one or more alias entities into a canonical entity, rewriting \
-                           and deduplicating their edges.",
+                           and deduplicating their edges. Merges never cross kinds (issue \
+                           #615): if the canonical and any alias differ in `kind` the WHOLE call \
+                           is refused with an error naming the kinds (dry_run included) and \
+                           nothing is modified. `kind` optionally disambiguates \
+                           `canonical_name`/`alias_names`; omitted, those names span all kinds \
+                           and a `canonical_name` matching several kinds is an ambiguity error. \
+                           `merge_all_by_name` is limited to the canonical's own kind.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -488,8 +796,9 @@ pub fn registry() -> Vec<ToolSpec> {
                         "alias_names": {"type": "array", "items": {"type": "string"}, "description": "Names of entities to merge away."},
                         "merge_all_by_name": {
                             "type": "boolean", "default": false,
-                            "description": "If true, merge all entities sharing canonical_name as aliases."
+                            "description": "If true, merge all entities of the canonical's kind sharing its name as aliases."
                         },
+                        "kind": {"type": "string", "description": "Optional kind restricting canonical_name / alias_names lookups. Omitted: those names span all kinds (a multi-kind canonical_name is an ambiguity error; an alias set spanning kinds is refused)."},
                         "group_id": {"type": "string", "default": "liminis"},
                         "dry_run": {"type": "boolean", "default": false, "description": "Preview the merge plan without writing."}
                     }
@@ -648,7 +957,13 @@ pub fn registry() -> Vec<ToolSpec> {
                            rather than dropped — the edge is still created, just missing that \
                            hop until a `knowledge_rebind_pointers` pass resolves it. A bare \
                            `uuid` endpoint that turns out to belong to a different group than \
-                           the edge is rejected before any write.",
+                           the edge is rejected before any write. `source_kind` / `target_kind` \
+                           (issue #615, optional) pin a FOREIGN endpoint's pointer to an entity \
+                           kind (stored as `endpoint_kind`): a kind-pinned pointer resolves \
+                           within that kind only and stays `bound` when a same-named entity of \
+                           another kind appears. Omitted, the pointer resolves across ALL kinds \
+                           and becomes `ambiguous` — with no hop — once a second kind shares the \
+                           name. Supplying a kind for a `{uuid}` endpoint is rejected.",
             scope: Scope::Write,
             input_schema: || {
                 let endpoint_schema = || {
@@ -680,6 +995,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "name": {"type": "string", "description": "Relation name, e.g. RELATES_TO subtype label."},
                         "source": endpoint_schema(),
                         "target": endpoint_schema(),
+                        "source_kind": {"type": "string", "description": "Optional kind for a foreign `source` endpoint (pins the pointer to that kind). Rejected for a {uuid} endpoint."},
+                        "target_kind": {"type": "string", "description": "Optional kind for a foreign `target` endpoint (pins the pointer to that kind). Rejected for a {uuid} endpoint."},
                         "group_id": {"type": "string", "default": "liminis", "description": "The edge's own (layer) group_id."},
                         "fact": {"type": "string", "description": "Natural-language fact text for the edge."},
                         "valid_at": {"type": "string", "description": "Optional ISO-8601 timestamp this fact became true."},
@@ -713,13 +1030,22 @@ pub fn registry() -> Vec<ToolSpec> {
                            `knowledge_backfill_summary_embeddings` is run for its group_id. If the \
                            configured embedder is unavailable, the call still succeeds with a \
                            zero-vector name_embedding and a non-null `embedding_warning` in the \
-                           response.",
+                           response. Entity identity is `(group_id, kind, name)` (issue #615): \
+                           `kind` is optional and WRITES ARE KIND-SCOPED — omitted, the call \
+                           acts on the default kind `Entity` ONLY, so a name-only write can \
+                           never reach into (or overwrite) another kind's same-named node; \
+                           given, it resolves/creates within exactly that kind. `kind` is always \
+                           one of the entity's `labels` (appended after `Entity` if you omit it \
+                           there) and is immutable: an `entity_uuid` whose entity has a \
+                           different kind than a supplied `kind` is rejected. The rename guard \
+                           is per-kind.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "The entity's name (required)."},
+                        "kind": {"type": "string", "description": "Optional entity kind (identity-bearing, immutable; non-empty, no U+001F, not the reserved label \"Merged\"). Omitted: acts on the default kind \"Entity\" only."},
                         "entity_uuid": {"type": "string", "description": "Optional: update this exact entity by UUID (strict group-scoped lookup, no create fallback) instead of resolving by name."},
                         "group_id": {"type": "string", "default": "liminis"},
                         "labels": {"type": "array", "items": {"type": "string"}, "default": ["Entity"], "description": "Defaults to [\"Entity\"] when omitted or empty."},
@@ -757,7 +1083,14 @@ pub fn registry() -> Vec<ToolSpec> {
                            through to a Binder exception) if it matches neither. If the \
                            configured embedder is unavailable, the call still succeeds with a \
                            zero-vector fact_embedding and a non-null `embedding_warning` in the \
-                           response.",
+                           response. Endpoints are always EXISTING entities (this tool never \
+                           creates one), so `source_kind` / `target_kind` (issue #615, \
+                           optional) follow the READ rule: given, that endpoint resolves \
+                           exactly within that kind; omitted, it spans ALL kinds and, if more \
+                           than one kind has an entity of that name, the call fails with \
+                           JSON-RPC error -32002 listing the candidates' kinds and uuids — it \
+                           never silently picks one. `adr` (KnowledgeChannel) -> `adr` (Topic) \
+                           links two distinct nodes and is not a self-loop.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -765,6 +1098,8 @@ pub fn registry() -> Vec<ToolSpec> {
                     "properties": {
                         "source_name": {"type": "string", "description": "Source entity name, resolved within group_id (required)."},
                         "target_name": {"type": "string", "description": "Target entity name, resolved within group_id (required)."},
+                        "source_kind": {"type": "string", "description": "Optional kind for the source endpoint. Omitted: spans all kinds; a multi-kind match is an ambiguity error (-32002)."},
+                        "target_kind": {"type": "string", "description": "Optional kind for the target endpoint. Omitted: spans all kinds; a multi-kind match is an ambiguity error (-32002)."},
                         "predicate": {"type": "string", "description": "The edge's identity label — participates in the (source, predicate, target, group_id) upsert match (required)."},
                         "group_id": {"type": "string", "default": "liminis"},
                         "fact": {"type": "string", "description": "Natural-language fact text. Defaults to \"<source_name> <predicate> <target_name>\" when omitted."},
@@ -793,7 +1128,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── admin (12) — WAL/lifecycle/recovery/index maintenance ────────────────────
+        // ── admin (15) — WAL/lifecycle/recovery/index maintenance ────────────────────
         ToolSpec {
             name: "knowledge_dump_wal",
             description: "Snapshot the current graph contents into a fresh compacted WAL \
@@ -813,6 +1148,51 @@ pub fn registry() -> Vec<ToolSpec> {
                         "target_dir": {
                             "type": "string",
                             "description": "Output directory. Must not exist or must be empty. Defaults to <workspace>/.lcg/wal-compacted/."
+                        }
+                    }
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_strip_wal_embeddings",
+            description: "Rewrite every qualifying on-disk WAL file in place, removing \
+                           embedding-vector params fields (name_embedding, fact_embedding, \
+                           content_embedding, summary_embedding) while leaving every other \
+                           field, record ordering, and sequence number untouched. 0.14.0 \
+                           stopped writing these vectors to the WAL and made replay ignore any \
+                           vector found in an older WAL — so a pre-0.14 WAL carries ~90% inert \
+                           bytes (measured 89.9% on the reference corpus) this operation \
+                           reclaims without changing what replay does. Idempotent: re-running \
+                           on an already-stripped WAL (or one that never had vectors) is a \
+                           zero-I/O no-op — zero files modified, byte-identical, mtime \
+                           unchanged. Crash-safe per file: each file needing a rewrite is \
+                           written to a temporary file in the same directory and atomically \
+                           renamed over the original only once fully flushed; an interrupted run \
+                           leaves the original file intact and a subsequent run resumes cleanly. \
+                           A record whose embedding-vector value is malformed (not a well-formed \
+                           JSON number array) is a per-file error: that file is left completely \
+                           untouched and reported in `errors`, while every other file is still \
+                           processed. Deliberately out of scope: a vector inlined as a raw \
+                           Cypher literal (no params key to remove) is not reachable by this \
+                           key-removal strategy and is left as-is, matching ADR-0526's existing \
+                           precedent for that shape.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {
+                            "type": "string",
+                            "description": "Restrict stripping to a single group's own WAL \
+                                             directory (issue #378). Omit to process every \
+                                             group directory under the WAL root, plus any \
+                                             legacy flat-layout files at the root itself."
+                        },
+                        "dry_run": {
+                            "type": "boolean", "default": false,
+                            "description": "Compute the same statistics (files that would be \
+                                             rewritten, bytes that would be reclaimed, records \
+                                             that would be touched) without modifying any file."
                         }
                     }
                 })
@@ -1145,6 +1525,38 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
+        ToolSpec {
+            name: "knowledge_reload_ontology",
+            description: "Reload ONE group's ontology without a service restart (issue #627): \
+                           discards the group's cached resolution and re-resolves it through the \
+                           normal precedence (per-group `.lcg/ontology/<group>.yaml`, then the \
+                           workspace ontology loaded at startup, then free-form), so an edited \
+                           per-group file takes effect on the live service and other groups are \
+                           untouched. Returns { group_id, previous_hash (null if the group was \
+                           not yet resolved), new_hash (\"none\" for no ontology), changed, drift \
+                           ({group_id, drifted, drift_summary}), identity_refusal }. An unchanged \
+                           file returns changed: false and has no side effects. If the new \
+                           ontology adds or removes `identity: true` on a type the group already \
+                           holds, the group is refused exactly as a restart would refuse it: \
+                           `identity_refusal` is a structured object ({message, label, count, \
+                           adding}), knowledge_add_episode for the group fails with -32003, and \
+                           the group is listed in knowledge_status.group_identity_refusals; \
+                           restore the previous identity-bearing set in the file and reload again \
+                           to clear it. Stored data is never modified. Waits for in-flight \
+                           read-lock passes (reprocess/canonicalize/backfill) to finish. `drift` \
+                           compares against the last-ingested ontology, not the previous cache, \
+                           so it is independent of `changed`.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "description": "The group whose ontology should be reloaded (required, non-empty)."}
+                    },
+                    "required": ["group_id"]
+                })
+            },
+        },
     ]
 }
 
@@ -1186,21 +1598,32 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_43_unique_tools() {
+    fn registry_has_50_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 43);
+        assert_eq!(r.len(), 50);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 43, "tool names must be unique");
+        assert_eq!(names.len(), 50, "tool names must be unique");
     }
 
     #[test]
     fn scope_bucket_sizes_match_fr_004_table() {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
-        assert_eq!(count(Scope::Read), 14);
-        assert_eq!(count(Scope::Write), 15);
+        assert_eq!(count(Scope::Read), 17);
+        assert_eq!(count(Scope::Write), 17);
         assert_eq!(count(Scope::Cypher), 1);
-        assert_eq!(count(Scope::Admin), 13);
+        assert_eq!(count(Scope::Admin), 15);
+    }
+
+    #[test]
+    fn reload_ontology_is_admin_only_and_requires_group_id() {
+        let r = registry();
+        let t = r
+            .iter()
+            .find(|t| t.name == "knowledge_reload_ontology")
+            .expect("knowledge_reload_ontology must be registered");
+        assert_eq!(t.scope, Scope::Admin);
+        assert_eq!((t.input_schema)()["required"], json!(["group_id"]));
     }
 
     #[test]
@@ -1266,6 +1689,59 @@ mod tests {
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_entity_types"));
         assert!(!is_streaming_method("knowledge_status"));
+    }
+
+    /// Issue #667: the two bulk reads advertise paging, projection and prefix filtering, and
+    /// `knowledge_get_episodes` documents `group_ids`, the `group_id` alias and all-groups default.
+    #[test]
+    fn bulk_reads_advertise_paging_projection_and_prefix() {
+        let r = registry();
+        for name in ["knowledge_get_episodes", "knowledge_list_entities"] {
+            let tool = r.iter().find(|t| t.name == name).unwrap();
+            let props = &(tool.input_schema)()["properties"];
+            for key in ["cursor", "fields", "name_prefix", "group_ids"] {
+                assert!(props.get(key).is_some(), "{name} missing {key}");
+            }
+        }
+        let ep = r
+            .iter()
+            .find(|t| t.name == "knowledge_get_episodes")
+            .unwrap();
+        let props = &(ep.input_schema)()["properties"];
+        assert!(props.get("group_id").is_some());
+        assert!(
+            props["group_id"].get("default").is_none(),
+            "group_id must no longer default to liminis"
+        );
+        assert!(ep.description.contains("EVERY group"));
+    }
+
+    #[test]
+    fn find_tools_document_min_similarity_and_search_evidence() {
+        let r = registry();
+        for (name, evidence) in [
+            ("knowledge_find_entities", "summary_similarity"),
+            ("knowledge_find_relationships", "fact_similarity"),
+        ] {
+            let tool = r.iter().find(|t| t.name == name).unwrap();
+            let prop = &(tool.input_schema)()["properties"]["min_similarity"];
+            assert_eq!(prop["type"], "number", "{name}");
+            assert_eq!(prop["minimum"], 0.0, "{name}");
+            assert_eq!(prop["maximum"], 1.0, "{name}");
+            assert!(
+                prop.get("default").is_none(),
+                "{name}: unset must mean no floor"
+            );
+            for field in [
+                "`search`",
+                "rrf_score",
+                "text_match",
+                "bm25_score",
+                evidence,
+            ] {
+                assert!(tool.description.contains(field), "{name} missing {field}");
+            }
+        }
     }
 
     #[test]

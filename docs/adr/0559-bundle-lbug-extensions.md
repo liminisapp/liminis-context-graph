@@ -106,13 +106,19 @@ resolves cleanly, with no special-case detection). But once that directory exist
 inside it is a hard `Error::Config`, not a silent fall-through, so an operator's "offline"
 deployment cannot reach the network unexpectedly because half of a bundle failed to extract.
 
+This directory-existence check cannot verify that staged bytes actually correspond to the
+version their directory is named after — it only checks the directory exists and its files are
+non-empty. [ADR-0593](0593-pin-lbug-extension-bytes.md) closes that gap at the point the bytes
+are staged, by pinning the expected sha256 of each downloaded extension file.
+
 ### `LBUG_EXTENSION_VERSION`: single-file source of truth, not derivable from `lbug::VERSION`
 
 The extension-directory version segment is **not a derivable function of the `lbug` crate's
 semver** — it's whatever version string is baked into that specific native build, which usually
 but not always matches the crate's patch version. Empirically: the `0.18.1` pin resolves to
 directory `0.18.1` (exact match), but a `0.19.1` pin resolved to directory `0.19.0`, and both
-`0.20.1` and `0.20.2` resolved to directory `0.20.0`. This must be re-verified by hand
+`0.20.1` through `0.20.4` resolve to directory `0.20.0`; `0.21.0` resolves to directory `0.21.0` (issue #619), and `0.21.1` and the current `0.21.2` pin resolve to
+directory `0.21.0` too (their CMake builds define `LBUG_EXTENSION_VERSION="0.21.0"`; `v0.21.1/` and `v0.21.2/` 404 on the CDN). This must be re-verified by hand
 (`INSTALL vector` against the pinned version with an empty `HOME`, or checking
 `https://extension.ladybugdb.com/v<N>/...`) every time the `lbug` workspace pin moves.
 

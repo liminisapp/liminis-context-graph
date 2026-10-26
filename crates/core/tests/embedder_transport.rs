@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use lcg_core::embedder::{is_transport_error, Embedder, OaiEmbedder};
-use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 
 const STUB_MODEL: &str = "stub-model";
@@ -1129,10 +1128,7 @@ impl Embedder for RecordingEmbedder {
             // Mirrors `cassette::request_key`'s documented contract (SHA-256 of the canonical
             // serialized request value), so this test-local record stays self-consistent with
             // the production `CassetteRecord.key` shape even though nothing here replays it.
-            let key = format!(
-                "{:x}",
-                Sha256::digest(serde_json::to_string(&request).unwrap().as_bytes())
-            );
+            let key = lcg_core::sha256_hex::sha256_hex(serde_json::to_string(&request).unwrap());
             self.writer.append(&lcg_core::CassetteRecord {
                 key,
                 call_type: "embed".to_string(),

@@ -26,7 +26,7 @@ title: Configuration
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `LCG_SOCKET_PATH` | No | Unix socket path the IPC daemon listens on (default `.lcg/service.sock`) |
+| `LCG_SOCKET_PATH` | No | Unix socket path the IPC daemon listens on (default `.lcg/service.sock`). On Windows it names the workspace endpoint instead: the service serves a named pipe derived from this path and writes its name to `.lcg/service.endpoint` — see [IPC & MCP Reference: Windows](ipc-mcp-reference.md#windows-named-pipe). A `\\.\pipe\…` value is used as the pipe name directly. |
 | `LCG_DB_PATH` | No | Path to the LadybugDB database file (default `.lcg/db/liminis.db`) |
 | `LCG_EMBEDDING_URL` | No | Fallback HTTP URL used when neither `--embedder-uds` nor `--embedder-http` is passed and the default UDS socket (`/tmp/liminis-inference.sock`) is absent. On Unix, if this var is also unset, the binary exits with an error. On non-Unix, defaults to `http://127.0.0.1:8765/v1/embeddings`. |
 | `LCG_EMBEDDING_MODEL` | No | Embedding model name sent in requests (default `bge-base-en-v1.5`) |
@@ -44,8 +44,8 @@ title: Configuration
 | `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` | No | Advisory threshold, in **characters** (not bytes), above which `knowledge_process_chunk`'s `chunk_text` is considered oversized (default `8000`). Ingestion is unaffected — no rejection, truncation, or internal splitting — but a call whose `chunk_text` exceeds this threshold gains a `warning` field in its result naming the actual character count and the recommended maximum, and emits a `chunk_text_oversized` telemetry event (see [Telemetry](telemetry.md)). Extraction quality degrades well before any context-window limit is reached, so splitting oversized input into multiple `knowledge_process_chunk` calls is the caller's responsibility. An invalid value (non-numeric, zero, or negative) logs a warning to stderr and falls back to the default. |
 | `LCG_RECORD_LLM` | No | Path to an LLM cassette (JSONL). If set, every extraction call is recorded to this file in addition to running live — see [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). Mutually exclusive with `LCG_REPLAY_LLM`. |
 | `LCG_REPLAY_LLM` | No | Path to a previously recorded LLM cassette (JSONL). If set, extraction is served entirely from the cassette — no extractor provider is resolved, no credentials are required, and no network call is ever made. Mutually exclusive with `LCG_RECORD_LLM`. See [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). |
-| `LCG_DEDUP_LLM` | No | If set, enables local dedup adapter |
-| `LCG_DEDUP_ADAPTER_URL` | No | URL for the local dedup HTTP adapter (default `http://127.0.0.1:8767`) |
+| `LCG_DEDUP_LLM` | No | Enables the **LLM-verified extraction dedup check** ([ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)). **Off by default** (opt-in). When on *and* an extraction provider is configured, every embedding-path dedup candidate that survives the identifier-mismatch veto is judged by the same extractor used for extraction (the Anthropic API, or the OpenAI-compatible `--extractor-uds` / `--extractor-http` endpoint) — one batched call per chunk (split into sequential groups of at most 16 pairs, each bounded by its own 30 s timeout). `duplicate` merges; `not duplicate`, an extractor error, a timeout or any malformed/unattributable answer inserts a separate entity (a missed merge is recoverable, a wrong merge is not) and logs a warning. Exact-name matches, veto-rejected pairs and identical-normalized-name pairs never cost a call, and WAL replay never calls the LLM. Values `0`, `false`, `off`, `no` and the empty string are off; anything else is on. If on with no extractor configured the service still starts, warns, and runs veto-only. The active mode is logged at startup (`dedup: mode=…`) and reported as `dedup_mode` (`"veto-only"` or `"llm-verified"`) by `knowledge_status`. Dedup calls report token usage with `role="dedup"`. Under `LCG_RECORD_LLM` / `LCG_REPLAY_LLM` the verdicts are recorded and served as `judge_duplicates` cassette records; a cassette without them yields "not a duplicate". |
+| `LCG_DEDUP_ADAPTER_URL` | No | **Deprecated and ignored** (retired in 0.16.3). The bespoke `{candidate, incoming}` HTTP protocol it configured was never implemented by any server shipped with lcg. If set, startup logs a deprecation warning and nothing contacts the URL. Use `LCG_DEDUP_LLM`. |
 | `LCG_WAL_DIR` | No | WAL **root** directory (default `.lcg/wal`) — holds one subdirectory per `group_id` (issue #378), e.g. `<LCG_WAL_DIR>/liminis/` for the default group. A pre-378 single-stream directory (loose `*.jsonl`/`.checkpoints/`/`.wal-bounds.json` with no `liminis/` subdirectory) is migrated into this layout automatically on first boot under the upgraded binary — see [Operations](operations.md#on-disk-layout) and [ADR-0378](adr/0378-multi-stream-wal-per-group-directory.md). |
 | `LCG_WAL_MAX_BYTES_PER_FILE` | No | Per-file byte-size rotation threshold for the WAL (default `5242880` = 5 MB); set to `0` to disable byte-size rotation and rely on event count only |
 | `LCG_WAL_MAX_EVENTS_PER_FILE` | No | Per-file event-count rotation threshold for the WAL (default `10000`); rotation fires when either this threshold or `LCG_WAL_MAX_BYTES_PER_FILE` is reached |
@@ -68,7 +68,7 @@ That's 33 variables as of this page's writing, covering every `env::var`/`lcg_en
 accepts its old `GRAPHITI_*` spelling — `GRAPHITI_SOCKET_PATH`, `GRAPHITI_DB_PATH`,
 `GRAPHITI_EMBEDDING_URL`, `GRAPHITI_EMBEDDING_MODEL`, `GRAPHITI_EMBEDDING_DIM`,
 `GRAPHITI_EMBEDDING_API_KEY`, `GRAPHITI_EXTRACTION_LLM`, `GRAPHITI_DEDUP_LLM`,
-`GRAPHITI_DEDUP_ADAPTER_URL`, and `GRAPHITI_WAL_DIR`. Using one logs `DEPRECATED: env var <old> is
+`GRAPHITI_DEDUP_ADAPTER_URL` (deprecated and ignored, like `LCG_DEDUP_ADAPTER_URL`), and `GRAPHITI_WAL_DIR`. Using one logs `DEPRECATED: env var <old> is
 deprecated; rename to <new>` at startup. They are honoured for now; prefer the `LCG_*` names.
 `OPENAI_API_KEY` is not in this list — it's a convenience fallback for `LCG_EMBEDDING_API_KEY`,
 not a legacy spelling of an LCG-specific variable, so using it triggers no deprecation warning.
@@ -125,12 +125,12 @@ Without it, the embedding-dependent IPC methods fail immediately with an embeddi
 ### macOS: Swift CoreML sidecar (default)
 
 The repository ships a Swift CoreML sidecar at
-[`native/local-inference/`](https://github.com/verveguy/liminis-context-graph/tree/main/native/local-inference)
+[`native/local-inference/`](https://github.com/liminisapp/liminis-context-graph/tree/main/native/local-inference)
 that serves OpenAI-compatible `/v1/embeddings` (BGE-base-en-v1.5) and `/v1/chat/completions`
 (Apple Foundation Models) over UDS at `/tmp/liminis-inference.sock` — fully local inference for
 embedding, and a fully local option for extraction: no API key, no network. macOS 26+ and Xcode
 command-line tools are required. See
-[`native/local-inference/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md)
+[`native/local-inference/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/README.md)
 for build and run instructions.
 
 `liminis-context-graph` discovers the sidecar's default UDS socket automatically for embedding —
@@ -146,7 +146,7 @@ backend is not recommended for extraction quality, so using it there requires th
 
 The sidecar's own `LOCAL_INFERENCE_MODE` environment variable (`embeddings` | `completions` |
 `both`, default `both`) selects which of its own two endpoints it serves — see
-[`native/local-inference/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md#selecting-a-mode)
+[`native/local-inference/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/README.md#selecting-a-mode)
 for the full table. Running `LOCAL_INFERENCE_MODE=completions` needs no CoreML model setup at
 all, since it serves only `/v1/chat/completions`. This mode selection is independent of, and does
 **not** change, the extraction-routing behavior above: Foundation-Models-backed completions are

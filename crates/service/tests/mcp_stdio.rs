@@ -43,8 +43,8 @@ fn standalone_lists_and_calls_read_and_write_tools() {
     let tools = client.list_tools();
     assert_eq!(
         tools.len(),
-        43,
-        "default --scope=all should advertise all 43 tools"
+        50,
+        "default --scope=all should advertise all 50 tools"
     );
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"knowledge_status"));
@@ -150,14 +150,18 @@ fn scope_read_advertises_only_read_tools_and_rejects_write() {
     let tools = client.list_tools();
     assert_eq!(
         tools.len(),
-        14,
-        "read scope should advertise exactly 14 tools"
+        17,
+        "read scope should advertise exactly 17 tools"
     );
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"knowledge_status"));
     assert!(!names.contains(&"knowledge_add_episode"));
     assert!(!names.contains(&"knowledge_query_cypher"));
     assert!(!names.contains(&"knowledge_build_indices"));
+    assert!(
+        !names.contains(&"knowledge_reload_ontology"),
+        "reload is admin-only, got {names:?}"
+    );
 
     // Calling an out-of-scope tool must be rejected cleanly, not silently ignored.
     let resp = client.call_tool(
@@ -192,9 +196,10 @@ fn scope_admin_advertises_wal_lifecycle_tools() {
 
     let tools = client.list_tools();
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert_eq!(names.len(), 13);
+    assert_eq!(names.len(), 15);
     for expected in [
         "knowledge_dump_wal",
+        "knowledge_strip_wal_embeddings",
         "knowledge_prepare_checkpoint",
         "knowledge_wal_mark_create",
         "knowledge_wal_mark_list",
@@ -207,6 +212,7 @@ fn scope_admin_advertises_wal_lifecycle_tools() {
         "knowledge_rebind_pointers",
         "knowledge_delete_by_group",
         "knowledge_backfill_summary_embeddings",
+        "knowledge_reload_ontology",
     ] {
         assert!(
             names.contains(&expected),
@@ -243,7 +249,7 @@ fn scope_union_advertises_both_sets() {
     client.initialize();
 
     let tools = client.list_tools();
-    assert_eq!(tools.len(), 27, "read(14) + admin(13) = 27");
+    assert_eq!(tools.len(), 32, "read(17) + admin(15) = 32");
 
     client.shutdown();
 }

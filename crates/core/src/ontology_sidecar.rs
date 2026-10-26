@@ -430,6 +430,8 @@ mod tests {
                 name: "KnowledgeChannel".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             }],
             relation_types: vec![],
             ancestor_map: std::collections::HashMap::new(),
@@ -583,6 +585,8 @@ mod tests {
             name: "Extra".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         });
         write_group_sidecar(dir.path(), "group-a", Some(&a)).unwrap();
         write_group_sidecar(dir.path(), "group-b", Some(&b)).unwrap();
@@ -645,6 +649,8 @@ mod tests {
             name: "Extra".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         });
         // group-a's sidecar matches `a`; group-b has no sidecar at all.
         write_group_sidecar(dir.path(), "group-a", Some(&a)).unwrap();
@@ -672,6 +678,8 @@ mod tests {
             name: "NewType".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         });
         let (drifted, summary) =
             compute_group_drift(Some(dir.path()), "group-a", Some(&old), false);

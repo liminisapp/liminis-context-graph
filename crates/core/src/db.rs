@@ -1,8 +1,8 @@
-use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use lbug::{LogicalType, Value};
 
@@ -29,6 +29,33 @@ pub struct Db {
     /// `clear_all`/recovery, so a fresh `Db` naturally starts with default (trusted, no
     /// fallback scans yet) status.
     lookup_key_status: LookupKeyStatus,
+    /// Count and timestamp of backstop FTS rebuilds (issue #649, ADR-0649); surfaced through
+    /// `knowledge_status`. On `Db` for the same reason as `lookup_key_status`.
+    fts_repair_status: FtsRepairStatus,
+}
+
+/// Observability for the statement-level FTS backstop (issue #649, ADR-0649): how many times a
+/// write hit `FTS index '<idx>' is inconsistent` and `Conn` rebuilt all 3 FTS indexes and
+/// retried, and when the last such repair finished. The open-time marker-driven rebuild is a
+/// one-time, logged event and is deliberately not counted here.
+#[derive(Default)]
+pub struct FtsRepairStatus {
+    /// `(count, last_unix_ms)` under one lock so a reader never sees a count paired with
+    /// another repair's timestamp (or a timestamp with a count of 0).
+    inner: std::sync::Mutex<(u64, u64)>,
+}
+
+impl FtsRepairStatus {
+    fn record(&self, now_ms: u64) {
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        g.0 += 1;
+        g.1 = now_ms;
+    }
+
+    fn snapshot(&self) -> (u64, Option<u64>) {
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        (g.0, Some(g.1).filter(|ms| *ms != 0))
+    }
 }
 
 /// Observability for the `lookup_key` ART-index design, surfaced through `knowledge_status`'s
@@ -42,6 +69,14 @@ pub struct Db {
 pub struct LookupKeyStatus {
     migrated: AtomicBool,
     fallback_scans: AtomicU64,
+    /// Superset registry of the entity kinds this database is known to hold (issue #615), always
+    /// containing the default kind. Broad (kind-less) name resolution probes the `lookup_key`
+    /// ART index once per known kind, so an all-`Entity` database pays exactly the single
+    /// indexed probe it paid before kinds existed. Seeded by `Conn::refresh_known_kinds` (open,
+    /// post-replay backfill funnel) and grown by `insert_entity`; an out-of-band write of a
+    /// brand-new kind is invisible until the next refresh — the same accepted limitation as
+    /// ADR-0221 FR-011.
+    known_kinds: RwLock<BTreeSet<String>>,
 }
 
 impl Default for LookupKeyStatus {
@@ -49,6 +84,7 @@ impl Default for LookupKeyStatus {
         Self {
             migrated: AtomicBool::new(true),
             fallback_scans: AtomicU64::new(0),
+            known_kinds: RwLock::new(BTreeSet::from([crate::types::DEFAULT_KIND.to_string()])),
         }
     }
 }
@@ -81,6 +117,15 @@ pub struct WalPositionRecord {
     pub embedding_dim: Option<i64>,
 }
 
+/// Outcome of a name-aware extraction-time dedup candidate selection (issue #650, ADR-0650).
+/// `vetoed` counts the above-threshold candidates discarded by the identifier-mismatch veto
+/// that ranked ahead of `candidate` (all of them when `candidate` is `None`).
+#[derive(Debug, Clone, Default)]
+pub struct DedupSelection {
+    pub candidate: Option<EntityRow>,
+    pub vetoed: usize,
+}
+
 pub struct Conn<'db> {
     inner: lbug::Connection<'db>,
     /// Recorded mutations as `(cypher_template, json_params)` pairs, in execution order.
@@ -91,6 +136,11 @@ pub struct Conn<'db> {
     /// correctly. See `wal_exec.rs` for the drain-and-flush pattern (ADR-0015).
     executed_mutations: RefCell<Vec<(String, serde_json::Value)>>,
     lookup_key_status: &'db LookupKeyStatus,
+    fts_repair_status: &'db FtsRepairStatus,
+    /// True between a successful `BEGIN TRANSACTION` and the matching `COMMIT`/`ROLLBACK`
+    /// (maintained by [`Conn::exec_transaction_control`], which every explicit transaction in
+    /// the repo goes through). The FTS backstop must not run index DDL inside a transaction.
+    in_txn: Cell<bool>,
 }
 
 /// Serializes `Db::open` across threads. `INSTALL`/`LOAD EXTENSION` mutate a
@@ -176,6 +226,17 @@ impl Db {
         // ExtensionManager::loadExtension treats it as a USER (not OFFICIAL) extension and
         // dlopen()s the given path directly.
         if let Some(files) = crate::lbug_extension_home::resolve_extension_files()? {
+            // Windows (#581): lbug's extension DLLs import libssl-3-x64.dll/libcrypto-3-x64.dll,
+            // shipped beside them in the bundle; this puts that directory on the DLL search path
+            // (SetDllDirectoryW) before lbug's plain LoadLibraryW. Deliberately process-global —
+            // it also removes the current directory from the search order, which is intended for a
+            // service process, and any later DLL load in lcg inherits it. OPEN_LOCK only keeps
+            // concurrent Db::open calls from racing each other over this setting; it does not
+            // stop another thread in the process from calling LoadLibrary (directly or through
+            // another crate) while the search path changes. In lcg's single-database service
+            // process nothing else loads DLLs concurrently with opening the DB, so that is
+            // accepted rather than guarded. A no-op on other platforms.
+            crate::lbug_extension_home::expose_extension_dependencies(&files)?;
             for path in [&files.vector, &files.fts] {
                 // `to_string_lossy()` would silently replace invalid bytes, which could turn a
                 // non-UTF-8 path into a *different*, plausible-looking path that doesn't
@@ -201,6 +262,7 @@ impl Db {
         Ok(Self {
             inner,
             lookup_key_status: LookupKeyStatus::default(),
+            fts_repair_status: FtsRepairStatus::default(),
         })
     }
 
@@ -276,6 +338,12 @@ impl Db {
             // column (issue #221 FR-006). Persists the outcome to SchemaState too, not just the
             // in-process flag — see backfill_entity_lookup_keys_and_record_status's doc comment.
             crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+            // `ingested_at` (issue #673): legacy WAL lines never mention it, so replay leaves it
+            // NULL — fill from the WAL's own creating-line timestamps, else `created_at`.
+            crate::schema::backfill_ingested_at_and_record_status(
+                &conn,
+                &[wal_dir_path.to_path_buf()],
+            );
             // Persist the applied-WAL-seq position (issue #353, FR-004) at the precise value
             // the replay just computed — a fresh rebuild is exactly as authoritative as
             // knowledge_rebuild_from_wal's own post-replay write. Non-fatal: a missed write
@@ -316,6 +384,8 @@ impl Db {
             // (no WAL to replay either) with no schema at all.
             let conn = db.connect()?;
             conn.init_schema(embedding_dim)?;
+            // Upgrade backfill of `ingested_at` (issue #673); O(1) once marked complete.
+            crate::schema::ensure_ingested_at_backfill(&conn, &[wal_dir_path.to_path_buf()]);
             // Carry a pre-378 database's WalPosition {id: 'singleton'} row forward to the
             // default group's own row (issue #378 FR-001/FR-009) before the backfill check below
             // decides whether a position is already known. No-op on a fresh DB (no legacy row)
@@ -346,6 +416,12 @@ impl Db {
         Ok((db, stats))
     }
 
+    /// `(count, last_unix_ms)` of backstop FTS rebuilds since this `Db` was opened (issue #649,
+    /// ADR-0649), read atomically as a pair; the timestamp is `None` if there has been none.
+    pub fn fts_repair_snapshot(&self) -> (u64, Option<u64>) {
+        self.fts_repair_status.snapshot()
+    }
+
     /// Opens a fresh connection against the already-set-up database.
     /// Extension setup happens once in `Db::open` because `INSTALL` and
     /// `LOAD EXTENSION` are both write transactions in lbug — running them
@@ -356,6 +432,8 @@ impl Db {
             inner: conn,
             executed_mutations: RefCell::new(Vec::new()),
             lookup_key_status: &self.lookup_key_status,
+            fts_repair_status: &self.fts_repair_status,
+            in_txn: Cell::new(false),
         })
     }
 }
@@ -389,11 +467,83 @@ impl<'db> Conn<'db> {
     /// parameters (no string interpolation, no escaping) and records the parameterized
     /// form into the WAL.
     pub(crate) fn raw_query(&self, sql: &str) -> Result<(), Error> {
-        let _ = self.inner.query(sql)?;
+        match self.inner.query(sql) {
+            Ok(_) => {}
+            Err(e) => {
+                let e = Error::from(e);
+                if !self.repair_fts_after(&e) {
+                    return Err(e);
+                }
+                let _ = self.inner.query(sql)?;
+            }
+        }
         self.executed_mutations
             .borrow_mut()
             .push((sql.to_string(), serde_json::Value::Null));
         Ok(())
+    }
+
+    /// Like [`Conn::raw_query`] but records nothing into `executed_mutations` and never runs
+    /// the FTS backstop. For derived-state maintenance (FTS rebuild, marker writes) that must
+    /// not reach the WAL (ADR-0015, ADR-0649).
+    pub(crate) fn query_unrecorded(&self, sql: &str) -> Result<(), Error> {
+        let _ = self.inner.query(sql)?;
+        Ok(())
+    }
+
+    /// Like [`Conn::exec_params`] but records nothing and never runs the FTS backstop.
+    pub(crate) fn exec_params_unrecorded(
+        &self,
+        cypher: &str,
+        params: serde_json::Value,
+    ) -> Result<(), Error> {
+        let mut prepared = self.inner.prepare(cypher)?;
+        self.execute_prepared(&mut prepared, &params)
+    }
+
+    /// Statement-level FTS backstop (issue #649, ADR-0649). If `err` is `FTS index … is
+    /// inconsistent` and this connection is not inside an explicit transaction, rebuilds all 3
+    /// FTS indexes (unrecorded) and returns `true` so the caller retries its single statement
+    /// once. A failed autocommit statement is atomic and the caller already holds the write
+    /// lock, so the retry is safe. Inside a transaction (purge, `remove_episodes_by_source`,
+    /// WAL replay batches) index DDL is unsafe, so the error propagates unchanged.
+    fn repair_fts_after(&self, err: &Error) -> bool {
+        if self.in_txn.get() || !crate::error::is_fts_inconsistent_error(err) {
+            return false;
+        }
+        eprintln!(
+            "liminis-context-graph: write hit an inconsistent FTS index ({err}); rebuilding all \
+             3 FTS indexes and retrying once (time is proportional to corpus size)"
+        );
+        match crate::schema::rebuild_fts_indexes(self) {
+            Ok(()) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                self.fts_repair_status.record(now);
+                true
+            }
+            Err(e) => {
+                eprintln!("liminis-context-graph: FTS backstop rebuild failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// `(count, last_unix_ms)` of backstop FTS rebuilds since the owning `Db` was opened.
+    pub fn fts_repair_snapshot(&self) -> (u64, Option<u64>) {
+        self.fts_repair_status.snapshot()
+    }
+
+    /// Number of backstop FTS rebuilds since the owning `Db` was opened (issue #649).
+    pub fn fts_repair_count(&self) -> u64 {
+        self.fts_repair_snapshot().0
+    }
+
+    /// Unix-ms timestamp of the last backstop FTS rebuild, or `None` if there has been none.
+    pub fn fts_last_repair_unix_ms(&self) -> Option<u64> {
+        self.fts_repair_snapshot().1
     }
 
     /// Executes a parameterized Cypher statement via lbug prepared-statement binding,
@@ -407,7 +557,14 @@ impl<'db> Conn<'db> {
     /// `cypher` must use `$name` placeholders matching keys in the `params` JSON object.
     pub(crate) fn exec_params(&self, cypher: &str, params: serde_json::Value) -> Result<(), Error> {
         let mut prepared = self.inner.prepare(cypher)?;
-        self.execute_prepared(&mut prepared, &params)?;
+        if let Err(e) = self.execute_prepared(&mut prepared, &params) {
+            if !self.repair_fts_after(&e) {
+                return Err(e);
+            }
+            // The rebuild invalidates the plan; re-prepare for the single retry.
+            let mut prepared = self.inner.prepare(cypher)?;
+            self.execute_prepared(&mut prepared, &params)?;
+        }
         self.executed_mutations
             .borrow_mut()
             .push((cypher.to_string(), params));
@@ -430,7 +587,18 @@ impl<'db> Conn<'db> {
     /// of a multi-hour replay, an unbounded-memory regression this issue exists to avoid (User
     /// Story 4), not to introduce in a different place. Used only by WAL replay's `flush_batch`.
     pub(crate) fn exec_transaction_control(&self, sql: &str) -> Result<(), Error> {
-        let _ = self.inner.query(sql)?;
+        let upper = sql.trim_start().to_ascii_uppercase();
+        let is_begin = upper.starts_with("BEGIN");
+        let is_end = upper.starts_with("COMMIT") || upper.starts_with("ROLLBACK");
+        let result = self.inner.query(sql);
+        // BEGIN only opens a transaction if it succeeded; COMMIT/ROLLBACK close it even on
+        // error (the engine auto-rolls-back a failed transaction).
+        if is_begin && result.is_ok() {
+            self.in_txn.set(true);
+        } else if is_end {
+            self.in_txn.set(false);
+        }
+        let _ = result?;
         Ok(())
     }
 
@@ -516,7 +684,18 @@ impl<'db> Conn<'db> {
     /// Records `(sql, Null)` on success so `handle_query_cypher` can WAL-log mutation
     /// queries issued via this escape hatch.
     pub fn cypher_query(&self, sql: &str) -> Result<Vec<Vec<String>>, Error> {
-        let result = self.inner.query(sql)?;
+        // Same statement-level FTS backstop as `raw_query` (issue #649, ADR-0649): this is the
+        // escape hatch for arbitrary mutations, so a delete/update here must self-heal too.
+        let result = match self.inner.query(sql) {
+            Ok(r) => r,
+            Err(e) => {
+                let e = Error::from(e);
+                if !self.repair_fts_after(&e) {
+                    return Err(e);
+                }
+                self.inner.query(sql)?
+            }
+        };
         let mut rows = Vec::new();
         for row in result {
             rows.push(row.iter().map(value_as_string).collect());
@@ -569,8 +748,11 @@ impl<'db> Conn<'db> {
     // ── Entity/Episodic insert ─────────────────────────────────────────────────
 
     pub fn insert_entity(&self, row: &EntityRow) -> Result<(), Error> {
-        // Enforce Entity-first label-order invariant (AD-8)
-        let labels = enforce_entity_first(&row.labels);
+        // Kind identity (issue #615): an empty kind (a hand-built row) means the default kind.
+        let kind =
+            crate::types::normalize_kind(Some(row.kind.as_str()).filter(|k| !k.trim().is_empty()))?;
+        // Enforce Entity-first label-order invariant (AD-8), and `kind ∈ labels` (FR-001).
+        let labels = labels_with_kind(&row.labels, &kind);
         // `summary_embedding` is a fixed-size `FLOAT[N]` column, same as `name_embedding` above
         // — a zero-length list fails to bind ("Unsupported casting LIST with incorrect list
         // entry to ARRAY"). Callers that don't compute a real summary embedding (an empty
@@ -582,12 +764,14 @@ impl<'db> Conn<'db> {
         } else {
             row.summary_embedding.clone()
         };
-        let lookup_key = compute_lookup_key(&row.group_id, &row.name);
+        let lookup_key = compute_lookup_key(&row.group_id, &kind, &row.name);
+        let ingested_at = ingested_at_or_now(&row.ingested_at);
         self.exec_params(
             "CREATE (:Entity {uuid: $uuid, name: $name, group_id: $group_id, \
              labels: $labels, created_at: $created_at, name_embedding: $name_embedding, \
              summary: $summary, attributes: $attributes, \
-             summary_embedding: $summary_embedding, lookup_key: $lookup_key})",
+             summary_embedding: $summary_embedding, kind: $kind, lookup_key: $lookup_key, \
+             ingested_at: $ingested_at})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -598,9 +782,12 @@ impl<'db> Conn<'db> {
                 "summary": row.summary,
                 "attributes": row.attributes,
                 "summary_embedding": summary_embedding,
+                "kind": kind,
                 "lookup_key": lookup_key,
+                "ingested_at": ingested_at,
             }),
         )?;
+        self.register_kind(&kind);
         Ok(())
     }
 
@@ -609,7 +796,10 @@ impl<'db> Conn<'db> {
             "CREATE (:Episodic {uuid: $uuid, name: $name, group_id: $group_id, \
              created_at: $created_at, source: $source, source_description: $source_description, \
              content: $content, content_embedding: $content_embedding, valid_at: $valid_at, \
-             entity_edges: $entity_edges, attributes: $attributes})",
+             entity_edges: $entity_edges, attributes: $attributes, ingested_at: $ingested_at, \
+             superseded_at: $superseded_at, superseded_by: $superseded_by, \
+             superseded_by_kind: $superseded_by_kind, \
+             supersession_reason: $supersession_reason, doc_id: $doc_id})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -622,6 +812,12 @@ impl<'db> Conn<'db> {
                 "valid_at": row.valid_at,
                 "entity_edges": row.entity_edges,
                 "attributes": row.attributes,
+                "ingested_at": ingested_at_or_now(&row.ingested_at),
+                "superseded_at": row.superseded_at,
+                "superseded_by": row.superseded_by,
+                "superseded_by_kind": row.superseded_by_kind,
+                "supersession_reason": row.supersession_reason,
+                "doc_id": row.doc_id,
             }),
         )
     }
@@ -636,7 +832,8 @@ impl<'db> Conn<'db> {
             "CREATE (:RelatesToNode_ {uuid: $uuid, name: $name, group_id: $group_id, \
              created_at: $created_at, fact: $fact, fact_embedding: $fact_embedding, \
              valid_at: $valid_at, invalid_at: $invalid_at, attributes: $attributes, \
-             relation_type: $relation_type})",
+             relation_type: $relation_type, ingested_at: $ingested_at, \
+             episodes: $episodes, warrant: $warrant, valid_at_source: $valid_at_source})",
             serde_json::json!({
                 "uuid": edge.uuid,
                 "name": edge.name,
@@ -648,6 +845,10 @@ impl<'db> Conn<'db> {
                 "invalid_at": edge.invalid_at,
                 "attributes": edge.attributes,
                 "relation_type": edge.relation_type,
+                "ingested_at": ingested_at_or_now(&edge.ingested_at),
+                "episodes": edge.episodes,
+                "warrant": edge.warrant,
+                "valid_at_source": edge.valid_at_source,
             }),
         )?;
 
@@ -705,7 +906,8 @@ impl<'db> Conn<'db> {
             "CREATE (:RelatesToNode_ {uuid: $uuid, name: $name, group_id: $group_id, \
              created_at: $created_at, fact: $fact, fact_embedding: $fact_embedding, \
              valid_at: $valid_at, invalid_at: $invalid_at, attributes: $attributes, \
-             relation_type: $relation_type})",
+             relation_type: $relation_type, ingested_at: $ingested_at, \
+             episodes: $episodes, warrant: $warrant, valid_at_source: $valid_at_source})",
             serde_json::json!({
                 "uuid": edge.uuid,
                 "name": edge.name,
@@ -717,6 +919,10 @@ impl<'db> Conn<'db> {
                 "invalid_at": edge.invalid_at,
                 "attributes": edge.attributes,
                 "relation_type": edge.relation_type,
+                "ingested_at": ingested_at_or_now(&edge.ingested_at),
+                "episodes": edge.episodes,
+                "warrant": edge.warrant,
+                "valid_at_source": edge.valid_at_source,
             }),
         )?;
 
@@ -1014,28 +1220,87 @@ impl<'db> Conn<'db> {
         group_id: &str,
         last_n: usize,
     ) -> Result<Vec<EpisodicRow>, Error> {
-        let result = self.query_params(
-            "MATCH (ep:Episodic) WHERE ep.group_id = $gid \
+        Ok(self
+            .retrieve_episodes_page(Some(&[group_id]), last_n, None, None)?
+            .into_iter()
+            .map(|(row, _)| row)
+            .collect())
+    }
+
+    /// Keyset-pageable episode read (issue #667), newest first with a `uuid` tiebreaker so the
+    /// order is total and deterministic. `groups` of `None` (or an empty slice) reads every
+    /// group; `name_prefix` is a literal, case-sensitive `STARTS WITH`; `after` is the
+    /// `(created_at_µs, uuid)` of the last row already returned. Each row is paired with its
+    /// `created_at` in microseconds since the epoch — the rendered `created_at` string is
+    /// second-precision, so a cursor must be built from this instead.
+    pub fn retrieve_episodes_page(
+        &self,
+        groups: Option<&[&str]>,
+        limit: usize,
+        name_prefix: Option<&str>,
+        after: Option<(i64, &str)>,
+    ) -> Result<Vec<(EpisodicRow, i64)>, Error> {
+        let mut preds: Vec<&str> = Vec::new();
+        let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
+        if let Some(gids) = groups.filter(|g| !g.is_empty()) {
+            preds.push("ep.group_id IN $gids");
+            params["gids"] = serde_json::json!(gids);
+        }
+        if let Some(prefix) = name_prefix {
+            preds.push("ep.name STARTS WITH $prefix");
+            params["prefix"] = serde_json::json!(prefix);
+        }
+        if let Some((us, uuid)) = after {
+            preds.push(
+                "(ep.created_at < $created_at \
+                 OR (ep.created_at = $created_at AND ep.uuid < $after_uuid))",
+            );
+            // `created_at` is a TIMESTAMP_PARAM_NAMES name, so this binds as a typed Timestamp
+            // and the keyset compares natively at microsecond precision.
+            let dt = time::OffsetDateTime::from_unix_timestamp_nanos(us as i128 * 1_000)
+                .map_err(|e| Error::Ipc(format!("invalid cursor: {e}")))?;
+            params["created_at"] = serde_json::json!(format_datetime_rfc3339_subsecond(dt));
+            params["after_uuid"] = serde_json::json!(uuid);
+        }
+        let where_clause = if preds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", preds.join(" AND "))
+        };
+        let cypher = format!(
+            "MATCH (ep:Episodic) {where_clause}\
              RETURN ep.uuid, ep.name, ep.group_id, ep.created_at, ep.source, \
-             ep.source_description, ep.content, ep.valid_at, ep.entity_edges, ep.attributes \
-             ORDER BY ep.created_at DESC LIMIT $limit",
-            serde_json::json!({ "gid": group_id, "limit": last_n as i64 }),
-        )?;
+             ep.source_description, ep.content, ep.valid_at, ep.entity_edges, ep.attributes, \
+             ep.ingested_at, ep.superseded_at, ep.superseded_by, ep.superseded_by_kind, \
+             ep.supersession_reason, ep.doc_id \
+             ORDER BY ep.created_at DESC, ep.uuid DESC LIMIT $limit"
+        );
+        let result = self.query_params(&cypher, params)?;
         let mut rows = Vec::new();
         for row in result {
-            rows.push(EpisodicRow {
-                uuid: value_as_string(&row[0]),
-                name: value_as_string(&row[1]),
-                group_id: value_as_string(&row[2]),
-                created_at: value_as_timestamp_str(&row[3]),
-                source: value_as_string(&row[4]),
-                source_description: value_as_string(&row[5]),
-                content: value_as_string(&row[6]),
-                valid_at: value_as_timestamp_str(&row[7]),
-                entity_edges: value_as_str_list(&row[8]),
-                attributes: value_as_string(&row[9]),
-                ..Default::default()
-            });
+            let created_us = value_as_timestamp_micros(&row[3]);
+            rows.push((
+                EpisodicRow {
+                    uuid: value_as_string(&row[0]),
+                    name: value_as_string(&row[1]),
+                    group_id: value_as_string(&row[2]),
+                    created_at: value_as_timestamp_str(&row[3]),
+                    source: value_as_string(&row[4]),
+                    source_description: value_as_string(&row[5]),
+                    content: value_as_string(&row[6]),
+                    valid_at: value_as_timestamp_str(&row[7]),
+                    entity_edges: value_as_str_list(&row[8]),
+                    attributes: value_as_string(&row[9]),
+                    ingested_at: value_as_timestamp_str(&row[10]),
+                    superseded_at: value_as_optional_timestamp_str(&row[11]),
+                    superseded_by: value_as_optional_string(&row[12]),
+                    superseded_by_kind: value_as_optional_string(&row[13]),
+                    supersession_reason: value_as_optional_string(&row[14]),
+                    doc_id: value_as_optional_string(&row[15]),
+                    ..Default::default()
+                },
+                created_us,
+            ));
         }
         Ok(rows)
     }
@@ -1208,6 +1473,494 @@ impl<'db> Conn<'db> {
         Ok((all_uuids, grouped))
     }
 
+    // ── Belief time: supersession and lookups (issue #705, ADR-0705) ───────────
+
+    /// UUIDs of `group_id`'s still-live (`superseded_at IS NULL`) episodes named `chunk_id`,
+    /// excluding `exclude`. Group-scoped by construction: supersession never crosses a group.
+    pub fn live_episode_uuids_for_chunk(
+        &self,
+        chunk_id: &str,
+        group_id: &str,
+        exclude: &[String],
+        as_of: &str,
+    ) -> Result<Vec<String>, Error> {
+        // An episode a document supersession has scheduled to end at a future effective date
+        // (issue #707) is still live: a correction before then ends belief at the correction.
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) \
+             WHERE ep.name = $name AND ep.group_id = $gid \
+             AND (ep.superseded_at IS NULL \
+                  OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+             RETURN ep.uuid",
+            serde_json::json!({ "name": chunk_id, "gid": group_id, "live_at": as_of }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| value_as_string(&r[0]))
+            .filter(|u| !exclude.contains(u))
+            .collect())
+    }
+
+    /// Marks the given episodes superseded. uuid-keyed, fixed-valued and guarded, so WAL tail
+    /// replay over an overlapping seq range is idempotent (ADR-0026) and a second supersession can
+    /// never overwrite the first's timestamp. The guard is `superseded_at IS NULL`, or a document
+    /// supersession still pending at `superseded_at` (issue #707), which a correction pre-empts;
+    /// after that the kind is no longer `document`, so a replay matches nothing. Never touches
+    /// `valid_at` / `invalid_at` (FR-008). `superseded_by` is `None` for `chunk_removed`, which has
+    /// no superseding episode; the supersession columns are then cleared of any pre-empted
+    /// document supersession.
+    pub fn supersede_episodes_by_uuids(
+        &self,
+        uuids: &[String],
+        superseded_at: &str,
+        superseded_by: Option<&str>,
+        reason: &str,
+    ) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        const GUARD: &str = "ep.uuid IN $uuids AND (ep.superseded_at IS NULL \
+             OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $superseded_at))";
+        match superseded_by {
+            Some(by) => self.exec_params(
+                &format!(
+                    "MATCH (ep:Episodic) WHERE {GUARD} \
+                     SET ep.superseded_at = $superseded_at, ep.superseded_by = $superseded_by, \
+                     ep.superseded_by_kind = 'episode', ep.supersession_reason = $reason"
+                ),
+                serde_json::json!({
+                    "uuids": uuids,
+                    "superseded_at": superseded_at,
+                    "superseded_by": by,
+                    "reason": reason,
+                }),
+            ),
+            None => self.exec_params(
+                &format!(
+                    "MATCH (ep:Episodic) WHERE {GUARD} \
+                     SET ep.superseded_at = $superseded_at, ep.superseded_by = NULL, \
+                     ep.superseded_by_kind = NULL, ep.supersession_reason = $reason"
+                ),
+                serde_json::json!({
+                    "uuids": uuids,
+                    "superseded_at": superseded_at,
+                    "reason": reason,
+                }),
+            ),
+        }
+    }
+
+    /// Supersedes `uuids` for a document supersession (issue #707): kind `document`, reason
+    /// `document_superseded`, `superseded_by` the superseding document's `doc_id`. Guarded by
+    /// `superseded_at IS NULL` so replay is idempotent and an already-corrected episode is left
+    /// alone. Never touches `valid_at` / `invalid_at` (FR-008).
+    pub fn supersede_episodes_for_document(
+        &self,
+        uuids: &[String],
+        superseded_at: &str,
+        superseding_doc_id: &str,
+    ) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids AND ep.superseded_at IS NULL \
+             SET ep.superseded_at = $superseded_at, ep.superseded_by = $superseded_by, \
+             ep.superseded_by_kind = 'document', ep.supersession_reason = 'document_superseded'",
+            serde_json::json!({
+                "uuids": uuids,
+                "superseded_at": superseded_at,
+                "superseded_by": superseding_doc_id,
+            }),
+        )
+    }
+
+    /// Whether `group_id` holds at least one episode with this `doc_id`.
+    pub fn doc_is_known(&self, group_id: &str, doc_id: &str) -> Result<bool, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             RETURN ep.uuid LIMIT 1",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        )?;
+        Ok(!rows.is_empty())
+    }
+
+    /// UUIDs of the episodes of `doc_id` in `group_id` that no supersession has touched.
+    pub fn live_episode_uuids_for_doc(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+    ) -> Result<Vec<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             AND ep.superseded_at IS NULL RETURN ep.uuid ORDER BY ep.uuid",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        )?;
+        Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
+    }
+
+    /// Creates the `DocSupersession` record for `rec.superseded_doc_id`. MERGE on the key with
+    /// `ON CREATE SET`, so a replayed statement never overwrites the first record's values.
+    pub fn create_doc_supersession(
+        &self,
+        rec: &crate::belief::DocSupersessionRecord,
+        effective_at: &str,
+        recorded_at: &str,
+    ) -> Result<(), Error> {
+        self.exec_params(
+            "MERGE (d:DocSupersession {key: $key}) \
+             ON CREATE SET d.group_id = $group_id, d.superseded_doc_id = $superseded_doc_id, \
+             d.superseding_doc_id = $superseding_doc_id, d.effective_at = $effective_at, \
+             d.recorded_at = $recorded_at",
+            serde_json::json!({
+                "key": doc_supersession_key(&rec.group_id, &rec.superseded_doc_id),
+                "group_id": rec.group_id,
+                "superseded_doc_id": rec.superseded_doc_id,
+                "superseding_doc_id": rec.superseding_doc_id,
+                "effective_at": effective_at,
+                "recorded_at": recorded_at,
+            }),
+        )
+    }
+
+    /// The supersession records for the given `(group_id, superseded_doc_id)` keys, one batched
+    /// lookup. Absent keys are simply missing from the map.
+    pub fn get_doc_supersessions(
+        &self,
+        keys: &[(String, String)],
+    ) -> Result<crate::belief::DocRecords, Error> {
+        let mut out = crate::belief::DocRecords::new();
+        if keys.is_empty() {
+            return Ok(out);
+        }
+        let key_strs: Vec<String> = keys
+            .iter()
+            .map(|(g, d)| doc_supersession_key(g, d))
+            .collect();
+        let rows = self.query_params(
+            "MATCH (d:DocSupersession) WHERE d.key IN $keys \
+             RETURN d.group_id, d.superseded_doc_id, d.superseding_doc_id, \
+             d.effective_at, d.recorded_at",
+            serde_json::json!({ "keys": key_strs }),
+        )?;
+        for r in rows {
+            let rec = crate::belief::DocSupersessionRecord {
+                group_id: value_as_string(&r[0]),
+                superseded_doc_id: value_as_string(&r[1]),
+                superseding_doc_id: value_as_string(&r[2]),
+                effective_at_us: value_as_timestamp_micros(&r[3]),
+                recorded_at_us: value_as_timestamp_micros(&r[4]),
+            };
+            out.insert((rec.group_id.clone(), rec.superseded_doc_id.clone()), rec);
+        }
+        Ok(out)
+    }
+
+    /// Page of `DocSupersession` rows for dump.
+    /// Columns: [key, group_id, superseded_doc_id, superseding_doc_id, effective_at, recorded_at]
+    pub(crate) fn dump_doc_supersession_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        let rows = if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (n:DocSupersession) WHERE n.group_id = $gid \
+                 RETURN n.key, n.group_id, n.superseded_doc_id, n.superseding_doc_id, \
+                 n.effective_at, n.recorded_at \
+                 ORDER BY n.key SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (n:DocSupersession) \
+                 RETURN n.key, n.group_id, n.superseded_doc_id, n.superseding_doc_id, \
+                 n.effective_at, n.recorded_at \
+                 ORDER BY n.key SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        };
+        match rows {
+            Err(e) if e.to_string().contains("does not exist") => Ok(Vec::new()),
+            other => other,
+        }
+    }
+
+    /// Whether the `DocSupersession` table exists (a database opened without the schema step has
+    /// none).
+    pub fn has_doc_supersession_table(&self) -> bool {
+        self.query_params(
+            "MATCH (d:DocSupersession) RETURN d.key LIMIT 0",
+            serde_json::json!({}),
+        )
+        .is_ok()
+    }
+
+    /// Deletes the `DocSupersession` records of the given groups (group purge, issue #707).
+    pub fn delete_doc_supersessions_by_group_ids(&self, group_ids: &[&str]) -> Result<(), Error> {
+        if group_ids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (d:DocSupersession) WHERE d.group_id IN $gids DELETE d",
+            serde_json::json!({ "gids": group_ids }),
+        )
+    }
+
+    /// `knowledge_mark_chunk_removed`'s storage half: supersedes every live episode named
+    /// `chunk_id` in each of `group_ids` with reason `chunk_removed`, one group at a time, and
+    /// returns the superseded UUIDs alongside a [`GroupedMutations`] bucketing each group's
+    /// mutations (the shape of [`Self::remove_episodes_by_chunk_id`], whose explicit-deletion
+    /// contract this deliberately does not change). Deletes nothing.
+    pub fn supersede_chunk_episodes(
+        &self,
+        chunk_id: &str,
+        group_ids: &[&str],
+        superseded_at: &str,
+    ) -> Result<(Vec<String>, GroupedMutations), Error> {
+        if group_ids.is_empty() {
+            return Err(Error::Ipc(
+                "supersede_chunk_episodes requires a non-empty group_ids".to_string(),
+            ));
+        }
+        let mut grouped: GroupedMutations = GroupedMutations::new();
+        let mut all_uuids: Vec<String> = Vec::new();
+        for gid in group_ids {
+            let uuids = self.live_episode_uuids_for_chunk(chunk_id, gid, &[], superseded_at)?;
+            if uuids.is_empty() {
+                continue;
+            }
+            self.supersede_episodes_by_uuids(&uuids, superseded_at, None, "chunk_removed")?;
+            self.drain_mutations_into(&mut grouped, gid);
+            all_uuids.extend(uuids);
+        }
+        Ok((all_uuids, grouped))
+    }
+
+    /// Belief-relevant columns for the given edge UUIDs (one batched lookup, keyed by uuid so the
+    /// group scoping of whatever read produced the UUIDs carries over).
+    pub fn get_edge_belief_rows(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, crate::belief::EdgeBeliefRow>, Error> {
+        let mut out = std::collections::HashMap::new();
+        if uuids.is_empty() {
+            return Ok(out);
+        }
+        let rows = self.query_params(
+            "MATCH (rn:RelatesToNode_) WHERE rn.uuid IN $uuids \
+             RETURN rn.uuid, rn.ingested_at, rn.episodes, rn.warrant, rn.valid_at_source",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        for r in rows {
+            let uuid = value_as_string(&r[0]);
+            let ingested = match &r[1] {
+                lbug::Value::Null(_) => None,
+                other => Some(value_as_timestamp_micros(other)),
+            };
+            out.insert(
+                uuid.clone(),
+                crate::belief::EdgeBeliefRow {
+                    uuid,
+                    ingested_at_us: ingested,
+                    episodes: value_as_str_list(&r[2]),
+                    warrant: value_as_optional_string(&r[3]),
+                    valid_at_source: value_as_optional_string(&r[4]),
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    /// Supersession state for the given episode UUIDs. A UUID absent from the result no longer
+    /// exists (hard-deleted).
+    pub fn get_episode_supersession(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, crate::belief::EpisodeSupersession>, Error> {
+        let mut out = std::collections::HashMap::new();
+        if uuids.is_empty() {
+            return Ok(out);
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids \
+             RETURN ep.uuid, ep.superseded_at, ep.superseded_by_kind, ep.superseded_by, \
+             ep.supersession_reason, ep.group_id, ep.doc_id",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        for r in rows {
+            let superseded = match &r[1] {
+                lbug::Value::Null(_) => None,
+                other => Some(value_as_timestamp_micros(other)),
+            };
+            out.insert(
+                value_as_string(&r[0]),
+                crate::belief::EpisodeSupersession {
+                    superseded_at_us: superseded,
+                    kind: value_as_optional_string(&r[2]),
+                    superseded_by: value_as_optional_string(&r[3]),
+                    reason: value_as_optional_string(&r[4]),
+                    group_id: value_as_string(&r[5]),
+                    doc_id: value_as_optional_string(&r[6]),
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    // ── Correction reads (issue #706, ADR-0706) ───────────────────────────────
+
+    /// Full belief-relevant episode rows for the given UUIDs. A UUID absent from the result was
+    /// hard-deleted. Timestamps are microseconds (see [`value_as_timestamp_micros`]).
+    pub fn get_episode_rows(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, crate::correction_reads::EpisodeRecord>, Error>
+    {
+        let mut out = std::collections::HashMap::new();
+        if uuids.is_empty() {
+            return Ok(out);
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids RETURN ep.uuid, ep.name, ep.group_id, \
+             ep.ingested_at, ep.superseded_at, ep.superseded_by, ep.supersession_reason",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        for r in rows {
+            let rec = episode_record_from_row(&r);
+            out.insert(rec.uuid.clone(), rec);
+        }
+        Ok(out)
+    }
+
+    /// Every episode (live or superseded) named `name` in `group_id` — the candidate pool for
+    /// recovering a revision's units (see `correction_reads::revision_unit_uuids`).
+    pub fn get_episode_rows_by_name(
+        &self,
+        group_id: &str,
+        name: &str,
+    ) -> Result<Vec<crate::correction_reads::EpisodeRecord>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.name = $name AND ep.group_id = $gid \
+             RETURN ep.uuid, ep.name, ep.group_id, ep.ingested_at, ep.superseded_at, \
+             ep.superseded_by, ep.supersession_reason",
+            serde_json::json!({ "name": name, "gid": group_id }),
+        )?;
+        Ok(rows.iter().map(|r| episode_record_from_row(r)).collect())
+    }
+
+    /// Edges in `group_id` whose producing-episode list contains any of `episode_uuids`, with
+    /// `episodes` populated. One group-scoped list-membership query per episode (the sets are a
+    /// revision's units — a handful), deduplicated by edge uuid, ordered by uuid.
+    pub fn get_edges_produced_by_episodes(
+        &self,
+        group_id: &str,
+        episode_uuids: &[String],
+    ) -> Result<Vec<RelatesToEdge>, Error> {
+        let mut seen = std::collections::BTreeMap::new();
+        for ep in episode_uuids {
+            let rows = self.query_params(
+                "MATCH (rn:RelatesToNode_) \
+                 WHERE rn.group_id = $gid AND list_contains(rn.episodes, $ep) \
+                 OPTIONAL MATCH (src:Entity)-[:RELATES_TO]->(rn) \
+                 OPTIONAL MATCH (rn)-[:RELATES_TO]->(dst:Entity) \
+                 RETURN rn.uuid, rn.name, coalesce(src.uuid, ''), coalesce(dst.uuid, ''), \
+                 rn.group_id, rn.fact, rn.episodes",
+                serde_json::json!({ "gid": group_id, "ep": ep }),
+            )?;
+            for r in rows {
+                let uuid = value_as_string(&r[0]);
+                seen.entry(uuid.clone()).or_insert_with(|| RelatesToEdge {
+                    uuid,
+                    name: value_as_string(&r[1]),
+                    source_node_uuid: value_as_string(&r[2]),
+                    target_node_uuid: value_as_string(&r[3]),
+                    group_id: value_as_string(&r[4]),
+                    fact: value_as_string(&r[5]),
+                    episodes: value_as_str_list(&r[6]),
+                    ..Default::default()
+                });
+            }
+        }
+        Ok(seen.into_values().collect())
+    }
+
+    /// Episodes in `group_id` that MENTION any of `entity_uuids`, with the entities each one
+    /// matched. `ingested_at` is read in microseconds so the caller can apply an exact half-open
+    /// window (a Cypher timestamp parameter would lose that precision, ADR-0705). Ordered by
+    /// ingest time then uuid.
+    pub fn get_mentioning_episodes(
+        &self,
+        group_id: &str,
+        entity_uuids: &[String],
+    ) -> Result<Vec<crate::correction_reads::MentioningEpisode>, Error> {
+        if entity_uuids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
+             WHERE n.uuid IN $uuids AND ep.group_id = $gid \
+             RETURN ep.uuid, ep.name, ep.ingested_at, ep.source_description, n.uuid",
+            serde_json::json!({ "uuids": entity_uuids, "gid": group_id }),
+        )?;
+        let mut by_uuid: std::collections::BTreeMap<
+            String,
+            crate::correction_reads::MentioningEpisode,
+        > = std::collections::BTreeMap::new();
+        for r in rows {
+            let uuid = value_as_string(&r[0]);
+            let entity = value_as_string(&r[4]);
+            let entry = by_uuid.entry(uuid.clone()).or_insert_with(|| {
+                crate::correction_reads::MentioningEpisode {
+                    uuid,
+                    name: value_as_string(&r[1]),
+                    ingested_at_us: match &r[2] {
+                        lbug::Value::Null(_) => None,
+                        other => Some(value_as_timestamp_micros(other)),
+                    },
+                    source_description: value_as_string(&r[3]),
+                    matched_entity_uuids: vec![],
+                }
+            });
+            if !entry.matched_entity_uuids.contains(&entity) {
+                entry.matched_entity_uuids.push(entity);
+            }
+        }
+        let mut out: Vec<_> = by_uuid.into_values().collect();
+        for ep in &mut out {
+            ep.matched_entity_uuids.sort();
+        }
+        out.sort_by(|a, b| (a.ingested_at_us, &a.uuid).cmp(&(b.ingested_at_us, &b.uuid)));
+        Ok(out)
+    }
+
+    /// Count of legacy edges (no producing episode and no warrant marker — FR-007), for
+    /// `knowledge_status`. `group_ids: None` counts every group.
+    pub fn count_legacy_edges(&self, group_ids: Option<&[&str]>) -> Result<u64, Error> {
+        let (cypher, params) = match group_ids {
+            Some(g) => (
+                "MATCH (rn:RelatesToNode_) WHERE rn.group_id IN $gids \
+                 AND (rn.warrant IS NULL OR rn.warrant = '') \
+                 AND (rn.episodes IS NULL OR size(rn.episodes) = 0) RETURN count(rn)",
+                serde_json::json!({ "gids": g }),
+            ),
+            None => (
+                "MATCH (rn:RelatesToNode_) WHERE (rn.warrant IS NULL OR rn.warrant = '') \
+                 AND (rn.episodes IS NULL OR size(rn.episodes) = 0) RETURN count(rn)",
+                serde_json::json!({}),
+            ),
+        };
+        let rows = self.query_params(cypher, params)?;
+        Ok(rows
+            .first()
+            .map(|r| match &r[0] {
+                lbug::Value::Int64(i) => *i as u64,
+                _ => 0,
+            })
+            .unwrap_or(0))
+    }
+
     // ── Group-scoped purge (issue #361) ─────────────────────────────────────────
     //
     // These are the only other places, besides `crate::group_purge`, that delete `Entity` or
@@ -1231,6 +1984,27 @@ impl<'db> Conn<'db> {
     /// `group_id`, not either endpoint's — matching `get_edges_by_group_ids`.
     pub fn count_relates_to_by_group_ids(&self, group_ids: &[&str]) -> Result<u64, Error> {
         self.count_by_group_ids("RelatesToNode_", "rn", group_ids)
+    }
+
+    /// Counts `Entity` nodes in `group_id` whose full `labels` list carries `label` (issue #616,
+    /// D1). Deliberately the full list — ancestor labels and the kind label included — because
+    /// D1 asks whether any existing node would be reinterpreted. A group-scoped scan, not an
+    /// indexed lookup; callers run it only when a group's identity-bearing set actually differs
+    /// from its recorded one.
+    pub fn count_entities_carrying_label(&self, group_id: &str, label: &str) -> Result<u64, Error> {
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE e.group_id = $gid AND $label IN e.labels RETURN count(*)",
+            serde_json::json!({ "gid": group_id, "label": label }),
+        )?;
+        for row in rows {
+            match &row[0] {
+                lbug::Value::Int64(n) => return Ok(*n as u64),
+                lbug::Value::UInt64(n) => return Ok(*n),
+                lbug::Value::Int32(n) => return Ok(*n as u64),
+                _ => {}
+            }
+        }
+        Ok(0)
     }
 
     fn count_by_group_ids(&self, label: &str, var: &str, group_ids: &[&str]) -> Result<u64, Error> {
@@ -1291,13 +2065,13 @@ impl<'db> Conn<'db> {
             Some(gids) => (
                 "MATCH (e:Entity) WHERE e.group_id IN $gids \
                  RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes",
+                 e.summary, e.attributes, e.kind, e.ingested_at",
                 serde_json::json!({ "gids": gids }),
             ),
             None => (
                 "MATCH (e:Entity) \
                  RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes",
+                 e.summary, e.attributes, e.kind, e.ingested_at",
                 serde_json::json!({}),
             ),
         };
@@ -1312,6 +2086,8 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -1329,13 +2105,13 @@ impl<'db> Conn<'db> {
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  WHERE rn.group_id IN $gids \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
                 serde_json::json!({ "gids": gids }),
             ),
             None => (
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
                 serde_json::json!({}),
             ),
         };
@@ -1351,7 +2127,7 @@ impl<'db> Conn<'db> {
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              WHERE rn.uuid IN $uuids \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuids": uuids }),
         )
     }
@@ -1375,6 +2151,7 @@ impl<'db> Conn<'db> {
                 invalid_at: value_as_optional_timestamp_str(&row[7]),
                 attributes: value_as_string(&row[8]),
                 relation_type: value_as_optional_string(&row[9]),
+                ingested_at: value_as_timestamp_str(&row[10]),
                 ..Default::default()
             });
         }
@@ -1392,19 +2169,31 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let gid_filter = match group_ids {
-            Some(_) => "WHERE node.group_id IN $gids",
-            None => "",
-        };
+        self.fts_search_entities_kind(query, group_ids, None, limit)
+    }
+
+    /// [`Self::fts_search_entities`] with an optional `kind` predicate (issue #615) applied
+    /// inside the query, before `LIMIT`, so the candidate pool is already kind-filtered.
+    pub fn fts_search_entities_kind(
+        &self,
+        query: &str,
+        group_ids: Option<&[&str]>,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let filter = entity_search_filter(group_ids.is_some(), kind.is_some());
         let cypher = format!(
             "CALL QUERY_FTS_INDEX('Entity', 'node_name_and_summary', $q) \
-             WITH node, score {gid_filter} \
+             WITH node, score {filter} \
              RETURN node.uuid, score \
              ORDER BY score DESC LIMIT $limit"
         );
         let mut params = serde_json::json!({ "q": query, "limit": limit as i64 });
         if let Some(gids) = group_ids {
             params["gids"] = serde_json::json!(gids);
+        }
+        if let Some(kind) = kind {
+            params["kind"] = serde_json::json!(kind);
         }
         self.collect_uuid_score_pairs(&cypher, params)
     }
@@ -1444,19 +2233,56 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let gid_filter = match group_ids {
-            Some(_) => "WHERE node.group_id IN $gids",
-            None => "",
-        };
+        self.vector_search_entities_kind(embedding, group_ids, None, limit)
+    }
+
+    /// [`Self::vector_search_entities`] with an optional `kind` predicate (issue #615). The
+    /// predicate runs after the ANN probe, so when it is set the probe's `k` is oversampled
+    /// ([`KIND_ANN_OVERSAMPLE`]) to keep a rare kind from being crowded out of the pool.
+    pub fn vector_search_entities_kind(
+        &self,
+        embedding: &[f32],
+        group_ids: Option<&[&str]>,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        self.vector_index_search_kind(
+            "entity_name_embedding_idx",
+            embedding,
+            group_ids,
+            kind,
+            limit,
+        )
+    }
+
+    /// Shared body of the two Entity vector searches: probe `index`, then filter by group/kind.
+    fn vector_index_search_kind(
+        &self,
+        index: &str,
+        embedding: &[f32],
+        group_ids: Option<&[&str]>,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let filter = entity_search_filter(group_ids.is_some(), kind.is_some());
         let cypher = format!(
-            "CALL QUERY_VECTOR_INDEX('Entity', 'entity_name_embedding_idx', $emb, $limit) \
-             WITH node, distance {gid_filter} \
+            "CALL QUERY_VECTOR_INDEX('Entity', '{index}', $emb, $k) \
+             WITH node, distance {filter} \
              RETURN node.uuid, distance \
              ORDER BY distance ASC LIMIT $limit"
         );
-        let mut params = serde_json::json!({ "emb": embedding, "limit": limit as i64 });
+        let k = if kind.is_some() {
+            limit.saturating_mul(KIND_ANN_OVERSAMPLE)
+        } else {
+            limit
+        };
+        let mut params =
+            serde_json::json!({ "emb": embedding, "k": k as i64, "limit": limit as i64 });
         if let Some(gids) = group_ids {
             params["gids"] = serde_json::json!(gids);
+        }
+        if let Some(kind) = kind {
+            params["kind"] = serde_json::json!(kind);
         }
         self.collect_uuid_score_pairs(&cypher, params)
     }
@@ -1474,21 +2300,25 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<(String, f64)>, Error> {
-        let gid_filter = match group_ids {
-            Some(_) => "WHERE node.group_id IN $gids",
-            None => "",
-        };
-        let cypher = format!(
-            "CALL QUERY_VECTOR_INDEX('Entity', 'entity_summary_embedding_idx', $emb, $limit) \
-             WITH node, distance {gid_filter} \
-             RETURN node.uuid, distance \
-             ORDER BY distance ASC LIMIT $limit"
-        );
-        let mut params = serde_json::json!({ "emb": embedding, "limit": limit as i64 });
-        if let Some(gids) = group_ids {
-            params["gids"] = serde_json::json!(gids);
-        }
-        self.collect_uuid_score_pairs(&cypher, params)
+        self.vector_search_entities_by_summary_kind(embedding, group_ids, None, limit)
+    }
+
+    /// [`Self::vector_search_entities_by_summary`] with an optional `kind` predicate (issue
+    /// #615); see [`Self::vector_search_entities_kind`].
+    pub fn vector_search_entities_by_summary_kind(
+        &self,
+        embedding: &[f32],
+        group_ids: Option<&[&str]>,
+        kind: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        self.vector_index_search_kind(
+            "entity_summary_embedding_idx",
+            embedding,
+            group_ids,
+            kind,
+            limit,
+        )
     }
 
     /// HNSW vector search on RelatesToNode_ (facts); returns (uuid, distance) pairs.
@@ -1572,21 +2402,73 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<EntityRow>, Error> {
-        let (cypher, params) = match group_ids {
-            Some(gids) if !gids.is_empty() => (
-                "MATCH (e:Entity) WHERE e.group_id IN $gids \
-                 RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes ORDER BY e.uuid DESC LIMIT $limit",
-                serde_json::json!({ "gids": gids, "limit": limit as i64 }),
-            ),
-            _ => (
-                "MATCH (e:Entity) \
-                 RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes ORDER BY e.uuid DESC LIMIT $limit",
-                serde_json::json!({ "limit": limit as i64 }),
-            ),
+        self.list_entities_of_kind(group_ids, limit, None)
+    }
+
+    /// [`Self::list_entities`] with an optional `kind` filter (issue #615): `Some(kind)` lists
+    /// only entities of that kind, `None` lists every kind. A NULL `kind` column is a
+    /// not-yet-backfilled default-kind row.
+    pub fn list_entities_of_kind(
+        &self,
+        group_ids: Option<&[&str]>,
+        limit: usize,
+        kind: Option<&str>,
+    ) -> Result<Vec<EntityRow>, Error> {
+        self.list_entities_page(group_ids, limit, kind, None, None)
+    }
+
+    /// Keyset-pageable entity read (issue #667), ordered by `uuid DESC` (unique, so the order is
+    /// total). `name_prefix` is a case-insensitive literal `STARTS WITH` via Cypher `lower()`
+    /// (ASCII-safe; non-ASCII folds only as far as lbug's `lower()` does). `after_uuid` is the
+    /// last uuid already returned.
+    pub fn list_entities_page(
+        &self,
+        group_ids: Option<&[&str]>,
+        limit: usize,
+        kind: Option<&str>,
+        name_prefix: Option<&str>,
+        after_uuid: Option<&str>,
+    ) -> Result<Vec<EntityRow>, Error> {
+        const KIND_PRED: &str = "(e.kind = $kind OR (e.kind IS NULL AND $kind = 'Entity'))";
+        let group_pred = match group_ids {
+            Some(gids) if !gids.is_empty() => Some("e.group_id IN $gids"),
+            _ => None,
         };
-        let result = self.query_params(cypher, params)?;
+        let mut preds: Vec<&str> = Vec::new();
+        preds.extend(group_pred);
+        if kind.is_some() {
+            preds.push(KIND_PRED);
+        }
+        if name_prefix.is_some() {
+            preds.push("lower(e.name) STARTS WITH lower($prefix)");
+        }
+        if after_uuid.is_some() {
+            preds.push("e.uuid < $after_uuid");
+        }
+        let where_clause = if preds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", preds.join(" AND "))
+        };
+        let cypher = format!(
+            "MATCH (e:Entity) {where_clause}\
+             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+             e.summary, e.attributes, e.kind, e.ingested_at ORDER BY e.uuid DESC LIMIT $limit"
+        );
+        let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
+        if group_pred.is_some() {
+            params["gids"] = serde_json::json!(group_ids);
+        }
+        if let Some(k) = kind {
+            params["kind"] = serde_json::json!(k);
+        }
+        if let Some(p) = name_prefix {
+            params["prefix"] = serde_json::json!(p);
+        }
+        if let Some(u) = after_uuid {
+            params["after_uuid"] = serde_json::json!(u);
+        }
+        let result = self.query_params(&cypher, params)?;
         let mut rows = Vec::new();
         for row in result {
             rows.push(EntityRow {
@@ -1597,6 +2479,8 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -1614,13 +2498,13 @@ impl<'db> Conn<'db> {
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  WHERE rn.group_id IN $gids \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit",
                 serde_json::json!({ "gids": gids, "limit": limit as i64 }),
             ),
             _ => (
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit",
                 serde_json::json!({ "limit": limit as i64 }),
             ),
         };
@@ -1653,13 +2537,13 @@ impl<'db> Conn<'db> {
             "MATCH (c:Entity {{uuid: $uuid}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(n:Entity) \
              {gid_filter} \
              RETURN rn.uuid, rn.name, c.uuid, n.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit"
         );
         let in_sql = format!(
             "MATCH (n:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(c:Entity {{uuid: $uuid}}) \
              {gid_filter} \
              RETURN rn.uuid, rn.name, n.uuid, c.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type ORDER BY rn.uuid DESC LIMIT $limit"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit"
         );
 
         let mut edges = self.collect_relates_to_edges(&out_sql, mk_params())?;
@@ -1698,14 +2582,14 @@ impl<'db> Conn<'db> {
                 "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
                  WHERE ep.source_description CONTAINS $src AND e.group_id IN $gids \
                  RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes LIMIT $limit",
+                 e.summary, e.attributes, e.kind, e.ingested_at LIMIT $limit",
                 serde_json::json!({ "src": source, "gids": gids, "limit": limit as i64 }),
             ),
             _ => (
                 "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
                  WHERE ep.source_description CONTAINS $src \
                  RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-                 e.summary, e.attributes LIMIT $limit",
+                 e.summary, e.attributes, e.kind, e.ingested_at LIMIT $limit",
                 serde_json::json!({ "src": source, "limit": limit as i64 }),
             ),
         };
@@ -1720,6 +2604,8 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -1741,20 +2627,76 @@ impl<'db> Conn<'db> {
         Ok(pairs)
     }
 
-    /// Brute-force cosine similarity to find the best-matching Entity in a group (AD-4).
+    /// Brute-force cosine similarity to find the best-matching Entity in a group (AD-4),
+    /// confined to the default kind (issue #615, FR-010).
     pub fn brute_force_similar_entity(
         &self,
         name_embedding: &[f32],
         group_id: &str,
         threshold: f32,
     ) -> Result<Option<EntityRow>, Error> {
+        self.brute_force_similar_entity_kind(
+            name_embedding,
+            group_id,
+            threshold,
+            crate::types::DEFAULT_KIND,
+        )
+    }
+
+    /// [`Self::brute_force_similar_entity`] confined to `kind` (issue #616): dedup never
+    /// compares across kinds, so an identity-bearing kind only ever merges into its own kind.
+    pub fn brute_force_similar_entity_kind(
+        &self,
+        name_embedding: &[f32],
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<Option<EntityRow>, Error> {
+        Ok(self
+            .brute_force_select(name_embedding, None, group_id, threshold, kind)?
+            .candidate)
+    }
+
+    /// Name-aware [`Self::brute_force_similar_entity_kind`] for extraction-time dedup (issue
+    /// #650, ADR-0650): above-threshold candidates are ranked (similarity descending, uuid
+    /// ascending) and any whose name fails the identifier-mismatch veto against `incoming_name`
+    /// is discarded *before* the best is picked, so a vetoed best match cannot hide a valid
+    /// lower-ranked alias. The result is identical to
+    /// [`Self::hybrid_dedup_similar_entity_kind_for_name`] on the same candidate set.
+    pub fn brute_force_similar_entity_kind_for_name(
+        &self,
+        name_embedding: &[f32],
+        incoming_name: &str,
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<DedupSelection, Error> {
+        self.brute_force_select(
+            name_embedding,
+            Some(incoming_name),
+            group_id,
+            threshold,
+            kind,
+        )
+    }
+
+    fn brute_force_select(
+        &self,
+        name_embedding: &[f32],
+        incoming_name: Option<&str>,
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<DedupSelection, Error> {
         let result = self.query_params(
-            "MATCH (e:Entity) WHERE e.group_id = $gid \
+            // Confined to one kind (issue #615, FR-010; #616) — see
+            // `get_entity_embeddings_by_uuids_kind`. A NULL kind is a default-kind row.
+            "MATCH (e:Entity) WHERE e.group_id = $gid AND (e.kind = $kind OR ((e.kind IS NULL OR e.kind = '') AND $kind = 'Entity')) \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.name_embedding, e.summary, e.attributes",
-            serde_json::json!({ "gid": group_id }),
+             e.name_embedding, e.summary, e.attributes, e.kind, e.ingested_at",
+            serde_json::json!({ "gid": group_id, "kind": kind }),
         )?;
-        let mut best: Option<(f32, EntityRow)> = None;
+        let mut ranked: Vec<(f32, EntityRow)> = Vec::new();
 
         for row in result {
             let stored_embedding = value_as_float_array(&row[5]);
@@ -1763,31 +2705,48 @@ impl<'db> Conn<'db> {
             }
             let sim = cosine_similarity(name_embedding, &stored_embedding);
             if sim >= threshold {
-                let candidate_uuid = value_as_string(&row[0]);
-                let is_better = best
-                    .as_ref()
-                    .is_none_or(|(s, r)| sim > *s || (sim == *s && candidate_uuid < r.uuid));
-                if is_better {
-                    best = Some((
-                        sim,
-                        EntityRow {
-                            uuid: candidate_uuid,
-                            name: value_as_string(&row[1]),
-                            group_id: value_as_string(&row[2]),
-                            labels: value_as_str_list(&row[3]),
-                            created_at: value_as_timestamp_str(&row[4]),
-                            name_embedding: stored_embedding,
-                            summary: value_as_string(&row[6]),
-                            attributes: value_as_string(&row[7]),
-                            episode_uuids: vec![],
-                            source_descriptions: vec![],
-                            ..Default::default()
-                        },
-                    ));
-                }
+                ranked.push((
+                    sim,
+                    EntityRow {
+                        uuid: value_as_string(&row[0]),
+                        name: value_as_string(&row[1]),
+                        group_id: value_as_string(&row[2]),
+                        labels: value_as_str_list(&row[3]),
+                        created_at: value_as_timestamp_str(&row[4]),
+                        name_embedding: stored_embedding,
+                        summary: value_as_string(&row[6]),
+                        attributes: value_as_string(&row[7]),
+                        kind: value_as_kind(&row[8]),
+                        ingested_at: value_as_timestamp_str(&row[9]),
+                        episode_uuids: vec![],
+                        source_descriptions: vec![],
+                        ..Default::default()
+                    },
+                ));
             }
         }
-        Ok(best.map(|(_, row)| row))
+        ranked.sort_by(|(sa, ra), (sb, rb)| {
+            sb.partial_cmp(sa)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| ra.uuid.cmp(&rb.uuid))
+        });
+        let mut vetoed = 0;
+        for (_, row) in ranked {
+            if incoming_name
+                .is_some_and(|n| crate::identifier_veto::identifier_mismatch(n, &row.name))
+            {
+                vetoed += 1;
+                continue;
+            }
+            return Ok(DedupSelection {
+                candidate: Some(row),
+                vetoed,
+            });
+        }
+        Ok(DedupSelection {
+            candidate: None,
+            vetoed,
+        })
     }
 
     /// Returns the number of Entity nodes in the given group. Returns 0 when the group is empty.
@@ -1809,12 +2768,27 @@ impl<'db> Conn<'db> {
         &self,
         uuids: &[String],
     ) -> Result<Vec<(String, Vec<f32>)>, Error> {
+        self.get_entity_embeddings_by_uuids_kind(uuids, crate::types::DEFAULT_KIND)
+    }
+
+    /// [`Self::get_entity_embeddings_by_uuids`] confined to `kind` (issue #616).
+    pub fn get_entity_embeddings_by_uuids_kind(
+        &self,
+        uuids: &[String],
+        kind: &str,
+    ) -> Result<Vec<(String, Vec<f32>)>, Error> {
         if uuids.is_empty() {
             return Ok(vec![]);
         }
         let result = self.query_params(
-            "MATCH (e:Entity) WHERE e.uuid IN $uuids RETURN e.uuid, e.name_embedding",
-            serde_json::json!({ "uuids": uuids }),
+            // Dedup candidates are confined to one kind (issue #615, FR-010; #616): a `Merge`
+            // decision appends extracted text to the matched entity, which must never be a node
+            // of another kind (e.g. an asserted non-`Entity`-kind node, or a differently-kinded
+            // identity-bearing one). A NULL kind is a not-yet-backfilled default row.
+            "MATCH (e:Entity) WHERE e.uuid IN $uuids \
+             AND (e.kind = $kind OR ((e.kind IS NULL OR e.kind = '') AND $kind = 'Entity')) \
+             RETURN e.uuid, e.name_embedding",
+            serde_json::json!({ "uuids": uuids, "kind": kind }),
         )?;
         let mut pairs = Vec::new();
         for row in result {
@@ -1830,7 +2804,7 @@ impl<'db> Conn<'db> {
     /// cosine-rechecks the full fused set against `threshold`, and returns the best match.
     ///
     /// Note: the `ef` search parameter is not configurable through lbug's Rust binding as of
-    /// 0.20.1; the lbug default is used.
+    /// 0.21.0 (re-verified: `SystemConfig` has no ef/HNSW-search field); the lbug default is used.
     pub fn hybrid_dedup_similar_entity(
         &self,
         name_embedding: &[f32],
@@ -1838,34 +2812,124 @@ impl<'db> Conn<'db> {
         group_id: &str,
         threshold: f32,
     ) -> Result<Option<EntityRow>, Error> {
+        self.hybrid_dedup_similar_entity_kind(
+            name_embedding,
+            entity_name,
+            group_id,
+            threshold,
+            crate::types::DEFAULT_KIND,
+        )
+    }
+
+    /// [`Self::hybrid_dedup_similar_entity`] confined to `kind` (issue #616). For the default
+    /// kind the candidate searches are unchanged (group-scoped, kind filtered afterwards in
+    /// `get_entity_embeddings_by_uuids_kind`), so flagless groups behave exactly as before. For
+    /// an identity-bearing kind the searches themselves are kind-filtered, so its entities are
+    /// not crowded out of the 200-candidate window by the (usually far more numerous) default
+    /// kind.
+    pub fn hybrid_dedup_similar_entity_kind(
+        &self,
+        name_embedding: &[f32],
+        entity_name: &str,
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<Option<EntityRow>, Error> {
+        match self
+            .hybrid_ranked(name_embedding, entity_name, group_id, threshold, kind)?
+            .into_iter()
+            .next()
+        {
+            Some((_, uuid)) => self.get_entity_by_uuid(&uuid),
+            None => Ok(None),
+        }
+    }
+
+    /// Name-aware [`Self::hybrid_dedup_similar_entity_kind`] for extraction-time dedup (issue
+    /// #650, ADR-0650): the cosine-rechecked candidates are ranked (similarity descending, uuid
+    /// ascending) and walked in order, discarding any whose name fails the identifier-mismatch
+    /// veto against `entity_name`, so a vetoed best match cannot hide a valid lower-ranked alias.
+    pub fn hybrid_dedup_similar_entity_kind_for_name(
+        &self,
+        name_embedding: &[f32],
+        entity_name: &str,
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<DedupSelection, Error> {
+        let mut vetoed = 0;
+        for (_, uuid) in
+            self.hybrid_ranked(name_embedding, entity_name, group_id, threshold, kind)?
+        {
+            let Some(row) = self.get_entity_by_uuid(&uuid)? else {
+                continue;
+            };
+            if crate::identifier_veto::identifier_mismatch(entity_name, &row.name) {
+                vetoed += 1;
+                continue;
+            }
+            return Ok(DedupSelection {
+                candidate: Some(row),
+                vetoed,
+            });
+        }
+        Ok(DedupSelection {
+            candidate: None,
+            vetoed,
+        })
+    }
+
+    /// Hybrid candidate retrieval shared by the plain and name-aware variants: the cosine-rechecked
+    /// `(similarity, uuid)` pairs at or above `threshold`, ordered similarity descending then uuid
+    /// ascending.
+    fn hybrid_ranked(
+        &self,
+        name_embedding: &[f32],
+        entity_name: &str,
+        group_id: &str,
+        threshold: f32,
+        kind: &str,
+    ) -> Result<Vec<(f32, String)>, Error> {
         const CANDIDATE_K: usize = 200;
 
-        let vector_candidates =
-            self.vector_search_entities(name_embedding, Some(&[group_id]), CANDIDATE_K)?;
-        let bm25_candidates =
-            self.fts_search_entities(entity_name, Some(&[group_id]), CANDIDATE_K)?;
+        let (vector_candidates, bm25_candidates) = if kind == crate::types::DEFAULT_KIND {
+            (
+                self.vector_search_entities(name_embedding, Some(&[group_id]), CANDIDATE_K)?,
+                self.fts_search_entities(entity_name, Some(&[group_id]), CANDIDATE_K)?,
+            )
+        } else {
+            (
+                self.vector_search_entities_kind(
+                    name_embedding,
+                    Some(&[group_id]),
+                    Some(kind),
+                    CANDIDATE_K,
+                )?,
+                self.fts_search_entities_kind(
+                    entity_name,
+                    Some(&[group_id]),
+                    Some(kind),
+                    CANDIDATE_K,
+                )?,
+            )
+        };
         let fused_uuids = crate::search::rrf_fuse(&[&bm25_candidates, &vector_candidates]);
 
-        let candidate_embeddings = self.get_entity_embeddings_by_uuids(&fused_uuids)?;
+        let candidate_embeddings = self.get_entity_embeddings_by_uuids_kind(&fused_uuids, kind)?;
 
-        let mut best: Option<(f32, String)> = None;
-        for (uuid, emb) in candidate_embeddings {
-            let sim = cosine_similarity(name_embedding, &emb);
-            if sim >= threshold {
-                let is_better = best
-                    .as_ref()
-                    .is_none_or(|(s, best_uuid)| sim > *s || (sim == *s && &uuid < best_uuid));
-                if is_better {
-                    best = Some((sim, uuid));
-                }
-            }
-        }
-
-        if let Some((_, uuid)) = best {
-            self.get_entity_by_uuid(&uuid)
-        } else {
-            Ok(None)
-        }
+        let mut ranked: Vec<(f32, String)> = candidate_embeddings
+            .into_iter()
+            .filter_map(|(uuid, emb)| {
+                let sim = cosine_similarity(name_embedding, &emb);
+                (sim >= threshold).then_some((sim, uuid))
+            })
+            .collect();
+        ranked.sort_by(|(sa, ua), (sb, ub)| {
+            sb.partial_cmp(sa)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| ua.cmp(ub))
+        });
+        Ok(ranked)
     }
 
     /// Returns an EntityRow by exact name match. Returns the first match if multiple exist.
@@ -1877,7 +2941,7 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.name = $name AND e.group_id = $gid \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes LIMIT 1",
+             e.summary, e.attributes, e.kind, e.ingested_at LIMIT 1",
             serde_json::json!({ "name": name, "gid": group_id }),
         )?;
         if let Some(row) = rows.into_iter().next() {
@@ -1889,6 +2953,8 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             }))
         } else {
@@ -1923,12 +2989,13 @@ impl<'db> Conn<'db> {
         &self,
         name: &str,
         group_id: &str,
+        kind: &str,
     ) -> Result<Option<EntityRow>, Error> {
-        let key = compute_lookup_key(group_id, name);
+        let key = compute_lookup_key(group_id, kind, name);
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.lookup_key = $key \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.name_embedding, e.summary, e.attributes \
+             e.name_embedding, e.summary, e.attributes, e.kind, e.ingested_at \
              ORDER BY e.created_at ASC, e.uuid ASC LIMIT 1",
             serde_json::json!({ "key": key }),
         )?;
@@ -1941,10 +3008,155 @@ impl<'db> Conn<'db> {
             name_embedding: value_as_float_array(&row[5]),
             summary: value_as_string(&row[6]),
             attributes: value_as_string(&row[7]),
+            kind: value_as_kind(&row[8]),
+            ingested_at: value_as_timestamp_str(&row[9]),
             episode_uuids: vec![],
             source_descriptions: vec![],
             ..Default::default()
         }))
+    }
+
+    /// Records `kind` in the known-kinds registry (issue #615). Superset-only: never removes.
+    pub(crate) fn register_kind(&self, kind: &str) {
+        let mut set = self
+            .lookup_key_status
+            .known_kinds
+            .write()
+            .unwrap_or_else(|p| p.into_inner());
+        if !set.contains(kind) {
+            set.insert(kind.to_string());
+        }
+    }
+
+    /// Snapshot of the known-kinds registry (always contains the default kind).
+    pub(crate) fn known_kinds(&self) -> Vec<String> {
+        self.lookup_key_status
+            .known_kinds
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Re-seeds the known-kinds registry from the database (`SELECT DISTINCT kind`). Best-effort:
+    /// on a fresh database with no `Entity` table (or before the `kind` column exists) the query
+    /// fails and the registry keeps what it has. Called at open, and from the post-replay
+    /// backfill funnel, so kinds arriving via WAL replay are visible to broad resolution.
+    pub fn refresh_known_kinds(&self) {
+        if let Ok(rows) = self.query_params(
+            "MATCH (e:Entity) RETURN DISTINCT e.kind",
+            serde_json::json!({}),
+        ) {
+            for row in rows {
+                let k = value_as_kind(&row[0]);
+                self.register_kind(&k);
+            }
+        }
+    }
+
+    /// Broad (kind-less) name resolution across **all** kinds (issue #615 D2's read rule): the
+    /// per-kind winner (`created_at ASC, uuid ASC`, as `get_entity_by_name_ci`) for every kind
+    /// holding an entity named `name` in `group_id` — at most one row per kind, ordered
+    /// `created_at ASC, uuid ASC`. One indexed probe per known kind (see `known_kinds`); on a
+    /// total miss it falls back to a group scan — like `get_entity_by_name_ci_with_scan_fallback`
+    /// — which also self-heals rows whose `kind`/`lookup_key` were never written.
+    ///
+    /// `Merged` tombstones are **not** filtered here: a tombstone shares its canonical's key, so
+    /// it can be a kind's winner, and the caller forwards it through `merged_into` exactly as it
+    /// does on the exact-kind path (D5 keeps that chain inside one kind). Callers treat
+    /// `len() > 1` as ambiguity (`Error::AmbiguousEntity`) — never pick one.
+    pub fn resolve_entities_by_name_any_kind(
+        &self,
+        name: &str,
+        group_id: &str,
+    ) -> Result<Vec<EntityRow>, Error> {
+        let mut out: Vec<EntityRow> = Vec::new();
+        for kind in self.known_kinds() {
+            if let Some(row) = self.get_entity_by_name_ci(name, group_id, &kind)? {
+                if row.group_id == group_id
+                    && row.kind == kind
+                    && row.name.trim().to_lowercase() == name.trim().to_lowercase()
+                {
+                    out.push(row);
+                }
+            }
+        }
+        if out.is_empty() {
+            // Total miss: a row may exist under an unregistered kind or with a stale/NULL key.
+            self.record_lookup_key_fallback_scan();
+            let mut seen_kinds = BTreeSet::new();
+            for row in self.scan_entities_by_name_ci(name, group_id, None)? {
+                self.self_heal_lookup_key(&row);
+                self.register_kind(&row.kind);
+                // The scan is ordered `created_at, uuid`: the first row per kind is its winner.
+                if seen_kinds.insert(row.kind.clone()) {
+                    out.push(row);
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.uuid.cmp(&b.uuid))
+        });
+        Ok(out)
+    }
+
+    /// Name resolution confined to `kinds` (issue #616): the per-kind winner (as
+    /// `get_entity_by_name_ci`) for every listed kind holding an entity named `name` in
+    /// `group_id`, ordered `created_at ASC, uuid ASC`. Used by extraction's cross-batch edge
+    /// endpoint resolution, which must see the default kind plus the group's identity-bearing
+    /// kinds but never asserted kinds it did not create (#615: extraction never touches them).
+    ///
+    /// One indexed probe per kind; whenever any listed kind's probe missed, a single group scan
+    /// (which also self-heals rows whose `kind`/`lookup_key` were never written) is filtered to
+    /// `kinds` and fills in only the kinds the probes did not resolve. Scanning on a partial
+    /// miss, not just a total one, keeps a NULL-keyed row of one kind from being masked by an
+    /// indexed row of another. Callers treat `len() > 1` as ambiguity.
+    pub fn resolve_entities_by_name_in_kinds(
+        &self,
+        name: &str,
+        group_id: &str,
+        kinds: &[String],
+    ) -> Result<Vec<EntityRow>, Error> {
+        let wanted = name.trim().to_lowercase();
+        let mut out: Vec<EntityRow> = Vec::new();
+        for kind in kinds {
+            if let Some(row) = self.get_entity_by_name_ci(name, group_id, kind)? {
+                if row.group_id == group_id
+                    && &row.kind == kind
+                    && row.name.trim().to_lowercase() == wanted
+                {
+                    out.push(row);
+                }
+            }
+        }
+        // Scan whenever any requested kind missed its probe, not only on a total miss: a kind
+        // whose same-named row has a NULL/stale `lookup_key` would otherwise be hidden by a
+        // sibling kind's indexed hit, turning an ambiguous name into a silent `Found`.
+        let mut seen_kinds: BTreeSet<String> = out.iter().map(|r| r.kind.clone()).collect();
+        let distinct_kinds: BTreeSet<&String> = kinds.iter().collect();
+        if seen_kinds.len() < distinct_kinds.len() {
+            self.record_lookup_key_fallback_scan();
+            for row in self.scan_entities_by_name_ci(name, group_id, None)? {
+                if !kinds.contains(&row.kind) {
+                    continue;
+                }
+                self.self_heal_lookup_key(&row);
+                // The scan is ordered `created_at, uuid`: the first row per kind is its winner,
+                // and kinds the probes already resolved keep the probe's row.
+                if seen_kinds.insert(row.kind.clone()) {
+                    out.push(row);
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then_with(|| a.uuid.cmp(&b.uuid))
+        });
+        Ok(out)
     }
 
     /// Case-insensitive, whitespace-normalised name lookup for the endpoint-authority call
@@ -1979,43 +3191,55 @@ impl<'db> Conn<'db> {
         &self,
         name: &str,
         group_id: &str,
+        kind: &str,
     ) -> Result<Option<EntityRow>, Error> {
-        if let Some(row) = self.get_entity_by_name_ci(name, group_id)? {
+        if let Some(row) = self.get_entity_by_name_ci(name, group_id, kind)? {
             if row.group_id == group_id
+                && row.kind == kind
                 && row.name.trim().to_lowercase() == name.trim().to_lowercase()
             {
                 return Ok(Some(row));
             }
-            // The indexed hit's lookup_key matched, but the row's live name/group_id no
+            // The indexed hit's lookup_key matched, but the row's live name/group_id/kind no
             // longer does — a stale (non-NULL) key from an out-of-band rename. Treat this
             // exactly like a miss: fall through to the scan below, which reflects live data.
         }
         self.record_lookup_key_fallback_scan();
-        let scanned = self.scan_entity_by_name_ci(name, group_id)?;
+        let scanned = self
+            .scan_entities_by_name_ci(name, group_id, Some(kind))?
+            .into_iter()
+            .next();
         if let Some(ref row) = scanned {
-            let key = compute_lookup_key(&row.group_id, &row.name);
-            // The scan read and this SET are two independent statements, not one transaction —
-            // a concurrent update_entity_core rename between them would already have persisted
-            // its own correct lookup_key for the new name. Scoping the SET to the exact
-            // name/group_id this scan observed makes it a no-op in that case (0 rows matched)
-            // instead of clobbering the fresher value with one derived from stale data.
-            if let Err(e) = self.exec_params(
-                "MATCH (e:Entity {uuid: $uuid, name: $expected_name, group_id: $expected_group_id}) \
-                 SET e.lookup_key = $key",
-                serde_json::json!({
-                    "uuid": row.uuid,
-                    "expected_name": row.name,
-                    "expected_group_id": row.group_id,
-                    "key": key,
-                }),
-            ) {
-                eprintln!(
-                    "liminis-context-graph: lookup_key self-heal failed for uuid={} (non-fatal): {e}",
-                    row.uuid
-                );
-            }
+            self.self_heal_lookup_key(row);
         }
         Ok(scanned)
+    }
+
+    /// Repairs a row's `kind` and `lookup_key` after a fallback scan found it (non-fatal).
+    ///
+    /// The scan read and this SET are two independent statements, not one transaction — a
+    /// concurrent update_entity_core rename between them would already have persisted its own
+    /// correct lookup_key for the new name. Scoping the SET to the exact name/group_id this scan
+    /// observed makes it a no-op in that case (0 rows matched) instead of clobbering the fresher
+    /// value with one derived from stale data.
+    fn self_heal_lookup_key(&self, row: &EntityRow) {
+        let key = compute_lookup_key(&row.group_id, &row.kind, &row.name);
+        if let Err(e) = self.exec_params(
+            "MATCH (e:Entity {uuid: $uuid, name: $expected_name, group_id: $expected_group_id}) \
+             SET e.kind = $kind, e.lookup_key = $key",
+            serde_json::json!({
+                "uuid": row.uuid,
+                "expected_name": row.name,
+                "expected_group_id": row.group_id,
+                "kind": row.kind,
+                "key": key,
+            }),
+        ) {
+            eprintln!(
+                "liminis-context-graph: lookup_key self-heal failed for uuid={} (non-fatal): {e}",
+                row.uuid
+            );
+        }
     }
 
     /// Bounded (to one group), full scan backing `get_entity_by_name_ci_with_scan_fallback`'s
@@ -2054,28 +3278,34 @@ impl<'db> Conn<'db> {
     /// the indexed path's single atomic `ORDER BY ... LIMIT 1` query — this loop reproduces that
     /// same "next surviving candidate" behavior across two statements instead of getting it for
     /// free from one.
-    fn scan_entity_by_name_ci(
+    fn scan_entities_by_name_ci(
         &self,
         name: &str,
         group_id: &str,
-    ) -> Result<Option<EntityRow>, Error> {
+        kind: Option<&str>,
+    ) -> Result<Vec<EntityRow>, Error> {
         let lower_name = name.trim().to_lowercase();
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.group_id = $gid \
-             RETURN e.uuid, e.name, e.group_id, e.created_at \
+             RETURN e.uuid, e.name, e.group_id, e.created_at, e.kind \
              ORDER BY e.created_at ASC, e.uuid ASC",
             serde_json::json!({ "gid": group_id }),
         )?;
-        for row in rows
-            .into_iter()
-            .filter(|row| value_as_string(&row[1]).trim().to_lowercase() == lower_name)
-        {
+        let mut out = Vec::new();
+        for row in rows.into_iter().filter(|row| {
+            value_as_string(&row[1]).trim().to_lowercase() == lower_name
+                && kind.is_none_or(|k| value_as_kind(&row[4]) == k)
+        }) {
             let uuid = value_as_string(&row[0]);
             if let Some(entity) = self.get_entity_by_uuid(&uuid)? {
-                return Ok(Some(entity));
+                out.push(entity);
+                if kind.is_some() {
+                    // Exact-kind: the first surviving candidate wins (see doc above).
+                    break;
+                }
             }
         }
-        Ok(None)
+        Ok(out)
     }
 
     /// Whether the one-shot `lookup_key` backfill migration (`schema::migrate`) completed
@@ -2150,20 +3380,25 @@ impl<'db> Conn<'db> {
     /// needs for ambiguity detection: a name shared by a canonical and its own merged-away
     /// aliases must resolve `Bound` to the canonical, not `Ambiguous` (issue #369 User Story 2
     /// AC 4) — counting tombstones as distinct candidates would contradict that.
+    ///
+    /// `kind` (issue #615): `Some(k)` counts only kind `k` (an exact-kind ambiguity check, so
+    /// same-kind duplicates still count as ambiguous), `None` counts across all kinds.
     pub fn count_active_entities_by_name_ci(
         &self,
         name: &str,
         group_id: &str,
+        kind: Option<&str>,
     ) -> Result<usize, Error> {
         let lower_name = name.trim().to_lowercase();
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE lower(e.name) = $lower_name AND e.group_id = $gid \
-             RETURN e.labels",
+             RETURN e.labels, e.kind",
             serde_json::json!({ "lower_name": lower_name, "gid": group_id }),
         )?;
         Ok(rows
             .into_iter()
             .filter(|row| !value_as_str_list(&row[0]).contains(&"Merged".to_string()))
+            .filter(|row| kind.is_none_or(|k| value_as_kind(&row[1]) == k))
             .count())
     }
 
@@ -2172,7 +3407,7 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (e:Entity {uuid: $uuid}) \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.name_embedding, e.summary, e.attributes",
+             e.name_embedding, e.summary, e.attributes, e.kind, e.ingested_at",
             serde_json::json!({ "uuid": uuid }),
         )?;
         if let Some(row) = rows.into_iter().next() {
@@ -2185,6 +3420,8 @@ impl<'db> Conn<'db> {
                 name_embedding: value_as_float_array(&row[5]),
                 summary: value_as_string(&row[6]),
                 attributes: value_as_string(&row[7]),
+                kind: value_as_kind(&row[8]),
+                ingested_at: value_as_timestamp_str(&row[9]),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
                 ..Default::default()
@@ -2202,7 +3439,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(
             "MATCH (e:Entity) WHERE e.uuid IN $uuids \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes",
+             e.summary, e.attributes, e.kind, e.ingested_at",
             serde_json::json!({ "uuids": uuids }),
         )?;
         let mut rows = Vec::new();
@@ -2215,6 +3452,8 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -2225,19 +3464,28 @@ impl<'db> Conn<'db> {
     /// `created_at ASC, uuid ASC`. Unlike `get_entity_by_name`, this method has no `LIMIT 1`
     /// and returns every matching node — used by `merge_entities` for canonical selection
     /// and alias expansion.
+    ///
+    /// `kind` (issue #615): `Some(k)` restricts to kind `k`; `None` returns every kind — callers
+    /// that must not cross kinds (merge, D5) inspect each row's `kind`.
     pub fn get_entities_by_name_all(
         &self,
         name: &str,
         group_id: &str,
+        kind: Option<&str>,
     ) -> Result<Vec<EntityRow>, Error> {
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.name = $name AND e.group_id = $gid \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes ORDER BY e.created_at ASC, e.uuid ASC",
+             e.summary, e.attributes, e.kind, e.ingested_at \
+             ORDER BY e.created_at ASC, e.uuid ASC",
             serde_json::json!({ "name": name, "gid": group_id }),
         )?;
         let mut result = Vec::new();
         for row in rows {
+            let row_kind = value_as_kind(&row[7]);
+            if kind.is_some_and(|k| row_kind != k) {
+                continue;
+            }
             result.push(EntityRow {
                 uuid: value_as_string(&row[0]),
                 name: value_as_string(&row[1]),
@@ -2246,6 +3494,8 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: row_kind,
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -2320,7 +3570,7 @@ impl<'db> Conn<'db> {
              OPTIONAL MATCH (src:Entity)-[:RELATES_TO]->(rn) \
              OPTIONAL MATCH (rn)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, coalesce(src.uuid, ''), coalesce(dst.uuid, ''), \
-             rn.group_id, rn.fact, rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+             rn.group_id, rn.fact, rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuids": uuids }),
         )?;
         let mut rows = Vec::new();
@@ -2336,6 +3586,7 @@ impl<'db> Conn<'db> {
                 invalid_at: value_as_optional_timestamp_str(&row[7]),
                 attributes: value_as_string(&row[8]),
                 relation_type: value_as_optional_string(&row[9]),
+                ingested_at: value_as_timestamp_str(&row[10]),
                 ..Default::default()
             });
         }
@@ -2593,14 +3844,16 @@ impl<'db> Conn<'db> {
         let mut edges = self.collect_full_relates_to_edges(
             "MATCH (src:Entity {uuid: $uuid})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type, rn.ingested_at, \
+             rn.episodes, rn.warrant, rn.valid_at_source",
             serde_json::json!({ "uuid": entity_uuid }),
         )?;
         // Incoming edges (entity is target)
         edges.extend(self.collect_full_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type, rn.ingested_at, \
+             rn.episodes, rn.warrant, rn.valid_at_source",
             serde_json::json!({ "uuid": entity_uuid }),
         )?);
         Ok(edges)
@@ -2627,8 +3880,14 @@ impl<'db> Conn<'db> {
                 fact_embedding: value_as_float_array(&row[9]),
                 created_at: value_as_timestamp_str(&row[10]),
                 relation_type: value_as_optional_string(&row[11]),
+                ingested_at: value_as_timestamp_str(&row[12]),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                // Belief-time provenance (issue #705): carried so corrections copies keep an
+                // extracted edge's producing episode instead of turning it into a legacy row.
+                episodes: value_as_str_list(&row[13]),
+                warrant: value_as_optional_string(&row[14]),
+                valid_at_source: value_as_optional_string(&row[15]),
             });
         }
         Ok(rows)
@@ -2679,7 +3938,7 @@ impl<'db> Conn<'db> {
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              WHERE rn.uuid = $uuid \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuid": uuid }),
         )?;
         Ok(rows.pop())
@@ -2690,16 +3949,27 @@ impl<'db> Conn<'db> {
         let mut edges = self.collect_relates_to_edges(
             "MATCH (src:Entity {uuid: $uuid})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuid": entity_uuid }),
         )?;
         edges.extend(self.collect_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
             serde_json::json!({ "uuid": entity_uuid }),
         )?);
         Ok(edges)
+    }
+
+    /// The kind of the Entity with `uuid` (issue #615), or `None` if no such entity exists. A NULL
+    /// column reads as the default kind. A single point lookup, for label rewriters that must
+    /// preserve `kind ∈ labels` (FR-001) without loading the whole row.
+    pub fn get_entity_kind(&self, uuid: &str) -> Result<Option<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (e:Entity {uuid: $uuid}) RETURN e.kind",
+            serde_json::json!({ "uuid": uuid }),
+        )?;
+        Ok(rows.into_iter().next().map(|r| value_as_kind(&r[0])))
     }
 
     /// Updates the labels array on the Entity with the given UUID.
@@ -2733,9 +4003,10 @@ impl<'db> Conn<'db> {
     /// name_embedding` by `create_vector_indexes`) rejects a plain `SET` on an indexed column
     /// outright: `Cannot set property name_embedding in table Entity because it is used in one
     /// or more indexes. Try delete and then insert.` This is the same reason
-    /// `episode.rs`'s dedup `DedupDecision::Merge` path (`SET e.summary = $summary`) never
-    /// rewrites `name_embedding` on a re-matched entity either — it is this codebase's existing
-    /// precedent, not a new decision invented for this feature. Since only the create path
+    /// `episode.rs`'s dedup `DedupDecision::Merge` path (which, since #651, `SET`s `summary` and
+    /// `summary_embedding` together) never rewrites `name_embedding` on a re-matched entity
+    /// either — it is this codebase's existing precedent, not a new decision invented for this
+    /// feature. Since only the create path
     /// (`insert_entity`, before any index exists over the row) ever persists an embedding, the
     /// caller no longer computes one at all before calling this update path (issue #444) — the
     /// embedder-unavailable `embedding_warning` fallback is therefore unreachable here; an
@@ -2748,14 +4019,22 @@ impl<'db> Conn<'db> {
         summary: &str,
         attributes: &str,
     ) -> Result<(), Error> {
-        let labels = enforce_entity_first(labels);
-        let lookup_key = compute_lookup_key(&existing.group_id, new_name);
+        // Kind is immutable (issue #615): the row's own kind is preserved in `labels` whatever
+        // the caller passed, and `group_id`/`kind` are re-SET to their current values purely so
+        // this record carries every input `lookup_key` derives from — replay recomputes the key
+        // from the record (D3) rather than trusting a stored copy.
+        let kind = normalize_row_kind(&existing.kind);
+        let labels = labels_with_kind(labels, &kind);
+        let lookup_key = compute_lookup_key(&existing.group_id, &kind, new_name);
         self.exec_params(
             "MATCH (e:Entity {uuid: $uuid}) SET e.name = $name, e.labels = $labels, \
-             e.summary = $summary, e.attributes = $attributes, e.lookup_key = $lookup_key",
+             e.summary = $summary, e.attributes = $attributes, e.group_id = $group_id, \
+             e.kind = $kind, e.lookup_key = $lookup_key",
             serde_json::json!({
                 "uuid": existing.uuid,
                 "name": new_name,
+                "group_id": existing.group_id,
+                "kind": kind,
                 "labels": labels,
                 "summary": summary,
                 "attributes": attributes,
@@ -2801,7 +4080,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(
             "MATCH (e:Entity) WHERE e.group_id = $gid AND size(e.labels) = 1 AND 'Entity' IN e.labels \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes ORDER BY e.uuid SKIP $offset LIMIT $limit",
+             e.summary, e.attributes, e.kind, e.ingested_at ORDER BY e.uuid SKIP $offset LIMIT $limit",
             serde_json::json!({ "gid": group_id, "offset": offset as i64, "limit": limit as i64 }),
         )?;
         let mut rows = Vec::new();
@@ -2814,6 +4093,8 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -2833,7 +4114,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(
             "MATCH (e:Entity) WHERE e.group_id = $gid AND size(e.labels) >= 2 AND 'Entity' IN e.labels \
              RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
-             e.summary, e.attributes ORDER BY e.uuid SKIP $offset LIMIT $limit",
+             e.summary, e.attributes, e.kind, e.ingested_at ORDER BY e.uuid SKIP $offset LIMIT $limit",
             serde_json::json!({ "gid": group_id, "offset": offset as i64, "limit": limit as i64 }),
         )?;
         let mut rows = Vec::new();
@@ -2846,6 +4127,8 @@ impl<'db> Conn<'db> {
                 created_at: value_as_timestamp_str(&row[4]),
                 summary: value_as_string(&row[5]),
                 attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
                 ..Default::default()
             });
         }
@@ -2873,7 +4156,7 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Entity) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
-                 n.name_embedding, n.summary, n.attributes, n.summary_embedding \
+                 n.name_embedding, n.summary, n.attributes, n.summary_embedding, n.kind, n.ingested_at \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -2881,7 +4164,7 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (n:Entity) \
                  RETURN n.uuid, n.name, n.group_id, n.labels, n.created_at, \
-                 n.name_embedding, n.summary, n.attributes, n.summary_embedding \
+                 n.name_embedding, n.summary, n.attributes, n.summary_embedding, n.kind, n.ingested_at \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -2890,7 +4173,8 @@ impl<'db> Conn<'db> {
 
     /// Page of Episodic rows for dump.
     /// Columns: [uuid, name, group_id, created_at, source, source_description, content,
-    ///            content_embedding, valid_at, entity_edges, attributes]
+    ///            content_embedding, valid_at, entity_edges, attributes, ingested_at,
+    ///            superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id]
     pub(crate) fn dump_episodics_page(
         &self,
         group_id: Option<&str>,
@@ -2902,7 +4186,8 @@ impl<'db> Conn<'db> {
                 "MATCH (n:Episodic) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
-                 n.attributes \
+                 n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
+                 n.superseded_by_kind, n.supersession_reason, n.doc_id \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -2911,7 +4196,8 @@ impl<'db> Conn<'db> {
                 "MATCH (n:Episodic) \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
-                 n.attributes \
+                 n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
+                 n.superseded_by_kind, n.supersession_reason, n.doc_id \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -2920,7 +4206,8 @@ impl<'db> Conn<'db> {
 
     /// Page of RelatesToNode_ rows for dump.
     /// Columns: [uuid, name, group_id, created_at, fact, fact_embedding, episodes,
-    ///            expired_at, valid_at, invalid_at, attributes, relation_type]
+    ///            expired_at, valid_at, invalid_at, attributes, relation_type, ingested_at,
+    ///            warrant, valid_at_source]
     pub(crate) fn dump_relatos_page(
         &self,
         group_id: Option<&str>,
@@ -2932,7 +4219,7 @@ impl<'db> Conn<'db> {
                 "MATCH (n:RelatesToNode_) WHERE n.group_id = $gid \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.fact, \
                  n.fact_embedding, n.episodes, n.expired_at, n.valid_at, n.invalid_at, \
-                 n.attributes, n.relation_type \
+                 n.attributes, n.relation_type, n.ingested_at, n.warrant, n.valid_at_source \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -2941,7 +4228,7 @@ impl<'db> Conn<'db> {
                 "MATCH (n:RelatesToNode_) \
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.fact, \
                  n.fact_embedding, n.episodes, n.expired_at, n.valid_at, n.invalid_at, \
-                 n.attributes, n.relation_type \
+                 n.attributes, n.relation_type, n.ingested_at, n.warrant, n.valid_at_source \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -3155,7 +4442,7 @@ impl<'db> Conn<'db> {
     pub fn search_entities(&self, name_prefix: &str) -> Result<Vec<EntityRow>, Error> {
         let result = self.query_params(
             "MATCH (e:Entity) WHERE e.name STARTS WITH $prefix \
-             RETURN e.uuid, e.name, e.group_id, e.summary, e.attributes",
+             RETURN e.uuid, e.name, e.group_id, e.summary, e.attributes, e.kind",
             serde_json::json!({ "prefix": name_prefix }),
         )?;
         let mut rows = Vec::new();
@@ -3166,6 +4453,7 @@ impl<'db> Conn<'db> {
                 group_id: value_as_string(&row[2]),
                 summary: value_as_string(&row[3]),
                 attributes: value_as_string(&row[4]),
+                kind: value_as_kind(&row[5]),
                 ..Default::default()
             });
         }
@@ -3190,6 +4478,12 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
     map.iter()
         .map(|(k, v)| (k.clone(), json_value_for_param(k, v)))
         .collect()
+}
+
+/// Key of a `DocSupersession` row: `group_id ␟ superseded_doc_id` (issue #707). Keying by the
+/// superseded document makes "at most one superseding document per group" structural.
+pub(crate) fn doc_supersession_key(group_id: &str, superseded_doc_id: &str) -> String {
+    format!("{group_id}\u{1f}{superseded_doc_id}")
 }
 
 /// Parameter names that target `TIMESTAMP` columns. Only these bind an RFC-3339 or space-format
@@ -3228,6 +4522,7 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
 /// | `delete_relates_to_hop` (#369)          | `exec_params`    | ✓ no timestamp fields       |
 /// | `update_relates_to_attributes` (#369)   | `exec_params`    | ✓ no timestamp fields       |
 /// | `create_relates_to_direct` (#369)       | `exec_params`    | ✓ exec_params gate          |
+/// | `create_doc_supersession` (#707)        | `exec_params`    | ✓ exec_params gate          |
 /// | `delete_relates_to_direct` (#369)       | `exec_params`    | ✓ no timestamp fields       |
 /// | `dump.rs` (all node/edge types)         | `WalWriter`      | ✓ RFC-3339+µs WAL; Cypher   |
 /// |                                         |                  |   wrapper coerces on replay |
@@ -3239,7 +4534,17 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
 /// `timestamp($new_created_at)` Cypher wrapper. This is intentional — the value arrives as a
 /// space-format string from `value_as_timestamp_str` and the wrapper handles coercion. Do NOT add
 /// `new_created_at` to this list; doing so would double-apply coercion and break the path.
-const TIMESTAMP_PARAM_NAMES: &[&str] = &["created_at", "valid_at", "invalid_at", "expired_at"];
+const TIMESTAMP_PARAM_NAMES: &[&str] = &[
+    "created_at",
+    "valid_at",
+    "invalid_at",
+    "expired_at",
+    "ingested_at",
+    "superseded_at",
+    "live_at",
+    "effective_at",
+    "recorded_at",
+];
 
 /// Maps a JSON param `(name, value)` to an lbug `Value`, applying timestamp typing only to
 /// known timestamp-column param names (see `TIMESTAMP_PARAM_NAMES`).
@@ -3265,7 +4570,7 @@ fn json_value_for_param(key: &str, v: &serde_json::Value) -> Value {
 /// read-back format (assumed UTC). Shared by `json_value_for_param`'s column-write coercion and
 /// [`validate_and_normalize_valid_at`]'s upfront call-time validation, so there is exactly one
 /// definition of "which formats we accept" rather than a second copy that could drift.
-fn parse_timestamp_str(s: &str) -> Option<time::OffsetDateTime> {
+pub(crate) fn parse_timestamp_str(s: &str) -> Option<time::OffsetDateTime> {
     if let Ok(odt) = time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
     {
         return Some(odt);
@@ -3276,6 +4581,21 @@ fn parse_timestamp_str(s: &str) -> Option<time::OffsetDateTime> {
         return Some(pdt.assume_utc());
     }
     None
+}
+
+/// Stamps a record's ingest time (issue #673, ADR-0673): the service clock at the moment of the
+/// first write, in the WAL `ts` format. A non-empty `existing` is kept as-is — that is only ever
+/// a value the service itself produced earlier (a corrections edge copy carrying the original
+/// edge's ingest time), never a request parameter: no handler maps a request key onto
+/// `ingested_at`, so a caller cannot influence the stored value (FR-002).
+pub(crate) fn ingested_at_or_now(existing: &str) -> String {
+    if existing.is_empty() {
+        chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.6f+00:00")
+            .to_string()
+    } else {
+        existing.to_string()
+    }
 }
 
 /// Validates and normalizes a caller-supplied `valid_at` timestamp (RFC-3339 or lbug's
@@ -3356,6 +4676,24 @@ fn logical_type_of(v: &serde_json::Value) -> LogicalType {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// Row shape: `uuid, name, group_id, ingested_at, superseded_at, superseded_by,
+/// supersession_reason` (issue #706).
+fn episode_record_from_row(r: &[lbug::Value]) -> crate::correction_reads::EpisodeRecord {
+    let micros = |v: &lbug::Value| match v {
+        lbug::Value::Null(_) => None,
+        other => Some(value_as_timestamp_micros(other)),
+    };
+    crate::correction_reads::EpisodeRecord {
+        uuid: value_as_string(&r[0]),
+        name: value_as_string(&r[1]),
+        group_id: value_as_string(&r[2]),
+        ingested_at_us: micros(&r[3]),
+        superseded_at_us: micros(&r[4]),
+        superseded_by: value_as_optional_string(&r[5]),
+        supersession_reason: value_as_optional_string(&r[6]),
+    }
+}
+
 pub(crate) fn value_as_string(v: &lbug::Value) -> String {
     match v {
         lbug::Value::String(s) => s.clone(),
@@ -3371,6 +4709,18 @@ pub(crate) fn value_as_timestamp_str(v: &lbug::Value) -> String {
         lbug::Value::Null(_) => String::new(),
         _ => v.to_string(),
     }
+}
+
+/// Microseconds since the Unix epoch for a TIMESTAMP value (0 for NULL / unparseable). Keyset
+/// cursors need this because [`value_as_timestamp_str`] truncates to whole seconds.
+pub(crate) fn value_as_timestamp_micros(v: &lbug::Value) -> i64 {
+    let dt = match v {
+        lbug::Value::Timestamp(dt) => Some(*dt),
+        lbug::Value::String(s) => parse_timestamp_str(s),
+        _ => None,
+    };
+    dt.map(|dt| (dt.unix_timestamp_nanos() / 1_000) as i64)
+        .unwrap_or(0)
 }
 
 pub(crate) fn value_as_optional_timestamp_str(v: &lbug::Value) -> Option<String> {
@@ -3526,21 +4876,85 @@ pub(crate) fn normalize_ts_str_for_dump(s: &str) -> String {
 }
 
 /// Computes the composite key materialized in `Entity.lookup_key` and used by every
-/// `get_entity_by_name_ci*` query and write path (issue #221 FR-001/FR-003): `group_id`,
-/// a `\x1f` (unit separator) delimiter, and `name` trimmed and lowercased.
+/// `get_entity_by_name_ci*` query and write path (issue #221 FR-001/FR-003, extended by issue
+/// #615 FR-002): `group_id`, a `\x1f` (unit separator), `kind` verbatim (case-sensitive; a
+/// validated kind never contains `\x1f`, see `types::normalize_kind`), a second `\x1f`, and
+/// `name` trimmed and lowercased.
 ///
 /// Always computed in Rust — including by `schema::backfill_entity_lookup_keys`'s one-shot
-/// migration backfill — never via Cypher `lower()`. `str::to_lowercase()` does full Unicode
-/// case-folding; there's no guarantee lbug's Cypher `lower()` folds identically for non-ASCII
-/// names, so computing the key in exactly one place for every writer (create, update, and
-/// backfill alike) is what guarantees two equal `(group_id, name)` pairs always produce the
-/// same key, regardless of which path wrote the row.
+/// migration backfill and replay's `inject_derived_lookup_key` — never via Cypher `lower()`.
+/// `str::to_lowercase()` does full Unicode case-folding; there's no guarantee lbug's Cypher
+/// `lower()` folds identically for non-ASCII names, so computing the key in exactly one place for
+/// every writer (create, update, backfill and replay alike) is what guarantees two equal
+/// `(group_id, kind, name)` triples always produce the same key, regardless of which path wrote
+/// the row.
 ///
 /// `\x1f` is a non-printable control character vanishingly unlikely to appear in an
 /// LLM-extracted entity name or an operator-supplied `group_id`, but this is a collision
-/// assumption, not a mechanical guarantee — see ADR-0221.
-pub(crate) fn compute_lookup_key(group_id: &str, name: &str) -> String {
-    format!("{group_id}\u{1f}{}", name.trim().to_lowercase())
+/// assumption, not a mechanical guarantee — see ADR-0221. Kinds are the exception: FR-012
+/// rejects a `kind` containing it.
+pub(crate) fn compute_lookup_key(group_id: &str, kind: &str, name: &str) -> String {
+    format!(
+        "{group_id}{sep}{kind}{sep}{}",
+        name.trim().to_lowercase(),
+        sep = crate::types::KEY_SEPARATOR
+    )
+}
+
+/// ANN-probe oversampling factor when a `kind` predicate is applied after the vector index probe
+/// (issue #615): the probe returns its top-`k` nearest rows *before* the predicate runs, so a
+/// rare kind would otherwise be crowded out of the candidate pool by nearer rows of other kinds.
+const KIND_ANN_OVERSAMPLE: usize = 10;
+
+/// `WHERE` clause for the Entity search queries: optional group filter and optional kind filter
+/// (issue #615). A NULL `kind` column is the default kind, matching [`value_as_kind`]'s
+/// read-side mapping.
+fn entity_search_filter(has_groups: bool, has_kind: bool) -> String {
+    let mut conds = Vec::new();
+    if has_groups {
+        conds.push("node.group_id IN $gids");
+    }
+    if has_kind {
+        conds.push(
+            "(node.kind = $kind OR ((node.kind IS NULL OR node.kind = '') AND $kind = 'Entity'))",
+        );
+    }
+    if conds.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conds.join(" AND "))
+    }
+}
+
+/// Reads an `Entity.kind` column value, mapping NULL/empty (a row written before kinds existed,
+/// or replayed from an old WAL, that the backfill has not reached yet) to the default kind so
+/// readers never observe a missing kind (issue #615).
+pub(crate) fn value_as_kind(v: &lbug::Value) -> String {
+    let k = value_as_string(v);
+    if k.trim().is_empty() {
+        crate::types::DEFAULT_KIND.to_string()
+    } else {
+        k
+    }
+}
+
+/// `labels` with `Entity` first (AD-8) and `kind` guaranteed present after it (issue #615
+/// FR-001). Idempotent.
+pub(crate) fn labels_with_kind(labels: &[String], kind: &str) -> Vec<String> {
+    let mut out = enforce_entity_first(labels);
+    if !out.iter().any(|l| l == kind) {
+        out.push(kind.to_string());
+    }
+    out
+}
+
+/// A row's kind as stored: empty (a hand-built `EntityRow`) means the default kind.
+pub(crate) fn normalize_row_kind(kind: &str) -> String {
+    if kind.trim().is_empty() {
+        crate::types::DEFAULT_KIND.to_string()
+    } else {
+        kind.trim().to_string()
+    }
 }
 
 fn enforce_entity_first(labels: &[String]) -> Vec<String> {
@@ -4465,5 +5879,94 @@ mod coerce_unit_tests {
             matches!(v_false, Value::Bool(false)),
             "false must yield Value::Bool(false), got: {v_false:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod fts_backstop_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn inconsistent() -> Error {
+        Error::QueryFailed(
+            "FTS index 'episode_content' is inconsistent: term '\u{2014}' is missing during \
+             delete. Drop and recreate the FTS index."
+                .to_string(),
+        )
+    }
+
+    fn open() -> (TempDir, Db) {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn in_txn_tracks_begin_commit_rollback() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        assert!(!conn.in_txn.get());
+        conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+        assert!(conn.in_txn.get());
+        conn.exec_transaction_control("COMMIT").unwrap();
+        assert!(!conn.in_txn.get());
+        conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+        assert!(conn.in_txn.get());
+        conn.exec_transaction_control("ROLLBACK").unwrap();
+        assert!(!conn.in_txn.get());
+    }
+
+    #[test]
+    fn unrecorded_helpers_leave_executed_mutations_empty() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        let _ = conn.drain_mutations();
+        conn.query_unrecorded("MATCH (e:Entity) RETURN count(*)")
+            .unwrap();
+        conn.exec_params_unrecorded(
+            "MERGE (s:SchemaState {key: $key}) SET s.status = $status",
+            serde_json::json!({ "key": "k", "status": "v" }),
+        )
+        .unwrap();
+        assert!(conn.drain_mutations().is_empty());
+    }
+
+    #[test]
+    fn backstop_rebuilds_and_counts_outside_a_transaction() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        assert_eq!(conn.fts_repair_snapshot(), (0, None));
+        let _ = conn.drain_mutations();
+        assert!(conn.repair_fts_after(&inconsistent()));
+        let (count, last) = conn.fts_repair_snapshot();
+        assert_eq!(count, 1);
+        assert!(last.is_some());
+        assert!(
+            conn.drain_mutations().is_empty(),
+            "repair must not be WAL-recorded"
+        );
+    }
+
+    #[test]
+    fn backstop_does_not_fire_inside_a_transaction() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        conn.exec_transaction_control("BEGIN TRANSACTION").unwrap();
+        assert!(!conn.repair_fts_after(&inconsistent()));
+        assert_eq!(conn.fts_repair_snapshot().0, 0);
+        conn.exec_transaction_control("ROLLBACK").unwrap();
+    }
+
+    #[test]
+    fn backstop_ignores_unrelated_errors() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        assert!(!conn.repair_fts_after(&Error::QueryFailed("boom".to_string())));
+        assert_eq!(conn.fts_repair_snapshot().0, 0);
     }
 }

@@ -60,6 +60,48 @@ pub async fn dispatch(
                     ),
                     false,
                 ),
+                // A name-only resolution that matched several kinds (issue #615, D2/FR-006): a
+                // distinct code with the candidates as structured data, so a caller can retry
+                // with an explicit `kind` instead of parsing the message.
+                Error::AmbiguousEntity {
+                    ref name,
+                    ref group_id,
+                    ref candidates,
+                } => (
+                    IpcResponse::err_with_data(
+                        req.id,
+                        -32002,
+                        e.to_string(),
+                        json!({
+                            "reason": "ambiguous_entity",
+                            "name": name,
+                            "group_id": group_id,
+                            "candidates": candidates,
+                        }),
+                    ),
+                    false,
+                ),
+                // A group's identity-bearing set changed in a way that would reinterpret existing
+                // entities (issue #616, D1). Structured so a client can name the label.
+                Error::IdentitySetChangeRefused {
+                    ref group_id,
+                    ref label,
+                    count,
+                    ..
+                } => (
+                    IpcResponse::err_with_data(
+                        req.id,
+                        -32003,
+                        e.to_string(),
+                        json!({
+                            "reason": "identity_set_change_refused",
+                            "group_id": group_id,
+                            "label": label,
+                            "entity_count": count,
+                        }),
+                    ),
+                    false,
+                ),
                 _ => (IpcResponse::err(req.id, -32000, e.to_string()), false),
             }
         }
@@ -96,6 +138,10 @@ async fn handle(
             // applied_seq, which requires an open DB.
             | "knowledge_wal_mark_list"
             | "knowledge_wal_mark_delete"
+            // knowledge_strip_wal_embeddings (issue #577): touches only state.wal_root and
+            // state.write_lock, never the DB — a pure filesystem transform, same rationale as
+            // the wal_mark_* pair above.
+            | "knowledge_strip_wal_embeddings"
     );
     if !exempt_in_degraded && state.db.load_full().is_none() {
         let reason = state
@@ -113,20 +159,27 @@ async fn handle(
         "knowledge_process_chunk" => handle_knowledge_process_chunk(req, state).await,
         "knowledge_add_episode" => handle_add_episode(req, state).await,
         "knowledge_find_entities" => handle_find_entities(req, state).await,
+        "knowledge_resolve_entity" => handle_resolve_entity(req, state).await,
         "knowledge_find_relationships" => handle_find_relationships(req, state).await,
         "knowledge_get_episodes" => handle_get_episodes(req, state).await,
         "knowledge_delete_episode" => handle_delete_episode(req, state).await,
         "knowledge_get_nodes_by_group" => handle_get_nodes_by_group(req, state).await,
         "knowledge_get_edges_by_group" => handle_get_edges_by_group(req, state).await,
         "knowledge_get_edges_by_uuids" => handle_get_edges_by_uuids(req, state).await,
+        "knowledge_get_correction_changes" => handle_get_correction_changes(req, state).await,
+        "knowledge_get_affected_work" => handle_get_affected_work(req, state).await,
         "knowledge_query_cypher" => handle_query_cypher(req, state).await,
         "knowledge_build_indices" => handle_build_indices(state).await,
         "knowledge_delete_by_source" => handle_delete_by_source(req, state).await,
         "knowledge_delete_chunk_episode" => handle_delete_chunk_episode(req, state).await,
+        "knowledge_mark_chunk_removed" => handle_mark_chunk_removed(req, state).await,
+        "knowledge_supersede_document" => handle_supersede_document(req, state).await,
         "knowledge_delete_by_group" => handle_delete_by_group(req, state).await,
+        "knowledge_reload_ontology" => handle_reload_ontology(req, state).await,
         "knowledge_clear_all" => handle_clear_all(req, state).await,
         "knowledge_dump_wal" => handle_dump_wal(req, state).await,
         "knowledge_prepare_checkpoint" => handle_prepare_checkpoint(state).await,
+        "knowledge_strip_wal_embeddings" => handle_strip_wal_embeddings(req, state).await,
         "knowledge_wal_mark_create" => handle_wal_mark_create(req, state).await,
         "knowledge_wal_mark_list" => handle_wal_mark_list(req, state).await,
         "knowledge_wal_mark_delete" => handle_wal_mark_delete(req, state).await,
@@ -178,9 +231,10 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         .unwrap_or(DEFAULT_GROUP_ID)
         .to_string();
     let attributes = attributes_param_to_string(&p["attributes"]);
+    let doc_id = optional_doc_id_param(&p["doc_id"])?;
 
     let source_type = SourceType::from_str_lossy(&source);
-    let result = episode::add_episode(
+    let result = episode::add_episode_with_opts(
         state,
         &name,
         &body,
@@ -191,12 +245,57 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         source_type,
         None,
         &attributes,
+        episode::EpisodeOpts {
+            doc_id,
+            ..Default::default()
+        },
     )
     .await?;
 
     Ok(json!({ "episode_uuid": result.episode_uuid }))
 }
 
+/// Builds the `busy` health payload (issue #628) without touching the DB or awaiting anything.
+///
+/// If a rebuild job is `Running`, reports `activity: "rebuilding"` with that job's `job_id` and
+/// `progress` (earliest `start_time` wins, `job_id` breaks ties). Otherwise — no running job, or
+/// the `rebuild_jobs` mutex is contended or poisoned — reports `activity: "writing"` with no
+/// progress. `try_lock` keeps this non-blocking (FR-008).
+fn busy_health_payload(state: &AppState) -> Value {
+    if let Ok(jobs) = state.rebuild_jobs.try_lock() {
+        let running = jobs
+            .values()
+            .filter(|j| j.status == JobStatus::Running)
+            .min_by(|a, b| {
+                a.start_time
+                    .cmp(&b.start_time)
+                    .then_with(|| a.job_id.cmp(&b.job_id))
+            });
+        if let Some(job) = running {
+            return json!({
+                "ok": true,
+                "healthy": false,
+                "state": "busy",
+                "activity": "rebuilding",
+                "job_id": job.job_id,
+                "progress": {
+                    "mutations_replayed": job.mutations_replayed,
+                    "wal_files_processed": job.wal_files_processed,
+                    "wal_files_total": job.wal_files_total,
+                    "elapsed_seconds": job.elapsed_seconds(),
+                },
+            });
+        }
+    }
+    json!({"ok": true, "healthy": false, "state": "busy", "activity": "writing"})
+}
+
+/// Liveness/readiness probe. Never waits on the write lock (issue #628).
+///
+/// - DB not loaded: `{ok:false, healthy:false, state:"degraded", reason}`.
+/// - Write lock free: probes the DB, `{ok:true, healthy:true, state:"healthy"}`.
+/// - Write lock held or a write pending: `{ok:true, healthy:false, state:"busy", activity, ..}`
+///   (alive but not ready), answered without connecting to the DB.
 async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
     let db_opt = state.db.load_full();
     match db_opt {
@@ -210,7 +309,9 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
             Ok(json!({"ok": false, "healthy": false, "state": "degraded", "reason": reason}))
         }
         Some(db) => {
-            let _guard = state.write_lock.read().await;
+            let Ok(_guard) = state.write_lock.try_read() else {
+                return Ok(busy_health_payload(&state));
+            };
             tokio::task::spawn_blocking(move || {
                 let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
                 conn.probe().map_err(|e| Error::Ipc(format!("db: {e}")))
@@ -240,6 +341,7 @@ struct StatusFields {
     entity_count: u64,
     episode_count: u64,
     edge_count: u64,
+    legacy_edge_count: u64,
     wal_exists: bool,
     wal_file_count: u64,
     wal_byte_size: u64,
@@ -361,11 +463,19 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "queryable": false,
             "initializing": false,
             "recovery_available": recovery_available,
+            "dedup_mode": state.dedup.mode().as_str(),
             "ontology": ontology_summary,
             "group_ontology_drift": group_ontology_drift,
+            "group_identity_refusals": state
+                .all_group_identity_refusals()
+                .into_iter()
+                .map(|(group_id, message)| json!({"group_id": group_id, "message": message}))
+                .collect::<Vec<_>>(),
             "indices_built": state.indices_built.load(Ordering::Acquire),
             "name_index_trusted": null,
             "name_index_fallback_scans": null,
+            "fts_repair_count": null,
+            "fts_last_repair_unix_ms": null,
             "cross_group_pointers": null,
         }));
     }
@@ -410,6 +520,9 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     }
 
     let _guard = state.write_lock.read().await;
+    // Snapshot both repair fields as one pair while the read guard is held: repairs run under
+    // the write lock, so none can interleave (issue #649).
+    let fts_repair = db.fts_repair_snapshot();
     let outcome =
         tokio::task::spawn_blocking(move || -> Result<StatusOutcome, crate::error::Error> {
             let conn = db.connect()?;
@@ -474,6 +587,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 let last_index_time = conn.get_latest_episode_time()?;
                 let index_created_at = conn.get_earliest_episode_time()?;
                 let cross_group_pointers = conn.count_cross_group_pointers()?;
+                let legacy_edge_count = conn.count_legacy_edges(None)?;
                 Ok((
                     entity_count,
                     episode_count,
@@ -481,6 +595,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     last_index_time,
                     index_created_at,
                     cross_group_pointers,
+                    legacy_edge_count,
                 ))
             })();
 
@@ -492,7 +607,9 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     last_index_time,
                     index_created_at,
                     cross_group_pointers,
+                    legacy_edge_count,
                 )) => Ok(StatusOutcome::Queryable(StatusFields {
+                    legacy_edge_count,
                     entity_count,
                     episode_count,
                     edge_count,
@@ -544,6 +661,10 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "embedding_dim": embedding_dim,
                 "entity_count": fields.entity_count,
                 "relationship_count": fields.edge_count,
+                // Issue #705, FR-007: edges with no producing episode and no warrant marker —
+                // written before belief time existed, so they cannot be soundly backfilled
+                // (endpoint co-occurrence is not provenance, #404). Believed, but reported.
+                "legacy_edge_count": fields.legacy_edge_count,
                 "episode_count": fields.episode_count,
                 "last_index_time": fields.last_index_time,
                 "context_graph_initialized": true,
@@ -593,6 +714,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "indices_built": state.indices_built.load(Ordering::Acquire),
                 "name_index_trusted": fields.name_index_trusted,
                 "name_index_fallback_scans": fields.name_index_fallback_scans,
+                "fts_repair_count": fts_repair.0,
+                "fts_last_repair_unix_ms": fts_repair.1,
                 "cross_group_pointers": {
                     "bound": fields.cross_group_pointers.bound,
                     "unbound": fields.cross_group_pointers.unbound,
@@ -666,6 +789,8 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "indices_built": false,
             "name_index_trusted": name_index_trusted,
             "name_index_fallback_scans": name_index_fallback_scans,
+            "fts_repair_count": fts_repair.0,
+            "fts_last_repair_unix_ms": fts_repair.1,
             "cross_group_pointers": {
                 "bound": null,
                 "unbound": null,
@@ -673,8 +798,31 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             },
         }),
     };
+    // Issue #667: with a WAL root configured the flat `wal` block describes only the default
+    // group's own stream, so it reads `exists: false` when that group has no directory even while
+    // `wal_groups` shows other groups hydrated. Label it (additively — every existing key is
+    // untouched, ADR-0378) rather than omit it. With no WAL root the block is unchanged.
+    if state.wal_root.is_some() {
+        if let Some(wal) = result["wal"].as_object_mut() {
+            wal.insert("scope".to_string(), json!("default_group"));
+            wal.insert("default_group".to_string(), json!(DEFAULT_GROUP_ID));
+            wal.insert("see".to_string(), json!("wal_groups"));
+        }
+    }
     result["ontology"] = ontology_summary;
     result["group_ontology_drift"] = group_ontology_drift;
+    // Per-group identity-bearing-set refusals (issue #616, D1): only groups whose ontology
+    // change was refused appear; absent means no refusal (or not yet resolved this process).
+    result["group_identity_refusals"] = Value::Array(
+        state
+            .all_group_identity_refusals()
+            .into_iter()
+            .map(|(group_id, message)| json!({"group_id": group_id, "message": message}))
+            .collect(),
+    );
+    // Extraction-time dedup mode (#652): "veto-only" or "llm-verified". Set once here so every
+    // non-degraded branch above (Queryable and NotQueryable) carries it.
+    result["dedup_mode"] = json!(state.dedup.mode().as_str());
     Ok(result)
 }
 
@@ -934,7 +1082,43 @@ async fn handle_knowledge_process_chunk(
     } else {
         SourceType::Text
     };
-    let result = episode::add_episode(
+    // Issue #705, FR-003: resubmitting a `chunk_id` supersedes that chunk's earlier live episodes in
+    // this group once this ingest has fully succeeded. A multi-unit revision (one chunk split into
+    // several calls under the same `chunk_id`) sends `supersede: false` on every non-final unit and
+    // passes the episode uuids those units returned as `same_revision_episode_uuids` on the final
+    // one, which are then kept live. Stateless: a unit that fails means the final call never
+    // happens and the old episodes stay live.
+    let supersede = match &p["supersede"] {
+        Value::Null => true,
+        Value::Bool(b) => *b,
+        _ => return Err(Error::Ipc("supersede must be a boolean".to_string())),
+    };
+    let keep: Vec<String> = match &p["same_revision_episode_uuids"] {
+        Value::Null => Vec::new(),
+        Value::Array(a) => a
+            .iter()
+            .map(|v| {
+                v.as_str().map(str::to_string).ok_or_else(|| {
+                    Error::Ipc("same_revision_episode_uuids must be an array of strings".into())
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        _ => {
+            return Err(Error::Ipc(
+                "same_revision_episode_uuids must be an array of strings".to_string(),
+            ))
+        }
+    };
+    let opts = episode::EpisodeOpts {
+        supersede: if supersede {
+            episode::SupersedePolicy::ReviseChunk { keep }
+        } else {
+            episode::SupersedePolicy::None
+        },
+        // Issue #707: never defaulted from `source_file` — omitted means none (FR-001, FR-010).
+        doc_id: optional_doc_id_param(&p["doc_id"])?,
+    };
+    let result = episode::add_episode_with_opts(
         Arc::clone(&state),
         &chunk_id,
         &chunk_text,
@@ -945,22 +1129,26 @@ async fn handle_knowledge_process_chunk(
         source_type,
         None,
         &attributes,
+        opts,
     )
     .await?;
 
     let mut response = json!({
         "success": true,
         "chunk_id": chunk_id,
+        "superseded_episode_uuids": result.superseded_episode_uuids,
         "source_file": source_file,
         "episode_uuid": result.episode_uuid,
         "nodes_extracted": result.nodes_extracted,
         "edges_extracted": result.edges_extracted,
         "edges_dropped_unresolvable": result.edges_dropped_unresolvable,
+        "edges_dropped_self_loop": result.edges_dropped_self_loop,
         "dropped_edges": result.dropped_edges,
         "edges_reclassified_unclassified": result.edges_reclassified_unclassified,
         "entities_reclassified_unclassified": result.entities_reclassified_unclassified,
         "entities_dropped_malformed": result.entities_dropped_malformed,
         "edges_dropped_malformed": result.edges_dropped_malformed,
+        "dedup_paths": result.dedup_paths,
         "duration_seconds": start.elapsed().as_secs_f64(),
     });
 
@@ -990,18 +1178,85 @@ async fn handle_knowledge_process_chunk(
 
 // ── Search handlers — no lock (hot read path, never blocked by writes) ────────
 
+/// `knowledge_resolve_entity` (issue #615, FR-005/FR-006): resolves one entity by
+/// `(group_id, name[, kind])`. With `kind` it is an exact, indexed lookup that never reports
+/// ambiguity across kinds. Without one it spans **all** kinds (D2's read rule) and fails with
+/// `Error::AmbiguousEntity` listing each candidate's kind and uuid when more than one kind
+/// matches — never a silent pick. A `Merged` tombstone is followed to its canonical, as in
+/// `knowledge_assert_relationship`. Returns `{"found": false, "node": null}` on no match.
+async fn handle_resolve_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let name = p["name"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| Error::Ipc("name is required".to_string()))?
+        .to_string();
+    let group_id = p["group_id"]
+        .as_str()
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
+    let kind = optional_kind_param(&p["kind"])?;
+
+    let db = load_db(&state)?;
+    let _guard = state.write_lock.read().await;
+    let resolved = tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        assert::resolve_entity_by_name(
+            &conn,
+            &group_id,
+            &name,
+            assert::KindScope::for_read(kind.as_deref()),
+        )
+    })
+    .await??;
+    drop(_guard);
+
+    Ok(match resolved {
+        assert::Resolved::Existing(e) => json!({ "found": true, "node": *e }),
+        assert::Resolved::NotFound => json!({ "found": false, "node": Value::Null }),
+    })
+}
+
+/// Parses an optional `kind` param (issue #615): absent/null ⇒ `None`; otherwise validated and
+/// normalised (FR-012). A non-string value is a validation error, not "omitted".
+fn optional_kind_param(v: &Value) -> Result<Option<String>, Error> {
+    if v.is_null() {
+        return Ok(None);
+    }
+    crate::types::normalize_kind(Some(v.as_str().unwrap_or(""))).map(Some)
+}
+
+/// Parses an optional `min_similarity` param (issue #629): absent/null ⇒ `None` (no floor);
+/// a number is clamped to 0.0–1.0, as `min_score` is for `search_passages`; any other type is a
+/// validation error. Unlike `min_score` there is deliberately no default — unset means no floor.
+fn optional_min_similarity_param(v: &Value) -> Result<Option<f64>, Error> {
+    if v.is_null() {
+        return Ok(None);
+    }
+    v.as_f64()
+        .map(|x| Some(x.clamp(0.0, 1.0)))
+        .ok_or_else(|| Error::Ipc("min_similarity must be a number".to_string()))
+}
+
 async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let query = p["query"].as_str().unwrap_or("").to_string();
     let group_ids = extract_optional_group_ids_preserve_empty(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
+    // Optional kind filter (issue #615): omitted ⇒ all kinds (D2's read rule). Multi-row, so
+    // there is nothing to be ambiguous about — every candidate is returned with its own `kind`.
+    let kind = optional_kind_param(&p["kind"])?;
+    // Optional similarity floor (issue #629), parsed once and reused by the retry below.
+    let min_similarity = optional_min_similarity_param(&p["min_similarity"])?;
 
-    let result = search::hybrid_entity_search(
+    let result = search::hybrid_entity_search_scored(
         load_db(&state)?,
         Arc::clone(&state.embedder),
         &query,
         group_ids.clone(),
         limit,
+        kind.clone(),
+        min_similarity,
     )
     .await;
 
@@ -1010,12 +1265,14 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
         Err(e) if is_missing_index_error(&e) => {
             if !state.indices_built.load(Ordering::Acquire) {
                 build_indices_once(&state).await?;
-                search::hybrid_entity_search(
+                search::hybrid_entity_search_scored(
                     load_db(&state)?,
                     Arc::clone(&state.embedder),
                     &query,
                     group_ids,
                     limit,
+                    kind,
+                    min_similarity,
                 )
                 .await
                 .map_err(|e2| {
@@ -1036,18 +1293,128 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     Ok(json!({"nodes": entities, "count": count}))
 }
 
+// ── Belief-time reads (issue #705, ADR-0705) ──────────────────────────────────
+
+/// Over-fetch factor applied to a capped relationship read when a belief filter is active, so
+/// post-filtering still tends to fill `num_results`. Fewer results than requested remain possible.
+const BELIEF_OVERFETCH: usize = 3;
+
+/// The opt-in belief parameters of a relationship read (FR-009). `believed_only` filters out
+/// edges the graph did not believe at `as_of`; either parameter attaches a `belief` annotation to
+/// every returned edge. `as_of` alone implies the filter; `believed_only: false` with an `as_of`
+/// annotates without filtering.
+struct BeliefQuery {
+    filter: bool,
+    as_of_us: i64,
+}
+
+fn parse_belief_query(p: &Value) -> Result<Option<BeliefQuery>, Error> {
+    let believed_only = match &p["believed_only"] {
+        Value::Null => None,
+        Value::Bool(b) => Some(*b),
+        _ => return Err(Error::Ipc("believed_only must be a boolean".to_string())),
+    };
+    let as_of_us = match &p["as_of"] {
+        Value::Null => None,
+        Value::String(s) => {
+            let odt = crate::db::parse_timestamp_str(s).ok_or_else(|| {
+                Error::Ipc(format!(
+                    "as_of '{s}' is not a valid RFC-3339 or 'YYYY-MM-DD HH:MM:SS' timestamp"
+                ))
+            })?;
+            Some((odt.unix_timestamp_nanos() / 1_000) as i64)
+        }
+        _ => return Err(Error::Ipc("as_of must be a timestamp string".to_string())),
+    };
+    if believed_only.is_none() && as_of_us.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(BeliefQuery {
+        filter: believed_only.unwrap_or(true),
+        as_of_us: as_of_us.unwrap_or_else(|| chrono::Utc::now().timestamp_micros()),
+    }))
+}
+
+/// Evaluates belief for `edges` and returns them as JSON with a `belief` annotation, dropping the
+/// unbelieved ones when the query filters. Batched uuid-keyed lookups, so the group scoping of
+/// the read that produced `edges` carries over.
+fn apply_belief<T: serde::Serialize>(
+    conn: &crate::db::Conn<'_>,
+    edges: Vec<T>,
+    uuid_of: impl Fn(&T) -> &str,
+    q: &BeliefQuery,
+) -> Result<Vec<Value>, Error> {
+    let uuids: Vec<String> = edges.iter().map(|e| uuid_of(e).to_string()).collect();
+    let rows = conn.get_edge_belief_rows(&uuids)?;
+    let mut ep_uuids: Vec<String> = rows
+        .values()
+        .flat_map(|r| r.episodes.iter().cloned())
+        .collect();
+    ep_uuids.sort();
+    ep_uuids.dedup();
+    let episodes = conn.get_episode_supersession(&ep_uuids)?;
+    // Document supersession records (issue #707), fetched only when some producing episode was
+    // superseded by a document, so reads without one issue no extra query.
+    let mut doc_keys: Vec<(String, String)> = episodes
+        .values()
+        .filter(|e| e.kind.as_deref() == Some("document"))
+        .filter_map(|e| Some((e.group_id.clone(), e.doc_id.clone()?)))
+        .collect();
+    doc_keys.sort();
+    doc_keys.dedup();
+    let docs = conn.get_doc_supersessions(&doc_keys)?;
+    let mut out = Vec::with_capacity(edges.len());
+    for edge in edges {
+        let uuid = uuid_of(&edge).to_string();
+        let row = rows
+            .get(&uuid)
+            .cloned()
+            .unwrap_or_else(|| crate::belief::EdgeBeliefRow {
+                uuid,
+                ..Default::default()
+            });
+        let state = crate::belief::evaluate(&row, &episodes, q.as_of_us);
+        if q.filter && !state.is_believed() {
+            continue;
+        }
+        let mut v = serde_json::to_value(&edge).unwrap_or(Value::Null);
+        let in_force = crate::belief::in_force(&row, &episodes, &docs, q.as_of_us);
+        let supersession = crate::belief::supersession_info(&row, &episodes, &docs);
+        v["belief"] = serde_json::to_value(crate::belief::BeliefAnnotation::new(
+            &row,
+            state,
+            in_force,
+            supersession,
+        ))
+        .unwrap_or(Value::Null);
+        out.push(v);
+    }
+    Ok(out)
+}
+
 async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let query = p["query"].as_str().unwrap_or("").to_string();
     let group_ids = extract_optional_group_ids_preserve_empty(&p["group_ids"]);
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
+    let min_similarity = optional_min_similarity_param(&p["min_similarity"])?;
+    let belief = parse_belief_query(p)?;
+    let requested = limit;
+    // Belief filtering happens after fusion (the FTS/vector candidate pools know nothing about
+    // supersession), so over-fetch when it is on and truncate afterwards.
+    let limit = if belief.as_ref().is_some_and(|b| b.filter) {
+        limit.saturating_mul(BELIEF_OVERFETCH)
+    } else {
+        limit
+    };
 
-    let result = search::hybrid_edge_search(
+    let result = search::hybrid_edge_search_scored(
         load_db(&state)?,
         Arc::clone(&state.embedder),
         &query,
         group_ids.clone(),
         limit,
+        min_similarity,
     )
     .await;
 
@@ -1056,12 +1423,13 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
         Err(e) if is_missing_index_error(&e) => {
             if !state.indices_built.load(Ordering::Acquire) {
                 build_indices_once(&state).await?;
-                search::hybrid_edge_search(
+                search::hybrid_edge_search_scored(
                     load_db(&state)?,
                     Arc::clone(&state.embedder),
                     &query,
                     group_ids,
                     limit,
+                    min_similarity,
                 )
                 .await
                 .map_err(|e2| {
@@ -1078,6 +1446,18 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
         Err(e) => return Err(e),
     };
 
+    if let Some(q) = belief {
+        let db = load_db(&state)?;
+        let mut edges = tokio::task::spawn_blocking(move || {
+            let conn = db.connect()?;
+            apply_belief(&conn, edges, |e| e.edge.uuid.as_str(), &q)
+        })
+        .await??;
+        edges.truncate(requested);
+        let count = edges.len();
+        return Ok(json!({"edges": edges, "count": count}));
+    }
+
     let count = edges.len();
     Ok(json!({"edges": edges, "count": count}))
 }
@@ -1088,24 +1468,99 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
 // RwLockReadGuard is not 'static so it cannot move into the closure.
 
 async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
-    let p = &req.params;
-    let group_id = p["group_id"]
-        .as_str()
-        .unwrap_or(DEFAULT_GROUP_ID)
-        .to_string();
-    let last_n = p["last_n"].as_u64().unwrap_or(50) as usize;
+    use crate::read_page as rp;
 
+    let p = &req.params;
+    let last_n = p["last_n"].as_u64().unwrap_or(50) as usize;
+    let opts = rp::parse_read_opts(p, rp::EPISODE_FIELDS)?;
+    // Issue #667: `group_ids` and the legacy single-group `group_id` alias are unioned; neither
+    // given ⇒ every group (reads broad, ADR-0615 D2), not the old `liminis` default.
+    let groups = episode_group_scope(p);
+    let shape = rp::shape_hash(
+        rp::EPISODES_TAG,
+        groups.as_deref(),
+        None,
+        opts.name_prefix.as_deref(),
+    );
+    let after: Option<(i64, String)> = match opts.cursor.as_deref() {
+        None => None,
+        Some(c) => {
+            let pos = rp::decode_cursor(c, rp::EPISODES_TAG, &shape)?;
+            match (pos["created_at_us"].as_i64(), pos["uuid"].as_str()) {
+                (Some(us), Some(uuid)) => Some((us, uuid.to_string())),
+                _ => return Err(Error::Ipc("invalid cursor: malformed".to_string())),
+            }
+        }
+    };
+
+    let name_prefix = opts.name_prefix.clone();
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
-    let episodes = tokio::task::spawn_blocking(move || {
+    let mut rows = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
-        conn.retrieve_episodes(&group_id, last_n)
+        let gid_refs: Vec<&str> = groups
+            .as_deref()
+            .map(|v| v.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        let gid_slice = groups.as_deref().map(|_| gid_refs.as_slice());
+        // Fetch one extra row to learn whether another page exists.
+        conn.retrieve_episodes_page(
+            gid_slice,
+            last_n.saturating_add(1),
+            name_prefix.as_deref(),
+            after.as_ref().map(|(us, u)| (*us, u.as_str())),
+        )
     })
     .await??;
     drop(_guard);
 
-    let count = episodes.len();
-    Ok(json!({"episodes": episodes, "count": count}))
+    let next_cursor = if rows.len() > last_n {
+        rows.truncate(last_n);
+        rows.last().map(|(row, us)| {
+            rp::encode_cursor(
+                rp::EPISODES_TAG,
+                &shape,
+                json!({ "created_at_us": us, "uuid": row.uuid }),
+            )
+        })
+    } else {
+        None
+    };
+
+    let count = rows.len();
+    let episodes: Vec<Value> = rows
+        .into_iter()
+        .map(|(row, _)| {
+            let item = serde_json::to_value(row).unwrap_or(Value::Null);
+            match &opts.fields {
+                Some(fields) => rp::project(item, fields),
+                None => item,
+            }
+        })
+        .collect();
+    if opts.paged {
+        Ok(json!({"episodes": episodes, "count": count, "next_cursor": next_cursor}))
+    } else {
+        Ok(json!({"episodes": episodes, "count": count}))
+    }
+}
+
+/// Effective group scope for `knowledge_get_episodes` (issue #667): the deduplicated union of
+/// `group_ids` (array or string; an explicit `[]` collapses to "all groups" like the other
+/// `list_*` reads) and the legacy `group_id` alias (an empty string counts as absent).
+/// `None` means every group.
+fn episode_group_scope(p: &Value) -> Option<Vec<String>> {
+    let mut out = extract_optional_group_ids(&p["group_ids"]).unwrap_or_default();
+    if let Some(g) = p["group_id"].as_str().filter(|s| !s.is_empty()) {
+        out.push(g.to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|g| seen.insert(g.clone()));
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
@@ -1160,6 +1615,7 @@ async fn handle_get_nodes_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
 
 async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let group_ids = extract_optional_group_ids_preserve_empty(&req.params["group_ids"]);
+    let belief = parse_belief_query(&req.params)?;
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
@@ -1168,7 +1624,14 @@ async fn handle_get_edges_by_group(req: &IpcRequest, state: Arc<AppState>) -> Re
         let gid_refs: Option<Vec<&str>> = group_ids
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
-        conn.get_edges_by_group_ids(gid_refs.as_deref())
+        let edges = conn.get_edges_by_group_ids(gid_refs.as_deref())?;
+        match &belief {
+            Some(q) => apply_belief(&conn, edges, |e| e.uuid.as_str(), q),
+            None => Ok(edges
+                .into_iter()
+                .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+                .collect()),
+        }
     })
     .await??;
     drop(_guard);
@@ -1186,19 +1649,147 @@ async fn handle_get_edges_by_uuids(req: &IpcRequest, state: Arc<AppState>) -> Re
                 .collect()
         })
         .unwrap_or_default();
+    let belief = parse_belief_query(&req.params)?;
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let edges = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
         let uuid_refs: Vec<&str> = uuids.iter().map(String::as_str).collect();
-        conn.get_edges_by_uuids(&uuid_refs)
+        let edges = conn.get_edges_by_uuids(&uuid_refs)?;
+        match &belief {
+            Some(q) => apply_belief(&conn, edges, |e| e.uuid.as_str(), q),
+            None => Ok(edges
+                .into_iter()
+                .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+                .collect()),
+        }
     })
     .await??;
     drop(_guard);
 
     let count = edges.len();
     Ok(json!({"edges": edges, "count": count}))
+}
+
+/// A required, non-empty string parameter.
+fn required_uuid_param(p: &Value, key: &str) -> Result<String, Error> {
+    match &p[key] {
+        Value::String(s) if !s.is_empty() => Ok(s.clone()),
+        Value::Null => Err(Error::Ipc(format!("{key} is required"))),
+        _ => Err(Error::Ipc(format!("{key} must be a non-empty string"))),
+    }
+}
+
+/// `knowledge_get_correction_changes` (issue #706, ADR-0706): the facts a superseded episode
+/// supported that its replacement does not, and the reverse. Read-only: no write lock, no WAL.
+async fn handle_get_correction_changes(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let episode_uuid = required_uuid_param(&req.params, "episode_uuid")?;
+
+    let db = load_db(&state)?;
+    let _guard = state.write_lock.read().await;
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, Error> {
+        use crate::correction_reads as cr;
+        let conn = db.connect()?;
+        let ep = conn
+            .get_episode_rows(std::slice::from_ref(&episode_uuid))?
+            .remove(&episode_uuid)
+            .ok_or_else(|| Error::Ipc(format!("episode '{episode_uuid}' not found")))?;
+        if ep.superseded_at_us.is_none() {
+            return Ok(cr::changes_not_superseded(&ep));
+        }
+        let pool = conn.get_episode_rows_by_name(&ep.group_id, &ep.name)?;
+        let units = cr::revision_unit_uuids(&ep, &pool);
+        let old = conn.get_edges_produced_by_episodes(&ep.group_id, &[episode_uuid])?;
+        let new = conn.get_edges_produced_by_episodes(&ep.group_id, &units)?;
+        let (removed, added) = cr::diff_facts(old, new);
+        // A removed fact can still be supported by a live episode outside the replacement.
+        let removed_uuids: Vec<String> = removed.iter().map(|e| e.uuid.clone()).collect();
+        let rows = conn.get_edge_belief_rows(&removed_uuids)?;
+        let producer_uuids: Vec<String> = rows
+            .values()
+            .flat_map(|r| r.episodes.iter().cloned())
+            .collect();
+        let producers = conn.get_episode_supersession(&producer_uuids)?;
+        let still_believed: std::collections::HashSet<String> = rows
+            .iter()
+            .filter(|(_, r)| {
+                crate::belief::belief_interval(r, &producers) == crate::belief::BeliefInterval::Open
+            })
+            .map(|(u, _)| u.clone())
+            .collect();
+        Ok(cr::changes_superseded(
+            &ep,
+            &units,
+            &removed,
+            &added,
+            &still_believed,
+        ))
+    })
+    .await??;
+    drop(_guard);
+    Ok(result)
+}
+
+/// `knowledge_get_affected_work` (issue #706, ADR-0706): for an edge no longer believed, the
+/// episodes ingested inside its belief interval that mention either endpoint entity. Candidates
+/// by entity overlap, not dependents. Read-only: no write lock, no WAL.
+async fn handle_get_affected_work(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let edge_uuid = required_uuid_param(&req.params, "edge_uuid")?;
+
+    let db = load_db(&state)?;
+    let _guard = state.write_lock.read().await;
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, Error> {
+        use crate::belief::{belief_interval, BeliefInterval};
+        use crate::correction_reads as cr;
+        let conn = db.connect()?;
+        let edge = conn
+            .get_relates_to_by_uuids(std::slice::from_ref(&edge_uuid))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Ipc(format!("edge '{edge_uuid}' not found")))?;
+        let row = conn
+            .get_edge_belief_rows(std::slice::from_ref(&edge_uuid))?
+            .remove(&edge_uuid)
+            .ok_or_else(|| Error::Ipc(format!("edge '{edge_uuid}' not found")))?;
+        let producers = conn.get_episode_supersession(&row.episodes)?;
+        let interval = belief_interval(&row, &producers);
+        let candidates = match interval {
+            BeliefInterval::Closed { t1_us, t2_us, .. } => {
+                let endpoints: Vec<String> = [&edge.source_node_uuid, &edge.target_node_uuid]
+                    .into_iter()
+                    .filter(|u| !u.is_empty())
+                    .cloned()
+                    .collect();
+                let mentioning = conn.get_mentioning_episodes(&edge.group_id, &endpoints)?;
+                // The correction that closed the interval is not work done under the old belief,
+                // and a split revision's earlier units are ingested before its final unit (T2):
+                // exclude every unit of the revision that superseded each producer.
+                let mut excluded = row.episodes.clone();
+                for producer in conn.get_episode_rows(&row.episodes)?.values() {
+                    if producer.superseded_by.is_some() {
+                        let pool =
+                            conn.get_episode_rows_by_name(&producer.group_id, &producer.name)?;
+                        excluded.extend(cr::revision_unit_uuids(producer, &pool));
+                    }
+                }
+                cr::filter_window(mentioning, t1_us, t2_us, &excluded)
+            }
+            _ => Vec::new(),
+        };
+        Ok(cr::affected_work_response(
+            &edge.uuid,
+            &edge.group_id,
+            &interval,
+            &candidates,
+        ))
+    })
+    .await??;
+    drop(_guard);
+    Ok(result)
 }
 
 async fn handle_query_cypher(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
@@ -1323,35 +1914,97 @@ async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     }
     let num_results = num_results_raw as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
+    // Optional kind filter (issue #615): omitted ⇒ all kinds.
+    let kind = optional_kind_param(&p["kind"])?;
+    // Paging / projection / prefix filter (issue #667).
+    use crate::read_page as rp;
+    let opts = rp::parse_read_opts(p, rp::ENTITY_FIELDS)?;
+    let shape = rp::shape_hash(
+        rp::ENTITIES_TAG,
+        group_ids.as_deref(),
+        kind.as_deref(),
+        opts.name_prefix
+            .as_deref()
+            .map(str::to_lowercase)
+            .as_deref(),
+    );
+    let after_uuid: Option<String> = match opts.cursor.as_deref() {
+        None => None,
+        Some(c) => {
+            let pos = rp::decode_cursor(c, rp::ENTITIES_TAG, &shape)?;
+            match pos["uuid"].as_str() {
+                Some(u) => Some(u.to_string()),
+                None => return Err(Error::Ipc("invalid cursor: malformed".to_string())),
+            }
+        }
+    };
+    // The enrichment pass only feeds these two fields; skip it when they are projected away.
+    let needs_enrichment = opts.fields.as_ref().is_none_or(|f| {
+        f.iter()
+            .any(|n| n == "episode_uuids" || n == "source_descriptions")
+    });
 
+    let name_prefix = opts.name_prefix.clone();
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
-    let nodes = tokio::task::spawn_blocking(move || {
+    let (nodes, has_more) = tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
         let gid_refs: Vec<&str> = group_ids
             .as_deref()
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
         let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
-        let mut nodes = conn.list_entities(gid_slice, num_results)?;
-        let uuid_owned: Vec<String> = nodes.iter().map(|n| n.uuid.clone()).collect();
-        let uuid_refs: Vec<&str> = uuid_owned.iter().map(String::as_str).collect();
-        let mut ep_info = conn
-            .get_episode_info_for_entities(&uuid_refs, gid_slice)
-            .unwrap_or_default();
-        for node in &mut nodes {
-            if let Some((ep_uuids, src_descs)) = ep_info.remove(&node.uuid) {
-                node.episode_uuids = ep_uuids;
-                node.source_descriptions = src_descs;
+        // Fetch one extra row to learn whether another page exists.
+        let mut nodes = conn.list_entities_page(
+            gid_slice,
+            num_results.saturating_add(1),
+            kind.as_deref(),
+            name_prefix.as_deref(),
+            after_uuid.as_deref(),
+        )?;
+        let has_more = nodes.len() > num_results;
+        nodes.truncate(num_results);
+        if needs_enrichment {
+            let uuid_owned: Vec<String> = nodes.iter().map(|n| n.uuid.clone()).collect();
+            let uuid_refs: Vec<&str> = uuid_owned.iter().map(String::as_str).collect();
+            let mut ep_info = conn
+                .get_episode_info_for_entities(&uuid_refs, gid_slice)
+                .unwrap_or_default();
+            for node in &mut nodes {
+                if let Some((ep_uuids, src_descs)) = ep_info.remove(&node.uuid) {
+                    node.episode_uuids = ep_uuids;
+                    node.source_descriptions = src_descs;
+                }
             }
         }
-        Ok::<_, crate::error::Error>(nodes)
+        Ok::<_, crate::error::Error>((nodes, has_more))
     })
     .await??;
     drop(_guard);
 
+    let next_cursor = if has_more {
+        nodes
+            .last()
+            .map(|n| rp::encode_cursor(rp::ENTITIES_TAG, &shape, json!({ "uuid": n.uuid })))
+    } else {
+        None
+    };
     let count = nodes.len();
-    Ok(json!({ "nodes": nodes, "count": count }))
+    let nodes: Vec<Value> = nodes
+        .into_iter()
+        .map(|n| {
+            let item = serde_json::to_value(n).unwrap_or(Value::Null);
+            match &opts.fields {
+                Some(fields) => rp::project(item, fields),
+                None => item,
+            }
+        })
+        .collect();
+    if opts.paged {
+        Ok(json!({ "nodes": nodes, "count": count, "next_cursor": next_cursor }))
+    } else {
+        Ok(json!({ "nodes": nodes, "count": count }))
+    }
 }
 
 async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
@@ -1362,6 +2015,12 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     }
     let num_results = num_results_raw as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
+    let belief = parse_belief_query(p)?;
+    let fetch = if belief.as_ref().is_some_and(|b| b.filter) {
+        num_results.saturating_mul(BELIEF_OVERFETCH)
+    } else {
+        num_results
+    };
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
@@ -1372,7 +2031,7 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
         let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
-        let mut facts = conn.list_relationships(gid_slice, num_results)?;
+        let mut facts = conn.list_relationships(gid_slice, fetch)?;
         let entity_uuids_owned = edge_endpoint_uuids(&facts);
         let entity_uuid_refs: Vec<&str> = entity_uuids_owned.iter().map(String::as_str).collect();
         let ep_info = conn
@@ -1381,7 +2040,17 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
         for edge in &mut facts {
             enrich_edge_from_entity_ep_info(edge, &ep_info);
         }
-        Ok::<_, crate::error::Error>(facts)
+        match &belief {
+            Some(q) => {
+                let mut v = apply_belief(&conn, facts, |e| e.uuid.as_str(), q)?;
+                v.truncate(num_results);
+                Ok::<_, crate::error::Error>(v)
+            }
+            None => Ok(facts
+                .into_iter()
+                .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+                .collect()),
+        }
     })
     .await??;
     drop(_guard);
@@ -1402,6 +2071,12 @@ async fn handle_get_entity_neighbors(
         .to_string();
     let num_results = p["num_results"].as_u64().unwrap_or(50) as usize;
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
+    let belief = parse_belief_query(p)?;
+    let fetch = if belief.as_ref().is_some_and(|b| b.filter) {
+        num_results.saturating_mul(BELIEF_OVERFETCH)
+    } else {
+        num_results
+    };
 
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
@@ -1413,7 +2088,7 @@ async fn handle_get_entity_neighbors(
             .unwrap_or_default();
         let gid_slice = group_ids.as_deref().map(|_| gid_refs.as_slice());
         let (mut edges, neighbor_uuids) =
-            conn.get_entity_neighbors(&entity_uuid, gid_slice, num_results)?;
+            conn.get_entity_neighbors(&entity_uuid, gid_slice, fetch)?;
         let mut nodes = conn.get_entities_by_uuids(&neighbor_uuids)?;
         // Collect all entity UUIDs: neighbor nodes + edge endpoints (for edge enrichment).
         let mut all_entity_uuids_owned = edge_endpoint_uuids(&edges);
@@ -1438,6 +2113,17 @@ async fn handle_get_entity_neighbors(
         for edge in &mut edges {
             enrich_edge_from_entity_ep_info(edge, &ep_info);
         }
+        let edges: Vec<Value> = match &belief {
+            Some(q) => {
+                let mut v = apply_belief(&conn, edges, |e| e.uuid.as_str(), q)?;
+                v.truncate(num_results);
+                v
+            }
+            None => edges
+                .into_iter()
+                .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+                .collect(),
+        };
         Ok::<_, crate::error::Error>((edges, nodes))
     })
     .await??;
@@ -1588,6 +2274,256 @@ async fn handle_delete_chunk_episode(
     }))
 }
 
+/// `knowledge_mark_chunk_removed` (issue #705, FR-004): records that a chunk no longer exists in
+/// its document. Supersedes the chunk's live episodes in each of `group_ids` with reason
+/// `chunk_removed` — the graph stops believing what they asserted, the episodes and the edges
+/// they produced stay readable as history, and `valid_at` / `invalid_at` are never written.
+/// Additive sibling of [`handle_delete_chunk_episode`], whose explicit-deletion contract is
+/// unchanged. `group_ids` is required, as there (issue #406). Idempotent: already-superseded
+/// episodes are not touched, so a repeat reports `superseded_count: 0`.
+async fn handle_mark_chunk_removed(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let chunk_id = p["chunk_id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("chunk_id is required and must be non-empty".to_string()))?
+        .to_string();
+    let group_ids_owned = extract_required_group_ids(&p["group_ids"])?;
+
+    let db = load_db(&state)?;
+    let state_c = Arc::clone(&state);
+    let _guard = state.write_lock.write().await;
+    let (superseded_uuids, superseded_at) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<String>, String), Error> {
+            let conn = db.connect()?;
+            let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
+            let superseded_at = crate::db::ingested_at_or_now("");
+            let (uuids, grouped) =
+                conn.supersede_chunk_episodes(&chunk_id, &gid_refs, &superseded_at)?;
+            // Per-group attribution, as in `handle_delete_chunk_episode` (issue #402/#385).
+            for (group_id, mutations) in grouped {
+                let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+                wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+            }
+            Ok((uuids, superseded_at))
+        })
+        .await??;
+    drop(_guard);
+
+    Ok(json!({
+        "success": true,
+        "chunk_id": req.params["chunk_id"],
+        "superseded_count": superseded_uuids.len(),
+        "superseded_uuids": superseded_uuids,
+        "superseded_at": superseded_at,
+    }))
+}
+
+/// Optional `doc_id` param (issue #707): absent or null means none; otherwise a non-empty string.
+fn optional_doc_id_param(v: &Value) -> Result<Option<String>, Error> {
+    match v {
+        Value::Null => Ok(None),
+        Value::String(s) if !s.is_empty() => Ok(Some(s.clone())),
+        _ => Err(Error::Ipc(
+            "doc_id must be a non-empty string when provided".to_string(),
+        )),
+    }
+}
+
+fn required_string_param(p: &Value, key: &str) -> Result<String, Error> {
+    p[key]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| Error::Ipc(format!("{key} is required and must be a non-empty string")))
+}
+
+/// `knowledge_supersede_document` (issue #707): records that document `superseding_doc_id`
+/// replaced `superseded_doc_id` in one group, effective at `effective_at`. Always explicit — the
+/// graph never infers supersession.
+///
+/// Writes one durable `DocSupersession` record and supersedes the old document's live episodes
+/// (kind `document`, reason `document_superseded`) at the service-clock recording instant, or at
+/// `effective_at` when that is later: the old decision stays believed and in force until it takes
+/// effect. For a retroactive `effective_at` belief ends at the recording instant while the record's
+/// effective date ends "in force" earlier, so as-of reads between the two see the fact believed
+/// but no longer in force. `valid_at` / `invalid_at` are never written.
+///
+/// Every check (same document, unknown document, conflict, cycle) completes under the write lock
+/// before any mutation, so a rejection leaves the graph and the WAL untouched. Recording the
+/// identical relation again is a no-op reporting `already_recorded: true`. The record and the
+/// episode statements are flushed as one chunk (`wal_flush_chunk`, all-or-nothing), so the WAL
+/// never holds half a supersession.
+async fn handle_supersede_document(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let group_id = extract_required_group_id(&p["group_id"])?;
+    let superseding = required_string_param(p, "superseding_doc_id")?;
+    let superseded = required_string_param(p, "superseded_doc_id")?;
+    let effective_raw = required_string_param(p, "effective_at")?;
+    let effective_us = chrono::DateTime::parse_from_rfc3339(&effective_raw)
+        .map_err(|_| {
+            Error::Ipc(format!(
+                "effective_at must be an RFC 3339 timestamp with a timezone offset: {effective_raw}"
+            ))
+        })?
+        .timestamp_micros();
+    if superseding == superseded {
+        return Err(Error::Ipc(
+            "a document cannot supersede itself (superseding_doc_id == superseded_doc_id)"
+                .to_string(),
+        ));
+    }
+    let effective_at = crate::belief::format_us(effective_us);
+
+    let db = load_db(&state)?;
+    let state_c = Arc::clone(&state);
+    let _guard = state.write_lock.write().await;
+    let response = tokio::task::spawn_blocking(move || -> Result<Value, Error> {
+        let conn = db.connect()?;
+        for (label, doc) in [
+            ("superseding_doc_id", &superseding),
+            ("superseded_doc_id", &superseded),
+        ] {
+            if !conn.doc_is_known(&group_id, doc)? {
+                return Err(Error::Ipc(format!(
+                    "{label} '{doc}' is unknown in group '{group_id}' (no episode carries that doc_id)"
+                )));
+            }
+        }
+
+        let existing =
+            conn.get_doc_supersessions(&[(group_id.clone(), superseded.clone())])?;
+        if let Some(rec) = existing.get(&(group_id.clone(), superseded.clone())) {
+            if rec.superseding_doc_id == superseding && rec.effective_at_us == effective_us {
+                return Ok(json!({
+                    "success": true,
+                    "already_recorded": true,
+                    "group_id": group_id,
+                    "superseding_doc_id": superseding,
+                    "superseded_doc_id": superseded,
+                    "effective_at": effective_at,
+                    "recorded_at": crate::belief::format_us(rec.recorded_at_us),
+                    "superseded_count": 0,
+                    "superseded_uuids": Vec::<String>::new(),
+                }));
+            }
+            return Err(Error::Ipc(format!(
+                "document '{superseded}' is already superseded by '{}' effective {}; \
+                 a different superseding document or effective date is not recorded",
+                rec.superseding_doc_id,
+                crate::belief::format_us(rec.effective_at_us)
+            )));
+        }
+
+        // Cycle check, Rust-side (ADR-0012): the new link is superseded -> superseding, so it
+        // closes a loop iff the superseding document's own chain of superseders reaches
+        // `superseded`.
+        let mut visited = std::collections::HashSet::new();
+        let mut cur = superseding.clone();
+        while visited.insert(cur.clone()) {
+            let next = conn.get_doc_supersessions(&[(group_id.clone(), cur.clone())])?;
+            let Some(rec) = next.get(&(group_id.clone(), cur.clone())) else {
+                break;
+            };
+            if rec.superseding_doc_id == superseded {
+                return Err(Error::Ipc(format!(
+                    "recording that '{superseding}' supersedes '{superseded}' would create a cycle"
+                )));
+            }
+            cur = rec.superseding_doc_id.clone();
+        }
+
+        let recorded_at = crate::db::ingested_at_or_now("");
+        let recorded_us = crate::db::parse_timestamp_str(&recorded_at)
+            .map(|d| (d.unix_timestamp_nanos() / 1_000) as i64)
+            .ok_or_else(|| Error::Ipc("service clock produced an unparseable instant".into()))?;
+        let superseded_at = if effective_us > recorded_us {
+            effective_at.clone()
+        } else {
+            recorded_at.clone()
+        };
+        let record = crate::belief::DocSupersessionRecord {
+            group_id: group_id.clone(),
+            superseded_doc_id: superseded.clone(),
+            superseding_doc_id: superseding.clone(),
+            effective_at_us: effective_us,
+            recorded_at_us: recorded_us,
+        };
+        conn.create_doc_supersession(&record, &effective_at, &recorded_at)?;
+        let uuids = conn.live_episode_uuids_for_doc(&group_id, &superseded)?;
+        conn.supersede_episodes_for_document(&uuids, &superseded_at, &superseding)?;
+        let seq = wal_exec::wal_flush_chunk(&state_c, &group_id, conn.drain_mutations());
+        wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+        Ok(json!({
+            "success": true,
+            "already_recorded": false,
+            "group_id": group_id,
+            "superseding_doc_id": superseding,
+            "superseded_doc_id": superseded,
+            "effective_at": effective_at,
+            "recorded_at": crate::belief::format_us(recorded_us),
+            "superseded_count": uuids.len(),
+            "superseded_uuids": uuids,
+        }))
+    })
+    .await??;
+    drop(_guard);
+    Ok(response)
+}
+
+/// `knowledge_reload_ontology` (issue #627): discards one group's cached ontology resolution and
+/// re-resolves it, so an edited per-group `.lcg/ontology/<group>.yaml` takes effect without a
+/// service restart. Admin-scoped.
+///
+/// Takes the service write lock exactly like `handle_delete_by_group`, so no Phase C commit or
+/// read-lock pass observes a half-swapped cache entry. It waits behind any read-lock holder
+/// (reprocess, canonicalize, backfill passes). Lock-free extraction phases are not blocked: an
+/// episode extracted under the old ontology may still commit afterwards (see `episode.rs`).
+///
+/// A group whose reload would reinterpret existing entities (identity-set guard, ADR-0616) is
+/// refused as a restart would refuse it — reported in `identity_refusal` of a *successful*
+/// response, with `add_episode` then failing `-32003`. If the identity check cannot run, the
+/// reload changes nothing and fails `DbUnavailable`.
+async fn handle_reload_ontology(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let group_id = extract_required_group_id(&req.params["group_id"])?;
+    // Fail before invalidating anything when the DB is gone (the identity check needs it).
+    load_db(&state)?;
+
+    let _guard = state.write_lock.write().await;
+    let state_c = Arc::clone(&state);
+    let gid = group_id.clone();
+    let outcome = tokio::task::spawn_blocking(move || state_c.reload_group_ontology(&gid)).await?;
+    drop(_guard);
+
+    if let Some(reason) = &outcome.identity_unchecked {
+        return Err(Error::DbUnavailable(format!(
+            "cannot verify identity-bearing set for group {group_id:?}: {reason}; \
+             ontology reload not applied"
+        )));
+    }
+
+    let identity_refusal = outcome.identity_refusal.as_ref().map(|r| {
+        json!({
+            "message": r.message(&group_id),
+            "label": r.label,
+            "count": r.count,
+            "adding": r.adding,
+        })
+    });
+    Ok(json!({
+        "group_id": group_id,
+        "previous_hash": outcome.previous_hash,
+        "new_hash": outcome.new_hash,
+        "changed": outcome.changed(),
+        "drift": {
+            "group_id": group_id,
+            "drifted": outcome.drift.drifted,
+            "drift_summary": outcome.drift.drift_summary,
+        },
+        "identity_refusal": identity_refusal,
+    }))
+}
+
 /// `knowledge_delete_by_group` (issue #361): removes all `Entity`, `Episodic`, and same-group
 /// `RelatesToNode_` data for one or more `group_ids`, leaving no orphans and never deleting a
 /// `RelatesToNode_` owned by a group outside the call (FR-008). See `crate::group_purge` for
@@ -1623,6 +2559,21 @@ async fn handle_delete_by_group(req: &IpcRequest, state: Arc<AppState>) -> Resul
         let gid_refs: Vec<&str> = group_ids.iter().map(String::as_str).collect();
         let ts = chrono::Utc::now().to_rfc3339();
         let (counts, grouped) = group_purge::purge_groups(&conn, &gid_refs, &ts, dry_run)?;
+        // A purged group holds no entities any more, so its identity-bearing-set stamp
+        // (issue #616) describes nothing and would only be left behind as an orphan sidecar.
+        // A later flag change on the emptied group is then checked against the empty set and
+        // accepted, which is correct: there is nothing to reinterpret. The cached ontology entry
+        // is dropped too, so the group's next ingest re-resolves and rewrites the stamp;
+        // otherwise new identity-kind entities would exist with no stamp and the next restart
+        // would refuse the group though its ontology never changed.
+        if !dry_run {
+            if let Some(root) = state_c.workspace_root.as_deref() {
+                for gid in &gid_refs {
+                    crate::identity_stamp::remove_stamp(root, gid);
+                    state_c.invalidate_group_ontology(gid);
+                }
+            }
+        }
         // Each purged group's own deletions, and any forced-rebind write on a foreign "owning"
         // group's RelatesToNode_ rows (ADR-0361), are already bucketed by the group whose data
         // they actually modify (issue #385 / ADR-0385) — flush each bucket to its own group's
@@ -1734,6 +2685,18 @@ async fn handle_clear_all(req: &IpcRequest, state: Arc<AppState>) -> Result<Valu
         Ok(())
     })
     .await??;
+
+    // The identity-bearing-set stamps (issue #616) describe entities that no longer exist once
+    // the WAL is gone too. With `preserve_wal` they are kept: a rebuild restores each entity's
+    // own kind, and the stamp is what still records which set those kinds were created under.
+    if !preserve_wal {
+        if let Some(root) = state.workspace_root.as_deref() {
+            crate::identity_stamp::remove_all_stamps(root);
+            // Drop every cached ontology entry so each group re-resolves (and re-stamps) on its
+            // next ingest instead of serving a stale `Resolved` entry with no stamp on disk.
+            state.invalidate_all_group_ontologies();
+        }
+    }
 
     // Phase 2: create fresh DB and initialize schema
     let db_path_reinit = db_path.clone();
@@ -1922,6 +2885,69 @@ fn count_jsonl_files_in_dir(dir: &std::path::Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+// FR-014: callers must add knowledge_strip_wal_embeddings to service_protocol.py in the
+// liminis-app repo.
+//
+// Filesystem-only (no DB access): degraded-mode exempt, see `exempt_in_degraded` above.
+async fn handle_strip_wal_embeddings(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+) -> Result<Value, Error> {
+    let p = &req.params;
+    let group_id = p["group_id"].as_str().map(|s| s.to_string());
+    let dry_run = p["dry_run"].as_bool().unwrap_or(false);
+
+    let wal_root = state
+        .wal_root
+        .clone()
+        .ok_or_else(|| Error::Ipc("No WAL directory configured (set LCG_WAL_DIR)".to_string()))?;
+
+    // Write lock held for the whole operation (FR-008): excludes a concurrent
+    // knowledge_process_chunk or a second concurrent invocation of this same tool from
+    // interleaving with the in-place rewrite, matching knowledge_dump_wal/
+    // knowledge_prepare_checkpoint's existing whole-WAL-directory locking discipline.
+    let _guard = state.write_lock.write().await;
+
+    let report = tokio::task::spawn_blocking(move || {
+        crate::wal_strip::strip_wal_embeddings(&wal_root, group_id.as_deref(), dry_run)
+    })
+    .await
+    .map_err(|e| {
+        Error::Ipc(format!(
+            "knowledge_strip_wal_embeddings: spawn_blocking panicked: {e}"
+        ))
+    })??;
+
+    // Resync any live WalWriter's cached bytes_in_current_file before releasing write_lock:
+    // a rewrite may have shrunk a group's currently-open file out from under its in-memory
+    // counter (review finding on PR #578), which nothing above excludes it from since the
+    // strip processes every .jsonl file, including one a writer in this process has open.
+    // Cheap even when nothing changed (bounded by live-writer count, not WAL size), so it's
+    // unconditional here rather than gated on files_rewritten > 0.
+    if !report.dry_run {
+        if let Ok(mut writers) = state.wal_writers.lock() {
+            for writer in writers.values_mut() {
+                writer.resync_current_file_bytes();
+            }
+        }
+    }
+
+    drop(_guard);
+
+    Ok(json!({
+        "success": true,
+        "dry_run": report.dry_run,
+        "files_processed": report.files_processed,
+        "files_rewritten": report.files_rewritten,
+        "files_unchanged": report.files_unchanged,
+        "bytes_before": report.bytes_before,
+        "bytes_after": report.bytes_after,
+        "records_rewritten": report.records_rewritten,
+        "unparseable_lines": report.unparseable_lines,
+        "errors": report.errors,
+    }))
 }
 
 async fn handle_prepare_checkpoint(state: Arc<AppState>) -> Result<Value, Error> {
@@ -2504,6 +3530,12 @@ async fn handle_rebuild_from_wal(
                     // below ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
                     // Persists the outcome to SchemaState too, not just the in-process flag.
                     crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+                    // `ingested_at` (issue #673): replay of a legacy WAL leaves it NULL. Backfill from the
+                    // WAL's own creating-line timestamps, falling back to `created_at` (FR-007).
+                    crate::schema::backfill_ingested_at_and_record_status(
+                        &conn,
+                        std::slice::from_ref(&wal_dir_c),
+                    );
                     // Snapshot this rebuild's own backfill outcome now, synchronously and on the
                     // same thread, before build_indices_and_constraints (or anything else) can
                     // touch the same in-process flag (issue #491 FR-002).
@@ -2984,6 +4016,12 @@ async fn handle_rebuild_from_wal(
                     // below ever builds entity_lookup_key_idx over the column (issue #221 FR-006).
                     // Persists the outcome to SchemaState too, not just the in-process flag.
                     crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+                    // `ingested_at` (issue #673): replay of a legacy WAL leaves it NULL. Backfill from the
+                    // WAL's own creating-line timestamps, falling back to `created_at` (FR-007).
+                    crate::schema::backfill_ingested_at_and_record_status(
+                        &conn,
+                        std::slice::from_ref(&wal_dir_c),
+                    );
                     // Snapshot this rebuild's own backfill outcome now, synchronously and on the
                     // same thread, before build_indices_and_constraints (or anything else) can
                     // touch the same in-process flag (issue #491 FR-002).
@@ -3233,6 +4271,17 @@ async fn clear_group_for_rebuild(
     let generation = crate::wal_generation::read_generation(wal_dir);
     tokio::task::spawn_blocking(move || -> Result<(), Error> {
         let conn = db.connect()?;
+        // Mark the indexes unbuilt *before* dropping them, so that if the purge below fails the
+        // flag still matches reality and search auto-heal (`build_indices_once`) recreates them
+        // (the trailing store only runs on success).
+        state_c.indices_built.store(false, Ordering::Release);
+        // Drop the FTS indexes *before* purging (issue #649, ADR-0649). The purge deletes rows
+        // inside an explicit transaction; deleting through a live FTS index built by an older
+        // lbug fails on any non-ASCII term (`FTS index ... is inconsistent`) and the statement-
+        // level backstop cannot repair inside a transaction. The replay's own drop (and
+        // `indices_built = false` below) still recreate them afterwards; the drop is idempotent
+        // and its entries are never flushed (this conn's `executed_mutations` is discarded).
+        crate::schema::drop_fts_indexes(&conn);
         let ts = chrono::Utc::now().to_rfc3339();
         let (_, mut grouped) = group_purge::purge_groups(&conn, &[gid.as_str()], &ts, false)?;
         // gid's own bucket (its own deletions, and any forced-rebind write that happened to
@@ -3390,6 +4439,13 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
             })
             .unwrap_or_default(),
         merge_all_by_name: p["merge_all_by_name"].as_bool().unwrap_or(false),
+        kind: if p["kind"].is_null() {
+            None
+        } else {
+            Some(crate::types::normalize_kind(Some(
+                p["kind"].as_str().unwrap_or(""),
+            ))?)
+        },
         group_id: p["group_id"]
             .as_str()
             .unwrap_or(DEFAULT_GROUP_ID)
@@ -3456,15 +4512,25 @@ async fn handle_merge_entities(req: &IpcRequest, state: Arc<AppState>) -> Result
 /// Parses one `EndpointSpec` from its JSON wire shape: `{"uuid": "..."}` for an endpoint
 /// already known to live in the edge's own `group_id`, or `{"source_group_id": "...",
 /// "endpoint_name": "..."}` for a foreign endpoint to be resolved (issue #369 FR-002).
-fn parse_endpoint_spec(v: &Value) -> Result<EndpointSpec, Error> {
+///
+/// `kind` is the top-level `source_kind`/`target_kind` (issue #615, D4): an optional kind
+/// assertion that applies to foreign endpoints only — supplying one for a `{uuid}` endpoint is a
+/// validation error (a uuid already identifies one entity, so a kind would assert nothing).
+fn parse_endpoint_spec(v: &Value, kind: Option<String>) -> Result<EndpointSpec, Error> {
     let uuid = v["uuid"].as_str();
     let source_group_id = v["source_group_id"].as_str();
     let endpoint_name = v["endpoint_name"].as_str();
     match (uuid, source_group_id, endpoint_name) {
+        (Some(_), None, None) if kind.is_some() => Err(Error::Ipc(
+            "source_kind/target_kind apply only to a foreign endpoint \
+             ({source_group_id, endpoint_name}), not a {uuid} endpoint"
+                .to_string(),
+        )),
         (Some(uuid), None, None) => Ok(EndpointSpec::Uuid(uuid.to_string())),
         (None, Some(source_group_id), Some(endpoint_name)) => Ok(EndpointSpec::Foreign {
             source_group_id: source_group_id.to_string(),
             endpoint_name: endpoint_name.to_string(),
+            kind,
         }),
         // A request mixing 'uuid' with 'source_group_id'/'endpoint_name' is rejected rather
         // than silently preferring 'uuid' and discarding the foreign pointer fields — an
@@ -3495,8 +4561,14 @@ async fn handle_add_cross_group_edge(
     let fact = p["fact"].as_str().unwrap_or("").to_string();
     let valid_at = p["valid_at"].as_str().map(|s| s.to_string());
     let relation_type = p["relation_type"].as_str().map(|s| s.to_string());
-    let source = parse_endpoint_spec(&p["source"])?;
-    let target = parse_endpoint_spec(&p["target"])?;
+    let opt_kind = |key: &str| -> Result<Option<String>, Error> {
+        if p[key].is_null() {
+            return Ok(None);
+        }
+        crate::types::normalize_kind(Some(p[key].as_str().unwrap_or(""))).map(Some)
+    };
+    let source = parse_endpoint_spec(&p["source"], opt_kind("source_kind")?)?;
+    let target = parse_endpoint_spec(&p["target"], opt_kind("target_kind")?)?;
 
     let fact_embedding = state.embedder.embed(&fact).await?;
 
@@ -3611,14 +4683,29 @@ fn resolve_and_update_entity(
     gid_wal: &str,
     entity_uuid: Option<&str>,
     name: &str,
+    kind: &str,
+    kind_explicit: bool,
     labels: &[String],
     summary: &str,
     attributes: &str,
 ) -> Result<Option<String>, Error> {
     let resolved = if let Some(eu) = entity_uuid {
-        Some(assert::resolve_entity_by_uuid(conn, group_id, eu)?)
+        let e = assert::resolve_entity_by_uuid(conn, group_id, eu)?;
+        // Kind is immutable (issue #615): an explicitly supplied `kind` must match the entity
+        // `entity_uuid` resolved. An omitted kind on a uuid-addressed call asserts nothing.
+        if kind_explicit && e.kind != kind {
+            return Err(Error::Ipc(format!(
+                "entity_uuid '{eu}' is kind '{}', but kind '{kind}' was supplied: an entity's \
+                 kind is immutable — assert a new entity of kind '{kind}' instead",
+                e.kind
+            )));
+        }
+        Some(e)
     } else {
-        match assert::resolve_entity_by_name(conn, group_id, name)? {
+        // Writes are kind-scoped (issue #615 D2): a name-only assert means the default kind and
+        // can never reach into another kind's node.
+        match assert::resolve_entity_by_name(conn, group_id, name, assert::KindScope::Exact(kind))?
+        {
             assert::Resolved::Existing(existing) => Some(*existing),
             assert::Resolved::NotFound => None,
         }
@@ -3642,12 +4729,14 @@ fn resolve_and_update_entity(
     // On the post-embed pass, this check runs against whatever exists *now*, so a collision that
     // only came into being during the dropped-lock window (issue #543 edge case) is still caught.
     if existing.name.trim().to_lowercase() != name.trim().to_lowercase()
-        && conn.count_active_entities_by_name_ci(name, group_id)? > 0
+        && conn.count_active_entities_by_name_ci(name, group_id, Some(&existing.kind))? > 0
     {
+        // Kind-scoped (issue #615): a rename collides only with an active entity of the same
+        // kind; an equal name under another kind is a different identity.
         return Err(Error::Ipc(format!(
-            "cannot rename entity '{}' to '{name}': an active entity in group \
+            "cannot rename entity '{}' to '{name}': an active entity of kind '{}' in group \
              '{group_id}' already uses that name",
-            existing.uuid
+            existing.uuid, existing.kind
         )));
     }
     conn.update_entity_core(&existing, name, labels, summary, attributes)?;
@@ -3700,6 +4789,15 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
         .unwrap_or_else(|| vec!["Entity".to_string()]);
     let summary = p["summary"].as_str().unwrap_or("").to_string();
     let attributes = attributes_param_to_string(&p["attributes"]);
+    // `kind` (issue #615, FR-003/FR-012): omitted ⇒ the default kind `Entity` — a write only ever
+    // acts on one kind (D2). A supplied kind is validated and, if absent from `labels`, appended
+    // by `labels_with_kind` (after `Entity`) on both the create and the update path.
+    let kind_explicit = !p["kind"].is_null();
+    let kind = crate::types::normalize_kind(p["kind"].as_str().or(if kind_explicit {
+        Some("")
+    } else {
+        None
+    }))?;
 
     let db = load_db(&state)?;
     let gid_wal = group_id.clone();
@@ -3714,6 +4812,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
         let gid1 = gid_wal.clone();
         let group_id1 = group_id.clone();
         let name1 = name.clone();
+        let kind1 = kind.clone();
         let labels1 = labels.clone();
         let summary1 = summary.clone();
         let attributes1 = attributes.clone();
@@ -3727,6 +4826,8 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                 &gid1,
                 entity_uuid1.as_deref(),
                 &name1,
+                &kind1,
+                kind_explicit,
                 &labels1,
                 &summary1,
                 &attributes1,
@@ -3773,6 +4874,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
             let gid2 = gid_wal.clone();
             let group_id2 = group_id.clone();
             let name2 = name.clone();
+            let kind2 = kind.clone();
             let labels2 = labels.clone();
             let summary2 = summary.clone();
             let attributes2 = attributes.clone();
@@ -3785,6 +4887,8 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                     &gid2,
                     None,
                     &name2,
+                    &kind2,
+                    kind_explicit,
                     &labels2,
                     &summary2,
                     &attributes2,
@@ -3796,10 +4900,12 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
                 }
                 let ts = chrono::Utc::now().to_rfc3339();
                 let row = EntityRow {
+                    ingested_at: String::new(),
                     uuid: Uuid::new_v4().to_string(),
                     name: name2,
                     group_id: group_id2,
                     labels: labels2,
+                    kind: kind2,
                     created_at: ts,
                     name_embedding,
                     summary: summary2,
@@ -3894,6 +5000,18 @@ fn resolve_and_update_edge(
     else {
         return Ok((None, source_uuid, target_uuid));
     };
+    // FR-010 (issue #705, resolves #405): an assertion never overwrites an extracted edge's
+    // content. An edge with a producing episode records what that episode said; rewriting its
+    // `fact` in place would make the episode no longer back it. Treat it as "no match" so the
+    // caller creates a separate, `assertion`-warranted edge. Today the extracted `"A → B"` naming
+    // keeps this from matching by accident; this makes it structural.
+    if conn
+        .get_edge_belief_rows(std::slice::from_ref(&uuid))?
+        .get(&uuid)
+        .is_some_and(|r| !r.episodes.is_empty())
+    {
+        return Ok((None, source_uuid, target_uuid));
+    }
     conn.update_relates_to_core(&uuid, fact, valid_at, relation_type, attributes)?;
     let seq = wal_exec::wal_flush_ungrouped(state, gid_wal, conn.drain_mutations());
     wal_exec::advance_wal_position(conn, gid_wal, seq, state);
@@ -3958,6 +5076,18 @@ async fn handle_assert_relationship(
         Some(raw) => Some(db::validate_and_normalize_valid_at(raw)?),
         None => None,
     };
+    // Endpoint kinds (issue #615, FR-004). Endpoints are always *existing* entities here
+    // (`assert_relationship` never creates one), so this is D2's read rule: a supplied kind
+    // resolves exactly; an omitted kind spans all kinds and a multi-kind match is an ambiguity
+    // error, never a silent pick.
+    let parse_kind = |key: &str| -> Result<Option<String>, Error> {
+        if p[key].is_null() {
+            return Ok(None);
+        }
+        crate::types::normalize_kind(Some(p[key].as_str().unwrap_or(""))).map(Some)
+    };
+    let source_kind = parse_kind("source_kind")?;
+    let target_kind = parse_kind("target_kind")?;
 
     let db = load_db(&state)?;
     let gid_wal = group_id.clone();
@@ -3986,6 +5116,8 @@ async fn handle_assert_relationship(
         let group_id1 = group_id.clone();
         let source_name1 = source_name.clone();
         let target_name1 = target_name.clone();
+        let source_kind1 = source_kind.clone();
+        let target_kind1 = target_kind.clone();
         let predicate1 = predicate.clone();
         let fact1 = fact.clone();
         let valid_at1 = valid_at.clone();
@@ -3994,8 +5126,13 @@ async fn handle_assert_relationship(
         tokio::task::spawn_blocking(move || {
             let conn = db1.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
 
-            let resolve_or_err = |n: &str| -> Result<EntityRow, Error> {
-                match assert::resolve_entity_by_name(&conn, &group_id1, n)? {
+            let resolve_or_err = |n: &str, kind: &Option<String>| -> Result<EntityRow, Error> {
+                match assert::resolve_entity_by_name(
+                    &conn,
+                    &group_id1,
+                    n,
+                    assert::KindScope::for_read(kind.as_deref()),
+                )? {
                     assert::Resolved::Existing(existing) => Ok(*existing),
                     assert::Resolved::NotFound => Err(Error::Ipc(format!(
                         "'{n}' does not exist in group '{group_id1}' — \
@@ -4005,8 +5142,8 @@ async fn handle_assert_relationship(
                     ))),
                 }
             };
-            let source = resolve_or_err(&source_name1)?;
-            let target = resolve_or_err(&target_name1)?;
+            let source = resolve_or_err(&source_name1, &source_kind1)?;
+            let target = resolve_or_err(&target_name1, &target_kind1)?;
 
             let (existing, source_uuid, target_uuid) = resolve_and_update_edge(
                 &conn,
@@ -4103,6 +5240,7 @@ async fn handle_assert_relationship(
                 }
                 let ts = chrono::Utc::now().to_rfc3339();
                 let edge = RelatesToEdge {
+                    ingested_at: String::new(),
                     uuid: Uuid::new_v4().to_string(),
                     name: predicate2,
                     source_node_uuid: source_uuid2,
@@ -4117,6 +5255,9 @@ async fn handle_assert_relationship(
                     relation_type: relation_type2,
                     episode_uuids: vec![],
                     source_descriptions: vec![],
+                    episodes: vec![],
+                    warrant: Some("assertion".to_string()),
+                    valid_at_source: None,
                 };
                 conn.insert_relates_to_edge(&edge)?;
                 let seq = wal_exec::wal_flush_ungrouped(&state2, &gid2, conn.drain_mutations());
@@ -4217,6 +5358,21 @@ async fn handle_reprocess_entity_types(
                           least one declared entity type to constrain classification",
             }));
         }
+        // `extract: false` types (#637) stay in the declared set above (so an asserted entity of
+        // such a type is not an off-ontology candidate) but are never offered as a target.
+        if resolved_ontology
+            .as_deref()
+            .unwrap()
+            .extractable_entity_types()
+            .next()
+            .is_none()
+        {
+            return Ok(json!({
+                "success": false,
+                "error": "every declared entity type is `extract: false`; reprocessing has no \
+                          extractable type to classify into",
+            }));
+        }
         Some(names)
     } else {
         None
@@ -4252,11 +5408,17 @@ async fn handle_reprocess_entity_types(
     }
 
     // Build the allowed_types list for constrained scopes (sorted for deterministic prompts).
-    let allowed_types: Option<Vec<String>> = ontology_type_names.map(|tn| {
-        let mut v: Vec<String> = tn.into_iter().collect();
-        v.sort_unstable();
-        v
-    });
+    // The menu is the extractable subset only (#637): reprocessing never retypes into an
+    // `extract: false` type.
+    let allowed_types: Option<Vec<String>> = if ontology_type_names.is_some() {
+        resolved_ontology.as_deref().map(|o| {
+            let mut v: Vec<String> = o.extractable_entity_type_names().into_iter().collect();
+            v.sort_unstable();
+            v
+        })
+    } else {
+        None
+    };
 
     // Phase B (no lock): classify entities via LLM in batches.
     let pairs: Vec<(String, String)> = entities
@@ -4313,13 +5475,34 @@ async fn handle_reprocess_entity_types(
     let mut plan: Vec<serde_json::Value> = Vec::new();
     let mut updates: Vec<(String, String)> = Vec::new();
     let mut unchanged_count: usize = 0;
+    // Entities whose fresh classification disagrees with their identity-bearing kind (issue #616,
+    // D3). Report-only: kind is immutable, so a merge-or-split decision is left to a person.
+    let mut kind_disagreements: Vec<serde_json::Value> = Vec::new();
     for (entity, assigned_type) in entities.iter().zip(types.iter()) {
         if assigned_type.is_empty() {
             // LLM returned no assignment (FR-010): leave unchanged.
             unchanged_count += 1;
             continue;
         }
-        let current_leaf = corrections::find_leaf_type(&entity.labels, &ancestor_map);
+        // Defensive (#637): the menu excludes `extract: false` types, but never trust the
+        // classifier's output to honour it.
+        if resolved_ontology
+            .as_deref()
+            .is_some_and(|o| o.is_extract_false_entity(assigned_type))
+        {
+            unchanged_count += 1;
+            continue;
+        }
+        if entity.kind != crate::types::DEFAULT_KIND && assigned_type.as_str() != entity.kind {
+            kind_disagreements.push(json!({
+                "entity_id": entity.uuid,
+                "entity_name": entity.name,
+                "kind": entity.kind,
+                "classified_type": assigned_type,
+            }));
+        }
+        let current_leaf =
+            corrections::find_leaf_type_with_kind(&entity.labels, &ancestor_map, &entity.kind);
         if current_leaf.as_deref() == Some(assigned_type.as_str()) {
             // Already has the correct type (FR-009): no write needed.
             unchanged_count += 1;
@@ -4338,6 +5521,7 @@ async fn handle_reprocess_entity_types(
         return Ok(json!({
             "would_reclassify_count": plan.len(),
             "plan": plan,
+            "kind_disagreements": kind_disagreements,
         }));
     }
 
@@ -4442,6 +5626,37 @@ async fn handle_reprocess_entity_types(
                             })
                     })
                     .collect();
+                // The kind label is immutable (issue #616): beside a reclassification it makes
+                // two independent leaves. Set it (and its ancestors) aside and judge the rest.
+                let without_kind: Vec<String>;
+                let leaf_types: Vec<&str> =
+                    if leaf_types.len() != 1 && entity.kind != crate::types::DEFAULT_KIND {
+                        without_kind = corrections::labels_without_kind(
+                            &entity.labels,
+                            &ancestor_map_d,
+                            &entity.kind,
+                        );
+                        let specific: Vec<&str> = without_kind
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|l| *l != "Entity")
+                            .collect();
+                        specific
+                            .iter()
+                            .copied()
+                            .filter(|&t| {
+                                ancestor_map_d.contains_key(t)
+                                    && !specific.iter().any(|&other| {
+                                        t != other
+                                            && ancestor_map_d.get(other).is_some_and(|anc| {
+                                                anc.iter().any(|a| a.as_str() == t)
+                                            })
+                                    })
+                            })
+                            .collect()
+                    } else {
+                        leaf_types
+                    };
                 if leaf_types.len() != 1 {
                     continue;
                 }
@@ -4451,6 +5666,8 @@ async fn handle_reprocess_entity_types(
                     expected.extend(ancestors.iter().cloned());
                 }
                 expected.push(entity_type.to_string());
+                // Preserve the entity's kind (issue #615, FR-001) — it may not be an ontology type.
+                let expected = db::labels_with_kind(&expected, &entity.kind);
                 let mut current = entity.labels.clone();
                 current.sort_unstable();
                 let mut exp_sorted = expected.clone();
@@ -4474,6 +5691,7 @@ async fn handle_reprocess_entity_types(
         "reclassified_count": reclassified,
         "unchanged_count": unchanged_count,
         "restamped_count": restamped,
+        "kind_disagreements": kind_disagreements,
         "group_id": group_id,
     }))
 }
@@ -4687,7 +5905,7 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
     let embedding_dim = state.embedder.dim();
 
     let result = match strategy.as_str() {
-        "drop_lbug_wal" => recover_drop_lbug_wal(&db_path, embedding_dim).await,
+        "drop_lbug_wal" => recover_drop_lbug_wal(&db_path, embedding_dim, wal_root.clone()).await,
         "rebuild_from_workspace_wal" => {
             let wal_root =
                 wal_root.ok_or_else(|| Error::Ipc("No WAL dir configured".to_string()))?;
@@ -4711,7 +5929,9 @@ async fn handle_knowledge_recover(req: &IpcRequest, state: Arc<AppState>) -> Res
             )
             .await
         }
-        "restore_from_backup" => recover_restore_from_backup(&db_path, embedding_dim).await,
+        "restore_from_backup" => {
+            recover_restore_from_backup(&db_path, embedding_dim, wal_root.clone()).await
+        }
         other => return Err(Error::Ipc(format!("Unknown strategy: {other}"))),
     };
 
@@ -4883,6 +6103,7 @@ async fn handle_knowledge_recover_full(
 async fn recover_drop_lbug_wal(
     db_path: &str,
     embedding_dim: usize,
+    wal_root: Option<std::path::PathBuf>,
 ) -> Result<RecoverOutcome, Error> {
     let db_path = db_path.to_string();
     tokio::task::spawn_blocking(move || -> Result<RecoverOutcome, Error> {
@@ -4929,6 +6150,11 @@ async fn recover_drop_lbug_wal(
             // query error here shouldn't fail an otherwise-successful recovery. Persists the
             // outcome to SchemaState too, not just the in-process flag.
             crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+            // `ingested_at` (issue #673): a checkpoint that predates the column is backfilled
+            // from the WAL tree's creating-line timestamps; a no-op once marked complete.
+            if let Some(root) = wal_root.as_deref() {
+                crate::schema::ensure_ingested_at_backfill(&conn, &crate::schema::group_wal_dirs(root));
+            }
             // This strategy's whole premise is reopening an already-indexed checkpoint (see
             // the file-existence guard above), which holds for HNSW/FTS on any checkpoint that
             // has ever completed a normal startup — but a checkpoint predating issue #221 has
@@ -5057,6 +6283,11 @@ async fn recover_rebuild_from_workspace_wal(
             // column (issue #221 FR-006). Persists the outcome to SchemaState too, not just the
             // in-process flag.
             crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+            // `ingested_at` (issue #673): every replayed legacy row has it NULL.
+            crate::schema::backfill_ingested_at_and_record_status(
+                &conn,
+                &crate::schema::group_wal_dirs(&wal_root),
+            );
             conn.build_indices_and_constraints()?;
         }
         Ok(RecoverOutcome {
@@ -5070,6 +6301,7 @@ async fn recover_rebuild_from_workspace_wal(
 async fn recover_restore_from_backup(
     db_path: &str,
     embedding_dim: usize,
+    wal_root: Option<std::path::PathBuf>,
 ) -> Result<RecoverOutcome, Error> {
     let db_path = db_path.to_string();
     tokio::task::spawn_blocking(move || -> Result<RecoverOutcome, Error> {
@@ -5120,6 +6352,11 @@ async fn recover_restore_from_backup(
             // transient backfill query error here shouldn't fail an otherwise-successful
             // recovery. Persists the outcome to SchemaState too, not just the in-process flag.
             crate::schema::backfill_entity_lookup_keys_and_record_status(&conn);
+            // `ingested_at` (issue #673): a backup that predates the column is backfilled from
+            // the WAL tree's creating-line timestamps; a no-op once marked complete.
+            if let Some(root) = wal_root.as_deref() {
+                crate::schema::ensure_ingested_at_backfill(&conn, &crate::schema::group_wal_dirs(root));
+            }
             // See recover_drop_lbug_wal's identical comment: a backup predating issue #221
             // never had entity_lookup_key_idx built, and this call is idempotent.
             if let Err(e) = conn.create_entity_lookup_key_index() {
@@ -5363,6 +6600,24 @@ fn enrich_edge_from_entity_ep_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn min_similarity_param_parsing() {
+        assert_eq!(optional_min_similarity_param(&Value::Null).unwrap(), None);
+        assert_eq!(
+            optional_min_similarity_param(&json!(0.5)).unwrap(),
+            Some(0.5)
+        );
+        assert_eq!(optional_min_similarity_param(&json!(0)).unwrap(), Some(0.0));
+        assert_eq!(optional_min_similarity_param(&json!(7)).unwrap(), Some(1.0));
+        assert_eq!(
+            optional_min_similarity_param(&json!(-3.5)).unwrap(),
+            Some(0.0)
+        );
+        for bad in [json!("0.5"), json!(true), json!({}), json!([0.5])] {
+            assert!(optional_min_similarity_param(&bad).is_err(), "{bad}");
+        }
+    }
 
     // #407: a single test function, not five, because `cargo test` runs tests within a binary
     // in parallel by default — separate tests toggling the same process-global env var would

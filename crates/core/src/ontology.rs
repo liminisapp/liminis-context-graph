@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use crate::error::Error;
 
@@ -32,6 +31,13 @@ struct EntityTypeRaw {
     description: Option<String>,
     #[serde(default)]
     parent: Option<String>,
+    /// Identity-bearing flag (#616): extracted entities of this type get it as their `kind`.
+    #[serde(default)]
+    identity: bool,
+    /// `extract: false` (#637): assert-only type — never offered to or accepted from the LLM
+    /// extractor. Defaults to `true`.
+    #[serde(default = "default_true")]
+    extract: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +55,13 @@ struct RelationTypeRaw {
     /// Lowercase substring keywords — if any keyword appears in the normalized name, maps here.
     #[serde(default)]
     keywords: Option<Vec<String>>,
+    /// `extract: false` (#637): assert-only relation type. Defaults to `true`.
+    #[serde(default = "default_true")]
+    extract: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // ── Runtime types ─────────────────────────────────────────────────────────────
@@ -73,6 +86,14 @@ pub struct EntityTypeDef {
     pub name: String,
     pub description: Option<String>,
     pub parent: Option<String>,
+    /// Identity-bearing (#616): an entity extracted with this as its primary type is created
+    /// with `kind` = this type's name, so it stays distinct from same-named entities of other
+    /// kinds. Never inherited through `parent`. Defaults to `false`.
+    pub identity: bool,
+    /// Extractable (#637): when `false` the type is assert-only — omitted from the extraction
+    /// prompts and never accepted from the extractor, but otherwise fully declared (assert,
+    /// identity, ancestry, drift). Not inherited through `parent`. Defaults to `true`.
+    pub extract: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +106,8 @@ pub struct RelationTypeDef {
     pub aliases: Vec<String>,
     /// Lowercase substring keywords for fuzzy name matching.
     pub keywords: Vec<String>,
+    /// Extractable (#637): `false` makes the relation type assert-only. Defaults to `true`.
+    pub extract: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +136,69 @@ impl Ontology {
 
     pub fn relation_type_names(&self) -> HashSet<String> {
         self.relation_types.iter().map(|r| r.name.clone()).collect()
+    }
+
+    /// Entity types offered to the LLM extractor (#637): every declared type with
+    /// `extract != false`. `entity_type_names()` remains the full declared set.
+    pub fn extractable_entity_types(&self) -> impl Iterator<Item = &EntityTypeDef> {
+        self.entity_types.iter().filter(|e| e.extract)
+    }
+
+    /// Relation types offered to the LLM extractor (#637).
+    pub fn extractable_relation_types(&self) -> impl Iterator<Item = &RelationTypeDef> {
+        self.relation_types.iter().filter(|r| r.extract)
+    }
+
+    pub fn extractable_entity_type_names(&self) -> HashSet<String> {
+        self.extractable_entity_types()
+            .map(|e| e.name.clone())
+            .collect()
+    }
+
+    pub fn extractable_relation_type_names(&self) -> HashSet<String> {
+        self.extractable_relation_types()
+            .map(|r| r.name.clone())
+            .collect()
+    }
+
+    /// True when `label` (normalized first, since open-mode labels are raw) names a declared
+    /// entity type flagged `extract: false` (#637).
+    pub fn is_extract_false_entity(&self, label: &str) -> bool {
+        let normalized = normalize_entity_type(label);
+        self.entity_types
+            .iter()
+            .any(|e| !e.extract && e.name == normalized)
+    }
+
+    /// True when `label` (normalized first) names a declared relation type flagged
+    /// `extract: false` (#637).
+    pub fn is_extract_false_relation(&self, label: &str) -> bool {
+        let normalized = normalize_relation_type(label);
+        self.relation_types
+            .iter()
+            .any(|r| !r.extract && r.name == normalized)
+    }
+
+    /// The set of normalized identity-bearing entity type names (#616). Empty for any
+    /// ontology that carries no `identity: true` flag.
+    pub fn identity_set(&self) -> std::collections::BTreeSet<String> {
+        self.entity_types
+            .iter()
+            .filter(|e| e.identity)
+            .map(|e| e.name.clone())
+            .collect()
+    }
+
+    /// Returns the kind an extracted entity of primary type `entity_type` receives, if that
+    /// type is identity-bearing (#616, FR-002/FR-003). The lookup is by the normalized
+    /// (PascalCase) name of the primary type only: parents never confer identity and no label
+    /// or declaration order is consulted. `None` means the default kind applies.
+    pub fn identity_kind(&self, entity_type: &str) -> Option<String> {
+        let normalized = normalize_entity_type(entity_type);
+        self.entity_types
+            .iter()
+            .find(|e| e.identity && e.extract && e.name == normalized)
+            .map(|e| e.name.clone())
     }
 }
 
@@ -400,10 +486,20 @@ fn build_ontology(file: OntologyFile, mode_override: Option<OntologyMode>) -> Op
                 );
             }
             let parent = raw.parent.map(|p| normalize_entity_type(&p));
+            // `Merged` is a reserved kind (it would masquerade as a merge tombstone, #615) and
+            // `Unclassified` is the strict-mode catch-all: neither may carry identity.
+            let identity = raw.identity && !matches!(normalized.as_str(), "Merged" | "Unclassified");
+            if raw.identity && !identity {
+                eprintln!(
+                    "liminis-context-graph: ontology: entity type '{normalized}' is reserved and cannot be identity-bearing — ignoring `identity: true`"
+                );
+            }
             Some(EntityTypeDef {
                 name: normalized,
                 description: raw.description,
                 parent,
+                identity,
+                extract: raw.extract,
             })
         })
         .collect();
@@ -451,6 +547,7 @@ fn build_ontology(file: OntologyFile, mode_override: Option<OntologyMode>) -> Op
                 target_type,
                 aliases,
                 keywords,
+                extract: raw.extract,
             })
         })
         .collect();
@@ -640,25 +737,46 @@ pub fn content_hash(ontology: Option<&Ontology>) -> String {
         .collect();
     parent_entries.sort_unstable();
 
-    let canonical = if parent_entries.is_empty() {
-        format!(
-            "mode:{}\nentity_types:{}\nrelation_types:{}",
-            o.mode,
-            entity_entries.join("\0\0"),
-            relation_entries.join("\0\0"),
-        )
-    } else {
-        format!(
-            "mode:{}\nentity_types:{}\nrelation_types:{}\nparent_edges:{}",
-            o.mode,
-            entity_entries.join("\0\0"),
-            relation_entries.join("\0\0"),
-            parent_entries.join("\0\0"),
-        )
-    };
+    let mut canonical = format!(
+        "mode:{}\nentity_types:{}\nrelation_types:{}",
+        o.mode,
+        entity_entries.join("\0\0"),
+        relation_entries.join("\0\0"),
+    );
+    if !parent_entries.is_empty() {
+        canonical.push_str(&format!("\nparent_edges:{}", parent_entries.join("\0\0")));
+    }
+    // Identity flags (#616) are appended only when at least one is set, so an ontology that
+    // declares none hashes byte-identically to before the flag existed.
+    let identity_entries: Vec<String> = o.identity_set().into_iter().collect();
+    if !identity_entries.is_empty() {
+        canonical.push_str(&format!("\nidentity:{}", identity_entries.join("\0\0")));
+    }
 
-    let digest = Sha256::digest(canonical.as_bytes());
-    format!("{:x}", digest)
+    // `extract: false` flags (#637) follow the same append-only-when-present rule.
+    let mut extract_false_entities: Vec<&str> = o
+        .entity_types
+        .iter()
+        .filter(|e| !e.extract)
+        .map(|e| e.name.as_str())
+        .collect();
+    extract_false_entities.sort_unstable();
+    let mut extract_false_relations: Vec<&str> = o
+        .relation_types
+        .iter()
+        .filter(|r| !r.extract)
+        .map(|r| r.name.as_str())
+        .collect();
+    extract_false_relations.sort_unstable();
+    if !extract_false_entities.is_empty() || !extract_false_relations.is_empty() {
+        canonical.push_str(&format!(
+            "\nextract_false:{}\nextract_false_relations:{}",
+            extract_false_entities.join("\0\0"),
+            extract_false_relations.join("\0\0"),
+        ));
+    }
+
+    crate::sha256_hex::sha256_hex(canonical.as_bytes())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1005,6 +1123,8 @@ relation_types:
                 name: name.to_string(),
                 description: desc.map(|s| s.to_string()),
                 parent: None,
+                identity: false,
+                extract: true,
             })
             .collect();
         let ancestor_map = compute_ancestor_map(&entity_types);
@@ -1021,6 +1141,7 @@ relation_types:
                     description: desc.map(|s| s.to_string()),
                     aliases: vec![],
                     keywords: vec![],
+                    extract: true,
                 })
                 .collect(),
         }
@@ -1238,15 +1359,166 @@ relation_types:
         let o = make_ontology(OntologyMode::Open, &[("Person", None)], &[]);
         // Manually build the expected canonical string using the pre-#173 format
         let expected_canonical = "mode:open\nentity_types:Person\0\nrelation_types:";
-        let expected_hash = {
-            let digest = sha2::Sha256::digest(expected_canonical.as_bytes());
-            format!("{:x}", digest)
-        };
+        let expected_hash = { crate::sha256_hex::sha256_hex(expected_canonical.as_bytes()) };
         assert_eq!(
             content_hash(Some(&o)),
             expected_hash,
             "flat-ontology hash must match pre-#173 canonical form"
         );
+    }
+
+    #[test]
+    fn identity_flag_parses_and_defaults_false() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: person\n    identity: true\n  - name: Technology\n",
+        );
+        let o = load_ontology(Some(dir.path())).unwrap();
+        let person = o.entity_types.iter().find(|e| e.name == "Person").unwrap();
+        let tech = o
+            .entity_types
+            .iter()
+            .find(|e| e.name == "Technology")
+            .unwrap();
+        assert!(person.identity, "identity: true must parse");
+        assert!(!tech.identity, "absent identity must default to false");
+        assert_eq!(
+            o.identity_set().into_iter().collect::<Vec<_>>(),
+            vec!["Person".to_string()]
+        );
+    }
+
+    #[test]
+    fn identity_kind_matches_normalized_primary_type_only() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Document\n    identity: true\n  - name: RFC\n    parent: Document\n  - name: Person\n    identity: true\n",
+        );
+        let o = load_ontology(Some(dir.path())).unwrap();
+        assert_eq!(o.identity_kind("person").as_deref(), Some("Person"));
+        assert_eq!(o.identity_kind("PERSON").as_deref(), Some("Person"));
+        // FR-003: a non-identity child of an identity-bearing parent stays default.
+        assert_eq!(o.identity_kind("Rfc"), None);
+        assert_eq!(o.identity_kind("Unclassified"), None);
+        assert_eq!(o.identity_kind("Undeclared"), None);
+    }
+
+    #[test]
+    fn content_hash_flagless_unchanged_and_identity_changes_hash() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(&dir, "entity_types:\n  - name: Person\n");
+        let flat = load_ontology(Some(dir.path())).unwrap();
+        let expected = {
+            crate::sha256_hex::sha256_hex(
+                "mode:open\nentity_types:Person\0\nrelation_types:".as_bytes(),
+            )
+        };
+        assert_eq!(content_hash(Some(&flat)), expected);
+
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Person\n    identity: true\n",
+        );
+        let flagged = load_ontology(Some(dir.path())).unwrap();
+        assert_ne!(content_hash(Some(&flagged)), expected);
+
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Person\n    identity: false\n",
+        );
+        let explicit_false = load_ontology(Some(dir.path())).unwrap();
+        assert_eq!(content_hash(Some(&explicit_false)), expected);
+    }
+
+    const ASSERT_ONLY_YAML: &str = "entity_types:\n  - name: Person\n  - name: Source\n    identity: true\n    extract: false\nrelation_types:\n  - name: KNOWS\n  - name: DERIVED_FROM\n    extract: false\n";
+
+    #[test]
+    fn extract_defaults_true_and_parses_false() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(&dir, ASSERT_ONLY_YAML);
+        let o = load_ontology(Some(dir.path())).unwrap();
+        let person = o.entity_types.iter().find(|e| e.name == "Person").unwrap();
+        let source = o.entity_types.iter().find(|e| e.name == "Source").unwrap();
+        assert!(person.extract);
+        assert!(!source.extract);
+        assert!(source.identity);
+        let knows = o.relation_types.iter().find(|r| r.name == "KNOWS").unwrap();
+        let derived = o
+            .relation_types
+            .iter()
+            .find(|r| r.name == "DERIVED_FROM")
+            .unwrap();
+        assert!(knows.extract);
+        assert!(!derived.extract);
+    }
+
+    #[test]
+    fn extractable_accessors_exclude_extract_false_but_declared_set_keeps_it() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(&dir, ASSERT_ONLY_YAML);
+        let o = load_ontology(Some(dir.path())).unwrap();
+        assert!(o.entity_type_names().contains("Source"));
+        assert!(o.relation_type_names().contains("DERIVED_FROM"));
+        assert_eq!(
+            o.extractable_entity_type_names(),
+            HashSet::from(["Person".to_string()])
+        );
+        assert_eq!(
+            o.extractable_relation_type_names(),
+            HashSet::from(["KNOWS".to_string()])
+        );
+        // Raw open-mode labels are normalized before comparing.
+        assert!(o.is_extract_false_entity("Source"));
+        assert!(o.is_extract_false_entity("source"));
+        assert!(o.is_extract_false_entity("SOURCE"));
+        assert!(!o.is_extract_false_entity("Person"));
+        assert!(!o.is_extract_false_entity("Unknown"));
+        assert!(o.is_extract_false_relation("derived_from"));
+        assert!(o.is_extract_false_relation("DerivedFrom"));
+        assert!(!o.is_extract_false_relation("KNOWS"));
+        // The identity set still counts the assert-only type (FR-008) …
+        assert!(o.identity_set().contains("Source"));
+        // … but the extraction path never derives its kind (FR-004).
+        assert_eq!(o.identity_kind("Source"), None);
+    }
+
+    #[test]
+    fn content_hash_extract_flag_changes_hash_only_when_false() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Person\n    identity: true\n",
+        );
+        let base = load_ontology(Some(dir.path())).unwrap();
+        let base_hash = content_hash(Some(&base));
+
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Person\n    identity: true\n    extract: true\n",
+        );
+        let explicit_true = load_ontology(Some(dir.path())).unwrap();
+        assert_eq!(content_hash(Some(&explicit_true)), base_hash);
+
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Person\n    identity: true\n    extract: false\n",
+        );
+        let flipped = load_ontology(Some(dir.path())).unwrap();
+        assert_ne!(content_hash(Some(&flipped)), base_hash);
+        // Flipping extract never changes the identity set (FR-011).
+        assert_eq!(flipped.identity_set(), base.identity_set());
+
+        // A relation flip is also visible.
+        write_ontology(&dir, "relation_types:\n  - name: KNOWS\n");
+        let r_base = load_ontology(Some(dir.path())).unwrap();
+        write_ontology(
+            &dir,
+            "relation_types:\n  - name: KNOWS\n    extract: false\n",
+        );
+        let r_flipped = load_ontology(Some(dir.path())).unwrap();
+        assert_ne!(content_hash(Some(&r_base)), content_hash(Some(&r_flipped)));
     }
 
     #[test]

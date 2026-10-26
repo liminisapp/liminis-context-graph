@@ -1,6 +1,6 @@
 # liminis-context-graph
 
-Source: https://v3rv.com/liminis-context-graph/
+Source: https://docs.liminis.app/liminis-context-graph/
 
 
 A local-first context graph engine. One Rust binary that turns a stream of text into a
@@ -10,12 +10,12 @@ HNSW vector search, and full-text search in a single embedded service, built on
 search cluster: everything runs in one process, on your machine, against files in your
 workspace.
 
-This page documents **v0.14.1**, built directly from that release tag's `docs/`
+This page documents **v0.17.0**, built directly from that release tag's `docs/`
 tree — not from `main`. Unreleased changes merged to `main` since this tag are not reflected
 here; use the version switcher in the footer to browse other published releases.
 
-Source: [github.com/verveguy/liminis-context-graph](https://github.com/verveguy/liminis-context-graph). The
-[`README`](https://github.com/verveguy/liminis-context-graph/blob/main/README.md) has a short overview
+Source: [github.com/liminisapp/liminis-context-graph](https://github.com/liminisapp/liminis-context-graph). The
+[`README`](https://github.com/liminisapp/liminis-context-graph/blob/main/README.md) has a short overview
 and a standalone quickstart; this site is the full reference.
 
 ## How it fits together
@@ -81,7 +81,7 @@ repository) is referenced from `llms.txt` but is not itself published here.
 
 # Getting Started
 
-Source: https://v3rv.com/liminis-context-graph/getting-started
+Source: https://docs.liminis.app/liminis-context-graph/getting-started
 
 
 **Multi-graph, not multi-tenant.** One workspace's `liminis-context-graph` process can hold many
@@ -97,7 +97,7 @@ and [Operations](operations.md) for how groups work in practice.
 No Rust toolchain required:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-context-graph/releases/latest/download/lcg-service-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/liminisapp/liminis-context-graph/releases/latest/download/lcg-service-installer.sh | sh
 ```
 
 Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**, and **Linux ARM64** on every tagged release.
@@ -191,7 +191,7 @@ cargo run -p lcg-service                      # run the service binary
 For consumers (e.g. Electron apps or CI pipelines) that need a pinned binary version without running cargo, use the direct tarball URL from GitHub Releases:
 
 ```sh
-curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/lcg-service-aarch64-apple-darwin.tar.xz \
+curl -L https://github.com/liminisapp/liminis-context-graph/releases/download/<TAG>/lcg-service-aarch64-apple-darwin.tar.xz \
   -o lcg-service-aarch64-apple-darwin.tar.xz
 tar -xJf lcg-service-aarch64-apple-darwin.tar.xz
 # binary is at: lcg-service-aarch64-apple-darwin/liminis-context-graph
@@ -202,7 +202,7 @@ Release artifacts are named after the `lcg-service` package (`lcg-service-<targe
 Discover the latest release tag programmatically:
 
 ```sh
-curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/latest | jq -r '.tag_name'
+curl -s https://api.github.com/repos/liminisapp/liminis-context-graph/releases/latest | jq -r '.tag_name'
 ```
 
 ## Next steps
@@ -215,7 +215,7 @@ curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/lat
 
 # Configuration
 
-Source: https://v3rv.com/liminis-context-graph/configuration
+Source: https://docs.liminis.app/liminis-context-graph/configuration
 
 
 ## CLI flags
@@ -239,7 +239,7 @@ Source: https://v3rv.com/liminis-context-graph/configuration
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `LCG_SOCKET_PATH` | No | Unix socket path the IPC daemon listens on (default `.lcg/service.sock`) |
+| `LCG_SOCKET_PATH` | No | Unix socket path the IPC daemon listens on (default `.lcg/service.sock`). On Windows it names the workspace endpoint instead: the service serves a named pipe derived from this path and writes its name to `.lcg/service.endpoint` — see [IPC & MCP Reference: Windows](ipc-mcp-reference.md#windows-named-pipe). A `\\.\pipe\…` value is used as the pipe name directly. |
 | `LCG_DB_PATH` | No | Path to the LadybugDB database file (default `.lcg/db/liminis.db`) |
 | `LCG_EMBEDDING_URL` | No | Fallback HTTP URL used when neither `--embedder-uds` nor `--embedder-http` is passed and the default UDS socket (`/tmp/liminis-inference.sock`) is absent. On Unix, if this var is also unset, the binary exits with an error. On non-Unix, defaults to `http://127.0.0.1:8765/v1/embeddings`. |
 | `LCG_EMBEDDING_MODEL` | No | Embedding model name sent in requests (default `bge-base-en-v1.5`) |
@@ -256,8 +256,8 @@ Source: https://v3rv.com/liminis-context-graph/configuration
 | `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` | No | Advisory threshold, in **characters** (not bytes), above which `knowledge_process_chunk`'s `chunk_text` is considered oversized (default `8000`). Ingestion is unaffected — no rejection, truncation, or internal splitting — but a call whose `chunk_text` exceeds this threshold gains a `warning` field in its result naming the actual character count and the recommended maximum, and emits a `chunk_text_oversized` telemetry event (see [Telemetry](telemetry.md)). Extraction quality degrades well before any context-window limit is reached, so splitting oversized input into multiple `knowledge_process_chunk` calls is the caller's responsibility. An invalid value (non-numeric, zero, or negative) logs a warning to stderr and falls back to the default. |
 | `LCG_RECORD_LLM` | No | Path to an LLM cassette (JSONL). If set, every extraction call is recorded to this file in addition to running live — see [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). Mutually exclusive with `LCG_REPLAY_LLM`. |
 | `LCG_REPLAY_LLM` | No | Path to a previously recorded LLM cassette (JSONL). If set, extraction is served entirely from the cassette — no extractor provider is resolved, no credentials are required, and no network call is ever made. Mutually exclusive with `LCG_RECORD_LLM`. See [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). |
-| `LCG_DEDUP_LLM` | No | If set, enables local dedup adapter |
-| `LCG_DEDUP_ADAPTER_URL` | No | URL for the local dedup HTTP adapter (default `http://127.0.0.1:8767`) |
+| `LCG_DEDUP_LLM` | No | Enables the **LLM-verified extraction dedup check** ([ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)). **Off by default** (opt-in). When on *and* an extraction provider is configured, every embedding-path dedup candidate that survives the identifier-mismatch veto is judged by the same extractor used for extraction (the Anthropic API, or the OpenAI-compatible `--extractor-uds` / `--extractor-http` endpoint) — one batched call per chunk (split into sequential groups of at most 16 pairs, each bounded by its own 30 s timeout). `duplicate` merges; `not duplicate`, an extractor error, a timeout or any malformed/unattributable answer inserts a separate entity (a missed merge is recoverable, a wrong merge is not) and logs a warning. Exact-name matches, veto-rejected pairs and identical-normalized-name pairs never cost a call, and WAL replay never calls the LLM. Values `0`, `false`, `off`, `no` and the empty string are off; anything else is on. If on with no extractor configured the service still starts, warns, and runs veto-only. The active mode is logged at startup (`dedup: mode=…`) and reported as `dedup_mode` (`"veto-only"` or `"llm-verified"`) by `knowledge_status`. Dedup calls report token usage with `role="dedup"`. Under `LCG_RECORD_LLM` / `LCG_REPLAY_LLM` the verdicts are recorded and served as `judge_duplicates` cassette records; a cassette without them yields "not a duplicate". |
+| `LCG_DEDUP_ADAPTER_URL` | No | **Deprecated and ignored** (retired in 0.16.3). The bespoke `{candidate, incoming}` HTTP protocol it configured was never implemented by any server shipped with lcg. If set, startup logs a deprecation warning and nothing contacts the URL. Use `LCG_DEDUP_LLM`. |
 | `LCG_WAL_DIR` | No | WAL **root** directory (default `.lcg/wal`) — holds one subdirectory per `group_id` (issue #378), e.g. `<LCG_WAL_DIR>/liminis/` for the default group. A pre-378 single-stream directory (loose `*.jsonl`/`.checkpoints/`/`.wal-bounds.json` with no `liminis/` subdirectory) is migrated into this layout automatically on first boot under the upgraded binary — see [Operations](operations.md#on-disk-layout) and [ADR-0378](adr/0378-multi-stream-wal-per-group-directory.md). |
 | `LCG_WAL_MAX_BYTES_PER_FILE` | No | Per-file byte-size rotation threshold for the WAL (default `5242880` = 5 MB); set to `0` to disable byte-size rotation and rely on event count only |
 | `LCG_WAL_MAX_EVENTS_PER_FILE` | No | Per-file event-count rotation threshold for the WAL (default `10000`); rotation fires when either this threshold or `LCG_WAL_MAX_BYTES_PER_FILE` is reached |
@@ -280,7 +280,7 @@ That's 33 variables as of this page's writing, covering every `env::var`/`lcg_en
 accepts its old `GRAPHITI_*` spelling — `GRAPHITI_SOCKET_PATH`, `GRAPHITI_DB_PATH`,
 `GRAPHITI_EMBEDDING_URL`, `GRAPHITI_EMBEDDING_MODEL`, `GRAPHITI_EMBEDDING_DIM`,
 `GRAPHITI_EMBEDDING_API_KEY`, `GRAPHITI_EXTRACTION_LLM`, `GRAPHITI_DEDUP_LLM`,
-`GRAPHITI_DEDUP_ADAPTER_URL`, and `GRAPHITI_WAL_DIR`. Using one logs `DEPRECATED: env var <old> is
+`GRAPHITI_DEDUP_ADAPTER_URL` (deprecated and ignored, like `LCG_DEDUP_ADAPTER_URL`), and `GRAPHITI_WAL_DIR`. Using one logs `DEPRECATED: env var <old> is
 deprecated; rename to <new>` at startup. They are honoured for now; prefer the `LCG_*` names.
 `OPENAI_API_KEY` is not in this list — it's a convenience fallback for `LCG_EMBEDDING_API_KEY`,
 not a legacy spelling of an LCG-specific variable, so using it triggers no deprecation warning.
@@ -337,12 +337,12 @@ Without it, the embedding-dependent IPC methods fail immediately with an embeddi
 ### macOS: Swift CoreML sidecar (default)
 
 The repository ships a Swift CoreML sidecar at
-[`native/local-inference/`](https://github.com/verveguy/liminis-context-graph/tree/main/native/local-inference)
+[`native/local-inference/`](https://github.com/liminisapp/liminis-context-graph/tree/main/native/local-inference)
 that serves OpenAI-compatible `/v1/embeddings` (BGE-base-en-v1.5) and `/v1/chat/completions`
 (Apple Foundation Models) over UDS at `/tmp/liminis-inference.sock` — fully local inference for
 embedding, and a fully local option for extraction: no API key, no network. macOS 26+ and Xcode
 command-line tools are required. See
-[`native/local-inference/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md)
+[`native/local-inference/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/README.md)
 for build and run instructions.
 
 `liminis-context-graph` discovers the sidecar's default UDS socket automatically for embedding —
@@ -358,7 +358,7 @@ backend is not recommended for extraction quality, so using it there requires th
 
 The sidecar's own `LOCAL_INFERENCE_MODE` environment variable (`embeddings` | `completions` |
 `both`, default `both`) selects which of its own two endpoints it serves — see
-[`native/local-inference/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md#selecting-a-mode)
+[`native/local-inference/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/README.md#selecting-a-mode)
 for the full table. Running `LOCAL_INFERENCE_MODE=completions` needs no CoreML model setup at
 all, since it serves only `/v1/chat/completions`. This mode selection is independent of, and does
 **not** change, the extraction-routing behavior above: Foundation-Models-backed completions are
@@ -614,7 +614,7 @@ function-calling (the bundled sidecar has no `tools`/`tool_choice` support).
 
 # Embedding Options
 
-Source: https://v3rv.com/liminis-context-graph/embedding-options
+Source: https://docs.liminis.app/liminis-context-graph/embedding-options
 
 
 **What should I run, on my platform, and what will it cost me?** This page answers that
@@ -630,7 +630,7 @@ that backend over the OpenAI-compatible `POST /v1/embeddings` contract, selected
 
 | Option | Platform(s) | Install | Setup / model cost | Dimension | Flag | Offline? | Dimension auto-probe? | Unreachable at startup | Verification |
 |---|---|---|---|---|---|---|---|---|---|
-| **Swift CoreML sidecar** | macOS 26+ | Xcode command-line tools; build from [`native/local-inference/`](https://github.com/verveguy/liminis-context-graph/tree/main/native/local-inference) | ~500 MB disk for the BGE-base-en-v1.5 CoreML model, downloaded on first setup; no per-call cost | 768 (fixed, BGE-base-en-v1.5) | `--embedder-uds` (or no flag — auto-detected at `/tmp/liminis-inference.sock`) | Yes, fully local | Yes | Fail-fast (socket-service mode) or bounded retry-and-degrade (`--mcp-stdio`) — see [Embedder sidecar](configuration.md#embedder-sidecar) | Verified — the [`swift test`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/README.md#tests) suite, and [`verify-embedding-parity.py`](https://github.com/verveguy/liminis-context-graph/blob/main/native/local-inference/verify-embedding-parity.py) (cosine parity vs. the PyTorch reference, run manually — not yet wired into CI) |
+| **Swift CoreML sidecar** | macOS 26+ | Xcode command-line tools; build from [`native/local-inference/`](https://github.com/liminisapp/liminis-context-graph/tree/main/native/local-inference) | ~500 MB disk for the BGE-base-en-v1.5 CoreML model, downloaded on first setup; no per-call cost | 768 (fixed, BGE-base-en-v1.5) | `--embedder-uds` (or no flag — auto-detected at `/tmp/liminis-inference.sock`) | Yes, fully local | Yes | Fail-fast (socket-service mode) or bounded retry-and-degrade (`--mcp-stdio`) — see [Embedder sidecar](configuration.md#embedder-sidecar) | Verified — the [`swift test`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/README.md#tests) suite, and [`verify-embedding-parity.py`](https://github.com/liminisapp/liminis-context-graph/blob/main/native/local-inference/verify-embedding-parity.py) (cosine parity vs. the PyTorch reference, run manually — not yet wired into CI) |
 | **Infinity** (Python, sentence-transformers-based) | Linux, macOS, Windows | Install and run [Infinity](https://github.com/michaelfeil/infinity) yourself; no download bundled with this repo | Depends on the model you load; Infinity itself is free/open-source, no per-call cost | Varies (model-chosen) | `--embedder-http` | Yes, fully local | Yes | Fail-fast or retry-and-degrade, same as above | Not independently verified in this repo — relies on the generic OpenAI-compatible contract. Listed as an unauthenticated-compatible server in [Configuration](configuration.md#http-transport-ci--linux--custom-embedders--hosted-providers) |
 | **Ollama** | Linux, macOS, Windows | Install [Ollama](https://ollama.com), pull an embedding model (e.g. `nomic-embed-text`) | Model download only (varies by model, typically a few hundred MB); no per-call cost | Varies (model-chosen) | `--embedder-http` | Yes, fully local | Yes | Fail-fast or retry-and-degrade, same as above | Not independently verified in this repo — relies on the generic OpenAI-compatible contract. Listed with a concrete recipe in [Configuration: MCP client config recipes](configuration.md#mcp-client-config-recipes) |
 | **vLLM / text-embeddings-inference (TEI)** | Linux (GPU recommended); macOS/Windows via Docker | Install vLLM or TEI, load a model | Model download (varies); no per-call cost; GPU strongly recommended for throughput | Varies (model-chosen) | `--embedder-http` | Yes, fully local | Yes | Fail-fast or retry-and-degrade, same as above | Not independently verified in this repo — relies on the generic OpenAI-compatible contract. Listed in [Configuration: MCP client config recipes](configuration.md#mcp-client-config-recipes) |
@@ -662,7 +662,7 @@ options above (or any other OpenAI-compatible server) yourself and point
 
 This isn't an oversight: a native, in-process, cross-platform Rust embedder was evaluated and
 rejected. See
-[`docs/spikes/native-embedder-2026-05.md`](https://github.com/verveguy/liminis-context-graph/blob/main/docs/spikes/native-embedder-2026-05.md)
+[`docs/spikes/native-embedder-2026-05.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/spikes/native-embedder-2026-05.md)
 for the full spike — `candle` was a **NO-GO**, `ort` was **GO-with-caveats**, and neither was
 ever built into production. Out-of-process, over the same wire contract as every other row in
 the matrix above, remains the supported path on every platform.
@@ -719,22 +719,51 @@ assuming the app's is reachable at the well-known path.
 
 # IPC & MCP Reference
 
-Source: https://v3rv.com/liminis-context-graph/ipc-mcp-reference
+Source: https://docs.liminis.app/liminis-context-graph/ipc-mcp-reference
 
 
 `liminis-context-graph` serves the same graph over **two transport surfaces**, both routed
 through the same core dispatch in
-[`crates/core/src/handlers.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs) —
+[`crates/core/src/handlers.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/handlers.rs) —
 no graph logic is duplicated between them:
 
-- **JSON-RPC 2.0 over a Unix domain socket** (default). Newline-delimited requests/responses over `.lcg/service.sock`.
+- **JSON-RPC 2.0 over a local socket** (default). Newline-delimited requests/responses over `.lcg/service.sock` — a Unix domain socket on macOS/Linux, a named pipe on Windows (see [Windows: named pipe](#windows-named-pipe)).
 - **[Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout** (`--mcp-stdio`). Any MCP client — Claude Code, Claude Desktop, other agents — can query and mutate the graph directly.
 
-## IPC methods (44)
+### Windows: named pipe
 
-The socket dispatch handles **44 methods**: 43 `knowledge_*` methods plus `health_check`.
+On Windows the service serves the identical protocol over a named pipe, because `AF_UNIX` is not
+usable from Rust's tokio, Node or CPython there (issue #581). `LCG_SOCKET_PATH` keeps its meaning —
+it still names the workspace's endpoint — and maps to a pipe:
+
+- **Discovery.** At bind the service writes the pipe name to `.lcg/service.endpoint` (the socket
+  path with its extension replaced). Clients should read that file.
+- **Name.** `\\.\pipe\lcg-<16 hex digits>`: FNV-1a 64-bit over the UTF-8 bytes of the absolute
+  socket path, lower-cased, with `/` replaced by `\`. Stable per workspace, so a client that cannot
+  read the file can compute it. A `LCG_SOCKET_PATH` (or `--connect`) that is already a
+  `\\.\pipe\…` name is used as-is.
+- **Access.** Only the user the service runs as (and SYSTEM) can connect; remote clients are
+  refused, and a second process cannot bind the same pipe name.
+- **Signals.** Closing the console, logoff/shutdown, Ctrl+Break and Ctrl+C all trigger the same
+  graceful shutdown SIGTERM/SIGINT do on Unix.
+
+A pipe opens like a file, so a client needs no socket library:
+
+```python
+import json
+endpoint = open(".lcg/service.endpoint").read().strip()      # \\.\pipe\lcg-…
+with open(endpoint, "r+b", buffering=0) as pipe:
+    pipe.write((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "health_check", "params": {}}) + "\n").encode())
+    print(json.loads(pipe.readline()))
+```
+
+In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
+
+## IPC methods (51)
+
+The socket dispatch handles **51 methods**: 50 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (44) and the MCP tool registry (43, below) differ by exactly one — `health_check` is
+surface (51) and the MCP tool registry (50, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -743,18 +772,21 @@ not exposed as an MCP tool.
 | Status | `knowledge_status`, `knowledge_rebuild_status` |
 | Ingestion | `knowledge_process_chunk`, `knowledge_add_episode` |
 | Direct assertion | `knowledge_assert_entity`, `knowledge_assert_relationship` |
-| Search | `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
+| Search | `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
+| Correction reads | `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_delete_by_group`, `knowledge_clear_all` |
+| Supersession | `knowledge_mark_chunk_removed`, `knowledge_supersede_document` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
+| Ontology | `knowledge_reload_ontology` |
 | Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
 | Semantic search maintenance | `knowledge_backfill_summary_embeddings` |
 | Cross-group pointers | `knowledge_add_cross_group_edge`, `knowledge_rebind_pointers` |
-| WAL administration | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
+| WAL administration | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
 | Recovery / lifecycle | `knowledge_recover`, `knowledge_recover_full`, `knowledge_close` |
 
 For request/response shapes and parameter details, the dispatch `match` arms in
-[`handlers.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs)
+[`handlers.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/handlers.rs)
 and their handler functions are the source of truth — this page is the method index, not a
 copy of each handler's parameter parsing.
 
@@ -789,6 +821,50 @@ until `connected` and `queryable` are both `true` and `initializing` is `false` 
 for the full rationale. A `degraded` response after startup has otherwise settled is a legitimate
 outcome (e.g. unrecovered corruption) — not something to retry indefinitely.
 
+A `busy` response (see [Health check contract](#health-check-contract)) is **not** a readiness
+signal: it means the service is alive but a write is holding or waiting for the write lock — most
+importantly a long `knowledge_rebuild_from_wal`. Pollers keep waiting on `busy` (gate on
+`result.healthy == true`) and must not treat it as failure.
+
+### Health check contract
+
+`health_check` never waits on the write lock, so it answers promptly even during a long WAL
+rebuild ([ADR-0628](adr/0628-health-check-busy-state.md), #628). The response's `state` is one of:
+
+| `state` | `ok` | `healthy` | Meaning | Supervisor action |
+|---|---|---|---|---|
+| `healthy` | `true` | `true` | Alive and ready: DB open, no write in progress or pending. | Ready — send work. |
+| `busy` | `true` | `false` | Alive, **not ready**: a write is pending or in progress. | Alive — keep waiting; do not restart. |
+| `degraded` | `false` | `false` | Alive but unusable: DB not loaded. `reason` says why. | Recover (`knowledge_recover`) or investigate. |
+| *(no answer)* | — | — | Dead or wedged. | Restart. |
+
+`busy` carries an `activity` field. While a `knowledge_rebuild_from_wal` job is running:
+
+```json
+{"ok": true, "healthy": false, "state": "busy", "activity": "rebuilding",
+ "job_id": "…", "progress": {"mutations_replayed": 48210, "wal_files_processed": 3,
+                             "wal_files_total": 12, "elapsed_seconds": 91.4}}
+```
+
+`progress` uses the same values as `knowledge_rebuild_status`. For any other writer the response
+is `{"ok": true, "healthy": false, "state": "busy", "activity": "writing"}` with no `job_id` or
+`progress`. The busy path never connects to or queries the database.
+
+Notes:
+
+- `busy` means "a write is pending **or** in progress": a writer queued behind readers also makes
+  the lock unavailable, so an otherwise idle service can briefly report `busy`.
+- Batched passes ([ADR-0030](adr/0030-batched-write-lock-for-long-running-passes.md)) release the
+  lock between batches, so during one the state alternates between `busy` and `healthy`.
+- A streaming rebuild (`_progress_token`) is not registered as a job: it reports
+  `activity: "writing"` without `progress`.
+- Startup work (legacy and WAL-root migration, startup recovery) runs before the accept loop, so a
+  probe sent then queues in the kernel and gets no answer until startup finishes.
+- `healthy` can be reported in the short window after a rebuild job is registered but before it
+  takes the write lock.
+- `busy` has `healthy: false` on purpose: existing pollers that gate on `healthy` keep waiting.
+  A liveness probe that only needs "is the process alive" should accept `ok: true`.
+
 ## MCP-over-stdio transport
 
 `liminis-context-graph --mcp-stdio` starts a native [Model Context Protocol](https://modelcontextprotocol.io)
@@ -801,7 +877,7 @@ Every MCP tool is derived from the `knowledge_*` dispatch methods above — tool
 IPC method names verbatim, and each `tools/call` is translated into an `IpcRequest` and routed
 straight through the same core dispatch the socket service uses. Tool descriptions and JSON
 schemas are maintained in the
-[`ToolSpec` registry in `crates/service/src/mcp/tools.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs) —
+[`ToolSpec` registry in `crates/service/src/mcp/tools.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs) —
 that file is the canonical source for per-tool descriptions; they are not duplicated here.
 
 ### Flags
@@ -810,7 +886,8 @@ that file is the canonical source for per-tool descriptions; they are not duplic
 |------|-------------|
 | `--mcp-stdio` | Starts the MCP server over stdin/stdout instead of binding the Unix socket. |
 | `--scope=<list>` | Comma-separated list of scopes to advertise in `tools/list` (default `all`). See [Scopes](#scopes) below. |
-| `--connect <path>` | Attached mode: forward every `tools/call` as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly. |
+| `--connect <path>` | Attached mode: forward every `tools/call` as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly. By default the socket is dialled lazily, on the first `tools/call` — see [DB-access modes](#db-access-modes) below. |
+| `--connect-eager` | Attached mode only: dial `--connect`'s socket at startup and exit immediately if it's unreachable, restoring the behavior attached mode had before issue #575. No effect without `--connect`. |
 | `--allow-remote-close` | Attached mode only: advertise and allow `knowledge_close`, forwarding the shutdown to the remote service. No effect in standalone mode (no `--connect`). |
 
 ### DB-access modes
@@ -822,6 +899,19 @@ that file is the canonical source for per-tool descriptions; they are not duplic
   forwards each call over the given socket to a service that already has it open. Use this to
   add MCP access to a workspace where another socket-service instance is already running,
   without contending for lbug's single-writer lock.
+  - **Lazy connect by default (issue #575).** The socket is not dialled during startup —
+    `initialize` and `tools/list` succeed immediately, serving the tool set from the compiled-in
+    registry, regardless of whether the daemon at `--connect`'s path is up. The first
+    `tools/call` triggers a dial; if it fails, that call returns a tool result with `isError:
+    true` naming the socket path and suggesting you start the daemon, but the MCP process itself
+    stays up and the client's session is unaffected — no protocol error, no exit. This avoids
+    two failure modes a client can otherwise get stuck in for the client's own cached-failure
+    window: registering a native MCP server before its daemon has started (first install,
+    post-reboot), and the client caching a failed attach for several minutes even after the
+    daemon comes up. Pass `--connect-eager` to restore the pre-#575 behavior of dialling at
+    startup and exiting immediately (before `initialize`) if the socket is unreachable — useful
+    if you rely on that fail-fast behavior as an external health check (e.g. a supervisor that
+    restarts the front until the daemon is ready).
   - **Idle timeout.** `LCG_ATTACHED_CALL_TIMEOUT_MS` (default 30s) is a **per-read-line** idle
     timeout, not a whole-call timeout: it resets on every line read off the socket, including
     `{"type":"progress"}` lines. A call that keeps emitting progress is never bounded by it, no
@@ -849,10 +939,10 @@ union of all active scopes.
 
 | Scope | Methods |
 |-------|---------|
-| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
-| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
+| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
+| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
-| `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings` |
+| `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` |
 | `all` | every scope above (default) |
 
 **`cypher` is a power scope, not bundled into anything else.** `knowledge_query_cypher` executes
@@ -871,7 +961,9 @@ the remote service.
 
 **Recovery and export live under `admin`.** `knowledge_rebuild_from_wal` (rebuild one group's data
 from its own WAL directory — `group_id`, default `"liminis"`), `knowledge_dump_wal`
-(snapshot/export the graph into a fresh compacted WAL directory), `knowledge_wal_mark_create` /
+(snapshot/export the graph into a fresh compacted WAL directory), `knowledge_strip_wal_embeddings`
+(rewrite existing WAL files in place to remove the embedding-vector `params` fields a pre-0.14
+WAL still carries — see [Operations](operations.md#wal-administration)), `knowledge_wal_mark_create` /
 `_list` / `_delete` (name a retained WAL position within one group's stream, without a full
 snapshot — each also takes `group_id`, default `"liminis"`, and `_list` reports only that one
 group's marks, never an aggregate across groups), and `knowledge_recover` / `knowledge_recover_full`
@@ -909,13 +1001,44 @@ is read or the database is touched. A bounded rebuild is **not durable**: WAL en
 bad mutation. `to_seq` bounds an endpoint; it does not add reverse/undo semantics to the
 forward-only replay noted above.
 
+### Search evidence and the similarity floor (`find_entities`, `find_relationships`)
+
+Hybrid search fuses its candidate lists with Reciprocal Rank Fusion, which is rank-only: the top
+hit of a gibberish query scores almost the same as the top hit of a perfect one, and every query
+fills its top-k. To let a caller tell a real match from filler, each result of
+`knowledge_find_entities` and `knowledge_find_relationships` carries an additive `search` object
+(issue #629):
+
+| Field | On | Meaning |
+|-------|----|---------|
+| `rrf_score` | both | fused, rank-based score — ordering only, **not** a relevance measure |
+| `text_match` | both | `true` iff the full-text (BM25) path retrieved the item |
+| `bm25_score` | both | raw BM25 score, or `null` |
+| `name_similarity`, `summary_similarity` | entities | cosine similarity (`1 - distance`) on that vector path, or `null` |
+| `fact_similarity` | relationships | cosine similarity (`1 - distance`) on the fact-vector path, or `null` |
+
+A field is `null` when that retrieval path did not return the item (`text_match` is then `false`).
+Values are raw and unnormalised; cosine similarity can be negative.
+
+Both tools also accept an optional **`min_similarity`** (number). Vector candidates whose cosine
+similarity is below it are dropped *before* fusion, independently per vector path, so they never
+affect the ranking and are not reported for an item they did not qualify for. Full-text matches
+always stay eligible, so an exact-name query still returns its match while a gibberish query
+returns nothing. With the `kind` filter the floor applies on top of the kind path's bounded
+nearest-neighbour probe.
+
+How it differs from `knowledge_search_passages`' `min_score`: the value is clamped to 0–1 the same
+way (a non-number is an invalid-params error), but `min_similarity` has **no default** — omitted
+or `null` means no floor and results are identical to before, apart from the added `search`
+object — and it acts before fusion and per path rather than as a post-filter on a single list.
+
 ### group_ids semantics: omitted vs. empty
 
 Every read tool that accepts `group_ids` treats an **omitted or `null` `group_ids` uniformly as
-"all groups"** (issue #413) — this holds across all 9 read tools: `knowledge_find_entities`,
+"all groups"** (issue #413) — this holds across all 10 read tools: `knowledge_find_entities`,
 `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_list_entities`,
 `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`,
-`knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`.
+`knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_episodes`.
 
 **An explicit `group_ids: []` does not mean the same thing on every tool**, and this split is
 deliberate, not an inconsistency to be fixed here:
@@ -923,20 +1046,266 @@ deliberate, not an inconsistency to be fixed here:
 - On `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_nodes_by_group`,
   and `knowledge_get_edges_by_group`, an explicit `group_ids: []` is preserved as "exactly these
   groups" — i.e. **zero rows**, a filter matching nothing.
-- On the other five read tools (`knowledge_search_passages`, `knowledge_list_entities`,
+- On the other six read tools (`knowledge_search_passages`, `knowledge_list_entities`,
   `knowledge_list_relationships`, `knowledge_get_entity_neighbors`,
-  `knowledge_get_entities_by_source`), an explicit `group_ids: []` collapses to the same
+  `knowledge_get_entities_by_source`, `knowledge_get_episodes`), an explicit `group_ids: []` collapses to the same
   behavior as omitting it — **all groups**.
 
 If you need "zero rows" as a filter result, use one of the four tools in the first list, or check
 the tool's own `ToolSpec` description in
-[`crates/service/src/mcp/tools.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs)
-before relying on `[]` to mean "nothing" — on the other five it doesn't.
+[`crates/service/src/mcp/tools.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs)
+before relying on `[]` to mean "nothing" — on the other six it doesn't.
 
 This section is the single, central statement of that contract; individual tool entries on this
 page don't restate it.
 
+### Time: event time vs ingest time (`reference_time`, `ingested_at`)
+
+The graph keeps two separately stored clocks, so a record can be both *old in the world* and
+*new to the graph* — a months-old conversation ingested today, or a document chunk dated by its
+content rather than its file mtime.
+
+| Clock | Key | Set by | Meaning |
+|---|---|---|---|
+| **Event time** | `reference_time` (request) → `valid_at` / `created_at` (stored) | the caller; defaults to *now* | When the content happened. `knowledge_process_chunk` validates it as RFC-3339 and writes it to the episode's `created_at` and `valid_at` and to the `created_at` of the entities and edges it extracts; time-ordered reads (episode ordering, paging cursors) key on it. |
+| **Ingest time** | `ingested_at` (response only) | the service clock — **never caller-supplied** | When this service first wrote the record. |
+
+`ingested_at` is on episodes, entities and edges, in the same timestamp format and timezone
+convention as `created_at` (`YYYY-MM-DD HH:MM:SS` on reads). It is an additive key: it appears on
+every read that returns these records (`knowledge_get_episodes`; `find_entities`,
+`resolve_entity`, `list_entities`, `get_nodes_by_group`, `get_entities_by_source`,
+`get_entity_neighbors`; `find_relationships`, `list_relationships`, `get_edges_by_group`,
+`get_edges_by_uuids`) and is accepted in the `fields` projection of `get_episodes` and
+`list_entities`. Any `ingested_at` passed in a request is ignored.
+
+- **First write wins.** The value is set once. A later episode that matches or updates an existing
+  entity or edge, `knowledge_merge_entities` (the surviving entity keeps its own value), and
+  re-asserting an existing entity or edge do not change it. A record re-created under a new uuid by
+  a correction (`same_as`, endpoint rewrite) carries the original edge's `ingested_at`: the graph
+  learned that fact when it was first written.
+- **Direct assertions** (`assert_entity`, `assert_relationship`) get the service clock at the call,
+  independent of any `valid_at` supplied.
+- **Replay never restamps.** `knowledge_rebuild_from_wal`, WAL-tail and startup recovery,
+  checkpoint restore and `knowledge_dump_wal` compaction all carry the recorded value through.
+- `created_at` / `valid_at` mean exactly what they did before. (Edge reads still leave `created_at`
+  empty, as before; only `ingested_at` was added.)
+
+**Upgrading an existing graph.** Records written before this feature have no stored ingest time, so
+on the first start of an upgraded service each one is backfilled once, from the best available
+signal, in this order:
+
+1. the `ts` of the WAL entry that created the record (the first native `CREATE` line for its uuid
+   under the group WAL directories) — a true ingest time;
+2. otherwise the record's own `created_at`.
+
+Signal 2 is **approximate**: for a record written before this feature, `created_at` was the
+event time, so a backfilled value can predate the real ingest. It is used where the WAL no longer
+holds a creating line — typically after `knowledge_dump_wal` compaction (a dumped line's `ts` is
+the compaction time, which says nothing about when the record was learned, so it is never used) or
+after WAL files were pruned. The backfill is idempotent and never rewrites a record that already
+has an ingest time. See [ADR-0673](adr/0673-ingest-time-separate-from-event-time.md).
+
+### Belief time: corrections supersede, they do not delete (issue #705)
+
+Alongside event time and ingest time (above) the graph records **when it stopped believing**
+something. Belief is *transaction time*; it is deliberately separate from validity
+(`valid_at` / `invalid_at`, the world's clock). When a document is corrected, the removed fact was
+never true, so no supersession path ever writes `valid_at` or `invalid_at`: **correction ends belief
+and leaves validity alone.** See [ADR-0705](adr/0705-belief-time-separate-from-validity.md).
+
+**Corrections.** Resubmitting a `chunk_id` to `knowledge_process_chunk` supersedes that chunk's
+earlier live episodes **in the same `group_id`**, at the new episode's ingest time, and only once the
+new ingest has fully succeeded. A failed re-ingest leaves the old episode live. The result gains
+`superseded_episode_uuids`. Nothing is deleted. The same `chunk_id` in another group is never touched.
+`knowledge_add_episode` never supersedes (its `name` is free-form).
+
+To submit one chunk as several calls under one `chunk_id`, send `supersede: false` on every unit but
+the last, and pass the earlier units' `episode_uuid`s as `same_revision_episode_uuids` on the last:
+they stay live, the older episodes are superseded. **Record a chunk as ingested only after the call
+succeeds** — a client that records it first will never resend a failed correction.
+
+**Removal.** `knowledge_mark_chunk_removed {chunk_id, group_ids}` records that a chunk no longer
+exists in its document: its live episodes are superseded with reason `chunk_removed`, and nothing is
+deleted. `group_ids` is required and non-empty, as for the delete. It returns
+`{superseded_count, superseded_uuids, superseded_at}` and is idempotent (a repeat reports 0).
+`knowledge_delete_chunk_episode` is unchanged and still destroys the episodes — use it only for
+explicit deletion. After a heading rename, ingest the renamed chunks first, then report the old ids
+removed; no fact present in both revisions is unbelieved at any instant.
+
+**Episode fields.** Episodes gain `superseded_at` (null while live), `superseded_by` (the superseding
+episode, absent for `chunk_removed`), `superseded_by_kind` (`episode`) and `supersession_reason`
+(`revision`, `chunk_removed`). They appear on `knowledge_get_episodes` only when set and are accepted
+in its `fields` projection. `get_episodes` and `search_passages` still return superseded episodes by
+default.
+
+**Edge provenance.** Each extracted edge records the episode that produced it. That is
+`producing_episode_uuids` in the `belief` object below — **not** the `episode_uuids` field on edge
+reads, which remains the either-endpoint inference (episodes mentioning the source or target) and is
+not evidence for that specific relationship. Edges with no producing episode carry a `warrant`
+(`assertion` for `knowledge_assert_relationship`, `cross_group` for `knowledge_add_cross_group_edge`)
+and are believed until retracted. An extracted edge's `valid_at_source` is `text` when the extractor
+read the date from the text and `reference_time` when it defaulted. A direct assertion never
+overwrites an extracted edge's fact; it creates a separate edge.
+
+**Reading belief.** `knowledge_find_relationships`, `knowledge_list_relationships`,
+`knowledge_get_entity_neighbors`, `knowledge_get_edges_by_group` and `knowledge_get_edges_by_uuids`
+accept two optional parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `believed_only` (boolean) | Drop edges the graph did not believe at `as_of` (default now). |
+| `as_of` (RFC 3339) | Evaluate belief at this time. Implies `believed_only` unless that is explicitly `false`, which annotates without filtering. |
+
+Either one adds a `belief` object to each edge: `state` (`believed`, `superseded`, `legacy`,
+`support_deleted`, `not_yet_ingested`), `believed`, `producing_episode_uuids`, and `warrant` /
+`valid_at_source` when set. An edge is believed at `t` iff it was ingested at or before `t` and either
+carries a warrant or has at least one producing episode not superseded at or before `t`; a fact is
+therefore believed on `[T1, T2)` when ingested at `T1` and superseded at `T2`, and stays believed
+while any one live source still states it. Capped reads (`find_relationships`,
+`list_relationships`, `get_entity_neighbors`) over-fetch and filter afterwards, so a filtered read can
+return fewer than `num_results`. **Without these parameters every read is unchanged** and includes
+superseded edges — making belief the default is a later, documented change.
+
+**Legacy edges.** An edge with neither a producing episode nor a warrant predates this feature. It is
+treated as believed and reported as `legacy`; `knowledge_status` returns `legacy_edge_count`. They
+cannot be soundly backfilled (endpoint co-occurrence is not provenance, #404), so re-ingest legacy
+graphs. Separately, an edge whose producing episodes were all hard-deleted
+(`knowledge_delete_episode`, `delete_by_source`, `delete_chunk_episode`) is `support_deleted` and
+unbelieved at every time.
+
+### Reviewing a correction: what changed, and what was written under the old belief (issue #706)
+
+Ending belief is half the job. After a correction you also want to see what it changed, and review
+work that may have leaned on the fact you dropped. Both reads below are **read-only** (no `valid_at` /
+`invalid_at`, no WAL entry, no schema change) and give the same answers after a rebuild. See
+[ADR-0706](adr/0706-correction-diff-and-affected-work-reads.md).
+
+The workflow: find the superseded episode (`knowledge_get_episodes` shows `superseded_at`,
+`superseded_by` and `supersession_reason`), run the changed-facts read, then run the affected-work
+read on each dropped fact.
+
+**`knowledge_get_correction_changes {episode_uuid}`** (MCP `read`). Compares a superseded episode with
+its direct superseder (E1 → E2 even if E2 was later superseded by E3):
+
+| Field | Meaning |
+|---|---|
+| `status` | `superseded`, or `not_superseded` (nothing to compare; both lists empty) |
+| `episode` | `uuid`, `name`, `group_id`, `ingested_at`, `superseded_at`, `reason` |
+| `replacement` | `{superseded_by, unit_episode_uuids}`, or `null` for `chunk_removed` (no replacement exists) |
+| `removed` / `added` (+ `*_count`) | Facts the old episode supports that the replacement does not / the replacement supports that the old episode does not, each with `uuid`, `source_node_uuid`, `target_node_uuid`, `name`, `fact`, `episodes`. Each `removed` fact also carries `still_believed`: `true` when another live episode outside the replacement still supports the edge, so it left the replacement but is not dropped from belief (`knowledge_get_affected_work` on it returns `open`). An `added` fact means only that the old episode did not support it: it may already have been believed through another live episode before the correction |
+
+A fact present on both sides appears on neither. Two edges are the same fact when they share source
+entity, target entity, relation name and fact text, so a **reworded fact is one removal plus one
+addition**. For a chunk ingested as several units, the replacement side is the whole revision, not only
+its final unit; the units are recovered from episodes of the same group and `name`, so a free-form
+`knowledge_add_episode` episode that reuses a chunk id as its name in that window is swept in. A heading
+rename supersedes one chunk and creates another, so a per-episode diff shows only removals for the old
+chunk — a whole-document diff needs document identity (#707).
+
+**`knowledge_get_affected_work {edge_uuid}`** (MCP `read`). For an edge no longer believed, lists the
+episodes ingested inside its belief interval `[start, end)` that mention either endpoint entity,
+ordered by ingest time:
+
+| Field | Meaning |
+|---|---|
+| `interval.state` | `closed` (candidates returned), `open` (still believed; affected work is not defined), `no_record` (`cause`: `legacy` or `support_deleted`) or `not_defined` (`cause`: `warranted`) |
+| `interval.start` / `end` | Microsecond RFC 3339; `end` is when the last producing episode was superseded. `derived_from_surviving_support` is true when some producers were hard-deleted and ignored |
+| `basis` | Always `entity_overlap` |
+| `candidates` (+ `count`) | `uuid`, `name`, `ingested_at`, `source_description`, `matched_entity_uuids` |
+
+**Candidates are not dependents.** The list is built from entity overlap, not recorded dependence, so
+review it rather than treating it as proof the work used the fact. The window is half-open (an episode
+ingested at exactly the superseding instant is outside it), the fact's own producing episodes and the
+units of the revision that superseded them are excluded, and the list is neither ranked nor truncated — a hub entity over a long window returns many
+episodes. Any state other than `closed` returns no candidates *and says why*, so an empty list never
+means "nothing affected" by accident. Both reads take a uuid, derive the group from the record, and
+return an error for a missing or unknown uuid.
+
+### Document supersession: a new document replaces an old one (issue #707)
+
+A document is sometimes *replaced* rather than edited — last year's decision record superseded by a
+new one. That is a relation between two documents, and it differs from a correction in one way: the
+old decision **was true** until it was replaced. So the old facts stop being *believed* when the
+supersession is recorded, but are reported as *in force* until the date the new document took
+effect. The two axes stay separate. See [ADR-0707](adr/0707-document-supersession.md).
+
+**Document identity.** `knowledge_process_chunk` and `knowledge_add_episode` accept an optional
+`doc_id`: the stable identity of the logical document an episode came from, unique within its
+`group_id` (path-valued today). It is stored on the episode and returned by `knowledge_get_episodes`
+when set. It is never defaulted from `source_file`; an episode without one cannot take part in
+supersession, and omitting it changes nothing for existing callers. Graphs written before this
+release have none — re-ingest them.
+
+**Recording a supersession.** `knowledge_supersede_document {group_id, superseding_doc_id,
+superseded_doc_id, effective_at}` (write scope) records "A supersedes B, effective `effective_at`"
+within one group. `effective_at` is an RFC 3339 timestamp **with a timezone offset**; it may be in the
+past (the retroactive case) or the future. Supersession is always explicit — the graph never infers it
+from topic similarity. The call:
+
+- writes one durable record per superseded document (a document has at most one superseding
+  document; express successive replacement as a chain), and
+- supersedes B's live episodes in that group with `superseded_by_kind` `document`, reason
+  `document_superseded`, `superseded_by` A's `doc_id`, at the service-clock recording instant — or at
+  `effective_at` when that is later, so a decision with a future effective date stays believed and in
+  force until then. A correction to B's chunk before that date still ends belief at the correction.
+
+It returns `{success, already_recorded, group_id, superseding_doc_id, superseded_doc_id,
+effective_at, recorded_at, superseded_count, superseded_uuids}`. Episodes of B ingested *after* the
+recording are not marked. Facts A also asserts stay believed through A's own episode. A recorded
+supersession is not undone by later corrections to A.
+
+It is rejected with no side effects (nothing written, WAL untouched) when A and B are the same
+document, when either is unknown in the group (no episode carries that `doc_id`), when the relation
+would form a cycle, when `effective_at` has no timezone, or when B is already superseded by a
+*different* document or effective date. Recording the identical relation again is a no-op
+(`already_recorded: true`). `valid_at` / `invalid_at` are never written. The record is in the WAL, is
+carried by dump compaction and checkpoint restore, and is removed by `knowledge_delete_by_group`.
+
+**Reading it.** On opted-in relationship reads (`believed_only` / `as_of`, above) the `belief` object
+gains:
+
+| Field | Meaning |
+|---|---|
+| `in_force` | Whether the fact was in force at the evaluated time, **independently of `believed`**. `false` once the superseding document's effective date has been reached; `true` otherwise; `null` for a fact that was corrected (it was never true, so it makes no validity claim). An edge is in force while any producing episode is. |
+| `supersession` | Present once the fact's producing episodes are all superseded; not time-dependent, so it classifies the fact from any read. `cause` is `corrected` (revision or removal) or `document_superseded`. For the latter it also carries `superseded_by_document`, `in_force_until` (the effective date) and `recorded_at`; `superseded_at` is when belief ended. |
+
+So between the effective date and the recording date an as-of read shows the old fact `believed` with
+`in_force: false` — the graph had not yet learned otherwise. Believed-only filtering is unchanged: it
+filters on belief, not on being in force, and there is no in-force-only filter yet.
+
+### Bulk reads: group scope, paging, projection, prefix (issue #667)
+
+`knowledge_get_episodes` and `knowledge_list_entities` are the two bulk reads, and a large graph
+can overflow an MCP client's tool-result limit if read in one call. Both accept the same optional,
+additive parameters; with none of them the response is exactly `{<collection>, count}` as before.
+
+| Parameter | Tools | Meaning |
+|---|---|---|
+| `group_ids` (array) | both | Groups to read. `knowledge_get_episodes` also accepts the single-group alias `group_id`; both given ⇒ their deduplicated union. **Neither given ⇒ every group** (episodes used to default to `liminis`). An explicit `[]` also means all groups. |
+| `last_n` / `num_results` | episodes / entities | Page size (defaults 50 / 500, unchanged). |
+| `cursor` | both | Opaque keyset cursor. Send `""` for the first page, then send back each response's `next_cursor` until it is `null`. |
+| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
+| `name_prefix` | both | Names starting with this prefix, matched literally. Case-insensitive for entities (via Cypher `lower()`, so non-ASCII folds only as far as lbug does); case-sensitive for episodes. |
+
+`next_cursor` appears only when the request contained `cursor`, `fields` or `name_prefix`; it is
+`null` on the last page. Order is deterministic (episodes newest first with a `uuid` tiebreaker;
+entities by `uuid` descending) and the cursor is a keyset position, so inserts and deletes between
+pages never repeat or skip an item that existed throughout. A cursor is bound to the tool and to
+its `group_ids`, `kind` and `name_prefix`; a malformed cursor or one replayed against a different
+query fails with `invalid cursor: …` (JSON-RPC `-32000`, like every other validation error here).
+`count` is always the number of items in the page. Filtering episodes by `attributes` is not
+supported yet. See [ADR-0667](adr/0667-read-path-paging-cursor-and-status-label.md).
+
+`knowledge_status`: the flat `wal` block always describes the **default group's** WAL stream. When
+a WAL root is configured it now also carries `"scope": "default_group"`, `"default_group":
+"liminis"` and `"see": "wal_groups"`, so `exists: false` there means the default group has no
+stream — read `wal_groups` for every group's position. With no WAL root the block is unchanged.
+
 ### Deletion (`delete_chunk_episode`, `delete_by_source`)
+
+> For a chunk that merely disappeared from its document, prefer
+> `knowledge_mark_chunk_removed` (see "Belief time" above), which ends belief without destroying the evidence. `knowledge_delete_chunk_episode` keeps its
+> explicit-deletion contract unchanged.
 
 **Breaking change in 0.13.2 (issue #406): `group_ids` is required and non-empty on both
 `knowledge_delete_chunk_episode` and `knowledge_delete_by_source`.** A call that previously
@@ -966,10 +1335,11 @@ round-trip through `knowledge_process_chunk`'s LLM-driven extraction. Use `proce
 you have unstructured text and want the graph populated by extraction; use the assert tools when
 you already know exactly which entity or edge you want to write.
 
-**`knowledge_assert_entity`** accepts `name` (required), `entity_uuid` (optional), `labels`,
-`summary`, `attributes`, and `group_id` (default `liminis`).
+**`knowledge_assert_entity`** accepts `name` (required), `entity_uuid` (optional), `kind`
+(optional, see [Entity kinds](#entity-kinds-kind-identity)), `labels`, `summary`, `attributes`, and
+`group_id` (default `liminis`).
 
-- **Upsert identity is `(name, group_id)`**, unless `entity_uuid` is supplied. `entity_uuid`, when
+- **Upsert identity is `(group_id, kind, name)`** (kind defaults to `Entity`), unless `entity_uuid` is supplied. `entity_uuid`, when
   given, is a **strict, group-scoped lookup** — the call fails if no entity with that UUID exists
   in `group_id`; there is no create-under-this-UUID fallback (ADR-0379 Decision 3). A caller
   cannot mint an entity at a UUID of its own choosing.
@@ -989,7 +1359,8 @@ you already know exactly which entity or edge you want to write.
   entity is deleted and recreated. There is currently no supported way to refresh it in place.
 
 **`knowledge_assert_relationship`** accepts `source_name`, `target_name`, `predicate` (all
-required), `fact` (optional — auto-derived as `"{source_name} {predicate} {target_name}"` if
+required), `source_kind` / `target_kind` (optional, see
+[Entity kinds](#entity-kinds-kind-identity)), `fact` (optional — auto-derived as `"{source_name} {predicate} {target_name}"` if
 omitted), `attributes`, `relation_type`, `valid_at`, and `group_id` (default `liminis`).
 
 - **Upsert identity is `(source_node_uuid, predicate, target_node_uuid, group_id)`**, resolved via
@@ -1008,8 +1379,67 @@ omitted), `attributes`, `relation_type`, `valid_at`, and `group_id` (default `li
   re-assert that changes `fact` updates the stored `fact` text but leaves `fact_embedding`
   reflecting the prior text until the edge is deleted and recreated.
 
+- **Both tools stamp `ingested_at` with the service clock** at the moment a record is created,
+  regardless of any `valid_at` supplied; see
+  [Time: event time vs ingest time](#time-event-time-vs-ingest-time-reference_time-ingested_at).
+
 See [ADR-0379](adr/0379-direct-assertion-conventions.md) for the full rationale behind these
 upsert and embedding decisions.
+
+### Entity kinds (`kind` identity)
+
+Entity identity is `(group_id, kind, name)` (issue #615,
+[ADR-0615](adr/0615-kind-scoped-entity-identity.md)). `kind` is a single string classifying an
+entity (`Topic`, `KnowledgeChannel`, `Team`, …). It is stored in `Entity.kind`, is always one of the
+entity's `labels` (appended after `Entity`), and is immutable. The default kind is exactly
+`Entity`; every entity written before kinds existed, and every extraction-created entity, is that
+kind. A `kind` is trimmed, case-sensitive, non-empty, must not contain U+001F, and must not be the
+reserved structural label `Merged`, else the call fails with a validation error. Every entity node in a response carries a `kind` field. So
+`Topic "adr"` and `KnowledgeChannel "adr"` are two distinct entities that coexist in one group.
+
+**Omitted `kind`: reads are broad, writes are scoped** (the rule `group_ids` already follows):
+
+| Operation | `kind` given | `kind` omitted |
+|-----------|--------------|----------------|
+| `knowledge_assert_entity` (write) | resolves/creates exactly that kind | acts on the default kind `Entity` **only** — never touches another kind's same-named node |
+| `knowledge_assert_relationship` endpoints (existing entities) | that endpoint resolves exactly within the kind | spans all kinds; more than one matching kind is an ambiguity error |
+| `knowledge_resolve_entity` (`name`, `group_id`, `kind?`) | exact lookup, never ambiguous | spans all kinds; one match resolves, several is an ambiguity error, none returns `{found: false}` |
+| `knowledge_find_entities`, `knowledge_list_entities` | only that kind | all kinds, each node carrying its `kind` (multi-row reads never pick one, so never ambiguous) |
+| `knowledge_add_cross_group_edge` `source_kind`/`target_kind` (foreign endpoints only) | pointer pinned to that kind (`endpoint_kind`) | pointer resolves across all kinds; `ambiguous` once a second kind shares the name |
+| `knowledge_merge_entities` `kind` | restricts `canonical_name`/`alias_names` | those names span all kinds; a multi-kind `canonical_name` is an ambiguity error |
+
+**Ambiguity error.** A name-only resolution that matches more than one kind fails with JSON-RPC
+error code **`-32002`**; `error.data` is `{"reason": "ambiguous_entity", "name", "group_id",
+"candidates": [{"uuid", "kind"}, …]}`. It never picks a candidate. Retry with an explicit `kind`.
+
+**Merges never cross kinds.** `knowledge_merge_entities` refuses the *whole call* (`dry_run`
+included, nothing modified) if the canonical and any alias differ in kind, with an error naming the
+kinds; `merge_all_by_name` is limited to the canonical's own kind.
+
+**Extraction and kinds.** `knowledge_add_episode`/`knowledge_process_chunk` create kind-`Entity`
+entities, except that an entity whose primary type the ontology marks `identity: true` is created
+with that type as its `kind` and resolves only within it (see
+[Identity-bearing types](ontology.md#identity-bearing-types)). Extraction never merges into an
+asserted kind it did not create. For a group whose identity-bearing set changed in a way that would
+reinterpret existing entities, `knowledge_add_episode` fails with JSON-RPC error code **`-32003`**;
+`error.data` is `{"reason": "identity_set_change_refused", "group_id", "label", "entity_count"}`, and
+`knowledge_status` lists the group under `group_identity_refusals`. Nothing is modified; restore
+the recorded set (and restart, or call `knowledge_reload_ontology` for the group) or re-ingest the
+group from source.
+`knowledge_reprocess_entity_types` never changes an entity's kind and adds an additive
+`kind_disagreements` array (`entity_id`, `entity_name`, `kind`, `classified_type`) — report-only —
+to both its dry-run plan and its result.
+Ontology types flagged `extract: false` are never offered as reclassification targets by `knowledge_reprocess_entity_types` / `knowledge_reprocess_relation_types` (nor by `knowledge_canonicalize_relations`); see [Assert-only types](ontology.md#assert-only-types-extract-false).
+
+### Ontology reload (`knowledge_reload_ontology`)
+
+`knowledge_reload_ontology {group_id}` (`admin` scope) discards one group's cached ontology
+resolution and re-resolves it, so an edited per-group ontology file takes effect without a service
+restart. It returns `{group_id, previous_hash, new_hash, changed, drift, identity_refusal}`; an
+identity-bearing-set change on a group that already holds entities of that type is reported in
+`identity_refusal` (and enforced as `-32003` on `knowledge_add_episode`) rather than installed
+silently. Other groups are untouched and stored data is never modified. See
+[Ontology → Reloading a group's ontology](ontology.md#reloading-a-groups-ontology).
 
 ### Relation typing (`canonicalize_relations`, `backfill_relation_types`, `reprocess_relation_types`)
 
@@ -1113,11 +1543,13 @@ that predate the capability.
 - **A partially-completed backfill is not an error.** Entities not yet processed simply retrieve
   via existing name/lexical behavior, exactly as before this issue — running the tool again
   covers more of the group each time.
-- **`summary_embedding` stays write-once after backfill, same as on creation.** A later
-  `knowledge_assert_entity` re-assert that changes an entity's `summary` does not refresh its
-  `summary_embedding` — the vector reflects whichever summary was embedded last (at creation, or
-  at the most recent backfill run), not necessarily the current `summary` text. Re-run this tool
-  to bring a changed summary's vector back in sync.
+- **A `knowledge_assert_entity` re-assert does not refresh `summary_embedding`.** A re-assert
+  that changes an entity's `summary` leaves its `summary_embedding` as it was — the vector
+  reflects whichever summary was embedded last (at creation, at an extraction merge, or at the
+  most recent backfill run), not necessarily the current `summary` text. Re-run this tool to bring
+  a changed summary's vector back in sync. (Extraction merges *do* refresh it: when extraction
+  folds a new description into an existing entity the merged summary is consolidated into one
+  bounded description of at most 600 characters and re-embedded in the same write — ADR-0651.)
 
 ### Cross-group pointers (`add_cross_group_edge`, `rebind_pointers`)
 
@@ -1134,7 +1566,12 @@ completely unaffected: pointers only ever exist on edges created through this to
   `get_entity_by_name_ci_with_scan_fallback` uses for extraction-time endpoint resolution, per
   [ADR-0283](adr/0283-name-index-scan-fallback-for-endpoint-authority.md)), and the edge carries
   a `cross_group_pointers.{src,dst}` object recording the assertion (`source_group_id`,
-  `endpoint_name`) and the resolution cache (`resolved_uuid`, `bound_at_seq`, `binding_state`).
+  `endpoint_name`, plus an optional `endpoint_kind`) and the resolution cache (`resolved_uuid`,
+  `bound_at_seq`, `binding_state`). Top-level `source_kind` / `target_kind` (issue #615) pin a
+  foreign endpoint to an entity kind: a kind-pinned pointer resolves within that kind only and stays
+  `bound` when a same-named entity of another kind appears; a kind-less pointer resolves across all
+  kinds and becomes `ambiguous` (no hop) once a second kind shares the name. A kind on a `{uuid}`
+  endpoint is rejected. If a pinned kind no longer exists the pointer is `unbound`.
 - **A foreign endpoint that doesn't currently resolve is `unbound`, not dropped.** Unlike
   ordinary extraction (which hard-drops an unresolvable endpoint at commit — see
   [ADR-0051](adr/0051-edge-endpoint-salvage-and-deferred-drop.md)), the edge is still created;
@@ -1204,12 +1641,56 @@ result fields exist for that, both introduced in 0.13.2.
   was dropped, so it can be iterated unconditionally. `edges_dropped_unresolvable`'s existing
   meaning is unchanged, and a caller reading only the count is unaffected (issue #411).
 
+- **`edges_dropped_self_loop` counts edges dropped because both endpoints resolved to one entity.**
+  Two differently named endpoints can resolve to the same entity UUID (through dedup merges or
+  salvage); inserting that edge would create a self-loop, so Phase C drops it. The count is a
+  separate top-level field, always present, and these edges are *not* in `dropped_edges` or
+  `edges_dropped_unresolvable`. (Edges whose endpoint *names* are identical are filtered earlier
+  and never counted.) Separately, an off-list edge endpoint that already exists exactly (same
+  group, case-insensitive) in the stored graph resolves to that entity and is never salvaged onto
+  a similar entity of the current chunk; a name stored under more than one eligible kind is dropped
+  as ambiguous rather than salvaged
+  ([ADR-0666](adr/0666-exact-graph-match-and-uuid-self-loop-guard.md)).
+
 - **`warning` reports oversized input.** A `chunk_text` longer than the advisory threshold
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see
   [Configuration](configuration.md)) adds a `warning` field naming the actual and recommended
   character counts, and emits a `chunk_text_oversized` telemetry event. This is visibility only:
   nothing is truncated, split, or rejected, and the call succeeds exactly as it did before.
   Splitting oversized input is the caller's responsibility (issue #407).
+
+- **`dedup_paths` reports how this chunk's entities were resolved.** An additive object of
+  per-path tallies for the chunk's Phase B entity resolution
+  ([ADR-0650](adr/0650-identifier-mismatch-veto-for-extraction-dedup.md)), always present:
+
+  ```json
+  {
+    "dedup_paths": {
+      "exact_name": 3,
+      "embedding_merge": 1,
+      "vetoed": 2,
+      "adapter_rejected": 0,
+      "llm_confirmed": 0,
+      "llm_rejected": 0,
+      "llm_unavailable": 0,
+      "salvage_vetoed": 0
+    }
+  }
+  ```
+
+  `exact_name` counts entities merged by the exact case-insensitive name match;
+  `embedding_merge` counts embedding-path merges where a candidate survived the identifier veto
+  and the dedup adapter confirmed it; `vetoed` counts entities that had above-threshold
+  embedding candidates, all of which were rejected by the identifier-mismatch veto (names
+  differing by a number or identifier, such as `ADR 2018` / `ADR 2019`, or by a distinct short
+  all-caps code such as `ACDS` / `ACDM`), so a new entity was
+  inserted; `adapter_rejected` counts candidates that survived the veto but were rejected by
+  a non-LLM (custom) dedup adapter; `llm_confirmed`, `llm_rejected` and `llm_unavailable` count
+  candidates judged by the [LLM dedup check](configuration.md) (`LCG_DEDUP_LLM`,
+  [ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)) as duplicate (merged),
+  distinct (inserted) and unanswerable — error, timeout or malformed answer — (inserted); when the
+  check is off, a surviving candidate merges and counts as `embedding_merge`; `salvage_vetoed` counts off-list edge endpoints whose salvage candidates
+  were all vetoed. The tallies are per chunk; sum them across chunks for a run total.
 
 ### Progress notifications
 
@@ -1261,7 +1742,7 @@ see [MCP client config recipes](configuration.md#mcp-client-config-recipes) in C
 
 # Telemetry
 
-Source: https://v3rv.com/liminis-context-graph/telemetry
+Source: https://docs.liminis.app/liminis-context-graph/telemetry
 
 
 The `liminis-context-graph` service emits structured JSON Lines (JSONL) telemetry events that give operators per-call timing, token usage with estimated cost, and WAL throughput counters.
@@ -1318,7 +1799,7 @@ Emitted after every successful Anthropic API call from `extractor.rs`. This is a
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `role` | string | Which LLM use-case produced these tokens (`"extraction"`, future: `"dedup"`) |
+| `role` | string | Which LLM use-case produced these tokens (`"extraction"`, `"dedup"` — the LLM dedup check, #652) |
 | `model` | string | Anthropic model identifier (e.g. `claude-haiku-4-5-20251001`) |
 | `input_tokens` | u64 | Input tokens billed by the API |
 | `output_tokens` | u64 | Output tokens billed by the API |
@@ -1639,7 +2120,7 @@ Rates are in USD per million tokens. Models not present in the table produce `"e
 
 # Ontology
 
-Source: https://v3rv.com/liminis-context-graph/ontology
+Source: https://docs.liminis.app/liminis-context-graph/ontology
 
 
 `liminis-context-graph` supports an **optional workspace-scoped ontology** that declares the entity types and relation types the LLM should use during extraction. Without an ontology, the LLM derives types ad-hoc (free-form behavior). With one, vocabulary is consistent and queryable across all chunks.
@@ -1648,7 +2129,7 @@ Source: https://v3rv.com/liminis-context-graph/ontology
 
 Place the ontology at `{workspace}/.lcg/ontology.yaml`.
 
-**Requires a service restart to take effect.** The ontology is loaded once at startup and held in memory. Editing the file while the service runs has no effect until the next restart.
+**Requires a service restart to take effect.** The workspace-wide ontology is loaded once at startup and held in memory. Editing the file while the service runs has no effect until the next restart. (A group's *per-group* file can instead be picked up on a live service with [`knowledge_reload_ontology`](#reloading-a-groups-ontology); that call re-resolves one group but does not re-read this workspace file.)
 
 ## Per-group ontologies
 
@@ -1690,12 +2171,17 @@ through to step 2 (the workspace-wide ontology) if one exists, or step 3 (free-f
 it doesn't — never a startup failure or a hard error for that group. This degrades gracefully to
 whatever ontology this workspace already has validated (which may be none at all), and the failure
 is logged so it's observable rather than silent. Like the workspace-wide file, per-group files are
-loaded once (on that group's first use in the running process) and cached — restart the service to
-pick up a changed file.
+loaded once (on that group's first use in the running process) and cached — restart the service, or
+call [`knowledge_reload_ontology`](#reloading-a-groups-ontology) for that group, to pick up a changed
+file.
 
 **Direct-assert is unaffected.** `knowledge_assert_entity`/`knowledge_assert_relationship` accept
 arbitrary `labels` regardless of any per-group or workspace ontology — per-group resolution only
 governs *extraction-guided* groups (`knowledge_add_episode` and the maintenance operations above).
+An entity's `kind` (issue #615) is part of its identity, not its ontology type: extraction creates
+kind `Entity` unless the ontology marks the entity's type [identity-bearing](#identity-bearing-types)
+(issue #616), while direct-assert may give an entity any `kind`. The ontology restamp/reprocess
+operations rewrite type labels but preserve the entity's kind in its `labels`.
 
 **`canonicalize_relations`** resolves and applies the target group's own ontology, scoped to the
 `group_id` the call already requires. **`backfill_relation_types`** is ontology-independent — it
@@ -1713,7 +2199,7 @@ behaves identically; only the documentation available to the consumer is degrade
 
 ## Drift detection
 
-If the ontology governing a group's data changes between service restarts — the file is edited,
+If the ontology governing a group's data changes between service restarts or reloads — the file is edited,
 or a group starts/stops resolving through a per-group file versus the workspace fallback — the
 graph's entity/relation types may no longer match the vocabulary that produced them. Drift
 detection catches this and recommends **Recreate + re-ingest** (or a WAL rebuild/replay) as the
@@ -1742,13 +2228,76 @@ caching: a group that has **not yet been resolved** in this process picks up wha
 (or the workspace fallback) contains *at the time of that first use*, so an edit made while the
 service keeps running is visible the first time the group is actually used. It's only a group
 whose resolution is **already cached** — because it was used earlier in this process — that needs
-a restart to see a later edit; once a group's drift status has been computed, it does not change
-again mid-process even if its file is edited again afterward.
+a restart (or a [`knowledge_reload_ontology`](#reloading-a-groups-ontology) call) to see a later
+edit; once a group's drift status has been computed, it does not change again mid-process even if
+its file is edited again afterward, unless that group is reloaded.
 
 Drift clears after a successful remediation for the specific group remediated: either a fresh
 ingest for that group (`knowledge_add_episode`, e.g. following "Recreate + re-ingest") or a
 `knowledge_rebuild_from_wal` replay for that group. Clearing one group's drift never clears (or
 affects) any other group's drift status.
+
+## Reloading a group's ontology
+
+A group's ontology is resolved on its first use and then cached, so editing its file does not
+affect a running service. To make **one group** adopt an edited ontology without restarting (and
+so without interrupting every co-resident group), call the admin-scoped `knowledge_reload_ontology`
+(MCP tool of the same name; `admin` scope only):
+
+```json
+{"method": "knowledge_reload_ontology", "params": {"group_id": "content"}}
+```
+
+The group's cached resolution is discarded and immediately re-resolved through the normal
+precedence (per-group file, then the workspace ontology, then free-form). The response:
+
+```json
+{
+  "group_id": "content",
+  "previous_hash": "3f1a…",
+  "new_hash": "9b7c…",
+  "changed": true,
+  "drift": {"group_id": "content", "drifted": true, "drift_summary": "…"},
+  "identity_refusal": null
+}
+```
+
+- `previous_hash` is `null` if the group had not been resolved in this process yet; `new_hash` is
+  `"none"` when the group resolves to no ontology.
+- `changed` is `true` iff the two hashes differ. Reloading an unchanged file returns
+  `changed: false` and changes nothing (drift, refusal state and stored identity stamp included), so
+  it is safe to call defensively. A never-resolved group that resolves to no ontology is also
+  `changed: false`.
+- `drift` is the group's per-group drift status after the reload, the same entry
+  `knowledge_status.group_ontology_drift` reports. It compares against the **last-ingested**
+  ontology, not the previous cached one, so `changed` and `drift.drifted` are independent.
+- `identity_refusal` is `null`, or — when the new ontology adds or removes `identity: true` on a type
+  the group already holds — an object `{message, label, count, adding}`. The group is then refused
+  exactly as a restart would refuse it (see [Identity-bearing types](#identity-bearing-types)):
+  `knowledge_add_episode` fails with `-32003` and the group is listed in
+  `knowledge_status.group_identity_refusals`. The reload call itself still succeeds. Restore the
+  previous identity-bearing set in the file and reload again to clear the refusal.
+
+After a successful reload, new extraction for the group is typed by the new ontology, and
+`knowledge_canonicalize_relations` and `knowledge_reprocess_entity_types` resolve against it. Other
+groups' cached resolutions, hashes and drift status are untouched, and no stored data or schema is
+modified.
+
+Things to know:
+
+- The reload takes the service write lock, so it waits for in-flight read-lock passes
+  (`knowledge_reprocess_*`, `knowledge_canonicalize_relations`, backfills) to finish; while it waits,
+  new reads and writes queue behind it.
+- Extraction that is already in flight is not interrupted: an episode whose extraction started under
+  the old ontology may still commit afterwards with entities typed by the old ontology, but it will
+  not overwrite the group's recorded ontology hash or clear the drift the reload reported.
+  Reprocess/canonicalize calls that resolved their ontology just before a reload likewise finish
+  under the old one; only reload-then-call ordering is guaranteed.
+- The workspace-wide `.lcg/ontology.yaml` is still read only at startup. A group that relies on it
+  re-resolves to the startup value; a workspace-wide edit still requires a restart.
+- If the identity-set check cannot run (database unavailable), the reload fails and changes nothing.
+- A missing `group_id` is rejected with an error; a malformed or unreadable per-group file is treated
+  as missing, as at first resolution.
 
 ## Format
 
@@ -1804,7 +2353,140 @@ The optional `parent: <TypeName>` field on an entity type declares a single-pare
 - **Flat ontologies unaffected**: types without `parent` fields behave exactly as before — `["Entity", <SpecificType>]`.
 - **Drift detection**: adding, removing, or changing a `parent` changes the ontology content hash, which triggers a `drifted: true` status in `knowledge_status`. Run `knowledge_reprocess_entity_types` to propagate new hierarchy to existing nodes.
 
-See [`docs/examples/ontology.example.yaml`](https://github.com/verveguy/liminis-context-graph/blob/main/docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
+### Identity-bearing types
+
+By default extraction merges same-named entities by name, whatever type the model gave them: a
+`Person "Aurora"` and a `Technology "Aurora"` become one node. Mark a type `identity: true` to
+make it part of the entity's identity instead:
+
+```yaml
+entity_types:
+  - name: Person
+    identity: true         # optional; absent means false
+  - name: Organization
+    identity: true
+  - name: Technology       # not identity-bearing: keeps merging by name
+```
+
+An entity whose **primary extracted type** is identity-bearing is created with `kind` set to that
+type ([ADR-0615](adr/0615-kind-scoped-entity-identity.md) makes kind part of identity,
+`(group_id, kind, name)`), so `Person "Aurora"` and `Technology "Aurora"` are two entities:
+kind `Person`, and kind `Entity` carrying the `Technology` label. A second `Person "Aurora"` in a
+later chunk resolves to the same kind-`Person` node, and a `Person` is never merged into an
+existing `Entity`-kind "Aurora" (or the reverse). Everything not identity-bearing behaves exactly
+as before, and an ontology with no `identity` keys is unchanged.
+
+**Which types to flag.** Only stable, well-defined types whose extracted typing is consistent —
+typically `Person` and `Organization`. Extracted typing is inconsistent for fuzzier types (the
+same "Aurora" may be `Technology` in one chunk and `Product` in another); flag such a type and one
+thing splits into several nodes. Leave those unflagged.
+
+**Rules.**
+
+- Kind comes from the entity's *primary* type alone. It is never inherited through `parent`: with
+  `Document` identity-bearing and `Rfc` (parent `Document`) not, an `Rfc` gets kind `Entity`
+  (labels `Entity`, `Document`, `Rfc`). The result never depends on label or declaration order.
+- The flag is matched against the normalized (PascalCase) type name, like every other type match.
+  An undeclared type (open mode) or `Unclassified` (strict mode) is never identity-bearing.
+  `Merged` and `Unclassified` cannot be flagged.
+- Asserted entities (`knowledge_assert_entity`) are unaffected: they use the caller's `kind`. To keep a host-asserted identity type out of extraction entirely, also set [`extract: false`](#assert-only-types-extract-false).
+- **Edges name endpoints by name only.** If one batch contains the same name under two kinds, or a
+  name from an earlier chunk resolves to more than one kind, that endpoint is ambiguous and the
+  edge is dropped (counted in `edges_dropped_unresolvable`) rather than guessed at.
+- `knowledge_reprocess_entity_types` never changes an entity's kind, and never removes it from
+  `labels`. When a fresh classification disagrees with an entity's identity-bearing kind it
+  reports the entity in a `kind_disagreements` array (`entity_id`, `entity_name`, `kind`,
+  `classified_type`) and acts on nothing; deciding to merge or split is left to a person.
+
+**Evaluated at extraction time only.** Identity is decided once, when an entity is created, and
+never inferred afterwards. A WAL rebuild cannot apply a flag retroactively: replay re-executes
+each record's stored `kind` mechanically and never calls the extractor, so flipping a flag and
+rebuilding yields exactly the same graph. Nor can kind be re-derived from stored labels — if
+"Aurora" was extracted as `Person` in one chunk and `Technology` in another, name-merging already
+folded them into one node, and lcg cannot tell whether that was one thing typed inconsistently or
+two things wrongly merged.
+
+**Changing the flag is refused when it would reinterpret existing data.** lcg records, per group,
+which types were identity-bearing (`.lcg/identity-set/<group_id>.json`, outside the WAL and the
+DB, so it survives a clear or a rebuild-from-WAL). When a group's ontology first resolves in a
+process, its identity-bearing set is compared with the record:
+
+- A difference that touches only types no existing entity in the group carries **is accepted**;
+  the record is updated and it takes effect for later extractions.
+- Adding or removing the flag for a type existing entities already carry (their full `labels`,
+  including ancestor labels and the kind label — so flagging `Document` is refused while any `Rfc`
+  entity carries the `Document` label) **is refused**. `knowledge_add_episode` for that group fails
+  with JSON-RPC error `-32003` (`error.data.reason = "identity_set_change_refused"`, plus
+  `group_id`, `label`, `entity_count`), and the group appears in `knowledge_status`'s
+  `group_identity_refusals`:
+
+  ```text
+  identity-bearing set change refused for group "content": adding the `identity` flag for type
+  "Person" would reinterpret 12 existing entities carrying that label. Identity is decided once,
+  at creation, and never inferred afterwards. Restore the group's previously recorded
+  identity-bearing set, or re-ingest the group from source.
+  ```
+
+A refusal modifies no data and affects only the offending group — reads, reprocessing, other
+groups and service startup are unaffected. It holds until the group is reloaded with the recorded set restored
+([`knowledge_reload_ontology`](#reloading-a-groups-ontology)) or the service is restarted with it
+restored; either loads the group normally. The remedy for a change you
+really want is to re-ingest the group from source (lcg does not automate this).
+
+Because the flag is part of the ontology content hash, adding one also raises the ordinary
+[drift](#drift-detection) warning; that warning is separate from, and weaker than, this refusal.
+
+### Assert-only types (`extract: false`)
+
+A host that asserts its own structural types through `knowledge_assert_entity` /
+`knowledge_assert_relationship` — a `Source` entity and a `DERIVED_FROM` relation, say — does not
+want the LLM extractor minting them from prose. Mark such a type `extract: false` (entity and
+relation types both accept it; absent or `true` means extractable):
+
+```yaml
+entity_types:
+  - name: Person
+  - name: Source
+    identity: true         # still identity-bearing for asserts and the identity-set guard
+    extract: false         # but never offered to, nor accepted from, the extractor
+relation_types:
+  - name: KNOWS
+  - name: DERIVED_FROM
+    extract: false
+```
+
+`extract: false` is an extraction-time concept only; everything else treats the type as fully
+declared.
+
+- **Prompts.** The entity and edge extraction prompts omit the type (and its description,
+  aliases and keywords). An ontology with no `extract: false` type renders byte-identical prompts.
+  If *every* entity type is `extract: false` the entity section falls back to the default
+  vocabulary; if every relation type is, the relation section is omitted.
+- **Stray extractor output.** A prompt is advisory, so an extracted entity typed with an
+  `extract: false` type (matched after normalization: `source`, `SOURCE` and `Source` are the same)
+  is reclassified to `Unclassified` with the original label preserved in `original_entity_type` —
+  in **both** `strict` and `open` mode, and it never receives the type's identity `kind` or its
+  label. An extracted edge of such a relation type is reclassified to `relation_type: UNCLASSIFIED`
+  with `original_relation_type` preserved. Both count toward `entities_reclassified_unclassified` /
+  `edges_reclassified_unclassified`. Every other undeclared label keeps its normal `open`-mode
+  behaviour. See [ADR-0637](adr/0637-extract-false-assert-only-types.md).
+- **Asserts are unaffected.** `knowledge_assert_entity {kind: "Source"}` and
+  `knowledge_assert_relationship` with `relation_type: "DERIVED_FROM"` work exactly as for any
+  declared type.
+- **Identity and hierarchy.** An `identity: true, extract: false` type counts in the identity set
+  and the `-32003` guard. The flag is per type and not inherited through `parent`: children of an
+  `extract: false` type are extractable and still get the parent's ancestor label.
+- **Reprocessing and canonicalization.** `knowledge_reprocess_entity_types`,
+  `knowledge_reprocess_relation_types` and `knowledge_canonicalize_relations` never retype into an
+  `extract: false` type. Already-asserted entities and edges of such a type are not off-ontology
+  candidates; under `scope: all` an asserted `Source` entity may appear in `kind_disagreements`
+  because the classifier cannot choose `Source`.
+- **Drift, not refusal.** Flipping `extract` changes the content hash (so it reports as
+  [drift](#drift-detection)) but never the identity set, so
+  [`knowledge_reload_ontology`](#reloading-a-groups-ontology) accepts it. Ontologies with no
+  `extract: false` type hash exactly as before.
+
+See [`docs/examples/ontology.example.yaml`](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
 
 ## Modes
 
@@ -1832,7 +2514,8 @@ The `knowledge_status` IPC response always includes an `ontology` field (workspa
   "group_ontology_drift": [
     { "group_id": "catalog", "drifted": true, "drift_summary": "entity types added: [Equipment]" },
     { "group_id": "content", "drifted": false, "drift_summary": null }
-  ]
+  ],
+  "group_identity_refusals": []
 }
 ```
 
@@ -1846,6 +2529,10 @@ timing. A single-ontology workspace (no `.lcg/ontology/` directory) behaves iden
 is empty until a group is used, then contains that group only, and the `ontology` field's shape
 and values are unaffected either way.
 
+`group_identity_refusals` lists `{group_id, message}` for each group whose identity-bearing-set
+change was refused this process (see [Identity-bearing types](#identity-bearing-types)); it is empty
+when nothing was refused.
+
 The response also includes an `indices_built` boolean, a `name_index_trusted` boolean, and a
 `name_index_fallback_scans` integer — these describe search-index and name-lookup health rather
 than ontology state. See [Operations](operations.md) for those fields.
@@ -1854,7 +2541,7 @@ than ontology state. See [Operations](operations.md) for those fields.
 
 # Operations
 
-Source: https://v3rv.com/liminis-context-graph/operations
+Source: https://docs.liminis.app/liminis-context-graph/operations
 
 
 ## On-disk layout
@@ -1873,6 +2560,9 @@ Everything the service manages lives under `.lcg/` in the workspace:
 ├── ontology-hash.json       # workspace-level ontology drift sidecar (issue #83)
 ├── ontology-hash/            # per-group ontology drift sidecars (issue #451)
 │   └── <group_id>.json      #   one file per group_id, drift state for its resolved ontology
+├── identity-set/             # per-group identity-bearing type stamps (issue #616)
+│   └── <group_id>.json      #   which entity types were `identity: true` when the group's
+│                            #   entities were extracted; only written once a group uses the flag
 └── service.sock            # JSON-RPC 2.0 endpoint while the service runs
 ```
 
@@ -2042,6 +2732,31 @@ the running embedder — a database-side check, not a property of the WAL or the
   the same reason, the output always gets a freshly minted generation (issue #387) — never the
   source's: it is a new stream, not a copy of the source's identity, so a consumer must not treat
   it as "the same stream" it was tracking before.
+- **Strip embedding vectors from a pre-0.14 WAL** with `knowledge_strip_wal_embeddings
+  {group_id, dry_run}` (issue #577). 0.14.0 stopped *writing* embedding vectors to the WAL and
+  made replay ignore any vector it finds in an older WAL (see above) — this operation reclaims
+  the space a WAL written before that change is still carrying, by rewriting every qualifying
+  `.jsonl` file in place to remove `params` entries keyed by an embedding-column name
+  (`name_embedding`, `fact_embedding`, `content_embedding`, `summary_embedding`), leaving every
+  other field, record ordering, and sequence number untouched. Because replay never reads a
+  stored vector regardless of whether it's present, this is pure reclamation: it cannot change
+  what a rebuild produces. `group_id` scopes the operation to one group's own WAL directory;
+  omit it to process every group directory under the WAL root plus any legacy flat-layout files
+  at the root itself. Idempotent: re-running against an already-stripped WAL (or one that never
+  had vectors, i.e. anything written entirely by 0.14.x) is a zero-I/O no-op — no file is opened
+  for writing, so bytes and mtime are left exactly as they were. Crash-safe per file: each file
+  needing a rewrite is written to a temporary file in the same directory and atomically renamed
+  over the original only once fully flushed, so an interrupted run leaves every already-rewritten
+  file replaced, the in-flight file's original intact, and a subsequent run resumes cleanly. A
+  record whose embedding-vector value is malformed (not a well-formed JSON array of numbers) is
+  reported as a per-file error — that file is left completely untouched, and every other file is
+  still processed. Pass `dry_run: true` to preview the same statistics (files that would be
+  rewritten, bytes that would be reclaimed, records that would be touched) without modifying
+  anything. Reachable even when the database is degraded or unavailable, since it only touches
+  the WAL directory on disk. Deliberately out of scope: a vector inlined as a raw Cypher literal
+  rather than a `params` entry (see [ADR-0526](adr/0526-vectors-are-a-local-cache.md)'s
+  externally-produced-content edge case) has no `params` key to remove and is left as-is. See
+  [ADR-0577](adr/0577-strip-wal-embeddings.md) for the full design.
 - **Name a known-good position** with `knowledge_wal_mark_create {name, group_id}` (`group_id`
   defaults to `"liminis"`) — a lightweight alternative to a full `knowledge_dump_wal` snapshot
   when all you need is a durable pointer back to "this group's stream was good here," not a
@@ -2126,9 +2841,39 @@ Poll `health_check` until it reports `healthy` (or `knowledge_status` until `con
 `queryable` are both `true` and `initializing` is `false` — `knowledge_status` has no `healthy`
 field of its own) before treating the service as ready.
 
+**`busy` is alive, not dead.** `health_check` never waits on the write lock: while a write is
+pending or in progress — above all a long `knowledge_rebuild_from_wal` — it answers immediately
+with `{"ok": true, "healthy": false, "state": "busy", "activity": "rebuilding" | "writing"}`, and
+for a rebuild job also `job_id` and `progress` (mutations replayed, WAL files processed/total,
+elapsed seconds). Keep polling on `busy`; **do not restart the service** — a restart mid-rebuild
+discards the replay and starts it over, so on a large corpus the rebuild never completes (#612).
+Supervisor liveness probes should treat any response with `ok: true` as alive and gate readiness on
+`healthy: true`. The four outcomes are: `busy` = alive, not ready; `healthy` = alive, ready;
+`degraded` = alive but unusable; no answer = dead or wedged. Full contract:
+[IPC reference: Health check contract](ipc-mcp-reference.md#health-check-contract).
+
 ## `knowledge_status` health fields
 
 Beyond the [ontology summary](ontology.md#knowledge_status-summary), `knowledge_status` reports:
+
+**`dedup_mode`** (string, always present, including when degraded) — what protects the graph from
+wrong embedding-path merges during extraction, beyond the cosine threshold (issue #652,
+[ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)). `"veto-only"`: the
+deterministic identifier-mismatch veto ([ADR-0650](adr/0650-identifier-mismatch-veto-for-extraction-dedup.md))
+is the only check, so any candidate that passes it merges. `"llm-verified"`: the configured
+extractor additionally judges each surviving candidate (`LCG_DEDUP_LLM`, off by default). If
+`LCG_DEDUP_LLM` is on but no extraction provider is configured the field reads `"veto-only"` and
+startup logged a warning. The same mode is logged once at startup as `dedup: mode=…`; per-chunk
+path counts are on `knowledge_process_chunk`'s `dedup_paths`.
+
+The veto also keeps distinct short all-caps codes apart (issue #666,
+[ADR-0666](adr/0666-exact-graph-match-and-uuid-self-loop-guard.md)): `ACDS` / `ACDM`, `UK` / `USA`
+and `US Army` / `UK Army` never merge by embedding. A token counts as a code when it is 2–6
+uppercase letters (not a Roman numeral) in the name as written, and the veto fires only when
+*each* name has a code the other lacks, so acronym/expansion aliases (`IBM` /
+`International Business Machines`) and case variants (`NASA` / `nasa`) still merge. Known gaps,
+left to the embedding and `LCG_DEDUP_LLM`: a shout-case name against a lone mixed-case one
+(`Acme` vs `ACDM`) and codes longer than six letters.
 
 **`indices_built`** (boolean) — whether the entity/relationship FTS + HNSW search indices are
 currently built and reflect the graph's current contents. The service builds these indices
@@ -2172,6 +2917,17 @@ learn a given rebuild's backfill outcome directly from its own result, without a
 `knowledge_status` call; use `name_index_trusted` (below) for the current global/cumulative
 backfill health, independent of any specific rebuild.
 
+**Key format and the kind migration (issue #615).** `Entity.lookup_key` is `group_id ␟ kind ␟
+lower(trim(name))` (U+001F separators; `kind` defaults to `Entity`), so same-named entities of
+different kinds coexist ([ADR-0615](adr/0615-kind-scoped-entity-identity.md)). It is a *derived*
+value: it is stripped from every WAL record at write time and recomputed on replay, and any
+`lookup_key` in an older WAL is ignored. On the first start after upgrading, `schema::migrate` adds
+`Entity.kind`, and a one-time backfill (persisted under the `SchemaState` key
+`entity_kind_lookup_key_v2`) sets every existing row's kind to `Entity` and re-keys it — an O(N)
+pass, one statement per row. The post-replay backfill after every rebuild/recovery covers
+`kind IS NULL OR lookup_key IS NULL`. **Downgrade is unsupported:** a pre-#615 binary cannot replay
+a WAL written after this change.
+
 **`name_index_trusted`** (boolean) and **`name_index_fallback_scans`** (integer) — field names
 kept for wire compatibility, but re-backed by the `Entity.lookup_key` secondary ART index
 ([ADR-0221](adr/0221-secondary-art-index-for-entity-name-lookup.md), which supersedes the
@@ -2192,6 +2948,25 @@ while the service is degraded (no connected database). A rising `name_index_fall
 count, or a `name_index_trusted: false` that doesn't clear on its own, signals `lookup_key`
 staleness worth investigating — see
 [ADR-0221](adr/0221-secondary-art-index-for-entity-name-lookup.md) for the mechanism.
+
+**`fts_repair_count`** (integer) and **`fts_last_repair_unix_ms`** (integer or `null`) — how many
+times, since this process opened the database, a write hit `FTS index '<idx>' is inconsistent` and
+the service rebuilt all three FTS indexes and retried that statement once, and when the last such
+repair finished (Unix ms; `null` if none). Both are `null` while the service is degraded. A
+non-zero count means a residual FTS inconsistency that the startup marker did not catch was
+detected and repaired (the classifier matches the error text, not its cause, so it does not by
+itself identify a version mismatch); it normally does not recur. The one-time startup rebuild (marker `fts_built_by_lbug` in
+`SchemaState`) is *not* counted here; it is logged on stderr
+(`rebuilding full-text (FTS) indexes: they were not built by this lbug version`) and its time is
+proportional to corpus size. See
+[ADR-0649](adr/0649-fts-index-rebuild-on-lbug-version-change.md).
+
+**Troubleshooting `FTS index '<idx>' is inconsistent`.** Raised by a delete/update on a row whose
+non-ASCII term is missing from an FTS index built by lbug 0.20 (0.15.x and earlier). Releases after
+0.16.2 rebuild the indexes automatically on first start. On 0.16.0–0.16.2, drop **all three** (not just
+the named one) with `CALL DROP_FTS_INDEX('Entity','node_name_and_summary')`,
+`CALL DROP_FTS_INDEX('RelatesToNode_','edge_name_and_fact')` and
+`CALL DROP_FTS_INDEX('Episodic','episode_content')`, then call `knowledge_build_indices`.
 
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below
@@ -2442,16 +3217,17 @@ bridge and the list of operations that support it.
 
 ## Recovery and export tools
 
-`knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`,
-`knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`,
-`knowledge_recover`, and `knowledge_recover_full` are all `admin`-scope IPC/MCP tools — see
+`knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`,
+`knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`,
+`knowledge_rebuild_from_wal`, `knowledge_recover`, and `knowledge_recover_full` are all
+`admin`-scope IPC/MCP tools — see
 [Scopes](ipc-mcp-reference.md#scopes) for the full admin-scope list and the MCP `--scope` flag.
 
 ---
 
 # Testing & Evaluation
 
-Source: https://v3rv.com/liminis-context-graph/testing-and-evaluation
+Source: https://docs.liminis.app/liminis-context-graph/testing-and-evaluation
 
 
 ## Record/replay cassettes
@@ -2505,7 +3281,7 @@ request nonces, and anything transport-specific (headers, API keys, URLs) are ne
 key, and never reach the cassette at all — the record/replay seam sits at the `Extractor` trait
 boundary, strictly above HTTP request construction, so there is nothing credential-shaped for it
 to see or need to scrub. See the
-[`crates/core/src/cassette.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/cassette.rs)
+[`crates/core/src/cassette.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/cassette.rs)
 module doc for the full, authoritative scope (including one documented, narrow gap around the
 edge extraction user prompt).
 
@@ -2514,7 +3290,7 @@ construction, so there's nothing transport-level for it to see. But a cassette's
 `response` fields are the actual episode text and model output, so **review content before
 committing or sharing a cassette**: source text drawn from a real workspace can carry
 proprietary or personal data that has nothing to do with authentication. See
-[`crates/core/tests/fixtures/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md)
+[`crates/core/tests/fixtures/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md)
 for this repo's fixture-capture conventions.
 
 ### Failure-record sidecar
@@ -2788,7 +3564,7 @@ nothing.
 
 # Full-corpus extraction benchmark runbook (#248)
 
-Source: https://v3rv.com/liminis-context-graph/eval-full-corpus-runbook
+Source: https://docs.liminis.app/liminis-context-graph/eval-full-corpus-runbook
 
 
 This is the maintainer-run procedure for producing #248's benchmark data: a full-228-article
@@ -3210,7 +3986,7 @@ whether or not it actually does.
 
 # Extraction-quality evaluation: methodology, model rankings, and local-LLM guidance
 
-Source: https://v3rv.com/liminis-context-graph/extraction-quality-evaluation
+Source: https://docs.liminis.app/liminis-context-graph/extraction-quality-evaluation
 
 
 This document answers the question `liminis-context-graph` has otherwise left unanswered: **can
@@ -3443,7 +4219,7 @@ flags and selection precedence.
 
 # Release process
 
-Source: https://v3rv.com/liminis-context-graph/release-process
+Source: https://docs.liminis.app/liminis-context-graph/release-process
 
 
 This is the maintainer procedure for verifying CI status before cutting a release. It
@@ -3503,18 +4279,51 @@ conclusion alone is not sufficient. Set `RELEASE_SHA` to the exact commit being 
 Do not treat step 1 alone as sufficient evidence that "full e2e passed." Step 2 is the
 one that actually verifies it.
 
+## Release packaging is verified post-merge
+
+`release.yml` does **not** run on pull requests. Release packaging — the four-target build
+(`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-pc-windows-msvc`), the pinned lbug extension-hash check
+([ADR-0593](adr/0593-pin-lbug-extension-bytes.md)) and the OpenSSL linkage guards
+([ADR-0550](adr/0550-openssl-dynamic-linkage-via-rpath.md),
+[ADR-0581](adr/0581-windows-static-openssl.md)) — is verified once per merge, by the
+`Release` run on the push to `main`. That run builds and checks but publishes nothing (no
+GitHub Release, no announcement, no docs dispatch); only a pushed version tag publishes. See
+[ADR-0639](adr/0639-post-merge-release-packaging-verification.md).
+
+A PR that breaks packaging is therefore caught after merge and fixed forward. Before
+tagging, with `RELEASE_SHA` set as above:
+
+```bash
+gh issue list --label ci-failure --label workflow:release --state open
+gh run list --workflow release.yml --commit "$RELEASE_SHA" --limit 5
+```
+
+A failed `Release` run on `main` files (or updates) a `ci-failure` + `workflow:release`
+issue via `ci-failure-notify.yml`, and the issue closes itself on the next green run. Treat
+an open one as a blocker: fix forward, or record in the release PR why the release proceeds
+anyway. Failed tag-triggered runs are not reported by the listener — watch the run you just
+triggered.
+
 ## Docs publishing
 
 The docs site is **no longer published from `main`**. Every merge to `main` that
 touches `docs/` still runs the PR-time checks below, but does not change the live
-site. Publishing happens only when a GitHub Release is published, via
+site. Publishing happens only when a release is cut, via
 `.github/workflows/docs-publish.yml`. See
 [ADR-0477](adr/0477-tag-based-versioned-docs-publishing.md) for the full design.
 
 ### What happens automatically when you cut a release
 
-`release.yml` (cargo-dist) creates the GitHub Release once artifact builds finish.
-That `release: published` event triggers `docs-publish.yml`, which:
+`release.yml` (cargo-dist) creates the GitHub Release once artifact builds finish. It
+does so with `GITHUB_TOKEN`, and GitHub does not start workflow runs from events created
+by `GITHUB_TOKEN` (the exceptions are `workflow_dispatch` and `repository_dispatch`), so
+the `release: published` event **never triggers** `docs-publish.yml` for these releases.
+Instead, `release.yml`'s hand-added `dispatch-docs` job runs after the release is created
+and dispatches `docs-publish.yml` with `version=<X.Y.Z>` and `ref=refs/tags/v<X.Y.Z>`
+(skipping quietly for a tag that isn't `vX.Y.Z[-pre]`). The `release: published` trigger
+is retained for releases created by hand (UI, or a non-`GITHUB_TOKEN` credential).
+Either way, `docs-publish.yml`:
 
 1. Skips entirely if the release's tag doesn't match the `vX.Y.Z` version-tag
    scheme (e.g. a non-version release like `eval-artifacts-2026-07`) — no docs
@@ -3534,11 +4343,16 @@ That `release: published` event triggers `docs-publish.yml`, which:
 ### What to check after a release publishes
 
 1. Confirm the `Docs publish` workflow run for the release succeeded:
-   `gh run list --workflow docs-publish.yml --limit 1`.
-2. Visit the root URL (`https://v3rv.com/liminis-context-graph/`) and confirm the
+   `gh run list --workflow docs-publish.yml --limit 1`. For a release cut by
+   `release.yml` its trigger shows as `workflow_dispatch` (dispatched by the
+   `dispatch-docs` job), not `release`. If there is no such run, check the
+   `dispatch-docs` job in the release workflow run: a red job means the dispatch failed
+   and docs were **not** triggered (the release itself is unaffected) — publish them
+   with `gh workflow run docs-publish.yml -f version=<X.Y.Z>`.
+2. Visit the root URL (`https://docs.liminis.app/liminis-context-graph/`) and confirm the
    footer reads the new version.
 3. Visit the new version's own URL
-   (`https://v3rv.com/liminis-context-graph/v<version>/`) and confirm it's live.
+   (`https://docs.liminis.app/liminis-context-graph/v<version>/`) and confirm it's live.
 4. Spot-check that the previous version's URL is still reachable and unchanged.
 
 If the workflow run failed (e.g. a transient build error), re-run it with
@@ -3620,7 +4434,7 @@ step 1; the `gh-pages` branch itself is unaffected by that setting.
 
 # Architecture Decision Records
 
-Source: https://github.com/verveguy/liminis-context-graph/blob/main/docs/adr/index.md
+Source: https://github.com/liminisapp/liminis-context-graph/blob/main/docs/adr/index.md
 
 
 **These are historical decision records, not current-state documentation.** Each ADR captures
@@ -3744,6 +4558,29 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0543](0543-narrow-write-lock-around-embedder-round-trip.md) | Narrow `state.write_lock`'s Critical Section Around the Embedder Round Trip | 2026-09-05 |
 | [0550](0550-openssl-dynamic-linkage-via-rpath.md) | Link OpenSSL Dynamically, Resolved Through `@rpath` on macOS | 2026-09-03 |
 | [0559](0559-bundle-lbug-extensions.md) | Bundle lbug vector/fts extensions so startup never downloads from the CDN | 2026-09-05 |
+| [0575](0575-lazy-connect-for-attached-mcp-stdio.md) | Lazy-Dial the Attached `--connect` Socket by Default, With `--connect-eager` Opt-Out | 2026-09-09 |
+| [0577](0577-strip-wal-embeddings.md) | `knowledge_strip_wal_embeddings` — Two-Pass In-Place Stripping of Pre-0.14 WAL Vectors | 2026-09-09 |
+| [0581](0581-windows-static-openssl.md) | Link OpenSSL Statically on Windows | 2026-09-15 |
+| [0593](0593-pin-lbug-extension-bytes.md) | Pin lbug extension bytes; treat embedded version strings as a diagnostic, not an oracle | 2026-09-16 |
+| [0615](0615-kind-scoped-entity-identity.md) | Kind-Scoped Entity Identity — `Entity.kind` and `lookup_key = group_id ␟ kind ␟ name` | 2026-09-29 |
+| [0616](0616-ontology-driven-kind-assignment.md) | Ontology-Driven Kind Assignment — identity-bearing entity types during extraction | 2026-09-29 |
+| [0627](0627-per-group-ontology-reload.md) | Per-Group Ontology Reload Without a Restart — `knowledge_reload_ontology` | 2026-09-30 |
+| [0637](0637-extract-false-assert-only-types.md) | Assert-Only Ontology Types — `extract: false` excludes a type from the LLM extractor | 2026-09-30 |
+| [0628](0628-health-check-busy-state.md) | `health_check` Reports `busy` Instead of Blocking Behind `write_lock` | 2026-09-29 |
+| [0629](0629-find-search-evidence-and-similarity-floor.md) | Search Evidence and a `min_similarity` Floor for `find_entities` / `find_relationships` | 2026-09-30 |
+| [0639](0639-post-merge-release-packaging-verification.md) | Verify Release Packaging Post-Merge on `main`, Not on Every PR Push | 2026-09-30 |
+| [0640](0640-ci-cheap-checks-first-and-fail-fast.md) | CI Cheap-Checks-First Pre-Gate and Run-Wide Fail-Fast | 2026-09-30 |
+| [0649](0649-fts-index-rebuild-on-lbug-version-change.md) | Rebuild FTS Indexes When the Building lbug Version Changes | 2026-10-01 |
+| [0650](0650-identifier-mismatch-veto-for-extraction-dedup.md) | Identifier-Mismatch Veto for Extraction-Time Entity Dedup | 2026-10-01 |
+| [0651](0651-merge-consolidates-summaries-and-refreshes-embedding.md) | Entity Merge Consolidates Summaries and Always Re-embeds `summary_embedding` | 2026-10-01 |
+| [0652](0652-llm-verified-extraction-dedup-via-extractor.md) | LLM-Verified Extraction Dedup via the Configured Extractor | 2026-10-01 |
+| [0666](0666-exact-graph-match-and-uuid-self-loop-guard.md) | Exact Graph Match Before Salvage, UUID-Level Self-Loop Guard, Short-Code Veto | 2026-10-02 |
+| [0667](0667-read-path-paging-cursor-and-status-label.md) | Read-Path Paging Cursor, Projection, All-Groups Episode Default and Status Label | 2026-10-01 |
+| [0673](0673-ingest-time-separate-from-event-time.md) | Ingest Time Is Stored Separately From Event Time (`ingested_at`) | 2026-10-03 |
+| [0690](0690-prefetch-and-cache-prebuilt-liblbug-for-release.md) | Prefetch and Cache the Pinned Prebuilt liblbug for Release Builds | 2026-10-18 |
+| [0705](0705-belief-time-separate-from-validity.md) | Belief Time Is Separate From Validity — Corrections Supersede Episodes | 2026-10-26 |
+| [0706](0706-correction-diff-and-affected-work-reads.md) | Correction Reads — What a Correction Changed, and What Was Written While the Old Belief Held | 2026-10-26 |
+| [0707](0707-document-supersession.md) | Document Supersession — A New Document Explicitly Replaces an Old One | 2026-10-26 |
 
 ## Historical numbering
 

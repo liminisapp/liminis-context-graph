@@ -22,6 +22,12 @@
 #   Linux  — an absolute DT_NEEDED entry. Correct form is a bare SONAME such as
 #            libssl.so.3, which ld.so resolves from the system search path.
 #
+#   Windows — the exception (ADR-0581): OpenSSL is linked *statically*, because the
+#            archive can't carry DLLs for one target alone and no Windows package
+#            manager would patch a DLL we shipped. So any import of an OpenSSL DLL
+#            (libssl-3*.dll / libcrypto-3*.dll) fails: it means the build picked up a
+#            dynamic OpenSSL and the shipped .exe would not start on a clean machine.
+#
 # lbug's build.rs emits -lssl/-lcrypto unconditionally and falls through to
 # hardcoded Homebrew probe paths. scripts/stage-openssl-rpath.sh gets the
 # @rpath form when it takes effect; under `dist build` on a GitHub runner it
@@ -90,6 +96,24 @@ for bin in "$@"; do
         continue
       fi
       echo "assert-openssl-linkage.sh: OK — '$bin' resolves OpenSSL via SONAME"
+      ;;
+    MINGW*|MSYS*|CYGWIN*)
+      # PE imports name DLLs by bare file name in the binary's import table, as
+      # NUL-terminated ASCII — no dumpbin (which needs a VS dev shell) required. Match
+      # only whole NUL-delimited strings: lbug 0.20.4 embeds an error message that
+      # *mentions* libssl-3-x64.dll/libcrypto-3-x64.dll, which a substring grep reads
+      # as an import.
+      dlls="$(tr '\0' '\n' < "$bin" | grep -a -i -x -E 'lib(ssl|crypto)-3[-a-z0-9_]*\.dll' | sort -u || true)"
+      if [[ -n "$dlls" ]]; then
+        echo "assert-openssl-linkage.sh: FAIL — '$bin' imports OpenSSL DLLs:" >&2
+        echo "$dlls" >&2
+        echo >&2
+        echo "  Windows builds link OpenSSL statically (ADR-0581): stage vcpkg's" >&2
+        echo "  x64-windows-static-md with scripts/stage-openssl-windows.sh." >&2
+        status=1
+        continue
+      fi
+      echo "assert-openssl-linkage.sh: OK — '$bin' links OpenSSL statically (no OpenSSL DLL imports)"
       ;;
     *)
       echo "assert-openssl-linkage.sh: unsupported OS '$os' — skipping '$bin'" >&2

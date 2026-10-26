@@ -97,11 +97,14 @@ impl VocabularyComplianceCounts {
         // Mirror episode.rs's Strict-mode gate: an ontology declaring only relation_types
         // (no entity_types) does not filter entities in production at all, so the harness
         // must not tally every entity as a violation here — that would report a 100%
-        // violation rate for an axis production never applies Strict-mode to.
-        if !vocab.has_entity_types() {
+        // violation rate for an axis production never applies Strict-mode to. The gate is on
+        // the *extractable* set (#637): an ontology whose every entity type is `extract: false`
+        // offers the extractor the default vocabulary and filters nothing in production, so an
+        // empty extractable vocabulary must not count every entity as out-of-vocab.
+        if vocab.extractable_entity_types().next().is_none() {
             return;
         }
-        let names = vocab.entity_type_names();
+        let names = vocab.extractable_entity_type_names();
         for e in entities {
             self.entities_checked += 1;
             if !names.contains(&normalize_entity_type(&e.entity_type)) {
@@ -112,11 +115,11 @@ impl VocabularyComplianceCounts {
 
     fn record_edges(&mut self, edges: &[lcg_core::ExtractedEdge], vocab: &Ontology) {
         // Same per-axis gate as record_entities, mirroring episode.rs's
-        // `has_relation_types()` check.
-        if !vocab.has_relation_types() {
+        // extractable-relation-type check (#637).
+        if vocab.extractable_relation_types().next().is_none() {
             return;
         }
-        let names = vocab.relation_type_names();
+        let names = vocab.extractable_relation_type_names();
         for e in edges {
             self.edges_checked += 1;
             // A missing relation_type is itself a vocabulary-compliance violation under
@@ -709,6 +712,35 @@ mod tests {
             vocab.edges_checked, 0,
             "no relation_types declared: edges must not be tallied at all"
         );
+        assert_eq!(vocab.edges_out_of_vocab, 0);
+    }
+
+    // #637: an ontology whose every type is `extract: false` offers the extractor no
+    // vocabulary (prompts fall back to defaults, ingest filters nothing), so the harness must
+    // gate on the extractable set and tally neither axis rather than report 100% violations.
+    #[tokio::test]
+    async fn all_extract_false_ontology_does_not_tally_vocabulary_violations() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ontology.yaml");
+        std::fs::write(
+            &path,
+            "entity_types:\n  - name: Source\n    extract: false\nrelation_types:\n  - name: DERIVED_FROM\n    extract: false\n",
+        )
+        .unwrap();
+        let ontology = load_ontology_from_path(&path, OntologyMode::Strict)
+            .expect("fixture ontology should load");
+
+        let extractor: Arc<dyn Extractor> =
+            Arc::new(ConfigurableExtractor::new(vec![mixed_vocab_extraction()]));
+        let sink = Arc::new(CountingSink::new());
+        let chunks = vec![chunk("A", "prose a")];
+
+        let result = run_backend("mock", extractor, sink, &chunks, Some(&ontology)).await;
+
+        let vocab = result.vocabulary_compliance.unwrap();
+        assert_eq!(vocab.entities_checked, 0);
+        assert_eq!(vocab.entities_out_of_vocab, 0);
+        assert_eq!(vocab.edges_checked, 0);
         assert_eq!(vocab.edges_out_of_vocab, 0);
     }
 }

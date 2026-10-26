@@ -1,0 +1,42 @@
+# Pinned sha256 for the lbug vector/fts extension binaries staged by
+# scripts/stage-lbug-extensions.sh (issue #593, ADR-0593).
+#
+# WHY THIS FILE EXISTS
+#
+# extension.ladybugdb.com publishes extensions at a per-minor path
+# (v<LBUG_EXTENSION_VERSION>/<platform>/<name>/) and overwrites the files at that path on
+# patch releases — LBUG_EXTENSION_VERSION resolves to one shared directory for every 0.20.x
+# core, so the bytes a build picks up depend on *when* it runs, not on anything pinned in this
+# repository. This file pins the exact bytes stage-lbug-extensions.sh must receive; any other
+# bytes fail the build instead of being silently staged. See ADR-0593 for the full design,
+# including why a version-string diagnostic on mismatch is informational only, never a
+# pass/fail signal — version equality is not the same as ABI compatibility.
+#
+# THIS FILE IS UPDATED BY HAND ONLY, after a human re-verifies new CDN bytes are safe to ship
+# (e.g. via loop testing against the pinned core, as documented in issue #593's discussion).
+# stage-lbug-extensions.sh never writes to this file.
+#
+# Format: one entry per line, "<platform> <extension> <sha256>", where <platform> is one of
+# is vector or fts. Values below are the lbug 0.21.0 extensions (CDN path v0.21.0), fetched
+# 2026-09-29 after upstream's 00:03 UTC republish (origin and edge agreed). Verified against an
+# lbug 0.21.0 core: macOS arm64 full lcg suite, Windows 11 vector 45/45 + fts 10/10
+# row-asserting pairing runs (issue #619). Bytes re-fetched 2026-10-04 and unchanged; the lbug 0.21.1 core still
+# resolves extension directory v0.21.0, so these same files pair with it. The lbug 0.21.2 core does too (issue #699):
+# its CMake build still defines LBUG_EXTENSION_VERSION="0.21.0" and v0.21.1/ and v0.21.2/ 404 on the CDN.
+#
+# Re-pinned 2026-10-26 (issue #709). Upstream served 0.22-built files at v0.21.0 from 2026-10-16
+# (LadybugDB/ladybug#1390), then on 2026-10-25 ~16:38 UTC restored the directory from the image
+# of its 0.21.2 release build (LadybugDB/ladybug#1403). The restored fts files (all platforms) and
+# win_amd64 vector differ from the earlier pins; the other three vector files are byte-identical.
+# Verified by loading both extensions and running an FTS and a vector-index query under lbug
+# 0.21.1 and 0.21.2 (Python wheels, empty home): osx_arm64 natively, linux_amd64 and linux_arm64
+# in python:3.12-slim. win_amd64 was not run locally.
+
+osx_arm64 vector 6f878f3c0a2320a34967ff568fcf6bbe9065666e95035f0eddfe28bbc73b53f4
+osx_arm64 fts 777d9b606514d3c45c6196e7a44300b583af6513a34178bf1a7d030f4c888f03
+linux_amd64 vector 571726cc2ea0d202df1909ae5a3b0528c9dea3ea8d40be6c16b310ec14aa8821
+linux_amd64 fts 399c8d883fbe836c4b60bbe9440180cbc0c7fe27ef350a4e1570dccdb93695a7
+linux_arm64 vector 583101f5bf2d0e5d40de2ee8966018a3bdf0fb8ad8951ef51ef46cd59169445f
+linux_arm64 fts 59669d011d485667b7b884f40aa408da0b8f117819eb83ccfa4d935556f16ba5
+win_amd64 vector 73edbde85174b20baa8539be9a50923453eef713553b68d466cf082bd3de9a1c
+win_amd64 fts caa3e2a0ee17a7103702aa6a916cb5f1ab881efb5386b217fb153df4ac12850b

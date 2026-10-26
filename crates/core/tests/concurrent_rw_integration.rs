@@ -739,7 +739,7 @@ async fn assert_entity_concurrent_creates_of_same_identity_yield_one_row() {
 
     let conn = db_check.connect().unwrap();
     let count = conn
-        .count_active_entities_by_name_ci("Racing Entity", "grp")
+        .count_active_entities_by_name_ci("Racing Entity", "grp", None)
         .unwrap();
     assert_eq!(count, 1, "expected exactly one row, found a duplicate");
 }
@@ -1030,7 +1030,7 @@ async fn assert_entity_during_embed_collision_takes_update_path_not_duplicate_in
 
     let conn = db_check.connect().unwrap();
     let count = conn
-        .count_active_entities_by_name_ci("Contested Name", "grp")
+        .count_active_entities_by_name_ci("Contested Name", "grp", None)
         .unwrap();
     assert_eq!(
         count, 1,

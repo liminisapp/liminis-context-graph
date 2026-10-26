@@ -10,9 +10,9 @@ use std::sync::Arc;
 use lcg_core::IpcResponse;
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResult, ErrorCode, ErrorData as McpError, Implementation,
-        ListToolsResult, PaginatedRequestParams, ProgressNotificationParam, ServerCapabilities,
-        ServerInfo, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ErrorCode, ErrorData as McpError,
+        Implementation, ListToolsResult, PaginatedRequestParams, ProgressNotificationParam,
+        ServerCapabilities, ServerConfig, Tool,
     },
     service::{NotificationContext, RequestContext, RoleServer},
     ServerHandler,
@@ -106,8 +106,8 @@ fn ipc_response_to_call_tool_result(resp: IpcResponse) -> CallToolResult {
 }
 
 impl<B: McpBackend> ServerHandler for LcgMcpServer<B> {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
                 "liminis-context-graph",
                 env!("CARGO_PKG_VERSION"),
@@ -140,7 +140,7 @@ impl<B: McpBackend> ServerHandler for LcgMcpServer<B> {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let Some(spec) = self.find_visible(&request.name) else {
             return Err(unknown_tool_error(&request.name));
         };
@@ -164,7 +164,8 @@ impl<B: McpBackend> ServerHandler for LcgMcpServer<B> {
                     spec.name,
                     missing.join(", ")
                 ),
-            })));
+            }))
+            .into());
         }
 
         // NOTE: `request.progress_token()` (via `RequestParamsMeta`) is always `None` here —
@@ -206,7 +207,7 @@ impl<B: McpBackend> ServerHandler for LcgMcpServer<B> {
             }
         }
 
-        Ok(ipc_response_to_call_tool_result(response))
+        Ok(ipc_response_to_call_tool_result(response).into())
     }
 
     async fn on_cancelled(

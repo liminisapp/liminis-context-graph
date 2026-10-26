@@ -33,11 +33,11 @@ use lcg_core::IpcResponse;
 use serde_json::{json, Value};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::UnixStream,
     sync::{mpsc::UnboundedSender, Mutex},
 };
 
 use crate::mcp::backend::McpBackend;
+use crate::transport::{self, ClientStream};
 
 /// Default idle-read timeout for a single line off the attached socket (Copilot review finding
 /// on PR #196): if the remote service hangs mid-call (e.g. crashes partway through a streaming
@@ -49,7 +49,7 @@ const DEFAULT_ATTACHED_CALL_TIMEOUT_MS: u64 = 30_000;
 
 pub struct AttachedBackend {
     /// `None` means the connection is known-dead; the next call redials lazily before use.
-    stream: Mutex<Option<BufReader<UnixStream>>>,
+    stream: Mutex<Option<BufReader<ClientStream>>>,
     socket_path: String,
     next_id: AtomicU64,
     call_timeout: Duration,
@@ -57,25 +57,48 @@ pub struct AttachedBackend {
 
 impl AttachedBackend {
     /// Connects once at startup. Fails fast (not hang) if the socket is missing or has no
-    /// listener — `UnixStream::connect` returns immediately in both cases (ENOENT/ECONNREFUSED).
+    /// listener — `transport::connect` returns immediately in both cases (ENOENT/ECONNREFUSED on
+    /// Unix; a missing named pipe on Windows).
+    ///
+    /// Used by `--connect-eager` (issue #575): today's original behavior, kept byte-for-byte
+    /// unchanged so SC-004's parity guarantee holds. Prefer `new_lazy` for the default path.
     pub async fn connect(socket_path: &str) -> Result<Self, String> {
         let stream = Self::dial(socket_path).await?;
-        let call_timeout_ms: u64 = std::env::var("LCG_ATTACHED_CALL_TIMEOUT_MS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_ATTACHED_CALL_TIMEOUT_MS);
         Ok(Self {
             stream: Mutex::new(Some(stream)),
             socket_path: socket_path.to_string(),
             next_id: AtomicU64::new(1),
-            call_timeout: Duration::from_millis(call_timeout_ms),
+            call_timeout: Self::read_call_timeout(),
         })
+    }
+
+    /// Constructs a backend without dialling (issue #575, FR-001–FR-003): `initialize` and
+    /// `tools/list` can complete against an unreachable or not-yet-started daemon, since neither
+    /// touches `self.stream`. The first `tools/call` triggers `call()`'s existing
+    /// `guard.is_none()` lazy-redial branch (issue #213) — that branch already doesn't
+    /// distinguish "never dialed" from "known-dead after a prior failure," so no changes to
+    /// `call()` are needed to support this.
+    pub fn new_lazy(socket_path: &str) -> Self {
+        Self {
+            stream: Mutex::new(None),
+            socket_path: socket_path.to_string(),
+            next_id: AtomicU64::new(1),
+            call_timeout: Self::read_call_timeout(),
+        }
+    }
+
+    fn read_call_timeout() -> Duration {
+        let call_timeout_ms: u64 = std::env::var("LCG_ATTACHED_CALL_TIMEOUT_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_ATTACHED_CALL_TIMEOUT_MS);
+        Duration::from_millis(call_timeout_ms)
     }
 
     /// Dials a fresh connection to `socket_path`. Used both by `connect()` (startup) and by
     /// `call()`'s reconnect paths (FR-008/FR-010).
-    async fn dial(socket_path: &str) -> Result<BufReader<UnixStream>, String> {
-        let stream = UnixStream::connect(socket_path).await.map_err(|e| {
+    async fn dial(socket_path: &str) -> Result<BufReader<ClientStream>, String> {
+        let stream = transport::connect(socket_path).await.map_err(|e| {
             format!(
                 "failed to connect to attached service at '{socket_path}': {e}. \
                  Ensure a liminis-context-graph socket service is running at this path."
@@ -89,7 +112,7 @@ impl AttachedBackend {
     /// failure, since a flush that fails after a successful write_all leaves genuine ambiguity
     /// about how many bytes reached the kernel, and both are treated as "safe to retry" per
     /// A1's conservative write-time boundary.
-    async fn write_request(stream: &mut BufReader<UnixStream>, line: &str) -> Result<(), String> {
+    async fn write_request(stream: &mut BufReader<ClientStream>, line: &str) -> Result<(), String> {
         stream
             .write_all(format!("{line}\n").as_bytes())
             .await

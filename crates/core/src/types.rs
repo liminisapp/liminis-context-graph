@@ -23,14 +23,64 @@ impl SourceType {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// The default entity kind (issue #615, D1/D2). Every entity written before kinds existed, every
+/// extraction-created entity, and every name-only direct write is this kind.
+pub const DEFAULT_KIND: &str = "Entity";
+
+/// The `lookup_key` field separator (U+001F). A `kind` may not contain it (FR-012), so a key
+/// `group_id ␟ kind ␟ name` stays unambiguous.
+pub const KEY_SEPARATOR: char = '\u{1f}';
+
+/// Labels the code treats as structural markers on an `Entity` row. A kind is always added to
+/// `labels`, so a kind equal to one of these would masquerade as the marker: `Merged` makes a live
+/// entity look like a merge tombstone (unresolvable by name, skipped by counts and merges).
+const RESERVED_KINDS: &[&str] = &["Merged"];
+
+/// Validates and normalises a caller-supplied `kind` (issue #615 FR-012): trimmed, non-empty,
+/// no U+001F, not a reserved structural label, case-sensitive. `None` means the default kind
+/// [`DEFAULT_KIND`].
+pub fn normalize_kind(kind: Option<&str>) -> Result<String, crate::error::Error> {
+    match kind {
+        None => Ok(DEFAULT_KIND.to_string()),
+        Some(k) => {
+            let t = k.trim();
+            if t.is_empty() || t.contains(KEY_SEPARATOR) || RESERVED_KINDS.contains(&t) {
+                return Err(crate::error::Error::InvalidKind(k.to_string()));
+            }
+            Ok(t.to_string())
+        }
+    }
+}
+
+/// One candidate of an ambiguous name-only resolution (issue #615 FR-006).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KindCandidate {
+    pub uuid: String,
+    pub kind: String,
+}
+
+fn default_kind() -> String {
+    DEFAULT_KIND.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityRow {
     pub uuid: String,
     pub name: String,
     pub group_id: String,
     pub labels: Vec<String>,
+    /// The entity's single identity-bearing kind (issue #615); always one of `labels`. Readers
+    /// map a NULL column to [`DEFAULT_KIND`], so this is never empty on a row read from the db.
+    #[serde(default = "default_kind")]
+    pub kind: String,
     /// LadybugDB TIMESTAMP as "YYYY-MM-DD HH:MM:SS".
     pub created_at: String,
+    /// Service-clock time the record was first written (issue #673, ADR-0673) — the "knowledge
+    /// time" clock, distinct from the caller-supplied event time in `created_at`/`valid_at`. Never
+    /// caller-supplied: the `Conn::insert_*` helpers stamp it when empty. Same read-back format as
+    /// `created_at` ("YYYY-MM-DD HH:MM:SS"); empty only for a NULL column.
+    #[serde(default)]
+    pub ingested_at: String,
     #[serde(skip)]
     pub name_embedding: Vec<f32>,
     pub summary: String,
@@ -41,6 +91,49 @@ pub struct EntityRow {
     pub source_descriptions: Vec<String>,
     #[serde(skip)]
     pub summary_embedding: Vec<f32>,
+}
+
+impl Default for EntityRow {
+    fn default() -> Self {
+        Self {
+            uuid: String::new(),
+            name: String::new(),
+            group_id: String::new(),
+            labels: Vec::new(),
+            kind: default_kind(),
+            created_at: String::new(),
+            ingested_at: String::new(),
+            name_embedding: Vec::new(),
+            summary: String::new(),
+            attributes: String::new(),
+            episode_uuids: Vec::new(),
+            source_descriptions: Vec::new(),
+            summary_embedding: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_kind_defaults_trims_and_validates() {
+        assert_eq!(normalize_kind(None).unwrap(), "Entity");
+        assert_eq!(normalize_kind(Some(" Topic ")).unwrap(), "Topic");
+        assert_eq!(normalize_kind(Some("topic")).unwrap(), "topic");
+        assert!(normalize_kind(Some("")).is_err());
+        assert!(normalize_kind(Some("   ")).is_err());
+        assert!(normalize_kind(Some("a\u{1f}b")).is_err());
+        assert!(normalize_kind(Some("Merged")).is_err());
+        assert!(normalize_kind(Some(" Merged ")).is_err());
+        assert!(normalize_kind(Some("merged")).is_ok());
+    }
+
+    #[test]
+    fn entity_row_default_kind_is_entity() {
+        assert_eq!(EntityRow::default().kind, "Entity");
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -55,7 +148,31 @@ pub struct EpisodicRow {
     #[serde(skip)]
     pub content_embedding: Vec<f32>,
     pub valid_at: String,
+    /// Service-clock time the record was first written (issue #673, ADR-0673) — the "knowledge
+    /// time" clock, distinct from the caller-supplied event time in `created_at`/`valid_at`. Never
+    /// caller-supplied: the `Conn::insert_*` helpers stamp it when empty. Same read-back format as
+    /// `created_at` ("YYYY-MM-DD HH:MM:SS"); empty only for a NULL column.
+    #[serde(default)]
+    pub ingested_at: String,
+    /// UUIDs of the **entities** this episode mentions — despite the name, NOT edge UUIDs and not
+    /// edge provenance (FR-012, issue #705). The episode that produced a `RELATES_TO` edge is
+    /// recorded on the edge itself, in `RelatesToNode_.episodes`.
     pub entity_edges: Vec<String>,
+    /// When the graph stopped believing this episode (issue #705, ADR-0705), service clock, same
+    /// format as `ingested_at`. `None` while the episode is live. Distinct from validity:
+    /// superseding an episode never writes `valid_at` / `invalid_at` on anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_at: Option<String>,
+    /// What superseded it: an episode uuid (`superseded_by_kind = "episode"`) or the superseding
+    /// document's `doc_id` (`"document"`, issue #707).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// Kind of `superseded_by` (`episode` or `document`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by_kind: Option<String>,
+    /// Why: `revision` (the chunk was resubmitted), `chunk_removed` or `document_superseded`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersession_reason: Option<String>,
     /// Caller-supplied structured metadata (issue #528), a JSON object serialized as a string.
     /// The write path (`episode::add_episode`) and the migration/WAL-rebuild zero-fill
     /// (`schema::zero_fill_null_episodic_attributes`) both maintain the invariant that this is a
@@ -66,6 +183,11 @@ pub struct EpisodicRow {
     /// `value_as_string`; callers parsing this field should tolerate that rather than assume the
     /// invariant is enforced unconditionally.
     pub attributes: String,
+    /// Stable identity of the logical document this episode came from (issue #707, ADR-0707),
+    /// unique within `group_id`. `None` when the caller supplied none; such an episode cannot take
+    /// part in document supersession.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -79,6 +201,12 @@ pub struct RelatesToEdge {
     #[serde(skip)]
     pub fact_embedding: Vec<f32>,
     pub created_at: String,
+    /// Service-clock time the record was first written (issue #673, ADR-0673) — the "knowledge
+    /// time" clock, distinct from the caller-supplied event time in `created_at`/`valid_at`. Never
+    /// caller-supplied: the `Conn::insert_*` helpers stamp it when empty. Same read-back format as
+    /// `created_at` ("YYYY-MM-DD HH:MM:SS"); empty only for a NULL column.
+    #[serde(default)]
+    pub ingested_at: String,
     pub valid_at: Option<String>,
     pub invalid_at: Option<String>,
     pub attributes: String,
@@ -95,6 +223,19 @@ pub struct RelatesToEdge {
     pub episode_uuids: Vec<String>,
     #[serde(default)]
     pub source_descriptions: Vec<String>,
+    /// The episode(s) that produced this edge — the `RelatesToNode_.episodes` column (issue #705,
+    /// FR-005). Unlike `episode_uuids` above, this IS provenance: extraction writes exactly one
+    /// entry. Empty for direct assertions, cross-group edges and legacy rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub episodes: Vec<String>,
+    /// Why an edge with no producing episode is believed: `assertion` or `cross_group` (FR-006).
+    /// `None` on extracted edges and on legacy rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warrant: Option<String>,
+    /// Whether an extracted edge's `valid_at` came from the text (`text`) or defaulted to the
+    /// episode's `reference_time` (`reference_time`) — FR-011. `None` when not applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_at_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -246,9 +387,100 @@ pub struct PassageResult {
     pub attributes: String,
 }
 
+/// Why an entity was returned by `knowledge_find_entities` (issue #629): the fused RRF score
+/// plus each retrieval path's raw evidence. A path that did not retrieve the item reports
+/// `None` (serialized as `null`). Similarities are cosine similarity (`1 - distance`); a
+/// non-finite value is reported as `None` so it never reaches JSON.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EntitySearchEvidence {
+    pub rrf_score: f64,
+    /// `true` iff the BM25 (full-text) path retrieved the item.
+    pub text_match: bool,
+    pub bm25_score: Option<f64>,
+    pub name_similarity: Option<f64>,
+    pub summary_similarity: Option<f64>,
+}
+
+/// Why a fact was returned by `knowledge_find_relationships` (issue #629). See
+/// [`EntitySearchEvidence`] for field semantics.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EdgeSearchEvidence {
+    pub rrf_score: f64,
+    pub text_match: bool,
+    pub bm25_score: Option<f64>,
+    pub fact_similarity: Option<f64>,
+}
+
+/// An [`EntityRow`] with its `search` evidence, flattened so the row's own fields stay at the
+/// top level. Used only by `knowledge_find_entities`; `EntityRow` itself is unchanged.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScoredEntity {
+    #[serde(flatten)]
+    pub entity: EntityRow,
+    pub search: EntitySearchEvidence,
+}
+
+/// A [`RelatesToEdge`] with its `search` evidence, flattened. Used only by
+/// `knowledge_find_relationships`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ScoredEdge {
+    #[serde(flatten)]
+    pub edge: RelatesToEdge,
+    pub search: EdgeSearchEvidence,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scored_entity_flattens_row_and_serializes_null_evidence() {
+        let scored = ScoredEntity {
+            entity: EntityRow {
+                uuid: "u1".into(),
+                name: "Apollo".into(),
+                ..Default::default()
+            },
+            search: EntitySearchEvidence {
+                rrf_score: 0.5,
+                text_match: false,
+                bm25_score: None,
+                name_similarity: Some(0.75),
+                summary_similarity: None,
+            },
+        };
+        let v = serde_json::to_value(&scored).unwrap();
+        assert_eq!(v["uuid"], "u1");
+        assert_eq!(v["name"], "Apollo");
+        assert_eq!(v["search"]["text_match"], false);
+        assert!(v["search"]["bm25_score"].is_null());
+        assert_eq!(v["search"]["name_similarity"], 0.75);
+        assert!(v["search"]["summary_similarity"].is_null());
+        assert!(v["search"].get("rrf_score").is_some());
+    }
+
+    #[test]
+    fn scored_edge_flattens_edge_and_serializes_evidence() {
+        let scored = ScoredEdge {
+            edge: RelatesToEdge {
+                uuid: "e1".into(),
+                fact: "A knows B".into(),
+                ..Default::default()
+            },
+            search: EdgeSearchEvidence {
+                rrf_score: 0.03,
+                text_match: true,
+                bm25_score: Some(1.5),
+                fact_similarity: None,
+            },
+        };
+        let v = serde_json::to_value(&scored).unwrap();
+        assert_eq!(v["uuid"], "e1");
+        assert_eq!(v["fact"], "A knows B");
+        assert_eq!(v["search"]["text_match"], true);
+        assert_eq!(v["search"]["bm25_score"], 1.5);
+        assert!(v["search"]["fact_similarity"].is_null());
+    }
 
     #[test]
     fn extracted_entity_summary_absent_defaults_to_empty_string() {

@@ -52,7 +52,7 @@ export function workspaceVersion() {
   return version[1]
 }
 
-const REPOSITORY = 'verveguy/liminis-context-graph'
+const REPOSITORY = 'liminisapp/liminis-context-graph'
 /** Where the real source files live, for the "Edit this page" link. */
 const EDIT_BASE = `https://github.com/${REPOSITORY}/edit/main/docs`
 const GITHUB_BLOB = `https://github.com/${REPOSITORY}/blob/main/docs`

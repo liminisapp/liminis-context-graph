@@ -670,3 +670,68 @@ async fn reassert_with_changed_summary_leaves_summary_embedding_stale() {
         via_updated["nodes"]
     );
 }
+
+// ── #651 probe: plain SET on the HNSW-indexed summary_embedding column ────────
+
+/// Probe for issue #651 Task 1: does lbug (pinned version) still reject a plain `SET` on
+/// `summary_embedding` while `entity_summary_embedding_idx` exists, and does the index follow
+/// the update? The outcome decides whether the extraction-merge write must bracket its `SET`
+/// with an index drop/rebuild (ADR-0651).
+#[tokio::test]
+async fn probe_plain_set_on_indexed_summary_embedding() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let mut map = HashMap::new();
+    map.insert("q-new".to_string(), vec![0.0, 0.0, 1.0, 0.0]);
+    map.insert("q-old".to_string(), vec![1.0, 0.0, 0.0, 0.0]);
+    let embedder: Arc<dyn Embedder> = Arc::new(NameMapEmbedder::new(DIM, map));
+    let state = make_state(
+        db.clone(),
+        embedder,
+        Arc::new(ConfigurableExtractor::new(vec![])),
+    );
+    {
+        let conn = db.connect().unwrap();
+        for (uuid, name, emb) in [
+            ("probe-uuid", "alpha", vec![1.0, 0.0, 0.0, 0.0]),
+            ("decoy-uuid", "bravo", vec![0.6, 0.8, 0.0, 0.0]),
+        ] {
+            conn.insert_entity(&EntityRow {
+                uuid: uuid.to_string(),
+                name: name.to_string(),
+                group_id: GRP.to_string(),
+                labels: vec!["Entity".to_string()],
+                created_at: "2026-01-01 00:00:01".to_string(),
+                name_embedding: vec![0.0, 1.0, 0.0, 0.0],
+                summary: "zzz".to_string(),
+                attributes: "{}".to_string(),
+                summary_embedding: emb,
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        let r = conn.run_cypher(
+            "MATCH (e:Entity {uuid: 'probe-uuid'}) SET e.summary = 't', \
+             e.summary_embedding = [0.0, 0.0, 1.0, 0.0]",
+        );
+        r.expect("plain SET on the indexed summary_embedding must succeed on the pinned lbug");
+    }
+    let _ = &state;
+    let conn = db.connect().unwrap();
+    // The index must follow the in-place update: the nearest neighbour of the new vector is the
+    // updated row, and the old vector now lands on the decoy.
+    for (v, expected) in [
+        ("[0.0, 0.0, 1.0, 0.0]", "alpha"),
+        ("[1.0, 0.0, 0.0, 0.0]", "bravo"),
+    ] {
+        let rows: Vec<String> = conn
+            .query_cypher_raw(&format!(
+                "CALL QUERY_VECTOR_INDEX('Entity', 'entity_summary_embedding_idx', {v}, 1) \
+                 RETURN node.name"
+            ))
+            .unwrap()
+            .map(|r| r[0].to_string())
+            .collect();
+        assert_eq!(rows, vec![expected.to_string()], "query {v}");
+    }
+}

@@ -62,18 +62,51 @@ conclusion alone is not sufficient. Set `RELEASE_SHA` to the exact commit being 
 Do not treat step 1 alone as sufficient evidence that "full e2e passed." Step 2 is the
 one that actually verifies it.
 
+## Release packaging is verified post-merge
+
+`release.yml` does **not** run on pull requests. Release packaging — the four-target build
+(`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-pc-windows-msvc`), the pinned lbug extension-hash check
+([ADR-0593](adr/0593-pin-lbug-extension-bytes.md)) and the OpenSSL linkage guards
+([ADR-0550](adr/0550-openssl-dynamic-linkage-via-rpath.md),
+[ADR-0581](adr/0581-windows-static-openssl.md)) — is verified once per merge, by the
+`Release` run on the push to `main`. That run builds and checks but publishes nothing (no
+GitHub Release, no announcement, no docs dispatch); only a pushed version tag publishes. See
+[ADR-0639](adr/0639-post-merge-release-packaging-verification.md).
+
+A PR that breaks packaging is therefore caught after merge and fixed forward. Before
+tagging, with `RELEASE_SHA` set as above:
+
+```bash
+gh issue list --label ci-failure --label workflow:release --state open
+gh run list --workflow release.yml --commit "$RELEASE_SHA" --limit 5
+```
+
+A failed `Release` run on `main` files (or updates) a `ci-failure` + `workflow:release`
+issue via `ci-failure-notify.yml`, and the issue closes itself on the next green run. Treat
+an open one as a blocker: fix forward, or record in the release PR why the release proceeds
+anyway. Failed tag-triggered runs are not reported by the listener — watch the run you just
+triggered.
+
 ## Docs publishing
 
 The docs site is **no longer published from `main`**. Every merge to `main` that
 touches `docs/` still runs the PR-time checks below, but does not change the live
-site. Publishing happens only when a GitHub Release is published, via
+site. Publishing happens only when a release is cut, via
 `.github/workflows/docs-publish.yml`. See
 [ADR-0477](adr/0477-tag-based-versioned-docs-publishing.md) for the full design.
 
 ### What happens automatically when you cut a release
 
-`release.yml` (cargo-dist) creates the GitHub Release once artifact builds finish.
-That `release: published` event triggers `docs-publish.yml`, which:
+`release.yml` (cargo-dist) creates the GitHub Release once artifact builds finish. It
+does so with `GITHUB_TOKEN`, and GitHub does not start workflow runs from events created
+by `GITHUB_TOKEN` (the exceptions are `workflow_dispatch` and `repository_dispatch`), so
+the `release: published` event **never triggers** `docs-publish.yml` for these releases.
+Instead, `release.yml`'s hand-added `dispatch-docs` job runs after the release is created
+and dispatches `docs-publish.yml` with `version=<X.Y.Z>` and `ref=refs/tags/v<X.Y.Z>`
+(skipping quietly for a tag that isn't `vX.Y.Z[-pre]`). The `release: published` trigger
+is retained for releases created by hand (UI, or a non-`GITHUB_TOKEN` credential).
+Either way, `docs-publish.yml`:
 
 1. Skips entirely if the release's tag doesn't match the `vX.Y.Z` version-tag
    scheme (e.g. a non-version release like `eval-artifacts-2026-07`) — no docs
@@ -93,11 +126,16 @@ That `release: published` event triggers `docs-publish.yml`, which:
 ### What to check after a release publishes
 
 1. Confirm the `Docs publish` workflow run for the release succeeded:
-   `gh run list --workflow docs-publish.yml --limit 1`.
-2. Visit the root URL (`https://v3rv.com/liminis-context-graph/`) and confirm the
+   `gh run list --workflow docs-publish.yml --limit 1`. For a release cut by
+   `release.yml` its trigger shows as `workflow_dispatch` (dispatched by the
+   `dispatch-docs` job), not `release`. If there is no such run, check the
+   `dispatch-docs` job in the release workflow run: a red job means the dispatch failed
+   and docs were **not** triggered (the release itself is unaffected) — publish them
+   with `gh workflow run docs-publish.yml -f version=<X.Y.Z>`.
+2. Visit the root URL (`https://docs.liminis.app/liminis-context-graph/`) and confirm the
    footer reads the new version.
 3. Visit the new version's own URL
-   (`https://v3rv.com/liminis-context-graph/v<version>/`) and confirm it's live.
+   (`https://docs.liminis.app/liminis-context-graph/v<version>/`) and confirm it's live.
 4. Spot-check that the previous version's URL is still reachable and unchanged.
 
 If the workflow run failed (e.g. a transient build error), re-run it with

@@ -27,7 +27,8 @@ const ENTITY_CYPHER: &str = "\
     SET n.name = $name, n.group_id = $group_id, n.labels = $labels, \
     n.created_at = timestamp($created_at), n.name_embedding = $name_embedding, \
     n.summary = $summary, n.attributes = $attributes, \
-    n.summary_embedding = $summary_embedding";
+    n.summary_embedding = $summary_embedding, n.kind = $kind, \
+    n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END";
 
 const EPISODIC_CYPHER: &str = "\
     MERGE (n:Episodic {uuid: $uuid}) \
@@ -36,7 +37,17 @@ const EPISODIC_CYPHER: &str = "\
     n.source_description = $source_description, n.content = $content, \
     n.content_embedding = $content_embedding, \
     n.valid_at = CASE WHEN $valid_at IS NULL THEN NULL ELSE timestamp($valid_at) END, \
-    n.entity_edges = $entity_edges, n.attributes = $attributes";
+    n.entity_edges = $entity_edges, n.attributes = $attributes, \
+    n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END, \
+    n.superseded_at = CASE WHEN $superseded_at IS NULL THEN NULL ELSE timestamp($superseded_at) END, \
+    n.superseded_by = $superseded_by, n.superseded_by_kind = $superseded_by_kind, \
+    n.supersession_reason = $supersession_reason, n.doc_id = $doc_id";
+
+const DOC_SUPERSESSION_CYPHER: &str = "\
+    MERGE (n:DocSupersession {key: $key}) \
+    SET n.group_id = $group_id, n.superseded_doc_id = $superseded_doc_id, \
+    n.superseding_doc_id = $superseding_doc_id, \
+    n.effective_at = timestamp($effective_at), n.recorded_at = timestamp($recorded_at)";
 
 const RELATO_CYPHER: &str = "\
     MERGE (n:RelatesToNode_ {uuid: $uuid}) \
@@ -46,7 +57,9 @@ const RELATO_CYPHER: &str = "\
     n.expired_at = CASE WHEN $expired_at IS NULL THEN NULL ELSE timestamp($expired_at) END, \
     n.valid_at = CASE WHEN $valid_at IS NULL THEN NULL ELSE timestamp($valid_at) END, \
     n.invalid_at = CASE WHEN $invalid_at IS NULL THEN NULL ELSE timestamp($invalid_at) END, \
-    n.attributes = $attributes, n.relation_type = $relation_type";
+    n.attributes = $attributes, n.relation_type = $relation_type, \
+    n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END, \
+    n.warrant = $warrant, n.valid_at_source = $valid_at_source";
 
 const COMMUNITY_CYPHER: &str = "\
     MERGE (n:Community {uuid: $uuid}) \
@@ -134,6 +147,7 @@ fn dump_nodes_phase(
     total += dump_relato_nodes(conn, writer, group_id)?;
     total += dump_community_nodes(conn, writer, group_id)?;
     total += dump_saga_nodes(conn, writer, group_id)?;
+    total += dump_doc_supersession_nodes(conn, writer, group_id)?;
     Ok(total)
 }
 
@@ -151,7 +165,7 @@ fn dump_entity_nodes(
             writer.with_chunk(|w| {
                 for row in &rows {
                     // cols: [uuid, name, group_id, labels, created_at, name_embedding, summary,
-                    // attributes, summary_embedding]
+                    // attributes, summary_embedding, kind, ingested_at]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -170,6 +184,11 @@ fn dump_entity_nodes(
                     // since binding a genuine zero-length list against a fixed-size `FLOAT[dim]`
                     // column fails at bind time ("Unsupported casting LIST ... to ARRAY").
                     let summary_embedding = value_as_float_array(&row[8]);
+                    // kind (issue #615): dumped so compaction / dump→replay does not flatten
+                    // every entity to the default kind. `lookup_key` is deliberately not dumped
+                    // (derived — the post-replay backfill recomputes it from group_id/kind/name).
+                    let kind = crate::db::value_as_kind(&row[9]);
+                    let ingested_at = dump_ingested_at_json(&row[10], &created_at);
                     let summary_embedding = if summary_embedding.is_empty() {
                         vec![0.0f32; embedding.len()]
                     } else {
@@ -185,6 +204,8 @@ fn dump_entity_nodes(
                         "summary": summary,
                         "attributes": attributes,
                         "summary_embedding": float_slice_to_json(&summary_embedding),
+                        "kind": kind,
+                        "ingested_at": ingested_at,
                     });
                     w.log_mutation(ENTITY_CYPHER, params, "")?;
                 }
@@ -214,7 +235,8 @@ fn dump_episodic_nodes(
             writer.with_chunk(|w| {
                 for row in &rows {
                     // cols: [uuid, name, group_id, created_at, source, source_description,
-                    //         content, content_embedding, valid_at, entity_edges, attributes]
+                    //         content, content_embedding, valid_at, entity_edges, attributes, ingested_at,
+                    //         superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -226,6 +248,16 @@ fn dump_episodic_nodes(
                     let valid_at = dump_opt_ts_json(&row[8]);
                     let entity_edges = value_as_str_list(&row[9]);
                     let attributes = value_as_string(&row[10]);
+                    let ingested_at = dump_ingested_at_json(&row[11], &created_at);
+                    // Belief time (issue #705): appended last so positional readers don't shift.
+                    // An unset string column dumps as "" (read back as absent), like
+                    // `relation_type` below.
+                    let superseded_at = dump_opt_ts_json(&row[12]);
+                    let superseded_by = value_as_string(&row[13]);
+                    let superseded_by_kind = value_as_string(&row[14]);
+                    let supersession_reason = value_as_string(&row[15]);
+                    // Document identity (issue #707), appended last like the columns above.
+                    let doc_id = value_as_string(&row[16]);
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -238,6 +270,12 @@ fn dump_episodic_nodes(
                         "valid_at": valid_at,
                         "entity_edges": entity_edges,
                         "attributes": attributes,
+                        "ingested_at": ingested_at,
+                        "superseded_at": superseded_at,
+                        "superseded_by": superseded_by,
+                        "superseded_by_kind": superseded_by_kind,
+                        "supersession_reason": supersession_reason,
+                        "doc_id": doc_id,
                     });
                     w.log_mutation(EPISODIC_CYPHER, params, "")?;
                 }
@@ -267,7 +305,8 @@ fn dump_relato_nodes(
             writer.with_chunk(|w| {
                 for row in &rows {
                     // cols: [uuid, name, group_id, created_at, fact, fact_embedding, episodes,
-                    //         expired_at, valid_at, invalid_at, attributes, relation_type]
+                    //         expired_at, valid_at, invalid_at, attributes, relation_type, ingested_at,
+                    //         warrant, valid_at_source]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -280,6 +319,9 @@ fn dump_relato_nodes(
                     let invalid_at = dump_opt_ts_json(&row[9]);
                     let attributes = value_as_string(&row[10]);
                     let relation_type = value_as_string(&row[11]);
+                    let ingested_at = dump_ingested_at_json(&row[12], &created_at);
+                    let warrant = value_as_string(&row[13]);
+                    let valid_at_source = value_as_string(&row[14]);
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -293,6 +335,9 @@ fn dump_relato_nodes(
                         "invalid_at": invalid_at,
                         "attributes": attributes,
                         "relation_type": relation_type,
+                        "ingested_at": ingested_at,
+                        "warrant": warrant,
+                        "valid_at_source": valid_at_source,
                     });
                     w.log_mutation(RELATO_CYPHER, params, "")?;
                 }
@@ -375,6 +420,45 @@ fn dump_saga_nodes(
                         "created_at": created_at,
                     });
                     w.log_mutation(SAGA_CYPHER, params, "")?;
+                }
+                Ok(())
+            })?;
+            total += count;
+        }
+        if count < PAGE_SIZE {
+            break;
+        }
+        offset += count;
+    }
+    Ok(total)
+}
+
+/// Document supersession records (issue #707). Without this a compaction would silently drop
+/// them and a rebuild would lose every "in force until" answer.
+fn dump_doc_supersession_nodes(
+    conn: &Conn<'_>,
+    writer: &mut WalWriter,
+    group_id: Option<&str>,
+) -> Result<usize, Error> {
+    let mut total = 0;
+    let mut offset = 0;
+    loop {
+        let rows = conn.dump_doc_supersession_page(group_id, offset, PAGE_SIZE)?;
+        let count = rows.len();
+        if count > 0 {
+            writer.with_chunk(|w| {
+                for row in &rows {
+                    // cols: [key, group_id, superseded_doc_id, superseding_doc_id, effective_at,
+                    //         recorded_at]
+                    let params = serde_json::json!({
+                        "key": value_as_string(&row[0]),
+                        "group_id": value_as_string(&row[1]),
+                        "superseded_doc_id": value_as_string(&row[2]),
+                        "superseding_doc_id": value_as_string(&row[3]),
+                        "effective_at": dump_ts_str(&row[4]),
+                        "recorded_at": dump_ts_str(&row[5]),
+                    });
+                    w.log_mutation(DOC_SUPERSESSION_CYPHER, params, "")?;
                 }
                 Ok(())
             })?;
@@ -621,6 +705,19 @@ fn dump_ts_str(v: &lbug::Value) -> String {
 fn dump_opt_ts_json(v: &lbug::Value) -> serde_json::Value {
     match v {
         lbug::Value::Null(_) => serde_json::Value::Null,
+        other => serde_json::Value::String(dump_ts_str(other)),
+    }
+}
+
+/// The `ingested_at` param for a dumped Entity/Episodic/RelatesToNode_ row (issue #673). The
+/// stored value is carried through unchanged — a dump must not restamp it with the compaction
+/// time. A row that still has no ingest time (a failed or skipped backfill) falls back to its
+/// `created_at`, the same last-resort signal the upgrade backfill uses (FR-007), rather than
+/// dumping NULL; JSON null only if even that is empty.
+fn dump_ingested_at_json(v: &lbug::Value, created_at: &str) -> serde_json::Value {
+    match v {
+        lbug::Value::Null(_) if created_at.is_empty() => serde_json::Value::Null,
+        lbug::Value::Null(_) => serde_json::Value::String(created_at.to_string()),
         other => serde_json::Value::String(dump_ts_str(other)),
     }
 }

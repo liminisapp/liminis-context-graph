@@ -21,6 +21,9 @@ Everything the service manages lives under `.lcg/` in the workspace:
 ├── ontology-hash.json       # workspace-level ontology drift sidecar (issue #83)
 ├── ontology-hash/            # per-group ontology drift sidecars (issue #451)
 │   └── <group_id>.json      #   one file per group_id, drift state for its resolved ontology
+├── identity-set/             # per-group identity-bearing type stamps (issue #616)
+│   └── <group_id>.json      #   which entity types were `identity: true` when the group's
+│                            #   entities were extracted; only written once a group uses the flag
 └── service.sock            # JSON-RPC 2.0 endpoint while the service runs
 ```
 
@@ -190,6 +193,31 @@ the running embedder — a database-side check, not a property of the WAL or the
   the same reason, the output always gets a freshly minted generation (issue #387) — never the
   source's: it is a new stream, not a copy of the source's identity, so a consumer must not treat
   it as "the same stream" it was tracking before.
+- **Strip embedding vectors from a pre-0.14 WAL** with `knowledge_strip_wal_embeddings
+  {group_id, dry_run}` (issue #577). 0.14.0 stopped *writing* embedding vectors to the WAL and
+  made replay ignore any vector it finds in an older WAL (see above) — this operation reclaims
+  the space a WAL written before that change is still carrying, by rewriting every qualifying
+  `.jsonl` file in place to remove `params` entries keyed by an embedding-column name
+  (`name_embedding`, `fact_embedding`, `content_embedding`, `summary_embedding`), leaving every
+  other field, record ordering, and sequence number untouched. Because replay never reads a
+  stored vector regardless of whether it's present, this is pure reclamation: it cannot change
+  what a rebuild produces. `group_id` scopes the operation to one group's own WAL directory;
+  omit it to process every group directory under the WAL root plus any legacy flat-layout files
+  at the root itself. Idempotent: re-running against an already-stripped WAL (or one that never
+  had vectors, i.e. anything written entirely by 0.14.x) is a zero-I/O no-op — no file is opened
+  for writing, so bytes and mtime are left exactly as they were. Crash-safe per file: each file
+  needing a rewrite is written to a temporary file in the same directory and atomically renamed
+  over the original only once fully flushed, so an interrupted run leaves every already-rewritten
+  file replaced, the in-flight file's original intact, and a subsequent run resumes cleanly. A
+  record whose embedding-vector value is malformed (not a well-formed JSON array of numbers) is
+  reported as a per-file error — that file is left completely untouched, and every other file is
+  still processed. Pass `dry_run: true` to preview the same statistics (files that would be
+  rewritten, bytes that would be reclaimed, records that would be touched) without modifying
+  anything. Reachable even when the database is degraded or unavailable, since it only touches
+  the WAL directory on disk. Deliberately out of scope: a vector inlined as a raw Cypher literal
+  rather than a `params` entry (see [ADR-0526](adr/0526-vectors-are-a-local-cache.md)'s
+  externally-produced-content edge case) has no `params` key to remove and is left as-is. See
+  [ADR-0577](adr/0577-strip-wal-embeddings.md) for the full design.
 - **Name a known-good position** with `knowledge_wal_mark_create {name, group_id}` (`group_id`
   defaults to `"liminis"`) — a lightweight alternative to a full `knowledge_dump_wal` snapshot
   when all you need is a durable pointer back to "this group's stream was good here," not a
@@ -274,9 +302,39 @@ Poll `health_check` until it reports `healthy` (or `knowledge_status` until `con
 `queryable` are both `true` and `initializing` is `false` — `knowledge_status` has no `healthy`
 field of its own) before treating the service as ready.
 
+**`busy` is alive, not dead.** `health_check` never waits on the write lock: while a write is
+pending or in progress — above all a long `knowledge_rebuild_from_wal` — it answers immediately
+with `{"ok": true, "healthy": false, "state": "busy", "activity": "rebuilding" | "writing"}`, and
+for a rebuild job also `job_id` and `progress` (mutations replayed, WAL files processed/total,
+elapsed seconds). Keep polling on `busy`; **do not restart the service** — a restart mid-rebuild
+discards the replay and starts it over, so on a large corpus the rebuild never completes (#612).
+Supervisor liveness probes should treat any response with `ok: true` as alive and gate readiness on
+`healthy: true`. The four outcomes are: `busy` = alive, not ready; `healthy` = alive, ready;
+`degraded` = alive but unusable; no answer = dead or wedged. Full contract:
+[IPC reference: Health check contract](ipc-mcp-reference.md#health-check-contract).
+
 ## `knowledge_status` health fields
 
 Beyond the [ontology summary](ontology.md#knowledge_status-summary), `knowledge_status` reports:
+
+**`dedup_mode`** (string, always present, including when degraded) — what protects the graph from
+wrong embedding-path merges during extraction, beyond the cosine threshold (issue #652,
+[ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)). `"veto-only"`: the
+deterministic identifier-mismatch veto ([ADR-0650](adr/0650-identifier-mismatch-veto-for-extraction-dedup.md))
+is the only check, so any candidate that passes it merges. `"llm-verified"`: the configured
+extractor additionally judges each surviving candidate (`LCG_DEDUP_LLM`, off by default). If
+`LCG_DEDUP_LLM` is on but no extraction provider is configured the field reads `"veto-only"` and
+startup logged a warning. The same mode is logged once at startup as `dedup: mode=…`; per-chunk
+path counts are on `knowledge_process_chunk`'s `dedup_paths`.
+
+The veto also keeps distinct short all-caps codes apart (issue #666,
+[ADR-0666](adr/0666-exact-graph-match-and-uuid-self-loop-guard.md)): `ACDS` / `ACDM`, `UK` / `USA`
+and `US Army` / `UK Army` never merge by embedding. A token counts as a code when it is 2–6
+uppercase letters (not a Roman numeral) in the name as written, and the veto fires only when
+*each* name has a code the other lacks, so acronym/expansion aliases (`IBM` /
+`International Business Machines`) and case variants (`NASA` / `nasa`) still merge. Known gaps,
+left to the embedding and `LCG_DEDUP_LLM`: a shout-case name against a lone mixed-case one
+(`Acme` vs `ACDM`) and codes longer than six letters.
 
 **`indices_built`** (boolean) — whether the entity/relationship FTS + HNSW search indices are
 currently built and reflect the graph's current contents. The service builds these indices
@@ -320,6 +378,17 @@ learn a given rebuild's backfill outcome directly from its own result, without a
 `knowledge_status` call; use `name_index_trusted` (below) for the current global/cumulative
 backfill health, independent of any specific rebuild.
 
+**Key format and the kind migration (issue #615).** `Entity.lookup_key` is `group_id ␟ kind ␟
+lower(trim(name))` (U+001F separators; `kind` defaults to `Entity`), so same-named entities of
+different kinds coexist ([ADR-0615](adr/0615-kind-scoped-entity-identity.md)). It is a *derived*
+value: it is stripped from every WAL record at write time and recomputed on replay, and any
+`lookup_key` in an older WAL is ignored. On the first start after upgrading, `schema::migrate` adds
+`Entity.kind`, and a one-time backfill (persisted under the `SchemaState` key
+`entity_kind_lookup_key_v2`) sets every existing row's kind to `Entity` and re-keys it — an O(N)
+pass, one statement per row. The post-replay backfill after every rebuild/recovery covers
+`kind IS NULL OR lookup_key IS NULL`. **Downgrade is unsupported:** a pre-#615 binary cannot replay
+a WAL written after this change.
+
 **`name_index_trusted`** (boolean) and **`name_index_fallback_scans`** (integer) — field names
 kept for wire compatibility, but re-backed by the `Entity.lookup_key` secondary ART index
 ([ADR-0221](adr/0221-secondary-art-index-for-entity-name-lookup.md), which supersedes the
@@ -340,6 +409,25 @@ while the service is degraded (no connected database). A rising `name_index_fall
 count, or a `name_index_trusted: false` that doesn't clear on its own, signals `lookup_key`
 staleness worth investigating — see
 [ADR-0221](adr/0221-secondary-art-index-for-entity-name-lookup.md) for the mechanism.
+
+**`fts_repair_count`** (integer) and **`fts_last_repair_unix_ms`** (integer or `null`) — how many
+times, since this process opened the database, a write hit `FTS index '<idx>' is inconsistent` and
+the service rebuilt all three FTS indexes and retried that statement once, and when the last such
+repair finished (Unix ms; `null` if none). Both are `null` while the service is degraded. A
+non-zero count means a residual FTS inconsistency that the startup marker did not catch was
+detected and repaired (the classifier matches the error text, not its cause, so it does not by
+itself identify a version mismatch); it normally does not recur. The one-time startup rebuild (marker `fts_built_by_lbug` in
+`SchemaState`) is *not* counted here; it is logged on stderr
+(`rebuilding full-text (FTS) indexes: they were not built by this lbug version`) and its time is
+proportional to corpus size. See
+[ADR-0649](adr/0649-fts-index-rebuild-on-lbug-version-change.md).
+
+**Troubleshooting `FTS index '<idx>' is inconsistent`.** Raised by a delete/update on a row whose
+non-ASCII term is missing from an FTS index built by lbug 0.20 (0.15.x and earlier). Releases after
+0.16.2 rebuild the indexes automatically on first start. On 0.16.0–0.16.2, drop **all three** (not just
+the named one) with `CALL DROP_FTS_INDEX('Entity','node_name_and_summary')`,
+`CALL DROP_FTS_INDEX('RelatesToNode_','edge_name_and_fact')` and
+`CALL DROP_FTS_INDEX('Episodic','episode_content')`, then call `knowledge_build_indices`.
 
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below
@@ -590,7 +678,8 @@ bridge and the list of operations that support it.
 
 ## Recovery and export tools
 
-`knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`,
-`knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`,
-`knowledge_recover`, and `knowledge_recover_full` are all `admin`-scope IPC/MCP tools — see
+`knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`,
+`knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`,
+`knowledge_rebuild_from_wal`, `knowledge_recover`, and `knowledge_recover_full` are all
+`admin`-scope IPC/MCP tools — see
 [Scopes](ipc-mcp-reference.md#scopes) for the full admin-scope list and the MCP `--scope` flag.

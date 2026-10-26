@@ -3,8 +3,8 @@ members = ["crates/core", "crates/service", "crates/eval"]
 resolver = "2"
 
 [workspace.package]
-version = "0.14.1"
-repository = "https://github.com/verveguy/liminis-context-graph"
+version = "0.17.0"
+repository = "https://github.com/liminisapp/liminis-context-graph"
 
 # Strip debuginfo from dev/test builds. Linking the ~50 integration-test
 # binaries (crates/core: 37, crates/service: 11, crates/eval: 2 — see #316)
@@ -23,21 +23,33 @@ strip = "debuginfo"
 [workspace.metadata.dist]
 cargo-dist-version = "0.32.0"
 ci = ["github"]
-installers = ["shell"]
-# Build the platform artifacts on pull requests, not only on tags. Without this,
-# `build-local-artifacts` is gated off for PRs and the release path is exercised
-# for the first time by the tag itself — which is exactly how ADR-0398's static
-# OpenSSL link shipped unverified (no release before v0.14.0 ever ran either
-# OpenSSL script, because every tag through v0.13.4 pinned lbug 0.17.0 with
-# OpenSSL still bundled), and how four separate macOS linkage defects each cost a
-# tag-and-delete cycle to discover. ci.yml cannot cover this: it is ubuntu-only,
-# and scripts/stage-openssl-rpath.sh is a no-op on Linux. Costs three extra
-# platform builds per code-touching PR; cheap against a failed release.
-pr-run-mode = "upload"
+# powershell: the irm|iex installer for the x86_64-pc-windows-msvc archive (#581).
+installers = ["shell", "powershell"]
+# Link the MSVC C runtime dynamically on Windows (dist's default is static, +crt-static).
+# lbug's prebuilt lbug.lib is compiled /MD (dynamic CRT); with +crt-static the cxx crate's C++
+# objects compile /MT, and the release link fails with LNK2038 "RuntimeLibrary mismatch
+# MT_StaticRelease vs MD_DynamicRelease" plus duplicate std:: symbols (#581's first Windows
+# `dist build`). Consequence: the Windows .exe needs the Visual C++ runtime (vcruntime140.dll),
+# as any /MD build does — see ADR-0581.
+msvc-crt-static = false
+# Do not build platform artifacts on pull requests (#639, ADR-0639). Release packaging —
+# the pinned extension-hash check (#593), the OpenSSL linkage guards (ADR-0550) and the
+# Windows static-OpenSSL link (ADR-0581) — is verified once per merge to `main` instead:
+# release.yml is hand-edited to run on `push: branches: [main]` (build and check only,
+# never publish) as well as on version tags. Nothing ships from a PR commit, and the
+# Windows build alone cost ~20 minutes per push. Trade-off: a PR that breaks packaging is
+# caught after merge (a `ci-failure` issue via ci-failure-notify.yml) and fixed forward
+# before the next tag. NOTE: "skip" is generator-honoured only for dropping the
+# `pull_request:` trigger; the `main` push trigger and the tag-based publishing
+# predicate are hand edits preserved by allow-dirty = ["ci"] below.
+pr-run-mode = "skip"
 targets = [
   "aarch64-apple-darwin",
   "x86_64-unknown-linux-gnu",
   "aarch64-unknown-linux-gnu",
+  # Windows (#581): named-pipe transport since #582. OpenSSL for this target is staged by a
+  # Windows-only step in release.yml, not by a dist dependency table — see that step.
+  "x86_64-pc-windows-msvc",
 ]
 # .lbdb: the bundled lbug vector/fts extension binaries staged per-target by
 # scripts/stage-lbug-extensions.sh (invoked from .github/build-setup.yml before `dist build`
@@ -96,11 +108,11 @@ libssl-dev = "*"
 
 [workspace.dependencies]
 arc-swap = "1"
-lbug = "=0.18.1"
+lbug = "=0.21.2"
 thiserror = "2"
 tempfile = "3"
 regex = "1"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -113,6 +125,6 @@ http-body-util = "0.1"
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 futures = "0.3"
 serde_yaml = "0.9"
-sha2 = "0.10"
+sha2 = "0.11"
 tokio-util = "0.7"
-rmcp = { version = "2.2.0", default-features = false, features = ["server", "transport-io"] }
+rmcp = { version = "3.5.0", default-features = false, features = ["server", "transport-io"] }

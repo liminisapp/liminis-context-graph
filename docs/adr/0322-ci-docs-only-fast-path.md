@@ -252,3 +252,11 @@ itself — unconditional, and not gated on the output it validates, which a patt
 in the skip direction would otherwise suppress along with the rest of the suite. It
 asserts both directions, including that an unrecognised script or workflow still
 classifies as code.
+
+## Amendment (2026-09-30, issue #640)
+
+`ci.yml` gained a `lint` pre-gate job (fmt, eval script guards, ML-deps guard) that `build-release`
+now `needs:`. `lint` uses the same `!cancelled() && (changes != success || code_changed == 'true')`
+fail-safe `if:` described above, so a docs-only run skips `lint` and the build from one condition
+and `test (ubuntu-latest)` still reports as skipped. The build job's display name is now
+`build (release profile)` (the id `build-release` is unchanged). See ADR-0640.

@@ -20,22 +20,34 @@
 # the build runner's Homebrew path, and only scripts/assert-openssl-linkage.sh
 # catches that.
 
-- name: Get rustc version for lbug cache key
-  id: rustc-ver
-  run: echo "version=$(rustc --version | shasum -a 256 | cut -c1-8)" >> "$GITHUB_OUTPUT"
+# Issue #690 / ADR-0690: prefetch the pinned prebuilt liblbug with retries before `dist build`.
+# THIS COPY IS NOT LIVE (see the note on the extension step below) — the identical steps are
+# hand-added to .github/workflows/release.yml (in build-local-artifacts, in place of the old
+# "Restore lbug build artifacts from cache" steps, which restored paths `dist build` never
+# writes). Edit both places together. The steps are placed before extension staging; they have no
+# dependency on "Install dependencies".
+- name: Read LBUG_VERSION for the prebuilt cache key
+  id: lbug-ver
+  shell: bash
+  run: |
+    set -euo pipefail
+    v="$(sed -n 's/^LBUG_VERSION[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' .cargo/config.toml | head -n1)"
+    [ -n "$v" ] || { echo "could not parse LBUG_VERSION from .cargo/config.toml" >&2; exit 1; }
+    echo "version=$v" >> "$GITHUB_OUTPUT"
 
-- name: Get lbug version hash for lbug cache key
-  id: lbug-hash
-  run: echo "hash=$(grep -A12 '^name = "lbug"$' Cargo.lock | shasum -a 256 | cut -c1-12)" >> "$GITHUB_OUTPUT"
-
-- name: Restore lbug build artifacts from cache
-  uses: actions/cache/restore@v6
+- name: Restore prebuilt liblbug from cache
+  id: lbug-prebuilt-cache
+  uses: actions/cache@v6
   with:
-    key: lbug-cache-${{ runner.os }}-${{ steps.rustc-ver.outputs.version }}-${{ steps.lbug-hash.outputs.hash }}-2026-05-29
-    path: |
-      target/release/build/lbug-*
-      target/release/.fingerprint/lbug-*
-      target/release/deps/liblbug-*
+    key: lbug-prebuilt-${{ runner.os }}-${{ join(matrix.targets, '') }}-${{ steps.lbug-ver.outputs.version }}
+    path: ${{ runner.temp }}/lbug-prebuilt
+
+- name: Fetch pinned prebuilt liblbug (with retries)
+  shell: bash
+  run: bash scripts/fetch-lbug-prebuilt.sh "${{ join(matrix.targets, '') }}" "${{ runner.temp }}/lbug-prebuilt"
+
+# Followed in release.yml by an "Assert prebuilt liblbug is staged where lbug's build.rs will
+# look" step that checks $LBUG_PREBUILT_CACHE_DIR/version-<v>[-compat]/lib/<lib> is non-empty.
 
 # Issue #559 / ADR-0559: bundle the lbug vector/fts extension binaries into the release
 # archive so a fresh install never has to download them from extension.ladybugdb.com at
@@ -46,8 +58,7 @@
 # THIS COPY IS NOT LIVE. `allow-dirty = ["ci"]` (Cargo.toml) makes `dist generate` refuse to
 # run at all ("'ci' is marked as allow-dirty ... refusing to run"), so nothing ever inlines
 # this fragment into .github/workflows/release.yml automatically — the identical step is
-# hand-added there (in build-local-artifacts, right after "Restore lbug build artifacts from
-# cache"), the same way scripts/stage-openssl-rpath.sh's step is hand-added rather than living
+# hand-added there (in build-local-artifacts, right after the prebuilt-liblbug steps above), the same way scripts/stage-openssl-rpath.sh's step is hand-added rather than living
 # in this file. Edit both places together; this file only documents the intended content, it
 # does not produce it.
 #
@@ -58,12 +69,15 @@
 # lockstep with crates/core/src/lbug_extension_home.rs's platform_string() — a 4th release
 # target needs both updated together.
 - name: Stage lbug vector/fts extensions for this target
+  # bash explicitly: the Windows runner's default shell is PowerShell (#581).
+  shell: bash
   run: |
     set -euo pipefail
     case "${{ join(matrix.targets, '') }}" in
       aarch64-apple-darwin) platform=osx_arm64 ;;
       x86_64-unknown-linux-gnu) platform=linux_amd64 ;;
       aarch64-unknown-linux-gnu) platform=linux_arm64 ;;
+      x86_64-pc-windows-msvc) platform=win_amd64 ;;
       *)
         echo "no lbug extension platform mapping for target '${{ join(matrix.targets, '') }}' — update .github/build-setup.yml, .github/workflows/release.yml, and crates/core/src/lbug_extension_home.rs together" >&2
         exit 1

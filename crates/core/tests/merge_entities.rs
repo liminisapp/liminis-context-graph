@@ -49,6 +49,7 @@ fn make_edge_in_group(
     group_id: &str,
 ) -> RelatesToEdge {
     RelatesToEdge {
+        ingested_at: String::new(),
         uuid: Uuid::new_v4().to_string(),
         name: name.to_string(),
         source_node_uuid: src.to_string(),
@@ -63,13 +64,14 @@ fn make_edge_in_group(
         relation_type: None,
         episode_uuids: vec![],
         source_descriptions: vec![],
+        ..Default::default()
     }
 }
 
 /// Returns the number of entities with the given name that are NOT merged.
 fn count_active_entities_named(db: &Db, name: &str) -> usize {
     let conn = db.connect().unwrap();
-    conn.get_entities_by_name_all(name, "liminis")
+    conn.get_entities_by_name_all(name, "liminis", None)
         .unwrap()
         .into_iter()
         .filter(|e| !e.labels.contains(&"Merged".to_string()))
@@ -127,7 +129,7 @@ fn test_merge_by_name_all_identical() {
 
     // Canonical has edges (at least 4 — one per alias, plus potential dedup)
     let canonical = conn
-        .get_entities_by_name_all("Brett", "liminis")
+        .get_entities_by_name_all("Brett", "liminis", None)
         .unwrap()
         .into_iter()
         .find(|e| !e.labels.contains(&"Merged".to_string()))
@@ -949,6 +951,7 @@ fn test_merge_with_timestamp_edges() {
         .unwrap();
         // Edge with explicit RFC-3339 valid_at — stored as TIMESTAMP, read back as space-format
         let edge = RelatesToEdge {
+            ingested_at: String::new(),
             uuid: Uuid::new_v4().to_string(),
             name: format!("knows_{i}"),
             source_node_uuid: uuid.clone(),
@@ -963,6 +966,7 @@ fn test_merge_with_timestamp_edges() {
             relation_type: None,
             episode_uuids: vec![],
             source_descriptions: vec![],
+            ..Default::default()
         };
         conn.insert_relates_to_edge(&edge).unwrap();
     }
@@ -1001,7 +1005,7 @@ fn test_merge_with_timestamp_edges() {
 
     // Canonical has the rewritten edges with correct timestamps
     let canonical = conn
-        .get_entities_by_name_all("Casey", "liminis")
+        .get_entities_by_name_all("Casey", "liminis", None)
         .unwrap()
         .into_iter()
         .find(|e| !e.labels.contains(&"Merged".to_string()))
@@ -1198,4 +1202,36 @@ fn test_apply_same_as_leaves_foreign_edge_untouched() {
         0,
         "no replacement group-L edge should be written onto the canonical by apply_same_as"
     );
+}
+
+// ── Issue #650 / FR-005: the identifier-mismatch veto never applies to explicit merges ──
+
+/// An operator-requested merge of `ADR 2018` into `ADR 2019` is honoured: the extraction-time
+/// veto lives only in `episode.rs` candidate selection, not in `merge_entities`.
+#[test]
+fn test_explicit_merge_ignores_identifier_veto() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+    conn.insert_entity(&make_entity("adr-2019", "ADR 2019", TS))
+        .unwrap();
+    conn.insert_entity(&make_entity("adr-2018", "ADR 2018", TS))
+        .unwrap();
+
+    let result = merge_entities(
+        &conn,
+        &MergeEntitiesParams {
+            canonical_uuid: Some("adr-2019".to_string()),
+            canonical_name: None,
+            alias_uuids: vec!["adr-2018".to_string()],
+            alias_names: vec![],
+            merge_all_by_name: false,
+            kind: None,
+            group_id: "liminis".to_string(),
+            dry_run: false,
+        },
+        TS,
+    );
+    assert!(result.success, "errors: {:?}", result.errors);
+    assert_eq!(result.merged_count, 1);
 }

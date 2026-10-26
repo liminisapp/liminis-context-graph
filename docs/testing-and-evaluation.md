@@ -56,7 +56,7 @@ request nonces, and anything transport-specific (headers, API keys, URLs) are ne
 key, and never reach the cassette at all — the record/replay seam sits at the `Extractor` trait
 boundary, strictly above HTTP request construction, so there is nothing credential-shaped for it
 to see or need to scrub. See the
-[`crates/core/src/cassette.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/cassette.rs)
+[`crates/core/src/cassette.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/cassette.rs)
 module doc for the full, authoritative scope (including one documented, narrow gap around the
 edge extraction user prompt).
 
@@ -65,7 +65,7 @@ construction, so there's nothing transport-level for it to see. But a cassette's
 `response` fields are the actual episode text and model output, so **review content before
 committing or sharing a cassette**: source text drawn from a real workspace can carry
 proprietary or personal data that has nothing to do with authentication. See
-[`crates/core/tests/fixtures/README.md`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md)
+[`crates/core/tests/fixtures/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md)
 for this repo's fixture-capture conventions.
 
 ### Failure-record sidecar

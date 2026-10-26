@@ -7,17 +7,46 @@ title: IPC & MCP Reference
 
 `liminis-context-graph` serves the same graph over **two transport surfaces**, both routed
 through the same core dispatch in
-[`crates/core/src/handlers.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs) —
+[`crates/core/src/handlers.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/handlers.rs) —
 no graph logic is duplicated between them:
 
-- **JSON-RPC 2.0 over a Unix domain socket** (default). Newline-delimited requests/responses over `.lcg/service.sock`.
+- **JSON-RPC 2.0 over a local socket** (default). Newline-delimited requests/responses over `.lcg/service.sock` — a Unix domain socket on macOS/Linux, a named pipe on Windows (see [Windows: named pipe](#windows-named-pipe)).
 - **[Model Context Protocol](https://modelcontextprotocol.io) over stdin/stdout** (`--mcp-stdio`). Any MCP client — Claude Code, Claude Desktop, other agents — can query and mutate the graph directly.
 
-## IPC methods (44)
+### Windows: named pipe
 
-The socket dispatch handles **44 methods**: 43 `knowledge_*` methods plus `health_check`.
+On Windows the service serves the identical protocol over a named pipe, because `AF_UNIX` is not
+usable from Rust's tokio, Node or CPython there (issue #581). `LCG_SOCKET_PATH` keeps its meaning —
+it still names the workspace's endpoint — and maps to a pipe:
+
+- **Discovery.** At bind the service writes the pipe name to `.lcg/service.endpoint` (the socket
+  path with its extension replaced). Clients should read that file.
+- **Name.** `\\.\pipe\lcg-<16 hex digits>`: FNV-1a 64-bit over the UTF-8 bytes of the absolute
+  socket path, lower-cased, with `/` replaced by `\`. Stable per workspace, so a client that cannot
+  read the file can compute it. A `LCG_SOCKET_PATH` (or `--connect`) that is already a
+  `\\.\pipe\…` name is used as-is.
+- **Access.** Only the user the service runs as (and SYSTEM) can connect; remote clients are
+  refused, and a second process cannot bind the same pipe name.
+- **Signals.** Closing the console, logoff/shutdown, Ctrl+Break and Ctrl+C all trigger the same
+  graceful shutdown SIGTERM/SIGINT do on Unix.
+
+A pipe opens like a file, so a client needs no socket library:
+
+```python
+import json
+endpoint = open(".lcg/service.endpoint").read().strip()      # \\.\pipe\lcg-…
+with open(endpoint, "r+b", buffering=0) as pipe:
+    pipe.write((json.dumps({"jsonrpc": "2.0", "id": 1, "method": "health_check", "params": {}}) + "\n").encode())
+    print(json.loads(pipe.readline()))
+```
+
+In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
+
+## IPC methods (51)
+
+The socket dispatch handles **51 methods**: 50 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (44) and the MCP tool registry (43, below) differ by exactly one — `health_check` is
+surface (51) and the MCP tool registry (50, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -26,18 +55,21 @@ not exposed as an MCP tool.
 | Status | `knowledge_status`, `knowledge_rebuild_status` |
 | Ingestion | `knowledge_process_chunk`, `knowledge_add_episode` |
 | Direct assertion | `knowledge_assert_entity`, `knowledge_assert_relationship` |
-| Search | `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
+| Search | `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
+| Correction reads | `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_delete_by_group`, `knowledge_clear_all` |
+| Supersession | `knowledge_mark_chunk_removed`, `knowledge_supersede_document` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
+| Ontology | `knowledge_reload_ontology` |
 | Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
 | Semantic search maintenance | `knowledge_backfill_summary_embeddings` |
 | Cross-group pointers | `knowledge_add_cross_group_edge`, `knowledge_rebind_pointers` |
-| WAL administration | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
+| WAL administration | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
 | Recovery / lifecycle | `knowledge_recover`, `knowledge_recover_full`, `knowledge_close` |
 
 For request/response shapes and parameter details, the dispatch `match` arms in
-[`handlers.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/core/src/handlers.rs)
+[`handlers.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/handlers.rs)
 and their handler functions are the source of truth — this page is the method index, not a
 copy of each handler's parameter parsing.
 
@@ -72,6 +104,50 @@ until `connected` and `queryable` are both `true` and `initializing` is `false` 
 for the full rationale. A `degraded` response after startup has otherwise settled is a legitimate
 outcome (e.g. unrecovered corruption) — not something to retry indefinitely.
 
+A `busy` response (see [Health check contract](#health-check-contract)) is **not** a readiness
+signal: it means the service is alive but a write is holding or waiting for the write lock — most
+importantly a long `knowledge_rebuild_from_wal`. Pollers keep waiting on `busy` (gate on
+`result.healthy == true`) and must not treat it as failure.
+
+### Health check contract
+
+`health_check` never waits on the write lock, so it answers promptly even during a long WAL
+rebuild ([ADR-0628](adr/0628-health-check-busy-state.md), #628). The response's `state` is one of:
+
+| `state` | `ok` | `healthy` | Meaning | Supervisor action |
+|---|---|---|---|---|
+| `healthy` | `true` | `true` | Alive and ready: DB open, no write in progress or pending. | Ready — send work. |
+| `busy` | `true` | `false` | Alive, **not ready**: a write is pending or in progress. | Alive — keep waiting; do not restart. |
+| `degraded` | `false` | `false` | Alive but unusable: DB not loaded. `reason` says why. | Recover (`knowledge_recover`) or investigate. |
+| *(no answer)* | — | — | Dead or wedged. | Restart. |
+
+`busy` carries an `activity` field. While a `knowledge_rebuild_from_wal` job is running:
+
+```json
+{"ok": true, "healthy": false, "state": "busy", "activity": "rebuilding",
+ "job_id": "…", "progress": {"mutations_replayed": 48210, "wal_files_processed": 3,
+                             "wal_files_total": 12, "elapsed_seconds": 91.4}}
+```
+
+`progress` uses the same values as `knowledge_rebuild_status`. For any other writer the response
+is `{"ok": true, "healthy": false, "state": "busy", "activity": "writing"}` with no `job_id` or
+`progress`. The busy path never connects to or queries the database.
+
+Notes:
+
+- `busy` means "a write is pending **or** in progress": a writer queued behind readers also makes
+  the lock unavailable, so an otherwise idle service can briefly report `busy`.
+- Batched passes ([ADR-0030](adr/0030-batched-write-lock-for-long-running-passes.md)) release the
+  lock between batches, so during one the state alternates between `busy` and `healthy`.
+- A streaming rebuild (`_progress_token`) is not registered as a job: it reports
+  `activity: "writing"` without `progress`.
+- Startup work (legacy and WAL-root migration, startup recovery) runs before the accept loop, so a
+  probe sent then queues in the kernel and gets no answer until startup finishes.
+- `healthy` can be reported in the short window after a rebuild job is registered but before it
+  takes the write lock.
+- `busy` has `healthy: false` on purpose: existing pollers that gate on `healthy` keep waiting.
+  A liveness probe that only needs "is the process alive" should accept `ok: true`.
+
 ## MCP-over-stdio transport
 
 `liminis-context-graph --mcp-stdio` starts a native [Model Context Protocol](https://modelcontextprotocol.io)
@@ -84,7 +160,7 @@ Every MCP tool is derived from the `knowledge_*` dispatch methods above — tool
 IPC method names verbatim, and each `tools/call` is translated into an `IpcRequest` and routed
 straight through the same core dispatch the socket service uses. Tool descriptions and JSON
 schemas are maintained in the
-[`ToolSpec` registry in `crates/service/src/mcp/tools.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs) —
+[`ToolSpec` registry in `crates/service/src/mcp/tools.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs) —
 that file is the canonical source for per-tool descriptions; they are not duplicated here.
 
 ### Flags
@@ -93,7 +169,8 @@ that file is the canonical source for per-tool descriptions; they are not duplic
 |------|-------------|
 | `--mcp-stdio` | Starts the MCP server over stdin/stdout instead of binding the Unix socket. |
 | `--scope=<list>` | Comma-separated list of scopes to advertise in `tools/list` (default `all`). See [Scopes](#scopes) below. |
-| `--connect <path>` | Attached mode: forward every `tools/call` as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly. |
+| `--connect <path>` | Attached mode: forward every `tools/call` as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly. By default the socket is dialled lazily, on the first `tools/call` — see [DB-access modes](#db-access-modes) below. |
+| `--connect-eager` | Attached mode only: dial `--connect`'s socket at startup and exit immediately if it's unreachable, restoring the behavior attached mode had before issue #575. No effect without `--connect`. |
 | `--allow-remote-close` | Attached mode only: advertise and allow `knowledge_close`, forwarding the shutdown to the remote service. No effect in standalone mode (no `--connect`). |
 
 ### DB-access modes
@@ -105,6 +182,19 @@ that file is the canonical source for per-tool descriptions; they are not duplic
   forwards each call over the given socket to a service that already has it open. Use this to
   add MCP access to a workspace where another socket-service instance is already running,
   without contending for lbug's single-writer lock.
+  - **Lazy connect by default (issue #575).** The socket is not dialled during startup —
+    `initialize` and `tools/list` succeed immediately, serving the tool set from the compiled-in
+    registry, regardless of whether the daemon at `--connect`'s path is up. The first
+    `tools/call` triggers a dial; if it fails, that call returns a tool result with `isError:
+    true` naming the socket path and suggesting you start the daemon, but the MCP process itself
+    stays up and the client's session is unaffected — no protocol error, no exit. This avoids
+    two failure modes a client can otherwise get stuck in for the client's own cached-failure
+    window: registering a native MCP server before its daemon has started (first install,
+    post-reboot), and the client caching a failed attach for several minutes even after the
+    daemon comes up. Pass `--connect-eager` to restore the pre-#575 behavior of dialling at
+    startup and exiting immediately (before `initialize`) if the socket is unreachable — useful
+    if you rely on that fail-fast behavior as an external health check (e.g. a supervisor that
+    restarts the front until the daemon is ready).
   - **Idle timeout.** `LCG_ATTACHED_CALL_TIMEOUT_MS` (default 30s) is a **per-read-line** idle
     timeout, not a whole-call timeout: it resets on every line read off the socket, including
     `{"type":"progress"}` lines. A call that keeps emitting progress is never bounded by it, no
@@ -132,10 +222,10 @@ union of all active scopes.
 
 | Scope | Methods |
 |-------|---------|
-| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
-| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
+| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
+| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
-| `admin` | `knowledge_dump_wal`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings` |
+| `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` |
 | `all` | every scope above (default) |
 
 **`cypher` is a power scope, not bundled into anything else.** `knowledge_query_cypher` executes
@@ -154,7 +244,9 @@ the remote service.
 
 **Recovery and export live under `admin`.** `knowledge_rebuild_from_wal` (rebuild one group's data
 from its own WAL directory — `group_id`, default `"liminis"`), `knowledge_dump_wal`
-(snapshot/export the graph into a fresh compacted WAL directory), `knowledge_wal_mark_create` /
+(snapshot/export the graph into a fresh compacted WAL directory), `knowledge_strip_wal_embeddings`
+(rewrite existing WAL files in place to remove the embedding-vector `params` fields a pre-0.14
+WAL still carries — see [Operations](operations.md#wal-administration)), `knowledge_wal_mark_create` /
 `_list` / `_delete` (name a retained WAL position within one group's stream, without a full
 snapshot — each also takes `group_id`, default `"liminis"`, and `_list` reports only that one
 group's marks, never an aggregate across groups), and `knowledge_recover` / `knowledge_recover_full`
@@ -192,13 +284,44 @@ is read or the database is touched. A bounded rebuild is **not durable**: WAL en
 bad mutation. `to_seq` bounds an endpoint; it does not add reverse/undo semantics to the
 forward-only replay noted above.
 
+### Search evidence and the similarity floor (`find_entities`, `find_relationships`)
+
+Hybrid search fuses its candidate lists with Reciprocal Rank Fusion, which is rank-only: the top
+hit of a gibberish query scores almost the same as the top hit of a perfect one, and every query
+fills its top-k. To let a caller tell a real match from filler, each result of
+`knowledge_find_entities` and `knowledge_find_relationships` carries an additive `search` object
+(issue #629):
+
+| Field | On | Meaning |
+|-------|----|---------|
+| `rrf_score` | both | fused, rank-based score — ordering only, **not** a relevance measure |
+| `text_match` | both | `true` iff the full-text (BM25) path retrieved the item |
+| `bm25_score` | both | raw BM25 score, or `null` |
+| `name_similarity`, `summary_similarity` | entities | cosine similarity (`1 - distance`) on that vector path, or `null` |
+| `fact_similarity` | relationships | cosine similarity (`1 - distance`) on the fact-vector path, or `null` |
+
+A field is `null` when that retrieval path did not return the item (`text_match` is then `false`).
+Values are raw and unnormalised; cosine similarity can be negative.
+
+Both tools also accept an optional **`min_similarity`** (number). Vector candidates whose cosine
+similarity is below it are dropped *before* fusion, independently per vector path, so they never
+affect the ranking and are not reported for an item they did not qualify for. Full-text matches
+always stay eligible, so an exact-name query still returns its match while a gibberish query
+returns nothing. With the `kind` filter the floor applies on top of the kind path's bounded
+nearest-neighbour probe.
+
+How it differs from `knowledge_search_passages`' `min_score`: the value is clamped to 0–1 the same
+way (a non-number is an invalid-params error), but `min_similarity` has **no default** — omitted
+or `null` means no floor and results are identical to before, apart from the added `search`
+object — and it acts before fusion and per path rather than as a post-filter on a single list.
+
 ### group_ids semantics: omitted vs. empty
 
 Every read tool that accepts `group_ids` treats an **omitted or `null` `group_ids` uniformly as
-"all groups"** (issue #413) — this holds across all 9 read tools: `knowledge_find_entities`,
+"all groups"** (issue #413) — this holds across all 10 read tools: `knowledge_find_entities`,
 `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_list_entities`,
 `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`,
-`knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`.
+`knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_episodes`.
 
 **An explicit `group_ids: []` does not mean the same thing on every tool**, and this split is
 deliberate, not an inconsistency to be fixed here:
@@ -206,20 +329,266 @@ deliberate, not an inconsistency to be fixed here:
 - On `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_nodes_by_group`,
   and `knowledge_get_edges_by_group`, an explicit `group_ids: []` is preserved as "exactly these
   groups" — i.e. **zero rows**, a filter matching nothing.
-- On the other five read tools (`knowledge_search_passages`, `knowledge_list_entities`,
+- On the other six read tools (`knowledge_search_passages`, `knowledge_list_entities`,
   `knowledge_list_relationships`, `knowledge_get_entity_neighbors`,
-  `knowledge_get_entities_by_source`), an explicit `group_ids: []` collapses to the same
+  `knowledge_get_entities_by_source`, `knowledge_get_episodes`), an explicit `group_ids: []` collapses to the same
   behavior as omitting it — **all groups**.
 
 If you need "zero rows" as a filter result, use one of the four tools in the first list, or check
 the tool's own `ToolSpec` description in
-[`crates/service/src/mcp/tools.rs`](https://github.com/verveguy/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs)
-before relying on `[]` to mean "nothing" — on the other five it doesn't.
+[`crates/service/src/mcp/tools.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs)
+before relying on `[]` to mean "nothing" — on the other six it doesn't.
 
 This section is the single, central statement of that contract; individual tool entries on this
 page don't restate it.
 
+### Time: event time vs ingest time (`reference_time`, `ingested_at`)
+
+The graph keeps two separately stored clocks, so a record can be both *old in the world* and
+*new to the graph* — a months-old conversation ingested today, or a document chunk dated by its
+content rather than its file mtime.
+
+| Clock | Key | Set by | Meaning |
+|---|---|---|---|
+| **Event time** | `reference_time` (request) → `valid_at` / `created_at` (stored) | the caller; defaults to *now* | When the content happened. `knowledge_process_chunk` validates it as RFC-3339 and writes it to the episode's `created_at` and `valid_at` and to the `created_at` of the entities and edges it extracts; time-ordered reads (episode ordering, paging cursors) key on it. |
+| **Ingest time** | `ingested_at` (response only) | the service clock — **never caller-supplied** | When this service first wrote the record. |
+
+`ingested_at` is on episodes, entities and edges, in the same timestamp format and timezone
+convention as `created_at` (`YYYY-MM-DD HH:MM:SS` on reads). It is an additive key: it appears on
+every read that returns these records (`knowledge_get_episodes`; `find_entities`,
+`resolve_entity`, `list_entities`, `get_nodes_by_group`, `get_entities_by_source`,
+`get_entity_neighbors`; `find_relationships`, `list_relationships`, `get_edges_by_group`,
+`get_edges_by_uuids`) and is accepted in the `fields` projection of `get_episodes` and
+`list_entities`. Any `ingested_at` passed in a request is ignored.
+
+- **First write wins.** The value is set once. A later episode that matches or updates an existing
+  entity or edge, `knowledge_merge_entities` (the surviving entity keeps its own value), and
+  re-asserting an existing entity or edge do not change it. A record re-created under a new uuid by
+  a correction (`same_as`, endpoint rewrite) carries the original edge's `ingested_at`: the graph
+  learned that fact when it was first written.
+- **Direct assertions** (`assert_entity`, `assert_relationship`) get the service clock at the call,
+  independent of any `valid_at` supplied.
+- **Replay never restamps.** `knowledge_rebuild_from_wal`, WAL-tail and startup recovery,
+  checkpoint restore and `knowledge_dump_wal` compaction all carry the recorded value through.
+- `created_at` / `valid_at` mean exactly what they did before. (Edge reads still leave `created_at`
+  empty, as before; only `ingested_at` was added.)
+
+**Upgrading an existing graph.** Records written before this feature have no stored ingest time, so
+on the first start of an upgraded service each one is backfilled once, from the best available
+signal, in this order:
+
+1. the `ts` of the WAL entry that created the record (the first native `CREATE` line for its uuid
+   under the group WAL directories) — a true ingest time;
+2. otherwise the record's own `created_at`.
+
+Signal 2 is **approximate**: for a record written before this feature, `created_at` was the
+event time, so a backfilled value can predate the real ingest. It is used where the WAL no longer
+holds a creating line — typically after `knowledge_dump_wal` compaction (a dumped line's `ts` is
+the compaction time, which says nothing about when the record was learned, so it is never used) or
+after WAL files were pruned. The backfill is idempotent and never rewrites a record that already
+has an ingest time. See [ADR-0673](adr/0673-ingest-time-separate-from-event-time.md).
+
+### Belief time: corrections supersede, they do not delete (issue #705)
+
+Alongside event time and ingest time (above) the graph records **when it stopped believing**
+something. Belief is *transaction time*; it is deliberately separate from validity
+(`valid_at` / `invalid_at`, the world's clock). When a document is corrected, the removed fact was
+never true, so no supersession path ever writes `valid_at` or `invalid_at`: **correction ends belief
+and leaves validity alone.** See [ADR-0705](adr/0705-belief-time-separate-from-validity.md).
+
+**Corrections.** Resubmitting a `chunk_id` to `knowledge_process_chunk` supersedes that chunk's
+earlier live episodes **in the same `group_id`**, at the new episode's ingest time, and only once the
+new ingest has fully succeeded. A failed re-ingest leaves the old episode live. The result gains
+`superseded_episode_uuids`. Nothing is deleted. The same `chunk_id` in another group is never touched.
+`knowledge_add_episode` never supersedes (its `name` is free-form).
+
+To submit one chunk as several calls under one `chunk_id`, send `supersede: false` on every unit but
+the last, and pass the earlier units' `episode_uuid`s as `same_revision_episode_uuids` on the last:
+they stay live, the older episodes are superseded. **Record a chunk as ingested only after the call
+succeeds** — a client that records it first will never resend a failed correction.
+
+**Removal.** `knowledge_mark_chunk_removed {chunk_id, group_ids}` records that a chunk no longer
+exists in its document: its live episodes are superseded with reason `chunk_removed`, and nothing is
+deleted. `group_ids` is required and non-empty, as for the delete. It returns
+`{superseded_count, superseded_uuids, superseded_at}` and is idempotent (a repeat reports 0).
+`knowledge_delete_chunk_episode` is unchanged and still destroys the episodes — use it only for
+explicit deletion. After a heading rename, ingest the renamed chunks first, then report the old ids
+removed; no fact present in both revisions is unbelieved at any instant.
+
+**Episode fields.** Episodes gain `superseded_at` (null while live), `superseded_by` (the superseding
+episode, absent for `chunk_removed`), `superseded_by_kind` (`episode`) and `supersession_reason`
+(`revision`, `chunk_removed`). They appear on `knowledge_get_episodes` only when set and are accepted
+in its `fields` projection. `get_episodes` and `search_passages` still return superseded episodes by
+default.
+
+**Edge provenance.** Each extracted edge records the episode that produced it. That is
+`producing_episode_uuids` in the `belief` object below — **not** the `episode_uuids` field on edge
+reads, which remains the either-endpoint inference (episodes mentioning the source or target) and is
+not evidence for that specific relationship. Edges with no producing episode carry a `warrant`
+(`assertion` for `knowledge_assert_relationship`, `cross_group` for `knowledge_add_cross_group_edge`)
+and are believed until retracted. An extracted edge's `valid_at_source` is `text` when the extractor
+read the date from the text and `reference_time` when it defaulted. A direct assertion never
+overwrites an extracted edge's fact; it creates a separate edge.
+
+**Reading belief.** `knowledge_find_relationships`, `knowledge_list_relationships`,
+`knowledge_get_entity_neighbors`, `knowledge_get_edges_by_group` and `knowledge_get_edges_by_uuids`
+accept two optional parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `believed_only` (boolean) | Drop edges the graph did not believe at `as_of` (default now). |
+| `as_of` (RFC 3339) | Evaluate belief at this time. Implies `believed_only` unless that is explicitly `false`, which annotates without filtering. |
+
+Either one adds a `belief` object to each edge: `state` (`believed`, `superseded`, `legacy`,
+`support_deleted`, `not_yet_ingested`), `believed`, `producing_episode_uuids`, and `warrant` /
+`valid_at_source` when set. An edge is believed at `t` iff it was ingested at or before `t` and either
+carries a warrant or has at least one producing episode not superseded at or before `t`; a fact is
+therefore believed on `[T1, T2)` when ingested at `T1` and superseded at `T2`, and stays believed
+while any one live source still states it. Capped reads (`find_relationships`,
+`list_relationships`, `get_entity_neighbors`) over-fetch and filter afterwards, so a filtered read can
+return fewer than `num_results`. **Without these parameters every read is unchanged** and includes
+superseded edges — making belief the default is a later, documented change.
+
+**Legacy edges.** An edge with neither a producing episode nor a warrant predates this feature. It is
+treated as believed and reported as `legacy`; `knowledge_status` returns `legacy_edge_count`. They
+cannot be soundly backfilled (endpoint co-occurrence is not provenance, #404), so re-ingest legacy
+graphs. Separately, an edge whose producing episodes were all hard-deleted
+(`knowledge_delete_episode`, `delete_by_source`, `delete_chunk_episode`) is `support_deleted` and
+unbelieved at every time.
+
+### Reviewing a correction: what changed, and what was written under the old belief (issue #706)
+
+Ending belief is half the job. After a correction you also want to see what it changed, and review
+work that may have leaned on the fact you dropped. Both reads below are **read-only** (no `valid_at` /
+`invalid_at`, no WAL entry, no schema change) and give the same answers after a rebuild. See
+[ADR-0706](adr/0706-correction-diff-and-affected-work-reads.md).
+
+The workflow: find the superseded episode (`knowledge_get_episodes` shows `superseded_at`,
+`superseded_by` and `supersession_reason`), run the changed-facts read, then run the affected-work
+read on each dropped fact.
+
+**`knowledge_get_correction_changes {episode_uuid}`** (MCP `read`). Compares a superseded episode with
+its direct superseder (E1 → E2 even if E2 was later superseded by E3):
+
+| Field | Meaning |
+|---|---|
+| `status` | `superseded`, or `not_superseded` (nothing to compare; both lists empty) |
+| `episode` | `uuid`, `name`, `group_id`, `ingested_at`, `superseded_at`, `reason` |
+| `replacement` | `{superseded_by, unit_episode_uuids}`, or `null` for `chunk_removed` (no replacement exists) |
+| `removed` / `added` (+ `*_count`) | Facts the old episode supports that the replacement does not / the replacement supports that the old episode does not, each with `uuid`, `source_node_uuid`, `target_node_uuid`, `name`, `fact`, `episodes`. Each `removed` fact also carries `still_believed`: `true` when another live episode outside the replacement still supports the edge, so it left the replacement but is not dropped from belief (`knowledge_get_affected_work` on it returns `open`). An `added` fact means only that the old episode did not support it: it may already have been believed through another live episode before the correction |
+
+A fact present on both sides appears on neither. Two edges are the same fact when they share source
+entity, target entity, relation name and fact text, so a **reworded fact is one removal plus one
+addition**. For a chunk ingested as several units, the replacement side is the whole revision, not only
+its final unit; the units are recovered from episodes of the same group and `name`, so a free-form
+`knowledge_add_episode` episode that reuses a chunk id as its name in that window is swept in. A heading
+rename supersedes one chunk and creates another, so a per-episode diff shows only removals for the old
+chunk — a whole-document diff needs document identity (#707).
+
+**`knowledge_get_affected_work {edge_uuid}`** (MCP `read`). For an edge no longer believed, lists the
+episodes ingested inside its belief interval `[start, end)` that mention either endpoint entity,
+ordered by ingest time:
+
+| Field | Meaning |
+|---|---|
+| `interval.state` | `closed` (candidates returned), `open` (still believed; affected work is not defined), `no_record` (`cause`: `legacy` or `support_deleted`) or `not_defined` (`cause`: `warranted`) |
+| `interval.start` / `end` | Microsecond RFC 3339; `end` is when the last producing episode was superseded. `derived_from_surviving_support` is true when some producers were hard-deleted and ignored |
+| `basis` | Always `entity_overlap` |
+| `candidates` (+ `count`) | `uuid`, `name`, `ingested_at`, `source_description`, `matched_entity_uuids` |
+
+**Candidates are not dependents.** The list is built from entity overlap, not recorded dependence, so
+review it rather than treating it as proof the work used the fact. The window is half-open (an episode
+ingested at exactly the superseding instant is outside it), the fact's own producing episodes and the
+units of the revision that superseded them are excluded, and the list is neither ranked nor truncated — a hub entity over a long window returns many
+episodes. Any state other than `closed` returns no candidates *and says why*, so an empty list never
+means "nothing affected" by accident. Both reads take a uuid, derive the group from the record, and
+return an error for a missing or unknown uuid.
+
+### Document supersession: a new document replaces an old one (issue #707)
+
+A document is sometimes *replaced* rather than edited — last year's decision record superseded by a
+new one. That is a relation between two documents, and it differs from a correction in one way: the
+old decision **was true** until it was replaced. So the old facts stop being *believed* when the
+supersession is recorded, but are reported as *in force* until the date the new document took
+effect. The two axes stay separate. See [ADR-0707](adr/0707-document-supersession.md).
+
+**Document identity.** `knowledge_process_chunk` and `knowledge_add_episode` accept an optional
+`doc_id`: the stable identity of the logical document an episode came from, unique within its
+`group_id` (path-valued today). It is stored on the episode and returned by `knowledge_get_episodes`
+when set. It is never defaulted from `source_file`; an episode without one cannot take part in
+supersession, and omitting it changes nothing for existing callers. Graphs written before this
+release have none — re-ingest them.
+
+**Recording a supersession.** `knowledge_supersede_document {group_id, superseding_doc_id,
+superseded_doc_id, effective_at}` (write scope) records "A supersedes B, effective `effective_at`"
+within one group. `effective_at` is an RFC 3339 timestamp **with a timezone offset**; it may be in the
+past (the retroactive case) or the future. Supersession is always explicit — the graph never infers it
+from topic similarity. The call:
+
+- writes one durable record per superseded document (a document has at most one superseding
+  document; express successive replacement as a chain), and
+- supersedes B's live episodes in that group with `superseded_by_kind` `document`, reason
+  `document_superseded`, `superseded_by` A's `doc_id`, at the service-clock recording instant — or at
+  `effective_at` when that is later, so a decision with a future effective date stays believed and in
+  force until then. A correction to B's chunk before that date still ends belief at the correction.
+
+It returns `{success, already_recorded, group_id, superseding_doc_id, superseded_doc_id,
+effective_at, recorded_at, superseded_count, superseded_uuids}`. Episodes of B ingested *after* the
+recording are not marked. Facts A also asserts stay believed through A's own episode. A recorded
+supersession is not undone by later corrections to A.
+
+It is rejected with no side effects (nothing written, WAL untouched) when A and B are the same
+document, when either is unknown in the group (no episode carries that `doc_id`), when the relation
+would form a cycle, when `effective_at` has no timezone, or when B is already superseded by a
+*different* document or effective date. Recording the identical relation again is a no-op
+(`already_recorded: true`). `valid_at` / `invalid_at` are never written. The record is in the WAL, is
+carried by dump compaction and checkpoint restore, and is removed by `knowledge_delete_by_group`.
+
+**Reading it.** On opted-in relationship reads (`believed_only` / `as_of`, above) the `belief` object
+gains:
+
+| Field | Meaning |
+|---|---|
+| `in_force` | Whether the fact was in force at the evaluated time, **independently of `believed`**. `false` once the superseding document's effective date has been reached; `true` otherwise; `null` for a fact that was corrected (it was never true, so it makes no validity claim). An edge is in force while any producing episode is. |
+| `supersession` | Present once the fact's producing episodes are all superseded; not time-dependent, so it classifies the fact from any read. `cause` is `corrected` (revision or removal) or `document_superseded`. For the latter it also carries `superseded_by_document`, `in_force_until` (the effective date) and `recorded_at`; `superseded_at` is when belief ended. |
+
+So between the effective date and the recording date an as-of read shows the old fact `believed` with
+`in_force: false` — the graph had not yet learned otherwise. Believed-only filtering is unchanged: it
+filters on belief, not on being in force, and there is no in-force-only filter yet.
+
+### Bulk reads: group scope, paging, projection, prefix (issue #667)
+
+`knowledge_get_episodes` and `knowledge_list_entities` are the two bulk reads, and a large graph
+can overflow an MCP client's tool-result limit if read in one call. Both accept the same optional,
+additive parameters; with none of them the response is exactly `{<collection>, count}` as before.
+
+| Parameter | Tools | Meaning |
+|---|---|---|
+| `group_ids` (array) | both | Groups to read. `knowledge_get_episodes` also accepts the single-group alias `group_id`; both given ⇒ their deduplicated union. **Neither given ⇒ every group** (episodes used to default to `liminis`). An explicit `[]` also means all groups. |
+| `last_n` / `num_results` | episodes / entities | Page size (defaults 50 / 500, unchanged). |
+| `cursor` | both | Opaque keyset cursor. Send `""` for the first page, then send back each response's `next_cursor` until it is `null`. |
+| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
+| `name_prefix` | both | Names starting with this prefix, matched literally. Case-insensitive for entities (via Cypher `lower()`, so non-ASCII folds only as far as lbug does); case-sensitive for episodes. |
+
+`next_cursor` appears only when the request contained `cursor`, `fields` or `name_prefix`; it is
+`null` on the last page. Order is deterministic (episodes newest first with a `uuid` tiebreaker;
+entities by `uuid` descending) and the cursor is a keyset position, so inserts and deletes between
+pages never repeat or skip an item that existed throughout. A cursor is bound to the tool and to
+its `group_ids`, `kind` and `name_prefix`; a malformed cursor or one replayed against a different
+query fails with `invalid cursor: …` (JSON-RPC `-32000`, like every other validation error here).
+`count` is always the number of items in the page. Filtering episodes by `attributes` is not
+supported yet. See [ADR-0667](adr/0667-read-path-paging-cursor-and-status-label.md).
+
+`knowledge_status`: the flat `wal` block always describes the **default group's** WAL stream. When
+a WAL root is configured it now also carries `"scope": "default_group"`, `"default_group":
+"liminis"` and `"see": "wal_groups"`, so `exists: false` there means the default group has no
+stream — read `wal_groups` for every group's position. With no WAL root the block is unchanged.
+
 ### Deletion (`delete_chunk_episode`, `delete_by_source`)
+
+> For a chunk that merely disappeared from its document, prefer
+> `knowledge_mark_chunk_removed` (see "Belief time" above), which ends belief without destroying the evidence. `knowledge_delete_chunk_episode` keeps its
+> explicit-deletion contract unchanged.
 
 **Breaking change in 0.13.2 (issue #406): `group_ids` is required and non-empty on both
 `knowledge_delete_chunk_episode` and `knowledge_delete_by_source`.** A call that previously
@@ -249,10 +618,11 @@ round-trip through `knowledge_process_chunk`'s LLM-driven extraction. Use `proce
 you have unstructured text and want the graph populated by extraction; use the assert tools when
 you already know exactly which entity or edge you want to write.
 
-**`knowledge_assert_entity`** accepts `name` (required), `entity_uuid` (optional), `labels`,
-`summary`, `attributes`, and `group_id` (default `liminis`).
+**`knowledge_assert_entity`** accepts `name` (required), `entity_uuid` (optional), `kind`
+(optional, see [Entity kinds](#entity-kinds-kind-identity)), `labels`, `summary`, `attributes`, and
+`group_id` (default `liminis`).
 
-- **Upsert identity is `(name, group_id)`**, unless `entity_uuid` is supplied. `entity_uuid`, when
+- **Upsert identity is `(group_id, kind, name)`** (kind defaults to `Entity`), unless `entity_uuid` is supplied. `entity_uuid`, when
   given, is a **strict, group-scoped lookup** — the call fails if no entity with that UUID exists
   in `group_id`; there is no create-under-this-UUID fallback (ADR-0379 Decision 3). A caller
   cannot mint an entity at a UUID of its own choosing.
@@ -272,7 +642,8 @@ you already know exactly which entity or edge you want to write.
   entity is deleted and recreated. There is currently no supported way to refresh it in place.
 
 **`knowledge_assert_relationship`** accepts `source_name`, `target_name`, `predicate` (all
-required), `fact` (optional — auto-derived as `"{source_name} {predicate} {target_name}"` if
+required), `source_kind` / `target_kind` (optional, see
+[Entity kinds](#entity-kinds-kind-identity)), `fact` (optional — auto-derived as `"{source_name} {predicate} {target_name}"` if
 omitted), `attributes`, `relation_type`, `valid_at`, and `group_id` (default `liminis`).
 
 - **Upsert identity is `(source_node_uuid, predicate, target_node_uuid, group_id)`**, resolved via
@@ -291,8 +662,67 @@ omitted), `attributes`, `relation_type`, `valid_at`, and `group_id` (default `li
   re-assert that changes `fact` updates the stored `fact` text but leaves `fact_embedding`
   reflecting the prior text until the edge is deleted and recreated.
 
+- **Both tools stamp `ingested_at` with the service clock** at the moment a record is created,
+  regardless of any `valid_at` supplied; see
+  [Time: event time vs ingest time](#time-event-time-vs-ingest-time-reference_time-ingested_at).
+
 See [ADR-0379](adr/0379-direct-assertion-conventions.md) for the full rationale behind these
 upsert and embedding decisions.
+
+### Entity kinds (`kind` identity)
+
+Entity identity is `(group_id, kind, name)` (issue #615,
+[ADR-0615](adr/0615-kind-scoped-entity-identity.md)). `kind` is a single string classifying an
+entity (`Topic`, `KnowledgeChannel`, `Team`, …). It is stored in `Entity.kind`, is always one of the
+entity's `labels` (appended after `Entity`), and is immutable. The default kind is exactly
+`Entity`; every entity written before kinds existed, and every extraction-created entity, is that
+kind. A `kind` is trimmed, case-sensitive, non-empty, must not contain U+001F, and must not be the
+reserved structural label `Merged`, else the call fails with a validation error. Every entity node in a response carries a `kind` field. So
+`Topic "adr"` and `KnowledgeChannel "adr"` are two distinct entities that coexist in one group.
+
+**Omitted `kind`: reads are broad, writes are scoped** (the rule `group_ids` already follows):
+
+| Operation | `kind` given | `kind` omitted |
+|-----------|--------------|----------------|
+| `knowledge_assert_entity` (write) | resolves/creates exactly that kind | acts on the default kind `Entity` **only** — never touches another kind's same-named node |
+| `knowledge_assert_relationship` endpoints (existing entities) | that endpoint resolves exactly within the kind | spans all kinds; more than one matching kind is an ambiguity error |
+| `knowledge_resolve_entity` (`name`, `group_id`, `kind?`) | exact lookup, never ambiguous | spans all kinds; one match resolves, several is an ambiguity error, none returns `{found: false}` |
+| `knowledge_find_entities`, `knowledge_list_entities` | only that kind | all kinds, each node carrying its `kind` (multi-row reads never pick one, so never ambiguous) |
+| `knowledge_add_cross_group_edge` `source_kind`/`target_kind` (foreign endpoints only) | pointer pinned to that kind (`endpoint_kind`) | pointer resolves across all kinds; `ambiguous` once a second kind shares the name |
+| `knowledge_merge_entities` `kind` | restricts `canonical_name`/`alias_names` | those names span all kinds; a multi-kind `canonical_name` is an ambiguity error |
+
+**Ambiguity error.** A name-only resolution that matches more than one kind fails with JSON-RPC
+error code **`-32002`**; `error.data` is `{"reason": "ambiguous_entity", "name", "group_id",
+"candidates": [{"uuid", "kind"}, …]}`. It never picks a candidate. Retry with an explicit `kind`.
+
+**Merges never cross kinds.** `knowledge_merge_entities` refuses the *whole call* (`dry_run`
+included, nothing modified) if the canonical and any alias differ in kind, with an error naming the
+kinds; `merge_all_by_name` is limited to the canonical's own kind.
+
+**Extraction and kinds.** `knowledge_add_episode`/`knowledge_process_chunk` create kind-`Entity`
+entities, except that an entity whose primary type the ontology marks `identity: true` is created
+with that type as its `kind` and resolves only within it (see
+[Identity-bearing types](ontology.md#identity-bearing-types)). Extraction never merges into an
+asserted kind it did not create. For a group whose identity-bearing set changed in a way that would
+reinterpret existing entities, `knowledge_add_episode` fails with JSON-RPC error code **`-32003`**;
+`error.data` is `{"reason": "identity_set_change_refused", "group_id", "label", "entity_count"}`, and
+`knowledge_status` lists the group under `group_identity_refusals`. Nothing is modified; restore
+the recorded set (and restart, or call `knowledge_reload_ontology` for the group) or re-ingest the
+group from source.
+`knowledge_reprocess_entity_types` never changes an entity's kind and adds an additive
+`kind_disagreements` array (`entity_id`, `entity_name`, `kind`, `classified_type`) — report-only —
+to both its dry-run plan and its result.
+Ontology types flagged `extract: false` are never offered as reclassification targets by `knowledge_reprocess_entity_types` / `knowledge_reprocess_relation_types` (nor by `knowledge_canonicalize_relations`); see [Assert-only types](ontology.md#assert-only-types-extract-false).
+
+### Ontology reload (`knowledge_reload_ontology`)
+
+`knowledge_reload_ontology {group_id}` (`admin` scope) discards one group's cached ontology
+resolution and re-resolves it, so an edited per-group ontology file takes effect without a service
+restart. It returns `{group_id, previous_hash, new_hash, changed, drift, identity_refusal}`; an
+identity-bearing-set change on a group that already holds entities of that type is reported in
+`identity_refusal` (and enforced as `-32003` on `knowledge_add_episode`) rather than installed
+silently. Other groups are untouched and stored data is never modified. See
+[Ontology → Reloading a group's ontology](ontology.md#reloading-a-groups-ontology).
 
 ### Relation typing (`canonicalize_relations`, `backfill_relation_types`, `reprocess_relation_types`)
 
@@ -396,11 +826,13 @@ that predate the capability.
 - **A partially-completed backfill is not an error.** Entities not yet processed simply retrieve
   via existing name/lexical behavior, exactly as before this issue — running the tool again
   covers more of the group each time.
-- **`summary_embedding` stays write-once after backfill, same as on creation.** A later
-  `knowledge_assert_entity` re-assert that changes an entity's `summary` does not refresh its
-  `summary_embedding` — the vector reflects whichever summary was embedded last (at creation, or
-  at the most recent backfill run), not necessarily the current `summary` text. Re-run this tool
-  to bring a changed summary's vector back in sync.
+- **A `knowledge_assert_entity` re-assert does not refresh `summary_embedding`.** A re-assert
+  that changes an entity's `summary` leaves its `summary_embedding` as it was — the vector
+  reflects whichever summary was embedded last (at creation, at an extraction merge, or at the
+  most recent backfill run), not necessarily the current `summary` text. Re-run this tool to bring
+  a changed summary's vector back in sync. (Extraction merges *do* refresh it: when extraction
+  folds a new description into an existing entity the merged summary is consolidated into one
+  bounded description of at most 600 characters and re-embedded in the same write — ADR-0651.)
 
 ### Cross-group pointers (`add_cross_group_edge`, `rebind_pointers`)
 
@@ -417,7 +849,12 @@ completely unaffected: pointers only ever exist on edges created through this to
   `get_entity_by_name_ci_with_scan_fallback` uses for extraction-time endpoint resolution, per
   [ADR-0283](adr/0283-name-index-scan-fallback-for-endpoint-authority.md)), and the edge carries
   a `cross_group_pointers.{src,dst}` object recording the assertion (`source_group_id`,
-  `endpoint_name`) and the resolution cache (`resolved_uuid`, `bound_at_seq`, `binding_state`).
+  `endpoint_name`, plus an optional `endpoint_kind`) and the resolution cache (`resolved_uuid`,
+  `bound_at_seq`, `binding_state`). Top-level `source_kind` / `target_kind` (issue #615) pin a
+  foreign endpoint to an entity kind: a kind-pinned pointer resolves within that kind only and stays
+  `bound` when a same-named entity of another kind appears; a kind-less pointer resolves across all
+  kinds and becomes `ambiguous` (no hop) once a second kind shares the name. A kind on a `{uuid}`
+  endpoint is rejected. If a pinned kind no longer exists the pointer is `unbound`.
 - **A foreign endpoint that doesn't currently resolve is `unbound`, not dropped.** Unlike
   ordinary extraction (which hard-drops an unresolvable endpoint at commit — see
   [ADR-0051](adr/0051-edge-endpoint-salvage-and-deferred-drop.md)), the edge is still created;
@@ -487,12 +924,56 @@ result fields exist for that, both introduced in 0.13.2.
   was dropped, so it can be iterated unconditionally. `edges_dropped_unresolvable`'s existing
   meaning is unchanged, and a caller reading only the count is unaffected (issue #411).
 
+- **`edges_dropped_self_loop` counts edges dropped because both endpoints resolved to one entity.**
+  Two differently named endpoints can resolve to the same entity UUID (through dedup merges or
+  salvage); inserting that edge would create a self-loop, so Phase C drops it. The count is a
+  separate top-level field, always present, and these edges are *not* in `dropped_edges` or
+  `edges_dropped_unresolvable`. (Edges whose endpoint *names* are identical are filtered earlier
+  and never counted.) Separately, an off-list edge endpoint that already exists exactly (same
+  group, case-insensitive) in the stored graph resolves to that entity and is never salvaged onto
+  a similar entity of the current chunk; a name stored under more than one eligible kind is dropped
+  as ambiguous rather than salvaged
+  ([ADR-0666](adr/0666-exact-graph-match-and-uuid-self-loop-guard.md)).
+
 - **`warning` reports oversized input.** A `chunk_text` longer than the advisory threshold
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see
   [Configuration](configuration.md)) adds a `warning` field naming the actual and recommended
   character counts, and emits a `chunk_text_oversized` telemetry event. This is visibility only:
   nothing is truncated, split, or rejected, and the call succeeds exactly as it did before.
   Splitting oversized input is the caller's responsibility (issue #407).
+
+- **`dedup_paths` reports how this chunk's entities were resolved.** An additive object of
+  per-path tallies for the chunk's Phase B entity resolution
+  ([ADR-0650](adr/0650-identifier-mismatch-veto-for-extraction-dedup.md)), always present:
+
+  ```json
+  {
+    "dedup_paths": {
+      "exact_name": 3,
+      "embedding_merge": 1,
+      "vetoed": 2,
+      "adapter_rejected": 0,
+      "llm_confirmed": 0,
+      "llm_rejected": 0,
+      "llm_unavailable": 0,
+      "salvage_vetoed": 0
+    }
+  }
+  ```
+
+  `exact_name` counts entities merged by the exact case-insensitive name match;
+  `embedding_merge` counts embedding-path merges where a candidate survived the identifier veto
+  and the dedup adapter confirmed it; `vetoed` counts entities that had above-threshold
+  embedding candidates, all of which were rejected by the identifier-mismatch veto (names
+  differing by a number or identifier, such as `ADR 2018` / `ADR 2019`, or by a distinct short
+  all-caps code such as `ACDS` / `ACDM`), so a new entity was
+  inserted; `adapter_rejected` counts candidates that survived the veto but were rejected by
+  a non-LLM (custom) dedup adapter; `llm_confirmed`, `llm_rejected` and `llm_unavailable` count
+  candidates judged by the [LLM dedup check](configuration.md) (`LCG_DEDUP_LLM`,
+  [ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)) as duplicate (merged),
+  distinct (inserted) and unanswerable — error, timeout or malformed answer — (inserted); when the
+  check is off, a surviving candidate merges and counts as `embedding_merge`; `salvage_vetoed` counts off-list edge endpoints whose salvage candidates
+  were all vetoed. The tallies are per chunk; sum them across chunks for a run total.
 
 ### Progress notifications
 

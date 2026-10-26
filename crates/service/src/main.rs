@@ -4,6 +4,7 @@ mod migration;
 #[cfg(unix)]
 mod sigterm_diag;
 mod sink;
+mod transport;
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -36,15 +37,19 @@ use serde_json::Value;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{unix::OwnedWriteHalf, UnixListener, UnixStream},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     sync::Notify,
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
 
-async fn handle_connection(stream: UnixStream, state: Arc<AppState>, shutdown_notify: Arc<Notify>) {
-    let (reader, mut writer) = stream.into_split();
+/// Serves one client connection. Generic over the stream so the same loop runs over a Unix socket
+/// or a Windows named pipe (`transport`, #581).
+async fn handle_connection<S>(stream: S, state: Arc<AppState>, shutdown_notify: Arc<Notify>)
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
 
     while let Ok(Some(line)) = lines.next_line().await {
@@ -87,7 +92,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<AppState>, shutdown_no
     }
 }
 
-async fn write_parse_error(writer: &mut OwnedWriteHalf, e: serde_json::Error) {
+async fn write_parse_error<W: AsyncWrite + Unpin>(writer: &mut W, e: serde_json::Error) {
     let response = serde_json::json!({
         "jsonrpc": "2.0",
         "id": null,
@@ -99,10 +104,10 @@ async fn write_parse_error(writer: &mut OwnedWriteHalf, e: serde_json::Error) {
 
 /// Returns `Some(response)` if the streaming dispatch produced a final response, or `None` if the
 /// client disconnected and the dispatch task was aborted.
-async fn handle_streaming_request(
+async fn handle_streaming_request<W: AsyncWrite + Unpin>(
     req: IpcRequest,
     state: Arc<AppState>,
-    writer: &mut OwnedWriteHalf,
+    writer: &mut W,
 ) -> Option<IpcResponse> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let req_id = req.id.clone();
@@ -190,6 +195,7 @@ async fn resolve_and_probe_embedder(
     embedder_model: &str,
     embedding_dim_override: Option<usize>,
 ) -> ProbeOutcome {
+    #[cfg(unix)]
     const DEFAULT_UDS_PATH: &str = "/tmp/liminis-inference.sock";
 
     let resolved = if let Some(uds_path) = cli_uds {
@@ -206,6 +212,7 @@ async fn resolve_and_probe_embedder(
         }
         #[cfg(not(unix))]
         {
+            let _ = uds_path;
             return ProbeOutcome::Fatal(
                 "--embedder-uds is only supported on Unix platforms".to_string(),
             );
@@ -282,10 +289,10 @@ async fn resolve_and_probe_embedder(
     // Redaction substring for the raw configured URL (FR-007) — transport_info() already
     // redacts `endpoint` above, but a wrapped reqwest::Error's Display can independently
     // echo the raw URL, so error-message sites below scrub the same substring separately.
-    let url_scrub = if let ResolvedTransport::Http(url) = &resolved {
-        redact_url_userinfo(url).1
-    } else {
-        None
+    let url_scrub = match &resolved {
+        ResolvedTransport::Http(url) => redact_url_userinfo(url).1,
+        #[cfg(unix)]
+        ResolvedTransport::Uds(_) => None,
     };
     let scrub_url = |msg: String| -> String {
         match &url_scrub {
@@ -361,6 +368,27 @@ async fn resolve_and_probe_embedder(
 const EMBEDDER_RETRY_CEILING: Duration = Duration::from_secs(5);
 const EMBEDDER_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
 const EMBEDDER_RETRY_MAX_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Startup log for the dedup mode and its configuration warnings (#650, #652). Called from every
+/// startup path that builds an `AppState`, including the degraded embedder-unreachable one.
+fn log_dedup_config(extractor_configured: bool) {
+    eprintln!(
+        "dedup: mode={}",
+        lcg_core::dedup_mode_description(extractor_configured)
+    );
+    if lcg_core::dedup_llm_requested() && !extractor_configured {
+        eprintln!(
+            "dedup: warning: LCG_DEDUP_LLM is on but no extraction provider is configured, so \
+             the LLM dedup check cannot run; using veto-only dedup"
+        );
+    }
+    if lcg_core::deprecated_adapter_url_set() {
+        eprintln!(
+            "dedup: warning: LCG_DEDUP_ADAPTER_URL (and GRAPHITI_DEDUP_ADAPTER_URL) is deprecated \
+             and ignored; LCG_DEDUP_LLM now uses the configured extractor (see ADR-0652)"
+        );
+    }
+}
 
 /// Resolves the embedder transport, probes it, opens the DB (with startup self-recovery per
 /// ADR-0009), and builds `AppState`. Shared by the socket service and standalone MCP mode
@@ -487,6 +515,9 @@ async fn bootstrap_app_state(
                     // branch below's own precedence rule.
                     let degraded_reason = pre_migration_degraded
                         .or_else(|| Some(EMBEDDER_UNREACHABLE_DEGRADED_REASON.to_string()));
+                    // This state carries no extractor, so it runs veto-only whatever
+                    // `LCG_DEDUP_LLM` says; log that rather than leaving the mode unreported.
+                    log_dedup_config(false);
                     let embedding_cache = Arc::new(lcg_core::EmbeddingCache::new());
                     let state = Arc::new(AppState::from_env(
                         telemetry_sink,
@@ -601,6 +632,7 @@ async fn bootstrap_app_state(
             }
             #[cfg(not(unix))]
             {
+                let _ = &uds_path;
                 return Err("--extractor-uds is only supported on Unix platforms".into());
             }
         } else if let Some(http_url) = extractor_cli_http {
@@ -739,6 +771,10 @@ async fn bootstrap_app_state(
         }
     };
 
+    // Logged once here rather than from `AppState::from_env`, which also runs on the recovery and
+    // attach paths (issue #650).
+    log_dedup_config(extractor.is_configured());
+
     // Derive the WAL root using the same env-var logic as AppState::from_env (issue #378:
     // LCG_WAL_DIR now names a root containing one subdirectory per group_id, not a single
     // shared stream). Available before DB open so startup recovery can use it without AppState.
@@ -782,6 +818,13 @@ async fn bootstrap_app_state(
             {
                 let conn = db.connect()?;
                 conn.init_schema(embedding_dim)?;
+                // Upgrade backfill of `ingested_at` (issue #673) for a graph that predates the
+                // column: needs the WAL tree for its preferred signal, which `migrate()` lacks.
+                // One point lookup once marked complete; non-fatal.
+                lcg_core::schema::ensure_ingested_at_backfill(
+                    &conn,
+                    &lcg_core::schema::group_wal_dirs(&startup_wal_root),
+                );
                 // Eager build (FR-001): build HNSW/FTS indices immediately after schema init,
                 // before the socket accepts any request, so ingest never has to discover a
                 // missing entity_name_embedding_idx mid-chunk (#208). Idempotent/cheap when
@@ -1004,6 +1047,25 @@ fn install_shutdown_signal_handlers(shutdown_ct: CancellationToken) -> std::io::
             ct.cancel();
         });
     }
+    // Windows has no SIGTERM. A console window closing, a logoff/shutdown, and Ctrl+Break are
+    // its termination requests (Ctrl+C is covered by `ctrl_c()` below on every platform).
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_break, ctrl_close, ctrl_shutdown};
+        let mut close = ctrl_close()?;
+        let mut shutdown = ctrl_shutdown()?;
+        let mut brk = ctrl_break()?;
+        let ct = shutdown_ct.clone();
+        tokio::spawn(async move {
+            let event = tokio::select! {
+                _ = close.recv() => "CTRL_CLOSE",
+                _ = shutdown.recv() => "CTRL_SHUTDOWN",
+                _ = brk.recv() => "CTRL_BREAK",
+            };
+            eprintln!("liminis-context-graph: received {event}, shutting down");
+            ct.cancel();
+        });
+    }
     {
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
@@ -1023,7 +1085,7 @@ async fn run_socket_service(
     telemetry_sink: Arc<dyn TelemetrySink>,
     sink_drain_handle: tokio::task::JoinHandle<()>,
     state: Arc<AppState>,
-    listener: UnixListener,
+    mut listener: transport::Listener,
     shutdown_timeout_ms: u64,
     shutdown_ct: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1045,7 +1107,7 @@ async fn run_socket_service(
     loop {
         tokio::select! {
             result = listener.accept() => {
-                let (stream, _) = result?;
+                let stream = result?;
                 let state_clone = Arc::clone(&state);
                 let notify_clone = Arc::clone(&shutdown_notify);
                 join_set.spawn(handle_connection(stream, state_clone, notify_clone));
@@ -1225,16 +1287,28 @@ async fn run_mcp_standalone(
 /// Runs attached MCP-over-stdio mode (FR-006): this process never touches the workspace
 /// filesystem or opens the DB. Every `tools/call` is forwarded as JSON-RPC over `socket_path`
 /// to an already-running service, so it never contends for lbug's single-writer lock (SC-002).
+///
+/// By default (`eager: false`, issue #575) the socket is never dialled here — `initialize` and
+/// `tools/list` complete without it, and the first `tools/call` triggers a lazy dial via
+/// `AttachedBackend::new_lazy`. Passing `--connect-eager` sets `eager: true`, restoring the
+/// pre-#575 behavior of dialling now and exiting (via `?`) before the MCP handshake if the
+/// socket is unreachable — kept as a byte-for-byte-identical call to the unmodified `connect()`
+/// (SC-004).
 async fn run_mcp_attached(
     socket_path: String,
     scopes: Vec<mcp::scope::Scope>,
     allow_remote_close: bool,
+    eager: bool,
     shutdown_ct: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "liminis-context-graph: MCP-over-stdio (attached to {socket_path}), scope={scopes:?}"
     );
-    let backend = mcp::attached::AttachedBackend::connect(&socket_path).await?;
+    let backend = if eager {
+        mcp::attached::AttachedBackend::connect(&socket_path).await?
+    } else {
+        mcp::attached::AttachedBackend::new_lazy(&socket_path)
+    };
     let server = mcp::server::LcgMcpServer::new(backend, scopes, allow_remote_close, None);
 
     // `shutdown_ct` is the one shared signal source installed at the top of `async_main` (see
@@ -1279,14 +1353,23 @@ async fn async_main(
         connect: Some(socket_path),
         scopes,
         allow_remote_close,
+        connect_eager,
         ..
     } = &cli_mode
     {
         let socket_path = socket_path.clone();
         let scopes = scopes.clone();
         let allow_remote_close = *allow_remote_close;
+        let connect_eager = *connect_eager;
         drop(sink_drain_handle); // attached mode emits no telemetry events; nothing to drain
-        return run_mcp_attached(socket_path, scopes, allow_remote_close, shutdown_ct).await;
+        return run_mcp_attached(
+            socket_path,
+            scopes,
+            allow_remote_close,
+            connect_eager,
+            shutdown_ct,
+        )
+        .await;
     }
 
     // Structured workspace migration: .graphiti/ → .lcg/ with file-layout restructuring.
@@ -1376,9 +1459,11 @@ async fn async_main(
             if let Some(parent) = std::path::Path::new(&socket_path).parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            let _ = std::fs::remove_file(&socket_path);
-            let listener = UnixListener::bind(&socket_path)?;
-            eprintln!("liminis-context-graph: listening on {socket_path}");
+            let listener = transport::Listener::bind(&socket_path)?;
+            eprintln!(
+                "liminis-context-graph: listening on {}",
+                listener.endpoint()
+            );
 
             // FR-001/SC-002: socket-service (hand-started) mode keeps today's fail-fast
             // behavior unchanged — an unreachable embedder is never retried or degraded here.
@@ -1417,6 +1502,7 @@ async fn async_main(
             connect: None,
             scopes,
             allow_remote_close,
+            connect_eager: _,
         } => {
             // FR-002/FR-003: standalone --mcp-stdio mode retries an unreachable embedder with
             // bounded backoff and, if the window is exhausted, starts in degraded mode instead

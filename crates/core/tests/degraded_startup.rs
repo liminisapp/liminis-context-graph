@@ -683,6 +683,8 @@ async fn test_knowledge_status_reports_embedder_unreachable_degraded_reason() {
 
     let status_resp = dispatch_val(1, "knowledge_status", json!({}), Arc::clone(&state)).await;
     assert_eq!(status_resp["result"]["degraded"], true);
+    // issue #652: the degraded branch reports the dedup mode too.
+    assert_eq!(status_resp["result"]["dedup_mode"], "veto-only");
     assert_eq!(
         status_resp["result"]["reason"],
         lcg_core::embedder::EMBEDDER_UNREACHABLE_DEGRADED_REASON

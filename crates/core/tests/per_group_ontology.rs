@@ -33,6 +33,11 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+/// How long a background `knowledge_rebuild_from_wal` job may run before a test calls it hung.
+/// Hang detection only: every rebuild ends with a ~2.5s (debug) index build, which overran
+/// tighter deadlines under parallel tests. Same value and rationale as `handlers_wal_admin.rs`.
+const REBUILD_JOB_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 const EMB_DIM: usize = 4;
 
 fn make_db(dir: &TempDir) -> Arc<Db> {
@@ -155,7 +160,7 @@ async fn per_group_ontology_governs_extraction_for_that_group_only() {
     let conn = db.connect().unwrap();
 
     let catalog_acme = conn
-        .get_entity_by_name_ci("Acme Corp", "catalog")
+        .get_entity_by_name_ci("Acme Corp", "catalog", "Entity")
         .unwrap()
         .expect("Acme Corp must be persisted in group catalog");
     assert!(
@@ -165,7 +170,7 @@ async fn per_group_ontology_governs_extraction_for_that_group_only() {
     );
 
     let content_acme = conn
-        .get_entity_by_name_ci("Acme Corp", "content")
+        .get_entity_by_name_ci("Acme Corp", "content", "Entity")
         .unwrap()
         .expect("Acme Corp must be persisted in group content");
     assert!(
@@ -444,6 +449,8 @@ fn ontology_with(mode: OntologyMode, names: &[&str]) -> Ontology {
                 name: n.to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             })
             .collect(),
         relation_types: vec![],
@@ -830,7 +837,7 @@ async fn drift_clears_after_wal_rebuild_for_that_group_only() {
         .expect("expected job_id")
         .to_string();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -845,7 +852,7 @@ async fn drift_clears_after_wal_rebuild_for_that_group_only() {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 5s: {status_v}");
+                    panic!("rebuild did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),
@@ -912,7 +919,7 @@ async fn wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache() {
         .expect("expected job_id")
         .to_string();
 
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch(
@@ -927,7 +934,7 @@ async fn wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache() {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 5s: {status_v}");
+                    panic!("rebuild did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),

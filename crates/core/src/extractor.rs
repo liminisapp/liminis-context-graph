@@ -8,6 +8,7 @@ use tokio::time::sleep;
 
 use crate::{
     backfill::derive_relation_type_from_fact,
+    dedup_judge::{self, DedupVerdict, DuplicatePair},
     env::lcg_env_var,
     error::Error,
     ontology::{normalize_relation_type, Ontology},
@@ -77,6 +78,51 @@ pub trait Extractor: Send + Sync {
         edges: &'a [(&'a str, &'a str)],
         allowed_types: &'a [(String, Option<String>)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>>;
+
+    /// Consolidates an entity's `existing` summary and a newly extracted `incoming` one into a
+    /// single concise, current description (issue #651). Called only after a merge decision, and
+    /// only when `incoming` adds information (see `summary_merge::decide_consolidation`).
+    ///
+    /// The default implementation returns `Error::Config`, which callers treat — like any other
+    /// error or an empty reply — as "use the deterministic bounded fallback"
+    /// (`summary_merge::fallback_merge`); implementors with no LLM behind them (stubs, cassette
+    /// replay) therefore need no code. Implementations return the model's text; callers bound
+    /// it with `summary_merge::cap_summary`.
+    fn consolidate_summary<'a>(
+        &'a self,
+        _entity_name: &'a str,
+        _existing: &'a str,
+        _incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(async {
+            Err(Error::Config(
+                "summary consolidation is not supported by this extractor".to_string(),
+            ))
+        })
+    }
+
+    /// Judges whether each `(existing, incoming)` pair names the same real-world entity
+    /// (issue #652, ADR-0652). Returns exactly one verdict per input pair, in order.
+    ///
+    /// The default implementation reports every pair as an error ("unsupported"); backends that
+    /// can answer (Anthropic, OpenAI-compatible, the router and cassette decorators) override it.
+    /// Callers treat an `Err` — like [`DedupVerdict::Unknown`] — as "not a duplicate".
+    fn judge_duplicates<'a>(
+        &'a self,
+        _pairs: &'a [DuplicatePair],
+    ) -> BoxFuture<'a, Result<Vec<DedupVerdict>, Error>> {
+        Box::pin(async {
+            Err(Error::Config(
+                "this extractor does not support duplicate judgement".to_string(),
+            ))
+        })
+    }
+
+    /// `false` only for [`UnconfiguredExtractor`] (#331): no provider is available, so
+    /// extractor-backed features such as the LLM dedup check cannot run.
+    fn is_configured(&self) -> bool {
+        true
+    }
 }
 
 /// Builds the `extract_edges` tool schema for the Anthropic tool-use call. Constrains
@@ -618,6 +664,56 @@ impl AnthropicExtractor {
         })
     }
 
+    async fn do_consolidate_summary(
+        &self,
+        entity_name: &str,
+        existing: &str,
+        incoming: &str,
+    ) -> Result<String, Error> {
+        let (system_text, user_text) =
+            crate::summary_merge::consolidation_prompts(entity_name, existing, incoming);
+        let system_value: Value = if self.is_sonnet() {
+            json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
+        } else {
+            json!(system_text)
+        };
+        let body = json!({
+            "model": &self.model,
+            "max_tokens": 512,
+            "system": system_value,
+            "messages": [{"role": "user", "content": user_text}]
+        });
+
+        let mut attempt = 0u32;
+        loop {
+            let mut req = self
+                .client
+                .post(&self.url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01");
+            if self.is_sonnet() {
+                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
+            }
+            let http_resp = req.json(&body).send().await?;
+            let status = http_resp.status();
+            if (status == 429 || status == 529) && attempt < 3 {
+                sleep(Duration::from_secs(1u64 << attempt)).await;
+                attempt += 1;
+                continue;
+            }
+            let resp: Value = http_resp.error_for_status()?.json().await?;
+            self.emit_token_usage(&resp);
+            let content = resp["content"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|block| block["text"].as_str())
+                .ok_or_else(|| {
+                    Error::Ipc("consolidate_summary response missing content text".to_string())
+                })?;
+            return parse_consolidation_reply(content);
+        }
+    }
+
     async fn do_classify_entities(
         &self,
         entities: &[(&str, &str)],
@@ -722,6 +818,55 @@ impl AnthropicExtractor {
                 }
             }
             return Ok(result);
+        }
+    }
+
+    async fn do_judge_duplicates(
+        &self,
+        pairs: &[DuplicatePair],
+    ) -> Result<Vec<DedupVerdict>, Error> {
+        if pairs.is_empty() {
+            return Ok(vec![]);
+        }
+        let system_value: Value = if self.is_sonnet() {
+            json!([{"type": "text", "text": dedup_judge::JUDGE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}])
+        } else {
+            json!(dedup_judge::JUDGE_SYSTEM_PROMPT)
+        };
+        let body = json!({
+            "model": &self.model,
+            "max_tokens": dedup_judge::JUDGE_MAX_TOKENS,
+            "system": system_value,
+            "messages": [{"role": "user", "content": dedup_judge::user_prompt(pairs)}]
+        });
+
+        let mut attempt = 0u32;
+        loop {
+            let mut req = self
+                .client
+                .post(&self.url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01");
+            if self.is_sonnet() {
+                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
+            }
+            let http_resp = req.json(&body).send().await?;
+            let status = http_resp.status();
+            if (status == 429 || status == 529) && attempt < 3 {
+                sleep(Duration::from_secs(1u64 << attempt)).await;
+                attempt += 1;
+                continue;
+            }
+            let resp: Value = http_resp.error_for_status()?.json().await?;
+            self.emit_token_usage_for("dedup", &resp);
+            let content = resp["content"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|block| block["text"].as_str())
+                .ok_or_else(|| {
+                    Error::Ipc("judge_duplicates response missing content text".to_string())
+                })?;
+            return Ok(dedup_judge::parse_verdicts(content, pairs.len()));
         }
     }
 
@@ -834,6 +979,10 @@ impl AnthropicExtractor {
     }
 
     fn emit_token_usage(&self, resp: &Value) {
+        self.emit_token_usage_for("extraction", resp);
+    }
+
+    fn emit_token_usage_for(&self, role: &str, resp: &Value) {
         let usage = &resp["usage"];
         if !usage.is_object() {
             return;
@@ -851,7 +1000,7 @@ impl AnthropicExtractor {
         );
         self.sink.emit(TelemetryEvent::TokenUsage {
             ts_ms: now_ms(),
-            role: "extraction".to_string(),
+            role: role.to_string(),
             model: self.model.clone(),
             input_tokens,
             output_tokens,
@@ -912,6 +1061,22 @@ impl Extractor for AnthropicExtractor {
         allowed_types: &'a [(String, Option<String>)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(self.do_classify_relations(edges, allowed_types))
+    }
+
+    fn consolidate_summary<'a>(
+        &'a self,
+        entity_name: &'a str,
+        existing: &'a str,
+        incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(self.do_consolidate_summary(entity_name, existing, incoming))
+    }
+
+    fn judge_duplicates<'a>(
+        &'a self,
+        pairs: &'a [DuplicatePair],
+    ) -> BoxFuture<'a, Result<Vec<DedupVerdict>, Error>> {
+        Box::pin(self.do_judge_duplicates(pairs))
     }
 }
 
@@ -1521,6 +1686,10 @@ impl OaiExtractor {
     /// field names than Anthropic's `input_tokens`/`output_tokens`) onto the same telemetry event.
     /// No-ops (FR-009) when `usage` is absent, matching non-compliant local servers.
     fn emit_token_usage(&self, resp: &Value) {
+        self.emit_token_usage_for("extraction", resp);
+    }
+
+    fn emit_token_usage_for(&self, role: &str, resp: &Value) {
         let usage = &resp["usage"];
         if !usage.is_object() {
             return;
@@ -1532,7 +1701,7 @@ impl OaiExtractor {
         let estimated_cost_usd = cost_for_usage(&self.model, input_tokens, output_tokens, 0, 0);
         self.sink.emit(TelemetryEvent::TokenUsage {
             ts_ms: now_ms(),
-            role: "extraction".to_string(),
+            role: role.to_string(),
             model: self.model.clone(),
             input_tokens,
             output_tokens,
@@ -1924,6 +2093,22 @@ impl OaiExtractor {
         })
     }
 
+    async fn do_consolidate_summary(
+        &self,
+        entity_name: &str,
+        existing: &str,
+        incoming: &str,
+    ) -> Result<String, Error> {
+        let (system_text, user_text) =
+            crate::summary_merge::consolidation_prompts(entity_name, existing, incoming);
+        let resp = self.send_chat(&system_text, &user_text, 512).await?;
+        self.emit_token_usage(&resp);
+        let content = oai_message_content(&resp).ok_or_else(|| {
+            Error::Ipc("consolidate_summary response missing message content".to_string())
+        })?;
+        parse_consolidation_reply(content)
+    }
+
     async fn do_classify_entities(
         &self,
         entities: &[(&str, &str)],
@@ -1991,6 +2176,27 @@ impl OaiExtractor {
             }
         }
         Ok(result)
+    }
+
+    async fn do_judge_duplicates(
+        &self,
+        pairs: &[DuplicatePair],
+    ) -> Result<Vec<DedupVerdict>, Error> {
+        if pairs.is_empty() {
+            return Ok(vec![]);
+        }
+        let resp = self
+            .send_chat(
+                dedup_judge::JUDGE_SYSTEM_PROMPT,
+                &dedup_judge::user_prompt(pairs),
+                dedup_judge::JUDGE_MAX_TOKENS,
+            )
+            .await?;
+        self.emit_token_usage_for("dedup", &resp);
+        let content = oai_message_content(&resp).ok_or_else(|| {
+            Error::Ipc("judge_duplicates response missing message content".to_string())
+        })?;
+        Ok(dedup_judge::parse_verdicts(content, pairs.len()))
     }
 
     async fn do_classify_relations(
@@ -2083,6 +2289,22 @@ impl Extractor for OaiExtractor {
         allowed_types: &'a [(String, Option<String>)],
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(self.do_classify_relations(edges, allowed_types))
+    }
+
+    fn consolidate_summary<'a>(
+        &'a self,
+        entity_name: &'a str,
+        existing: &'a str,
+        incoming: &'a str,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(self.do_consolidate_summary(entity_name, existing, incoming))
+    }
+
+    fn judge_duplicates<'a>(
+        &'a self,
+        pairs: &'a [DuplicatePair],
+    ) -> BoxFuture<'a, Result<Vec<DedupVerdict>, Error>> {
+        Box::pin(self.do_judge_duplicates(pairs))
     }
 }
 
@@ -2317,11 +2539,29 @@ impl Extractor for UnconfiguredExtractor {
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         Box::pin(async { Err(Error::Config(NO_EXTRACTION_PROVIDER_MSG.to_string())) })
     }
+
+    fn is_configured(&self) -> bool {
+        false
+    }
+}
+
+/// Parses a consolidation reply — `{"summary": "..."}` per the prompt, tolerating code fences
+/// and, when the model ignored the JSON instruction entirely, bare prose — into bounded summary
+/// text. An empty result is an `Err` so the caller takes the deterministic fallback.
+fn parse_consolidation_reply(content: &str) -> Result<String, Error> {
+    let json_str = extract_json_block(content);
+    let text = match serde_json::from_str::<Value>(json_str) {
+        Ok(v) => v["summary"].as_str().map(str::to_string),
+        Err(_) if !content.contains('{') => Some(content.to_string()),
+        Err(_) => None,
+    };
+    text.and_then(|t| crate::summary_merge::finalize_consolidation(&t))
+        .ok_or_else(|| Error::Ipc("consolidate_summary reply held no summary text".to_string()))
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn extract_json_block(s: &str) -> &str {
+pub(crate) fn extract_json_block(s: &str) -> &str {
     if let Some(start) = s.find("```json") {
         let after = &s[start + 7..];
         if let Some(end) = after.find("```") {
@@ -3323,6 +3563,80 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn parse_consolidation_reply_accepts_json_fenced_json_and_bare_prose() {
+        assert_eq!(
+            parse_consolidation_reply(r#"{"summary": "  Merged text.  "}"#).unwrap(),
+            "Merged text."
+        );
+        assert_eq!(
+            parse_consolidation_reply("```json\n{\"summary\": \"Fenced.\"}\n```").unwrap(),
+            "Fenced."
+        );
+        assert_eq!(
+            parse_consolidation_reply("Just prose.").unwrap(),
+            "Just prose."
+        );
+    }
+
+    #[test]
+    fn parse_consolidation_reply_rejects_empty_and_malformed() {
+        assert!(parse_consolidation_reply(r#"{"summary": ""}"#).is_err());
+        assert!(parse_consolidation_reply(r#"{"other": "x"}"#).is_err());
+        assert!(parse_consolidation_reply(r#"{"summary": "unterminated"#).is_err());
+        assert!(parse_consolidation_reply("   ").is_err());
+    }
+
+    #[test]
+    fn parse_consolidation_reply_bounds_output() {
+        let long = format!("{{\"summary\": \"{}\"}}", "word ".repeat(400));
+        let out = parse_consolidation_reply(&long).unwrap();
+        assert!(out.chars().count() <= crate::summary_merge::MERGED_SUMMARY_CAP);
+    }
+
+    #[tokio::test]
+    async fn oai_consolidate_summary_returns_summary_and_emits_usage() {
+        let body = json!({
+            "choices": [{"finish_reason": "stop",
+                "message": {"content": r#"{"summary": "Acme builds rockets."}"#}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        })
+        .to_string();
+        let (url, _server) = spawn_stub_http_server(body).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+        let out = extractor
+            .consolidate_summary("Acme", "Acme builds things.", "Acme builds rockets.")
+            .await
+            .unwrap();
+        assert_eq!(out, "Acme builds rockets.");
+        assert!(sink
+            .events()
+            .iter()
+            .any(|e| matches!(e, TelemetryEvent::TokenUsage { .. })));
+    }
+
+    #[tokio::test]
+    async fn oai_consolidate_summary_empty_reply_is_err() {
+        let (url, _server) =
+            spawn_stub_http_server(oai_response_body(r#"{"summary": "   "}"#)).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+        assert!(extractor
+            .consolidate_summary("A", "x.", "y.")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn default_consolidate_summary_is_config_error() {
+        let err = UnconfiguredExtractor
+            .consolidate_summary("A", "x.", "y.")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+    }
+
     #[tokio::test]
     async fn do_extract_entities_emits_malformed_structured_output_parse() {
         let (url, _server) = spawn_stub_http_server(oai_response_body("not json at all")).await;
@@ -3523,5 +3837,113 @@ mod tests {
             .unwrap();
         assert!(edges.is_empty());
         assert_eq!(dropped, 0);
+    }
+
+    // ── judge_duplicates (#652) ───────────────────────────────────────────────
+
+    fn judge_pairs(n: usize) -> Vec<DuplicatePair> {
+        (0..n)
+            .map(|i| {
+                let side = |name: &str| dedup_judge::DedupSide {
+                    name: name.to_string(),
+                    entity_type: "Person".to_string(),
+                    summary: String::new(),
+                };
+                DuplicatePair {
+                    existing: side(&format!("Existing {i}")),
+                    incoming: side(&format!("Incoming {i}")),
+                }
+            })
+            .collect()
+    }
+
+    fn anthropic_response_body(text: &str) -> String {
+        json!({
+            "content": [{"type": "text", "text": text}],
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn oai_judge_duplicates_confirms_and_rejects_and_tags_dedup_role() {
+        let content = r#"{"verdicts":[{"id":0,"duplicate":true},{"id":1,"duplicate":false}]}"#;
+        let body = json!({
+            "choices": [{"finish_reason": "stop", "message": {"content": content}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2}
+        })
+        .to_string();
+        let (url, _server) = spawn_stub_http_server(body).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+
+        let verdicts = extractor.judge_duplicates(&judge_pairs(2)).await.unwrap();
+        assert_eq!(
+            verdicts,
+            vec![DedupVerdict::Duplicate, DedupVerdict::Distinct]
+        );
+        assert!(sink.events().iter().any(|e| matches!(
+            e,
+            TelemetryEvent::TokenUsage { role, .. } if role == "dedup"
+        )));
+    }
+
+    #[tokio::test]
+    async fn oai_judge_duplicates_malformed_is_unknown_and_error_is_err() {
+        let (url, _server) = spawn_stub_http_server(oai_response_body("yes, same")).await;
+        let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink));
+        let verdicts = extractor.judge_duplicates(&judge_pairs(2)).await.unwrap();
+        assert_eq!(verdicts, vec![DedupVerdict::Unknown; 2]);
+
+        let dead =
+            OaiExtractor::new_http("http://127.0.0.1:1/v1/chat/completions", "test-model", sink);
+        assert!(dead.judge_duplicates(&judge_pairs(1)).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn anthropic_judge_duplicates_confirms_rejects_and_handles_failure() {
+        let text = r#"{"verdicts":[{"id":1,"duplicate":true},{"id":0,"duplicate":false}]}"#;
+        let (url, _server) = spawn_stub_http_server(anthropic_response_body(text)).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = AnthropicExtractor::with_url(
+            "claude-haiku-4-5-20251001".to_string(),
+            "key".to_string(),
+            url,
+            Arc::clone(&sink) as _,
+        );
+        let verdicts = extractor.judge_duplicates(&judge_pairs(2)).await.unwrap();
+        assert_eq!(
+            verdicts,
+            vec![DedupVerdict::Distinct, DedupVerdict::Duplicate]
+        );
+        assert!(sink.events().iter().any(|e| matches!(
+            e,
+            TelemetryEvent::TokenUsage { role, .. } if role == "dedup"
+        )));
+
+        let (url, _server) = spawn_stub_http_server(anthropic_response_body("nope")).await;
+        let extractor = AnthropicExtractor::with_url(
+            "claude-haiku-4-5-20251001".to_string(),
+            "key".to_string(),
+            url,
+            Arc::new(NoopSink),
+        );
+        let verdicts = extractor.judge_duplicates(&judge_pairs(1)).await.unwrap();
+        assert_eq!(verdicts, vec![DedupVerdict::Unknown]);
+
+        let dead = AnthropicExtractor::with_url(
+            "claude-haiku-4-5-20251001".to_string(),
+            "key".to_string(),
+            "http://127.0.0.1:1/v1/messages".to_string(),
+            Arc::new(NoopSink),
+        );
+        assert!(dead.judge_duplicates(&judge_pairs(1)).await.is_err());
+    }
+
+    #[test]
+    fn unconfigured_extractor_reports_not_configured() {
+        assert!(!UnconfiguredExtractor.is_configured());
+        assert!(MockExtractor.is_configured());
     }
 }

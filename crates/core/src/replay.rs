@@ -750,10 +750,11 @@ impl WalReplayer {
                     let (norm_cypher, params) = expand_bulk_property_set(&norm_cypher, wal_params);
 
                     // Extract the params map for batch accumulation.
-                    let params_map = match params {
+                    let mut params_map = match params {
                         serde_json::Value::Object(m) => m,
                         _ => serde_json::Map::new(),
                     };
+                    inject_derived_lookup_key(&norm_cypher, &mut params_map);
 
                     // Buffer this row for batched embedding recompute (issue #486) rather than
                     // recomputing it inline — resolved a whole `embed_window_size`-bounded window
@@ -1535,6 +1536,34 @@ fn is_delete_form(template: &str) -> bool {
 /// `stats` already reflects the outcome.
 struct FlushOutcome {
     cancelled: bool,
+}
+
+/// Recomputes `lookup_key` for a replayed row whose template binds `$lookup_key` (issue #615,
+/// D3), overwriting any stored value — an old WAL's literal key is never trusted.
+///
+/// The key is derived from the record's own `group_id`, `kind` (absent ⇒ the default kind, so an
+/// old corpus replays to exactly its old identities) and `name`. A record that lacks `group_id`
+/// or `name` — an old `update_entity_core` record carried neither's partner `group_id` — binds
+/// NULL: the post-replay `schema::backfill_entity_lookup_keys` recomputes every NULL key, so a
+/// stale value is never left behind, including on incremental/tail replay onto an existing DB.
+fn inject_derived_lookup_key(
+    cypher: &str,
+    params: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    if !cypher.contains("$lookup_key") {
+        return;
+    }
+    let text = |k: &str| params.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let key = match (text("group_id"), text("name")) {
+        (Some(group_id), Some(name)) => {
+            let kind = text("kind")
+                .filter(|k| !k.trim().is_empty())
+                .unwrap_or_else(|| crate::types::DEFAULT_KIND.to_string());
+            serde_json::Value::String(crate::db::compute_lookup_key(&group_id, &kind, &name))
+        }
+        _ => serde_json::Value::Null,
+    };
+    params.insert("lookup_key".to_string(), key);
 }
 
 /// Executes accumulated batch mutations against `conn` inside one explicit transaction (issue

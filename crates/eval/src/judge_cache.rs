@@ -18,7 +18,6 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 use crate::judge::{JudgeVerdict, PairwiseVerdict};
 
@@ -83,8 +82,7 @@ pub fn cache_key(
     });
     let canonical =
         serde_json::to_string(&canonical_json(&value)).expect("Value serialization is infallible");
-    let digest = Sha256::digest(canonical.as_bytes());
-    let hex = format!("{digest:x}");
+    let hex = lcg_core::sha256_hex::sha256_hex(canonical.as_bytes());
     hex[..24].to_string()
 }
 

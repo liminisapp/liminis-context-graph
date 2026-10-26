@@ -104,6 +104,7 @@ fn make_edge_in_group(
     group_id: &str,
 ) -> RelatesToEdge {
     RelatesToEdge {
+        ingested_at: String::new(),
         uuid: Uuid::new_v4().to_string(),
         name: format!("{src} → {dst}"),
         source_node_uuid: src.to_string(),
@@ -118,6 +119,7 @@ fn make_edge_in_group(
         relation_type: rt.map(|s| s.to_string()),
         episode_uuids: vec![],
         source_descriptions: vec![],
+        ..Default::default()
     }
 }
 

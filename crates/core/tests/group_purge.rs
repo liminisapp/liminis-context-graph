@@ -31,6 +31,11 @@ use tempfile::TempDir;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// How long a background `knowledge_rebuild_from_wal` job may run before a test calls it hung.
+/// Hang detection only: every rebuild ends with a ~2.5s (debug) index build, which overran
+/// tighter deadlines under parallel tests. Same value and rationale as `handlers_wal_admin.rs`.
+const REBUILD_JOB_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 const DIM: usize = 4;
 const TS: &str = "2026-01-01T00:00:00Z";
 const GROUP_A: &str = "group-a";
@@ -144,10 +149,10 @@ fn assert_err(v: &Value, id: i64) {
 }
 
 /// Polls `knowledge_rebuild_status` for `job_id` until it reports `completed`, panicking on
-/// `failed` or a 10s timeout. Shared by every test that drives a background rebuild job via
-/// `knowledge_rebuild_from_wal`.
+/// `failed` or after `REBUILD_JOB_DEADLINE`. Shared by every test that drives a background
+/// rebuild job via `knowledge_rebuild_from_wal`.
 async fn wait_for_rebuild(id: i64, job_id: &str, state: &Arc<AppState>) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + REBUILD_JOB_DEADLINE;
     loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let status_v = dispatch_val(
@@ -162,7 +167,7 @@ async fn wait_for_rebuild(id: i64, job_id: &str, state: &Arc<AppState>) {
             "failed" => panic!("rebuild job failed: {status_v}"),
             "running" => {
                 if std::time::Instant::now() > deadline {
-                    panic!("rebuild did not complete within 10s: {status_v}");
+                    panic!("rebuild did not complete within {REBUILD_JOB_DEADLINE:?}: {status_v}");
                 }
             }
             other => panic!("unexpected status: {other}: {status_v}"),
@@ -283,6 +288,7 @@ async fn purge_removes_target_group_and_leaves_other_group_untouched() {
         conn.insert_entity(&b1).unwrap();
 
         let edge_a = lcg_core::types::RelatesToEdge {
+            ingested_at: String::new(),
             uuid: Uuid::new_v4().to_string(),
             name: "KNOWS".to_string(),
             source_node_uuid: a1.uuid.clone(),
@@ -297,6 +303,7 @@ async fn purge_removes_target_group_and_leaves_other_group_untouched() {
             relation_type: None,
             episode_uuids: vec![],
             source_descriptions: vec![],
+            ..Default::default()
         };
         conn.insert_relates_to_edge(&edge_a).unwrap();
     }
@@ -411,6 +418,7 @@ async fn purge_preserves_foreign_relates_to_node_and_leaves_pointer_unbound() {
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(alice.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_A.to_string(),
                     endpoint_name: "Bob".to_string(),
                 },
@@ -568,6 +576,7 @@ async fn dry_run_mutates_nothing_and_matches_a_following_real_purge() {
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(alice.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_A.to_string(),
                     endpoint_name: "Bob".to_string(),
                 },
@@ -837,6 +846,7 @@ async fn purge_excludes_unbound_impact_when_owning_group_is_itself_purged() {
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(layer_entity.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_B.to_string(),
                     endpoint_name: "Bob".to_string(),
                 },
@@ -904,7 +914,7 @@ fn purged_entity_name_no_longer_resolves_via_lookup_key() {
     let alice = make_entity("Indexed Alice", GROUP_A, TS);
     conn.insert_entity(&alice).unwrap();
     assert!(
-        conn.get_entity_by_name_ci("Indexed Alice", GROUP_A)
+        conn.get_entity_by_name_ci("Indexed Alice", GROUP_A, "Entity")
             .unwrap()
             .is_some(),
         "lookup_key should resolve the entity before purge"
@@ -914,7 +924,7 @@ fn purged_entity_name_no_longer_resolves_via_lookup_key() {
     assert_eq!(counts.groups[0].entities, 1);
 
     assert!(
-        conn.get_entity_by_name_ci("Indexed Alice", GROUP_A)
+        conn.get_entity_by_name_ci("Indexed Alice", GROUP_A, "Entity")
             .unwrap()
             .is_none(),
         "lookup_key must not resolve a purged entity's name"
@@ -1073,6 +1083,7 @@ async fn delete_by_group_attributes_deletions_and_forced_rebind_to_their_own_gro
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(alice.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_A.to_string(),
                     endpoint_name: "Bob".to_string(),
                 },
@@ -1250,6 +1261,7 @@ async fn purge_multi_group_attributes_owner_purged_edge_to_owning_groups_stream(
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(owner.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_B.to_string(),
                     endpoint_name: "Bob".to_string(),
                 },
@@ -1380,6 +1392,7 @@ async fn clear_group_for_rebuild_routes_forced_rebind_to_owning_group_not_defaul
                 name: "KNOWS".to_string(),
                 source: EndpointSpec::Uuid(alice.uuid.clone()),
                 target: EndpointSpec::Foreign {
+                    kind: None,
                     source_group_id: GROUP_A.to_string(),
                     endpoint_name: "A-Seed".to_string(),
                 },

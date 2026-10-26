@@ -7,40 +7,40 @@
 
 ## Getting Started
 
-- [Getting Started](https://v3rv.com/liminis-context-graph/getting-started): Install, run, build from source, and bundle in downstream apps.
+- [Getting Started](https://docs.liminis.app/liminis-context-graph/getting-started): Install, run, build from source, and bundle in downstream apps.
 
 ## Configuration
 
-- [Configuration](https://v3rv.com/liminis-context-graph/configuration): Every environment variable and CLI flag, plus the embedder-sidecar and extractor local-vs-hosted selection rules.
+- [Configuration](https://docs.liminis.app/liminis-context-graph/configuration): Every environment variable and CLI flag, plus the embedder-sidecar and extractor local-vs-hosted selection rules.
 
 ## IPC & MCP Reference
 
-- [IPC & MCP Reference](https://v3rv.com/liminis-context-graph/ipc-mcp-reference): The JSON-RPC method surface and the Model Context Protocol (`--mcp-stdio`) transport, scopes, and tools.
+- [IPC & MCP Reference](https://docs.liminis.app/liminis-context-graph/ipc-mcp-reference): The JSON-RPC method surface and the Model Context Protocol (`--mcp-stdio`) transport, scopes, and tools.
 
 ## Telemetry
 
-- [Telemetry](https://v3rv.com/liminis-context-graph/telemetry): Structured JSONL events emitted on stderr, with field-level schemas for each event type.
+- [Telemetry](https://docs.liminis.app/liminis-context-graph/telemetry): Structured JSONL events emitted on stderr, with field-level schemas for each event type.
 
 ## Ontology
 
-- [Ontology](https://v3rv.com/liminis-context-graph/ontology): The optional workspace-scoped entity/relation type vocabulary, its YAML format, and type-hierarchy rules.
+- [Ontology](https://docs.liminis.app/liminis-context-graph/ontology): The optional workspace-scoped entity/relation type vocabulary, its YAML format, and type-hierarchy rules.
 
 ## Operations
 
-- [Operations](https://v3rv.com/liminis-context-graph/operations): WAL administration, degraded-mode startup, and autonomous self-healing recovery.
+- [Operations](https://docs.liminis.app/liminis-context-graph/operations): WAL administration, degraded-mode startup, and autonomous self-healing recovery.
 
 ## Testing & Evaluation
 
-- [Testing & Evaluation](https://v3rv.com/liminis-context-graph/testing-and-evaluation): LLM record/replay cassettes and the `lcg-eval` extraction-quality harness.
-- [Full-Corpus Extraction Benchmark Runbook](https://v3rv.com/liminis-context-graph/eval-full-corpus-runbook): Maintainer-run procedure for the full-corpus model comparison.
-- [Extraction-Quality Evaluation](https://v3rv.com/liminis-context-graph/extraction-quality-evaluation): Methodology, model rankings, and local-LLM guidance.
+- [Testing & Evaluation](https://docs.liminis.app/liminis-context-graph/testing-and-evaluation): LLM record/replay cassettes and the `lcg-eval` extraction-quality harness.
+- [Full-Corpus Extraction Benchmark Runbook](https://docs.liminis.app/liminis-context-graph/eval-full-corpus-runbook): Maintainer-run procedure for the full-corpus model comparison.
+- [Extraction-Quality Evaluation](https://docs.liminis.app/liminis-context-graph/extraction-quality-evaluation): Methodology, model rankings, and local-LLM guidance.
 
 ## Architecture Decision Records
 
-- [ADR Index](https://v3rv.com/liminis-context-graph/adr/index): Historical decision records — each is immutable and reflects reasoning at the time it was made, not necessarily current behavior.
+- [ADR Index](https://docs.liminis.app/liminis-context-graph/adr/index): Historical decision records — each is immutable and reflects reasoning at the time it was made, not necessarily current behavior.
 
 ## Other repository documentation
 
-- [README](https://github.com/verveguy/liminis-context-graph/blob/main/README.md): Short project overview, install, and a standalone quickstart.
-- [CONTRIBUTING](https://github.com/verveguy/liminis-context-graph/blob/main/CONTRIBUTING.md): Filing issues, submitting pull requests, and the maintainer release runbook.
-- [CLAUDE.md](https://github.com/verveguy/liminis-context-graph/blob/main/CLAUDE.md): Agent guidance for contributors working in this repository with Claude Code — not user documentation, and not published on the site.
+- [README](https://github.com/liminisapp/liminis-context-graph/blob/main/README.md): Short project overview, install, and a standalone quickstart.
+- [CONTRIBUTING](https://github.com/liminisapp/liminis-context-graph/blob/main/CONTRIBUTING.md): Filing issues, submitting pull requests, and the maintainer release runbook.
+- [CLAUDE.md](https://github.com/liminisapp/liminis-context-graph/blob/main/CLAUDE.md): Agent guidance for contributors working in this repository with Claude Code — not user documentation, and not published on the site.

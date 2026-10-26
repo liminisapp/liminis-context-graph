@@ -44,6 +44,8 @@ fn test_ontology() -> Arc<Ontology> {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
         relation_types: vec![
@@ -54,6 +56,7 @@ fn test_ontology() -> Arc<Ontology> {
                 target_type: None,
                 aliases: vec!["WROTE".to_string(), "AUTHORED_BY".to_string()],
                 keywords: vec!["author".to_string(), "writ".to_string()],
+                extract: true,
             },
             RelationTypeDef {
                 name: "AFFILIATED_WITH".to_string(),
@@ -62,6 +65,7 @@ fn test_ontology() -> Arc<Ontology> {
                 target_type: None,
                 aliases: vec!["WORKS_FOR".to_string()],
                 keywords: vec!["affiliat".to_string(), "employ".to_string()],
+                extract: true,
             },
             RelationTypeDef {
                 name: "MANAGES".to_string(),
@@ -70,6 +74,7 @@ fn test_ontology() -> Arc<Ontology> {
                 target_type: None,
                 aliases: vec![],
                 keywords: vec!["manag".to_string(), "supervis".to_string()],
+                extract: true,
             },
         ],
     })
@@ -272,6 +277,7 @@ fn make_edge_with_rt_in_group(
     group_id: &str,
 ) -> RelatesToEdge {
     RelatesToEdge {
+        ingested_at: String::new(),
         uuid: Uuid::new_v4().to_string(),
         name: name.to_string(),
         source_node_uuid: src.to_string(),
@@ -290,6 +296,7 @@ fn make_edge_with_rt_in_group(
         relation_type: rt.map(|s| s.to_string()),
         episode_uuids: vec![],
         source_descriptions: vec![],
+        ..Default::default()
     }
 }
 

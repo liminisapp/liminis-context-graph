@@ -199,6 +199,8 @@ async fn strict_mode_entity_filtering_reclassifies_out_of_vocab() {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![],
         ancestor_map: HashMap::new(),
@@ -237,6 +239,8 @@ async fn open_mode_no_filtering() {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![],
         ancestor_map: HashMap::new(),
@@ -303,11 +307,15 @@ async fn knowledge_status_ontology_field_populated() {
                 name: "Person".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
             EntityTypeDef {
                 name: "Organization".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
         ],
         relation_types: vec![],
@@ -372,11 +380,15 @@ async fn strict_mode_relation_type_reclassifies_non_matching_edges_to_unclassifi
                 name: "Person".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
             EntityTypeDef {
                 name: "Organization".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
         ],
         relation_types: vec![RelationTypeDef {
@@ -386,6 +398,7 @@ async fn strict_mode_relation_type_reclassifies_non_matching_edges_to_unclassifi
             target_type: None,
             aliases: vec![],
             keywords: vec![],
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
     };
@@ -451,11 +464,15 @@ async fn strict_mode_alias_edge_retained_under_canonical_name() {
                 name: "Person".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
             EntityTypeDef {
                 name: "Vehicle".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
         ],
         relation_types: vec![RelationTypeDef {
@@ -465,6 +482,7 @@ async fn strict_mode_alias_edge_retained_under_canonical_name() {
             target_type: None,
             aliases: vec!["LAUNCHED_BY".to_string()],
             keywords: vec![],
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
     };
@@ -547,11 +565,15 @@ async fn strict_mode_alias_case_variant_recognized() {
                 name: "Person".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
             EntityTypeDef {
                 name: "Vehicle".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
         ],
         relation_types: vec![RelationTypeDef {
@@ -561,6 +583,7 @@ async fn strict_mode_alias_case_variant_recognized() {
             target_type: None,
             aliases: vec!["LAUNCHED_BY".to_string()],
             keywords: vec![],
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
     };
@@ -636,11 +659,15 @@ async fn strict_mode_no_aliases_declared_canonical_edge_unchanged() {
                 name: "Person".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
             EntityTypeDef {
                 name: "Organization".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
         ],
         relation_types: vec![RelationTypeDef {
@@ -650,6 +677,7 @@ async fn strict_mode_no_aliases_declared_canonical_edge_unchanged() {
             target_type: None,
             aliases: vec![],
             keywords: vec![],
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
     };
@@ -696,6 +724,8 @@ async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_edges() {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![RelationTypeDef {
             name: "KNOWS".to_string(),
@@ -704,6 +734,7 @@ async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_edges() {
             target_type: None,
             aliases: vec![],
             keywords: vec![],
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
     };
@@ -809,6 +840,8 @@ async fn strict_mode_reclassify_count_includes_edges_with_no_original_relation_t
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![RelationTypeDef {
             name: "KNOWS".to_string(),
@@ -817,6 +850,7 @@ async fn strict_mode_reclassify_count_includes_edges_with_no_original_relation_t
             target_type: None,
             aliases: vec![],
             keywords: vec![],
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
     };
@@ -904,6 +938,8 @@ async fn strict_mode_reclassified_self_referential_edge_not_counted() {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![RelationTypeDef {
             name: "KNOWS".to_string(),
@@ -912,6 +948,7 @@ async fn strict_mode_reclassified_self_referential_edge_not_counted() {
             target_type: None,
             aliases: vec![],
             keywords: vec![],
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
     };
@@ -975,6 +1012,8 @@ async fn open_mode_literal_unclassified_relation_type_not_counted_as_reclassifie
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![RelationTypeDef {
             name: "KNOWS".to_string(),
@@ -983,6 +1022,7 @@ async fn open_mode_literal_unclassified_relation_type_not_counted_as_reclassifie
             target_type: None,
             aliases: vec![],
             keywords: vec![],
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
     };
@@ -1076,6 +1116,8 @@ async fn strict_mode_entity_type_reclassifies_not_drops() {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![],
         ancestor_map: HashMap::new(),
@@ -1108,7 +1150,7 @@ async fn strict_mode_entity_type_reclassifies_not_drops() {
 
     let conn = db.connect().unwrap();
     let acme = conn
-        .get_entity_by_name_ci("Acme Corp", "grp")
+        .get_entity_by_name_ci("Acme Corp", "grp", "Entity")
         .unwrap()
         .expect("Acme Corp must be persisted");
     assert!(
@@ -1129,7 +1171,7 @@ async fn strict_mode_entity_type_reclassifies_not_drops() {
     );
 
     let alice = conn
-        .get_entity_by_name_ci("Alice", "grp")
+        .get_entity_by_name_ci("Alice", "grp", "Entity")
         .unwrap()
         .expect("Alice must be persisted");
     assert!(
@@ -1150,6 +1192,8 @@ async fn strict_mode_reclassify_count_reflects_n_out_of_vocab_entities() {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![],
         ancestor_map: HashMap::new(),
@@ -1247,6 +1291,8 @@ async fn strict_mode_edge_survives_when_endpoint_entity_is_reclassified() {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![],
         ancestor_map: HashMap::new(),
@@ -1323,6 +1369,8 @@ async fn strict_mode_empty_entity_type_resolves_as_plain_entity() {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![],
         ancestor_map: HashMap::new(),
@@ -1372,7 +1420,7 @@ async fn strict_mode_empty_entity_type_resolves_as_plain_entity() {
     let conn = db.connect().unwrap();
     for name in ["Mystery", "AlsoMystery"] {
         let row = conn
-            .get_entity_by_name_ci(name, "grp")
+            .get_entity_by_name_ci(name, "grp", "Entity")
             .unwrap()
             .unwrap_or_else(|| panic!("{name} must be persisted"));
         assert_eq!(
@@ -1401,6 +1449,8 @@ async fn strict_mode_reclassified_entity_dedups_against_declared_type() {
             name: "Spacecraft".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![],
         ancestor_map: HashMap::new(),
@@ -1490,6 +1540,8 @@ async fn strict_mode_empty_name_out_of_vocab_entity_not_counted_in_tally() {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![],
         ancestor_map: HashMap::new(),
@@ -1553,6 +1605,8 @@ async fn strict_mode_entity_type_case_variant_of_entity_not_leaked_into_labels()
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![],
         ancestor_map: HashMap::new(),
@@ -1593,7 +1647,7 @@ async fn strict_mode_entity_type_case_variant_of_entity_not_leaked_into_labels()
 
     let conn = db.connect().unwrap();
     let mystery = conn
-        .get_entity_by_name_ci("Mystery", "grp")
+        .get_entity_by_name_ci("Mystery", "grp", "Entity")
         .unwrap()
         .expect("Mystery must be persisted");
     assert_eq!(
@@ -1616,11 +1670,15 @@ async fn open_mode_relation_type_keeps_llm_derived_edges() {
                 name: "Person".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
             EntityTypeDef {
                 name: "Organization".to_string(),
                 description: None,
                 parent: None,
+                identity: false,
+                extract: true,
             },
         ],
         relation_types: vec![RelationTypeDef {
@@ -1630,6 +1688,7 @@ async fn open_mode_relation_type_keeps_llm_derived_edges() {
             target_type: None,
             aliases: vec![],
             keywords: vec![],
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
     };
@@ -1670,6 +1729,8 @@ fn make_ontology_with_entities(mode: OntologyMode, names: &[&str]) -> Ontology {
             name: n.to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         })
         .collect();
     Ontology {
@@ -1699,6 +1760,8 @@ fn drift_detected_after_relation_type_rename() {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![RelationTypeDef {
             name: "AUTHORED".to_string(),
@@ -1707,6 +1770,7 @@ fn drift_detected_after_relation_type_rename() {
             target_type: None,
             aliases: vec![],
             keywords: vec![],
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
     };
@@ -1716,6 +1780,8 @@ fn drift_detected_after_relation_type_rename() {
             name: "Person".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![RelationTypeDef {
             name: "WROTE".to_string(),
@@ -1724,6 +1790,7 @@ fn drift_detected_after_relation_type_rename() {
             target_type: None,
             aliases: vec![],
             keywords: vec![],
+            extract: true,
         }],
         ancestor_map: HashMap::new(),
     };
@@ -2070,6 +2137,8 @@ async fn knowledge_status_group_ontology_drift_distinguishes_drifted_and_clean_g
             name: "StaleType".to_string(),
             description: None,
             parent: None,
+            identity: false,
+            extract: true,
         }],
         relation_types: vec![],
         ancestor_map: HashMap::new(),

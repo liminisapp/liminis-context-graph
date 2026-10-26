@@ -18,7 +18,7 @@ and [Operations](operations.md) for how groups work in practice.
 No Rust toolchain required:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/verveguy/liminis-context-graph/releases/latest/download/lcg-service-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/liminisapp/liminis-context-graph/releases/latest/download/lcg-service-installer.sh | sh
 ```
 
 Prebuilt binaries are published for **macOS (Apple Silicon)**, **Linux x86_64**, and **Linux ARM64** on every tagged release.
@@ -112,7 +112,7 @@ cargo run -p lcg-service                      # run the service binary
 For consumers (e.g. Electron apps or CI pipelines) that need a pinned binary version without running cargo, use the direct tarball URL from GitHub Releases:
 
 ```sh
-curl -L https://github.com/verveguy/liminis-context-graph/releases/download/<TAG>/lcg-service-aarch64-apple-darwin.tar.xz \
+curl -L https://github.com/liminisapp/liminis-context-graph/releases/download/<TAG>/lcg-service-aarch64-apple-darwin.tar.xz \
   -o lcg-service-aarch64-apple-darwin.tar.xz
 tar -xJf lcg-service-aarch64-apple-darwin.tar.xz
 # binary is at: lcg-service-aarch64-apple-darwin/liminis-context-graph
@@ -123,7 +123,7 @@ Release artifacts are named after the `lcg-service` package (`lcg-service-<targe
 Discover the latest release tag programmatically:
 
 ```sh
-curl -s https://api.github.com/repos/verveguy/liminis-context-graph/releases/latest | jq -r '.tag_name'
+curl -s https://api.github.com/repos/liminisapp/liminis-context-graph/releases/latest | jq -r '.tag_name'
 ```
 
 ## Next steps

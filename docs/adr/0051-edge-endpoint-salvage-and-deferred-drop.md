@@ -135,3 +135,11 @@ this mechanism is what makes the outcome correct when one occurs anyway, on eith
 - `crates/core/src/episode.rs`: the pre-lock salvage step and Phase C's commit closure.
 - `crates/core/tests/edge_endpoint_resolution.rs`: salvage, adversarial non-collapse, and
   drop-counting coverage.
+
+## Amendment (#666)
+
+Salvage no longer applies to an off-list endpoint that exactly matches an entity in the stored graph
+(same group, eligible kinds): such a name is left untouched for Phase C. Phase C also drops an edge
+whose resolved source and target UUIDs are equal, counted in `edges_dropped_self_loop` rather than
+`edges_dropped_unresolvable` / `dropped_edges`. See
+[ADR-0666](0666-exact-graph-match-and-uuid-self-loop-guard.md).

@@ -25,6 +25,26 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // so `get_entity_by_name_ci` can be answered by an ART-indexed equality lookup instead of
     // an in-process accelerator (ADR-0038's `NameIndex`, which this column and its index
     // replace) or an unindexed `lower(e.name) = $x` scan.
+    // `kind` (issue #615, ADR-0615) is a third documented divergence from graphiti's
+    // kuzu_driver.py schema, additive like the two above: the single identity-bearing kind of an
+    // entity (default `Entity`), part of `lookup_key`'s composition
+    // (`group_id ␟ kind ␟ lower(name)`). Graphiti-shaped reads/writes never mention it, so they
+    // are unaffected (FR-013).
+    // `ingested_at` (issue #673, ADR-0673) is a fourth documented divergence from graphiti's
+    // kuzu_driver.py schema, additive like the three above and present on exactly `Entity`,
+    // `Episodic` and `RelatesToNode_`: the service-clock time the record was first written
+    // ("knowledge time"), kept separately from the caller-supplied event time that feeds
+    // `created_at`/`valid_at`. Nullable, so graphiti-shaped statements that never mention it
+    // still bind; legacy rows are filled by `ensure_ingested_at_backfill`.
+    // Belief time (issue #705, ADR-0705) adds a fifth documented divergence from kuzu_driver.py,
+    // additive and nullable like the others: `Episodic.superseded_at` / `superseded_by` /
+    // `superseded_by_kind` / `supersession_reason` record *when the graph stopped believing* an
+    // episode (service clock), by what, and why; `RelatesToNode_.warrant` marks edges with no
+    // producing episode (`assertion`, `cross_group`) and `RelatesToNode_.valid_at_source` records
+    // whether an extracted edge's `valid_at` came from the text or defaulted to `reference_time`.
+    // Supersession never touches `valid_at` / `invalid_at`: a correction ends belief, not validity.
+    // Issue #707 (ADR-0707) adds a sixth: `Episodic.doc_id` (the logical document an episode came
+    // from) and the `DocSupersession` record table below.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Entity (\
          uuid STRING PRIMARY KEY, \
@@ -36,7 +56,9 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          summary STRING, \
          attributes STRING, \
          summary_embedding FLOAT[{dim}], \
-         lookup_key STRING\
+         lookup_key STRING, \
+         kind STRING, \
+         ingested_at TIMESTAMP\
          )"
     ))?;
     // `attributes` (issue #528) is a deliberate divergence from graphiti's kuzu_driver.py
@@ -57,7 +79,13 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          content_embedding FLOAT[{dim}], \
          valid_at TIMESTAMP, \
          entity_edges STRING[], \
-         attributes STRING\
+         attributes STRING, \
+         ingested_at TIMESTAMP, \
+         superseded_at TIMESTAMP, \
+         superseded_by STRING, \
+         superseded_by_kind STRING, \
+         supersession_reason STRING, \
+         doc_id STRING\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -73,9 +101,28 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          valid_at TIMESTAMP, \
          invalid_at TIMESTAMP, \
          attributes STRING, \
-         relation_type STRING\
+         relation_type STRING, \
+         ingested_at TIMESTAMP, \
+         warrant STRING, \
+         valid_at_source STRING\
          )"
     ))?;
+    // Document supersession (issue #707, ADR-0707): one durable record per superseded document
+    // per group, keyed `group_id ␟ superseded_doc_id` so "at most one superseding document" is
+    // structural. `effective_at` is the instant the decision took effect (the in-force end,
+    // caller-supplied); `recorded_at` is the service-clock instant the graph learned of it.
+    // Not part of graphiti's kuzu_driver.py schema (sixth documented divergence, with
+    // `Episodic.doc_id`).
+    conn.raw_query(
+        "CREATE NODE TABLE IF NOT EXISTS DocSupersession (\
+         key STRING PRIMARY KEY, \
+         group_id STRING, \
+         superseded_doc_id STRING, \
+         superseding_doc_id STRING, \
+         effective_at TIMESTAMP, \
+         recorded_at TIMESTAMP\
+         )",
+    )?;
     // Stub tables for graphiti's community/saga subsystem (not implemented in liminis-graph;
     // see #145). They carry no read/write paths, but must EXIST so legacy WAL statements that
     // reference them — notably the bulk edge-delete `MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]
@@ -331,6 +378,48 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
     // below for how the persisted marker closes that gap without reintroducing an O(N) `Entity`
     // scan on the clean (already-migrated) startup path.
     ensure_lookup_key_backfill(conn);
+    // Entity/Episodic/RelatesToNode_ gained `ingested_at` (issue #673). Probe first — lbug
+    // corrupts its hash index if `ALTER TABLE ADD` runs on an existing column. The value backfill
+    // is `ensure_ingested_at_backfill` (it needs the WAL dir, which `migrate` does not have).
+    for table in ["Entity", "Episodic", "RelatesToNode_"] {
+        if conn
+            .raw_query(&format!(
+                "MATCH (n:{table}) WHERE n.uuid = '_probe_' RETURN n.ingested_at LIMIT 0"
+            ))
+            .is_err()
+        {
+            if let Err(e) =
+                conn.raw_query(&format!("ALTER TABLE {table} ADD ingested_at TIMESTAMP"))
+            {
+                eprintln!("liminis-context-graph: schema migrate: ALTER TABLE {table} ADD ingested_at TIMESTAMP: {e} (non-fatal)");
+            }
+        }
+    }
+    // Belief-time columns (issue #705). Same probe-then-ALTER discipline as `ingested_at`.
+    for (table, col, ty) in [
+        ("Episodic", "superseded_at", "TIMESTAMP"),
+        ("Episodic", "superseded_by", "STRING"),
+        ("Episodic", "superseded_by_kind", "STRING"),
+        ("Episodic", "supersession_reason", "STRING"),
+        // Document identity (issue #707).
+        ("Episodic", "doc_id", "STRING"),
+        ("RelatesToNode_", "warrant", "STRING"),
+        ("RelatesToNode_", "valid_at_source", "STRING"),
+    ] {
+        if conn
+            .raw_query(&format!(
+                "MATCH (n:{table}) WHERE n.uuid = '_probe_' RETURN n.{col} LIMIT 0"
+            ))
+            .is_err()
+        {
+            if let Err(e) = conn.raw_query(&format!("ALTER TABLE {table} ADD {col} {ty}")) {
+                eprintln!("liminis-context-graph: schema migrate: ALTER TABLE {table} ADD {col} {ty}: {e} (non-fatal)");
+            }
+        }
+    }
+    // Seed the known-kinds registry (issue #615) from the migrated data, so broad name
+    // resolution probes every kind an existing database holds from the first request.
+    conn.refresh_known_kinds();
     // Episodic gained `attributes` (issue #528) to hold caller-supplied structured metadata
     // directly on the episode node. Probe first: a fresh DB already has the column from
     // `create_node_tables`, so the ALTER only runs against pre-existing workspaces. Unlike
@@ -407,26 +496,214 @@ pub fn zero_fill_null_episodic_attributes(conn: &Conn<'_>) -> Result<(), Error> 
 /// `build_indices_and_constraints`/`create_entity_lookup_key_index` ever builds the ART index
 /// over the column, so the index is never built while rows are still `NULL`.
 pub fn backfill_entity_lookup_keys(conn: &Conn<'_>) -> Result<(), Error> {
+    // Issue #615 widened this from `lookup_key IS NULL`: an entity with a NULL `kind` is one
+    // written before kinds existed (an upgraded database's rows, an old WAL's records, the #217
+    // corpus), and its key — if it has one at all — is in the old two-field format and must be
+    // recomputed under the new composition. Such rows are all kind `Entity` (D3). A row with a
+    // kind but no key is the original #221 case.
     let rows = conn.query_params(
-        "MATCH (n:Entity) WHERE n.lookup_key IS NULL RETURN n.uuid, n.name, n.group_id",
+        "MATCH (n:Entity) WHERE n.kind IS NULL OR n.lookup_key IS NULL \
+         RETURN n.uuid, n.name, n.group_id, n.kind, n.labels",
         serde_json::json!({}),
     )?;
     for row in rows {
         let uuid = crate::db::value_as_string(&row[0]);
         let name = crate::db::value_as_string(&row[1]);
         let group_id = crate::db::value_as_string(&row[2]);
-        let key = crate::db::compute_lookup_key(&group_id, &name);
+        let kind = crate::db::value_as_kind(&row[3]);
+        let labels = crate::db::value_as_str_list(&row[4]);
+        let key = crate::db::compute_lookup_key(&group_id, &kind, &name);
+        // `kind ∈ labels` (FR-001) is restored here too. The label *set* only changes for a row
+        // whose labels were clobbered out-of-band, but `labels_with_kind` also moves `Entity` to
+        // the front (enforce_entity_first), so rows written by older lcg versions with `Entity`
+        // later in the list (e.g. `[Object, Entity]`) are reordered to `[Entity, Object]`. On a
+        // real 0.14.x notebook that was 144 of 198 entities; harmless for set-semantics readers.
+        let labels = crate::db::labels_with_kind(&labels, &kind);
         conn.exec_params(
-            "MATCH (n:Entity {uuid: $uuid}) SET n.lookup_key = $key",
-            serde_json::json!({ "uuid": uuid, "key": key }),
+            "MATCH (n:Entity {uuid: $uuid}) SET n.kind = $kind, n.lookup_key = $key, \
+             n.labels = $labels",
+            serde_json::json!({ "uuid": uuid, "kind": kind, "key": key, "labels": labels }),
+        )?;
+    }
+    conn.refresh_known_kinds();
+    Ok(())
+}
+
+/// `SchemaState` key recording that the `ingested_at` upgrade backfill (issue #673) has run to
+/// completion against this database. See [`ensure_ingested_at_backfill`].
+pub(crate) const INGESTED_AT_BACKFILL_STATE_KEY: &str = "ingested_at_backfill_v1";
+
+/// The node tables that carry `ingested_at`, with the label a WAL `CREATE` names them by.
+const INGESTED_AT_TABLES: [&str; 3] = ["Entity", "Episodic", "RelatesToNode_"];
+
+/// If `cypher` is a *native creating* statement for one of the [`INGESTED_AT_TABLES`], returns
+/// that table. "Native" is deliberate: it is the only shape whose WAL `ts` means "when the
+/// service first wrote this record" — `Conn::insert_*`'s bound `CREATE (:Label {…})`, or the
+/// legacy graphiti-era `MERGE (n:Label {uuid: $uuid}) ON CREATE SET …`. The dump/compaction
+/// templates are `MERGE … SET` and are stamped with the *compaction* time, which says nothing
+/// about when anything was learned, so they are never a creating line (records whose only WAL
+/// trace is a dump line take the `created_at` fallback).
+fn creating_table(cypher: &str) -> Option<&'static str> {
+    let c = cypher.trim_start();
+    INGESTED_AT_TABLES.into_iter().find(|label| {
+        c.starts_with(&format!("CREATE (:{label} {{"))
+            || (c.starts_with("MERGE (")
+                && c.contains(&format!(":{label} {{uuid: $uuid}})"))
+                && c.contains("ON CREATE SET"))
+    })
+}
+
+/// WAL pass of the `ingested_at` backfill (issue #673, FR-007 signal 1): for every record whose
+/// `ingested_at` is still NULL, sets it to the `ts` of the earliest WAL line that natively
+/// created it. Streams the WAL files once, in first-`seq` order (so the first creating line
+/// wins), and writes one `IS NULL`-guarded point update per creating line — memory stays O(1)
+/// and a re-run is a no-op. Lines that already bind `$ingested_at` carry their own value through
+/// replay and are skipped. Unrecorded: marker/derived state must not reach the WAL.
+fn backfill_ingested_at_from_wal(conn: &Conn<'_>, wal_dir: &std::path::Path) -> Result<(), Error> {
+    use std::io::BufRead;
+    if !wal_dir.is_dir() {
+        return Ok(());
+    }
+    let mut files: Vec<(Option<u64>, std::path::PathBuf)> = std::fs::read_dir(wal_dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        .map(|p| (crate::wal::first_seq_in_file(&p), p))
+        .collect();
+    files.sort_by(|(sa, pa), (sb, pb)| match (sa, sb) {
+        (Some(a), Some(b)) => a.cmp(b).then_with(|| pa.file_name().cmp(&pb.file_name())),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => pa.file_name().cmp(&pb.file_name()),
+    });
+    for (_, path) in files {
+        let reader = std::io::BufReader::new(std::fs::File::open(&path)?);
+        for line in reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                // A line that is not valid UTF-8 (a torn write) has already been consumed: skip
+                // just that line. Stopping here would still return `Ok`, the caller would record
+                // the marker `complete`, and every later creating line in this file would take
+                // the approximate `created_at` fallback with no retry.
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+                // A genuine read failure: surface it so the status is recorded `failed` and the
+                // backfill is retried on the next open.
+                Err(e) => return Err(e.into()),
+            };
+            // Cheap pre-filter before paying for a JSON parse of a (possibly vector-bearing) line.
+            if !line.contains("\"cypher\"")
+                || !(line.contains("CREATE (:") || line.contains("ON CREATE SET"))
+            {
+                continue;
+            }
+            let Ok(wl) = serde_json::from_str::<crate::wal::WalLine>(&line) else {
+                continue;
+            };
+            let Some(table) = creating_table(&wl.cypher) else {
+                continue;
+            };
+            if wl.cypher.contains("$ingested_at") {
+                continue;
+            }
+            let Some(uuid) = wl.params.get("uuid").and_then(|u| u.as_str()) else {
+                continue;
+            };
+            // `ts` is `%Y-%m-%dT%H:%M:%S%.6f+00:00`; `ingested_at` is a TIMESTAMP_PARAM_NAMES
+            // name, so it binds as a typed Timestamp.
+            conn.exec_params_unrecorded(
+                &format!(
+                    "MATCH (n:{table} {{uuid: $uuid}}) WHERE n.ingested_at IS NULL \
+                     SET n.ingested_at = $ingested_at"
+                ),
+                serde_json::json!({ "uuid": uuid, "ingested_at": wl.ts }),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Backfills `ingested_at` on every Entity/Episodic/RelatesToNode_ row where it is NULL (issue
+/// #673, FR-007), in precedence order: (1) the WAL `ts` of the line that created the record, when
+/// `wal_dirs` are given; (2) the record's own `created_at`. Idempotent (every step is guarded by
+/// `ingested_at IS NULL`), so rows that already carry an ingest time are never touched.
+///
+/// Values from (2) are *approximate*: for records written before this feature `created_at` was
+/// the caller-supplied event time, not the ingest time. Documented in `docs/ipc-mcp-reference.md`.
+pub fn backfill_ingested_at(conn: &Conn<'_>, wal_dirs: &[std::path::PathBuf]) -> Result<(), Error> {
+    for dir in wal_dirs {
+        backfill_ingested_at_from_wal(conn, dir)?;
+    }
+    for table in INGESTED_AT_TABLES {
+        conn.exec_params_unrecorded(
+            &format!(
+                "MATCH (n:{table}) WHERE n.ingested_at IS NULL AND n.created_at IS NOT NULL \
+                 SET n.ingested_at = n.created_at"
+            ),
+            serde_json::json!({}),
         )?;
     }
     Ok(())
 }
 
+/// Runs [`backfill_ingested_at`] and persists the outcome to `SchemaState`. Unconditional (no
+/// marker check): the entry point for every WAL-rebuild/recovery site, because replaying a legacy
+/// WAL creates NULL-`ingested_at` rows *after* an earlier `"complete"` marker was written, exactly
+/// like `lookup_key` (see [`backfill_entity_lookup_keys_and_record_status`]). Non-fatal.
+pub(crate) fn backfill_ingested_at_and_record_status(
+    conn: &Conn<'_>,
+    wal_dirs: &[std::path::PathBuf],
+) {
+    if let Err(e) = ensure_schema_state_table(conn) {
+        eprintln!(
+            "liminis-context-graph: ingested_at backfill: ensure SchemaState table (non-fatal): {e}"
+        );
+    }
+    let status = match backfill_ingested_at(conn, wal_dirs) {
+        Ok(()) => "complete",
+        Err(e) => {
+            eprintln!("liminis-context-graph: backfill ingested_at (non-fatal): {e}");
+            "failed"
+        }
+    };
+    if let Err(e) = set_schema_state_status(conn, INGESTED_AT_BACKFILL_STATE_KEY, status) {
+        eprintln!(
+            "liminis-context-graph: record ingested_at backfill status in SchemaState (non-fatal): {e}"
+        );
+    }
+}
+
+/// Upgrade-path entry point (issue #673): backfills `ingested_at` once for a database that
+/// predates the column. A persisted `"complete"` marker makes every later open an O(1) point
+/// lookup; no marker, or `"failed"`, runs the backfill. Needs the group's WAL dir for the
+/// preferred signal, which `migrate()` does not have — so it is called right after `init_schema`
+/// at each open site that does (`Db::open_or_rebuild`, service startup). An empty `wal_dirs` is a
+/// no-op rather than a `created_at`-only pass, so the WAL signal is not lost to a site that
+/// cannot see it; a later call with a WAL dir still does the full job.
+pub fn ensure_ingested_at_backfill(conn: &Conn<'_>, wal_dirs: &[std::path::PathBuf]) {
+    if wal_dirs.is_empty() {
+        return;
+    }
+    if let Err(e) = ensure_schema_state_table(conn) {
+        eprintln!(
+            "liminis-context-graph: ingested_at backfill: ensure SchemaState table (non-fatal): {e}"
+        );
+    }
+    match schema_state_status(conn, INGESTED_AT_BACKFILL_STATE_KEY) {
+        Ok(Some(status)) if status == "complete" => {}
+        Ok(_) => backfill_ingested_at_and_record_status(conn, wal_dirs),
+        Err(e) => eprintln!(
+            "liminis-context-graph: read SchemaState for ingested_at backfill (non-fatal): {e}"
+        ),
+    }
+}
+
 /// Key under which the `lookup_key` backfill's completion state is persisted in `SchemaState`
 /// (see `ensure_lookup_key_backfill`).
-const LOOKUP_KEY_BACKFILL_STATE_KEY: &str = "entity_lookup_key_backfill";
+///
+/// Versioned (issue #615): the original `entity_lookup_key_backfill` marker only proved every
+/// row had *a* key, and old-format keys are non-NULL. Renaming the key forces every database
+/// through the widened backfill (`kind IS NULL OR lookup_key IS NULL`) exactly once.
+const LOOKUP_KEY_BACKFILL_STATE_KEY: &str = "entity_kind_lookup_key_v2";
 
 /// A minimal, generic migration-state marker table: one row per named migration step, keyed by
 /// a stable string identifier. Introduced by issue #221 to close a gap the PR's own human review
@@ -434,7 +711,9 @@ const LOOKUP_KEY_BACKFILL_STATE_KEY: &str = "entity_lookup_key_backfill";
 /// prevent. `CREATE NODE TABLE IF NOT EXISTS` is a catalog check, not a scan, so calling this
 /// unconditionally on every `migrate()` run is cheap regardless of database size or age.
 fn ensure_schema_state_table(conn: &Conn<'_>) -> Result<(), Error> {
-    conn.raw_query(
+    // Unrecorded: derived/marker state must never reach the WAL (ADR-0015, ADR-0649), and
+    // this is now also called from `create_fts_indexes` on handler connections.
+    conn.query_unrecorded(
         "CREATE NODE TABLE IF NOT EXISTS SchemaState (key STRING PRIMARY KEY, status STRING)",
     )?;
     Ok(())
@@ -559,6 +838,22 @@ fn ensure_lookup_key_backfill(conn: &Conn<'_>) {
         );
     }
 
+    // Entity gained `kind` (issue #615). A fresh DB has the column from `create_node_tables`;
+    // an existing one gets it here, NULL on every row, which the widened backfill below fills
+    // (and re-keys) because the v2 marker cannot yet be `complete`.
+    if conn
+        .raw_query("MATCH (n:Entity) WHERE n.uuid = '_probe_' RETURN n.kind LIMIT 0")
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE Entity ADD kind STRING") {
+            eprintln!(
+                "liminis-context-graph: schema migrate: ALTER TABLE Entity ADD kind STRING (non-fatal): {e}"
+            );
+            conn.mark_lookup_key_migration_failed();
+            return;
+        }
+    }
+
     let lookup_key_column_absent = conn
         .raw_query("MATCH (n:Entity) WHERE n.uuid = '_probe_' RETURN n.lookup_key LIMIT 0")
         .is_err();
@@ -600,33 +895,135 @@ fn ensure_lookup_key_backfill(conn: &Conn<'_>) {
     }
 }
 
+/// `SchemaState` key recording which lbug version built the FTS indexes (issue #649, ADR-0649).
+/// Its `status` is `lbug::VERSION`. lbug 0.20 → 0.21 changed how non-ASCII FTS terms are stored
+/// *without* a storage-version bump, so a 0.20-built index cannot be maintained (deletes fail)
+/// or searched (silently empty) by 0.21 — and nothing in the file format reveals it. A missing
+/// marker, or one differing from the running lbug, means "rebuild". Written last, after all 3
+/// indexes are known to have been built by the running lbug, so a crash leaves it unset.
+pub(crate) const FTS_MARKER_KEY: &str = "fts_built_by_lbug";
+
+const CREATE_FTS_SQL: [&str; 3] = [
+    "CALL CREATE_FTS_INDEX('Entity', 'node_name_and_summary', ['name', 'summary'])",
+    "CALL CREATE_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact', ['name', 'fact'])",
+    "CALL CREATE_FTS_INDEX('Episodic', 'episode_content', \
+     ['content', 'source', 'source_description'])",
+];
+
+const DROP_FTS_SQL: [&str; 3] = [
+    "CALL DROP_FTS_INDEX('Entity', 'node_name_and_summary')",
+    "CALL DROP_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact')",
+    "CALL DROP_FTS_INDEX('Episodic', 'episode_content')",
+];
+
 /// Creates the 3 FTS indexes. Idempotent — an "already exists" error is swallowed; any other
 /// error (missing table, malformed column, ...) propagates so callers can observe a genuine
 /// index-build failure instead of silently treating it as success.
 /// Index names and covered columns match the upstream Python graphiti-core service (canonical source).
+///
+/// Also the single detection point for FTS indexes built by an older lbug (issue #649,
+/// ADR-0649). Unless the [`FTS_MARKER_KEY`] marker equals the running `lbug::VERSION`:
+/// - all 3 indexes were just *created* → they were built by this lbug (fresh database, or
+///   dropped by a replay): write the marker, nothing else;
+/// - any index *already existed* → it may be stale: drop all 3, recreate all 3, then write
+///   the marker (one-time; logged on stderr).
 pub(crate) fn create_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
-    for sql in [
-        "CALL CREATE_FTS_INDEX('Entity', 'node_name_and_summary', ['name', 'summary'])",
-        "CALL CREATE_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact', ['name', 'fact'])",
-        "CALL CREATE_FTS_INDEX('Episodic', 'episode_content', \
-         ['content', 'source', 'source_description'])",
-    ] {
+    create_fts_indexes_outcome(conn).map(|_| ())
+}
+
+/// What [`create_fts_indexes`] concluded; returned so tests can assert *whether* a rebuild ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FtsOutcome {
+    /// Marker already matched the running lbug; nothing to do.
+    Current,
+    /// All 3 indexes were just created by this lbug; the marker was written, no rebuild.
+    MarkedFresh,
+    /// Pre-existing indexes of unknown provenance were dropped, recreated and marked.
+    Rebuilt,
+}
+
+fn create_fts_indexes_outcome(conn: &Conn<'_>) -> Result<FtsOutcome, Error> {
+    let marker_current = fts_marker_is_current(conn)?;
+
+    let mut already_existed = false;
+    for sql in CREATE_FTS_SQL {
         if let Err(e) = conn.raw_query(sql) {
             if !crate::error::is_already_exists_error(&e) {
                 return Err(e);
             }
+            already_existed = true;
         }
     }
-    Ok(())
+    if marker_current {
+        return Ok(FtsOutcome::Current);
+    }
+    if already_existed {
+        eprintln!(
+            "liminis-context-graph: rebuilding full-text (FTS) indexes: they were not built by \
+             this lbug version ({}). This is a one-time rebuild; its time is proportional to \
+             corpus size, and it is needed to recover search and writes for non-ASCII terms \
+             (issue #649).",
+            lbug::VERSION
+        );
+        rebuild_fts_indexes(conn)?;
+        return Ok(FtsOutcome::Rebuilt);
+    }
+    write_fts_marker(conn)?;
+    Ok(FtsOutcome::MarkedFresh)
+}
+
+/// Drops all 3 FTS indexes, recreates them, then records the marker — in that order, so a
+/// crash anywhere leaves the marker unset and the next open rebuilds again. All statements are
+/// unrecorded (never enter `executed_mutations`, hence never the WAL; ADR-0015). Always
+/// rebuilds all 3 together: dropping only the index named in an "inconsistent" error just
+/// moves the failure to the next one.
+pub(crate) fn rebuild_fts_indexes(conn: &Conn<'_>) -> Result<(), Error> {
+    ensure_schema_state_table(conn)?;
+    // Clear any *current* marker first (the backstop runs with one set): otherwise a crash after
+    // only some of the drops would leave a marker that the next open trusts, skipping the rebuild
+    // and leaving an undropped inconsistent index in place (FR-009).
+    conn.exec_params_unrecorded(
+        "MATCH (s:SchemaState {key: $key}) DELETE s",
+        serde_json::json!({ "key": FTS_MARKER_KEY }),
+    )?;
+    for sql in DROP_FTS_SQL {
+        let _ = conn.query_unrecorded(sql);
+    }
+    for sql in CREATE_FTS_SQL {
+        conn.query_unrecorded(sql)?;
+    }
+    write_fts_marker(conn)
+}
+
+/// Whether the marker equals the running lbug. Reads first and only creates `SchemaState` when
+/// it is missing: `CREATE NODE TABLE IF NOT EXISTS` is a write transaction (and so a checkpoint)
+/// even when it is a no-op, which `build_indices_and_constraints` — called on every replay and
+/// recovery — must not pay when nothing needs doing.
+fn fts_marker_is_current(conn: &Conn<'_>) -> Result<bool, Error> {
+    match schema_state_status(conn, FTS_MARKER_KEY) {
+        Ok(v) => Ok(v.as_deref() == Some(lbug::VERSION)),
+        Err(e) if crate::error::is_missing_table_error(&e) => {
+            ensure_schema_state_table(conn)?;
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn write_fts_marker(conn: &Conn<'_>) -> Result<(), Error> {
+    conn.exec_params_unrecorded(
+        "MERGE (s:SchemaState {key: $key}) SET s.status = $status",
+        serde_json::json!({ "key": FTS_MARKER_KEY, "status": lbug::VERSION }),
+    )
 }
 
 /// Drops the 3 FTS indexes. Idempotent — errors are suppressed so this is safe to call
 /// even when the indexes are already absent (e.g. repeated reload or interrupted reload).
 /// Used by `handle_rebuild_from_wal` to enable bulk-load replay without inline FTS maintenance.
 pub fn drop_fts_indexes(conn: &Conn<'_>) {
-    let _ = conn.raw_query("CALL DROP_FTS_INDEX('Entity', 'node_name_and_summary')");
-    let _ = conn.raw_query("CALL DROP_FTS_INDEX('RelatesToNode_', 'edge_name_and_fact')");
-    let _ = conn.raw_query("CALL DROP_FTS_INDEX('Episodic', 'episode_content')");
+    for sql in DROP_FTS_SQL {
+        let _ = conn.raw_query(sql);
+    }
 }
 
 #[cfg(test)]
@@ -666,4 +1063,133 @@ mod create_fts_indexes_tests {
             "missing-table error must not be misclassified as already-exists: {err}"
         );
     }
+}
+
+#[cfg(test)]
+mod fts_marker_tests {
+    use super::*;
+    use crate::db::Db;
+    use tempfile::TempDir;
+
+    fn marker(conn: &Conn<'_>) -> Option<String> {
+        schema_state_status(conn, FTS_MARKER_KEY).unwrap()
+    }
+
+    fn clear_marker(conn: &Conn<'_>) {
+        conn.exec_params_unrecorded(
+            "MATCH (s:SchemaState {key: $key}) DELETE s",
+            serde_json::json!({ "key": FTS_MARKER_KEY }),
+        )
+        .unwrap();
+    }
+
+    fn open() -> (TempDir, Db) {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        (dir, db)
+    }
+
+    /// SC-003: a database created by this build writes the marker at index creation and a later
+    /// open does not rebuild.
+    #[test]
+    fn fresh_db_writes_marker_and_does_not_rebuild() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::Current
+        );
+    }
+
+    /// SC-002 / FR-003: indexes present but no marker (every pre-fix database) → rebuild once;
+    /// the next call does not rebuild.
+    #[test]
+    fn missing_marker_rebuilds_once() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        clear_marker(&conn);
+        assert_eq!(marker(&conn), None);
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::Rebuilt
+        );
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::Current
+        );
+    }
+
+    /// FR-009: `rebuild_fts_indexes` clears the marker before its first drop and re-sets it
+    /// last, whether or not a marker was present when it started.
+    #[test]
+    fn rebuild_with_current_marker_or_none_ends_marked() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+        rebuild_fts_indexes(&conn).unwrap();
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+        clear_marker(&conn);
+        rebuild_fts_indexes(&conn).unwrap();
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+    }
+
+    #[test]
+    fn mismatched_marker_rebuilds() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        set_schema_state_status(&conn, FTS_MARKER_KEY, "0.20.3").unwrap();
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::Rebuilt
+        );
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+    }
+
+    /// Indexes dropped (as a replay does) and no marker → the creates all succeed, so the
+    /// indexes are known-fresh: marker only, no rebuild.
+    #[test]
+    fn all_created_writes_marker_without_rebuild() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        drop_fts_indexes(&conn);
+        clear_marker(&conn);
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::MarkedFresh
+        );
+        assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+    }
+
+    /// ADR-0015: the rebuild's DDL and the marker write must never enter `executed_mutations`
+    /// (handlers drain that buffer into the WAL).
+    #[test]
+    fn rebuild_is_not_recorded_for_the_wal() {
+        let (_d, db) = open();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        clear_marker(&conn);
+        let _ = conn.drain_mutations();
+        assert_eq!(
+            create_fts_indexes_outcome(&conn).unwrap(),
+            FtsOutcome::Rebuilt
+        );
+        let recorded = conn.drain_mutations();
+        assert!(recorded.is_empty(), "unexpected WAL entries: {recorded:?}");
+    }
+}
+
+/// Every per-group WAL directory under `wal_root` — the `wal_dirs` argument for the
+/// `ingested_at` backfill at sites that rebuild or reopen the whole embedded DB (which holds
+/// every group's records, not just the default group's).
+pub fn group_wal_dirs(wal_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    crate::wal_group::list_group_wal_dirs(wal_root)
+        .map(|v| v.into_iter().map(|(_, d)| d).collect())
+        .unwrap_or_default()
 }

@@ -1,5 +1,7 @@
 # ADR-0283: Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution
 
+> **Amended by ADR-0615 (issue #615):** the scan-fallback authority is kind-aware (`get_entity_by_name_ci_with_scan_fallback(name, group_id, kind)`); extraction calls it with kind `Entity`. A self-heal now repairs `kind` as well as `lookup_key`.
+
 **Status**: Superseded by [ADR-0221](0221-secondary-art-index-for-entity-name-lookup.md)
 **Date**: 2026-07-30
 **Issue**: #283 (this fix); narrows ADR-0038's "no scan fallback" stance for two of its four

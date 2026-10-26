@@ -76,11 +76,13 @@ in CI.
 Two structural constraints shaped the response:
 
 - **CI cannot prove macOS.** All eight `runs-on:` entries in `ci.yml` are `ubuntu-latest`.
-  `release.yml` does trigger on `pull_request`, but its `build-local-artifacts` job is gated on
-  `publishing == 'true' || pr_run_mode == 'upload'`, and no `pr-run-mode` is set, so a PR runs
-  only the `plan` job and builds nothing. `aarch64-apple-darwin` is therefore linked for the
+  At the time, `release.yml` triggered on `pull_request` but its `build-local-artifacts` job was
+  gated on `publishing == 'true' || pr_run_mode == 'upload'` with no `pr-run-mode` set, so a PR
+  ran only the `plan` job and built nothing. `aarch64-apple-darwin` was therefore linked for the
   first time *by the release itself* — which is exactly how the v0.9.0 `ld: symbol(s) not found`
-  failure reached a tag.
+  failure reached a tag. *(Superseded by [ADR-0639](0639-post-merge-release-packaging-verification.md):
+  `release.yml` no longer runs on PRs at all, and instead builds all four targets on every push
+  to `main`, so the release path is now exercised before each tag.)*
 - **`release.yml` is cargo-dist–generated but hand-maintained in places.** It inlines the
   `.github/build-setup.yml` fragment at generate time rather than referencing it at run time, and
   `allow-dirty = ["ci"]` preserves hand edits.
@@ -219,10 +221,11 @@ each, so neither can ship a bad artifact:
 
 Cold release runners build in the correct order, so the release path itself is unaffected.
 
-**macOS remains unproven by CI.** This ADR does not fix that structural gap — it only makes the
-release path reproducible locally so it can be checked by hand before tagging. Closing the gap
-properly means adding a macOS job or enabling cargo-dist's `pr-run-mode = "upload"`, which is
-separate work.
+**macOS remains unproven by per-PR CI.** This ADR does not fix that structural gap — it only makes
+the release path reproducible locally so it can be checked by hand before tagging. *(Since
+[ADR-0639](0639-post-merge-release-packaging-verification.md) the macOS link is verified
+post-merge by the `Release` run on every push to `main`, not per PR — and `pr-run-mode` is
+`"skip"`, not `"upload"`.)*
 
 ## Amendment (2026-09-01, issue #529)
 
