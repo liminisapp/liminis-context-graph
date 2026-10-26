@@ -2460,7 +2460,7 @@ async fn handle_supersede_document(req: &IpcRequest, state: Arc<AppState>) -> Re
             "superseding_doc_id": superseding,
             "superseded_doc_id": superseded,
             "effective_at": effective_at,
-            "recorded_at": recorded_at,
+            "recorded_at": crate::belief::format_us(recorded_us),
             "superseded_count": uuids.len(),
             "superseded_uuids": uuids,
         }))
