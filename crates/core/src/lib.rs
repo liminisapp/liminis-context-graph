@@ -2,6 +2,7 @@ pub mod app_state;
 pub mod assert;
 pub mod backfill;
 pub mod backfill_summary_embeddings;
+pub mod belief;
 pub mod canonicalize;
 pub mod cassette;
 pub(crate) mod checkpoint;

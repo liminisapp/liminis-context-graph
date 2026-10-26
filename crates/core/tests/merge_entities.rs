@@ -64,6 +64,7 @@ fn make_edge_in_group(
         relation_type: None,
         episode_uuids: vec![],
         source_descriptions: vec![],
+        ..Default::default()
     }
 }
 
@@ -965,6 +966,7 @@ fn test_merge_with_timestamp_edges() {
             relation_type: None,
             episode_uuids: vec![],
             source_descriptions: vec![],
+            ..Default::default()
         };
         conn.insert_relates_to_edge(&edge).unwrap();
     }

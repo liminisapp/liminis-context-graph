@@ -303,6 +303,7 @@ async fn purge_removes_target_group_and_leaves_other_group_untouched() {
             relation_type: None,
             episode_uuids: vec![],
             source_descriptions: vec![],
+            ..Default::default()
         };
         conn.insert_relates_to_edge(&edge_a).unwrap();
     }

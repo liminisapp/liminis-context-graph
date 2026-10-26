@@ -36,6 +36,13 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // ("knowledge time"), kept separately from the caller-supplied event time that feeds
     // `created_at`/`valid_at`. Nullable, so graphiti-shaped statements that never mention it
     // still bind; legacy rows are filled by `ensure_ingested_at_backfill`.
+    // Belief time (issue #705, ADR-0705) adds a fifth documented divergence from kuzu_driver.py,
+    // additive and nullable like the others: `Episodic.superseded_at` / `superseded_by` /
+    // `superseded_by_kind` / `supersession_reason` record *when the graph stopped believing* an
+    // episode (service clock), by what, and why; `RelatesToNode_.warrant` marks edges with no
+    // producing episode (`assertion`, `cross_group`) and `RelatesToNode_.valid_at_source` records
+    // whether an extracted edge's `valid_at` came from the text or defaulted to `reference_time`.
+    // Supersession never touches `valid_at` / `invalid_at`: a correction ends belief, not validity.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Entity (\
          uuid STRING PRIMARY KEY, \
@@ -71,7 +78,11 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          valid_at TIMESTAMP, \
          entity_edges STRING[], \
          attributes STRING, \
-         ingested_at TIMESTAMP\
+         ingested_at TIMESTAMP, \
+         superseded_at TIMESTAMP, \
+         superseded_by STRING, \
+         superseded_by_kind STRING, \
+         supersession_reason STRING\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -88,7 +99,9 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          invalid_at TIMESTAMP, \
          attributes STRING, \
          relation_type STRING, \
-         ingested_at TIMESTAMP\
+         ingested_at TIMESTAMP, \
+         warrant STRING, \
+         valid_at_source STRING\
          )"
     ))?;
     // Stub tables for graphiti's community/saga subsystem (not implemented in liminis-graph;
@@ -360,6 +373,26 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
                 conn.raw_query(&format!("ALTER TABLE {table} ADD ingested_at TIMESTAMP"))
             {
                 eprintln!("liminis-context-graph: schema migrate: ALTER TABLE {table} ADD ingested_at TIMESTAMP: {e} (non-fatal)");
+            }
+        }
+    }
+    // Belief-time columns (issue #705). Same probe-then-ALTER discipline as `ingested_at`.
+    for (table, col, ty) in [
+        ("Episodic", "superseded_at", "TIMESTAMP"),
+        ("Episodic", "superseded_by", "STRING"),
+        ("Episodic", "superseded_by_kind", "STRING"),
+        ("Episodic", "supersession_reason", "STRING"),
+        ("RelatesToNode_", "warrant", "STRING"),
+        ("RelatesToNode_", "valid_at_source", "STRING"),
+    ] {
+        if conn
+            .raw_query(&format!(
+                "MATCH (n:{table}) WHERE n.uuid = '_probe_' RETURN n.{col} LIMIT 0"
+            ))
+            .is_err()
+        {
+            if let Err(e) = conn.raw_query(&format!("ALTER TABLE {table} ADD {col} {ty}")) {
+                eprintln!("liminis-context-graph: schema migrate: ALTER TABLE {table} ADD {col} {ty}: {e} (non-fatal)");
             }
         }
     }

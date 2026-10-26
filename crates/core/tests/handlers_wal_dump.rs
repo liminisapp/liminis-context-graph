@@ -733,6 +733,7 @@ async fn test_dump_wal_preserves_episodic_attributes() {
             valid_at: "2026-01-01 00:00:00".to_string(),
             entity_edges: vec![],
             attributes: attrs.to_string(),
+            ..Default::default()
         })
         .unwrap();
     }

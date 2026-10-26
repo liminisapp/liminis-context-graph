@@ -476,6 +476,7 @@ async fn assert_relationship_edge_upsert_never_crosses_groups() {
             relation_type: None,
             episode_uuids: vec![],
             source_descriptions: vec![],
+            ..Default::default()
         })
         .unwrap();
     }

@@ -80,7 +80,45 @@ fn min_similarity_prop() -> Value {
     })
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (46 total),
+/// Belief-time parameters (issue #705) shared by the five relationship reads, spread into each
+/// tool's `properties`.
+fn belief_props() -> [(&'static str, Value); 2] {
+    [
+        (
+            "believed_only",
+            json!({
+                "type": "boolean",
+                "description": "Opt in to belief filtering (issue #705): drop edges the graph did \
+                                 not believe at `as_of` (default now) — e.g. a fact whose only \
+                                 source episode was superseded by a correction. Superseded edges \
+                                 stay readable without this flag. Every returned edge also gains \
+                                 a `belief` object (state, producing_episode_uuids, warrant, \
+                                 valid_at_source). With `as_of` set and this false, edges are \
+                                 annotated but not filtered. Capped reads over-fetch, so fewer \
+                                 than `num_results` edges may come back."
+            }),
+        ),
+        (
+            "as_of",
+            json!({
+                "type": "string", "format": "date-time",
+                "description": "Evaluate belief as of this time (RFC 3339) instead of now. Implies \
+                                 `believed_only` unless that is explicitly false. Belief is \
+                                 transaction time, distinct from `valid_at`/`invalid_at`."
+            }),
+        ),
+    ]
+}
+
+/// `props` plus the [`belief_props`] entries, as a JSON object.
+fn with_belief(mut props: Value) -> Value {
+    for (k, v) in belief_props() {
+        props[k] = v;
+    }
+    props
+}
+
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (47 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -198,7 +236,7 @@ pub fn registry() -> Vec<ToolSpec> {
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {
+                    "properties": with_belief(json!({
                         "query": {"type": "string", "description": "Search text."},
                         "group_ids": group_ids_prop(),
                         "num_results": {
@@ -206,7 +244,7 @@ pub fn registry() -> Vec<ToolSpec> {
                             "description": "Maximum number of relationships to return."
                         },
                         "min_similarity": min_similarity_prop()
-                    },
+                    })),
                     "required": ["query"]
                 })
             },
@@ -246,7 +284,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "cursor": cursor_prop(),
                         "fields": fields_prop(
                             "uuid, name, group_id, created_at, ingested_at, source, source_description, \
-                             content, valid_at, entity_edges, attributes"
+                             content, valid_at, entity_edges, attributes, superseded_at, superseded_by, \
+                             superseded_by_kind, supersession_reason"
                         )
                     }
                 })
@@ -275,7 +314,7 @@ pub fn registry() -> Vec<ToolSpec> {
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {"group_ids": group_ids_prop()}
+                    "properties": with_belief(json!({"group_ids": group_ids_prop()}))
                 })
             },
         },
@@ -289,12 +328,12 @@ pub fn registry() -> Vec<ToolSpec> {
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {
+                    "properties": with_belief(json!({
                         "uuids": {
                             "type": "array", "items": {"type": "string"},
                             "description": "Edge UUIDs to fetch."
                         }
-                    },
+                    })),
                     "required": ["uuids"]
                 })
             },
@@ -373,13 +412,13 @@ pub fn registry() -> Vec<ToolSpec> {
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {
+                    "properties": with_belief(json!({
                         "num_results": {
                             "type": "integer", "minimum": 1, "default": 1000,
                             "description": "Maximum number of relationships to return."
                         },
                         "group_ids": group_ids_prop()
-                    }
+                    }))
                 })
             },
         },
@@ -395,14 +434,14 @@ pub fn registry() -> Vec<ToolSpec> {
             input_schema: || {
                 json!({
                     "type": "object",
-                    "properties": {
+                    "properties": with_belief(json!({
                         "entity_uuid": {"type": "string", "description": "Center entity UUID (required)."},
                         "num_results": {
                             "type": "integer", "minimum": 1, "default": 50,
                             "description": "Maximum number of neighbors to return."
                         },
                         "group_ids": group_ids_prop()
-                    },
+                    })),
                     "required": ["entity_uuid"]
                 })
             },
@@ -478,7 +517,18 @@ pub fn registry() -> Vec<ToolSpec> {
                            episode node — structured metadata co-located with, but independent \
                            of, the facts extracted from the chunk's prose (reachable from the \
                            episode via a MENTIONS hop). Returned by `knowledge_get_episodes` and \
-                           `knowledge_search_passages`.",
+                           `knowledge_search_passages`. \
+                           Resubmitting a `chunk_id` is a correction (issue #705): once the new \
+                           ingest has fully succeeded, the chunk's earlier live episodes in this \
+                           group are superseded, so the graph stops believing the facts they \
+                           asserted. Nothing is deleted and `valid_at`/`invalid_at` are never \
+                           written — read the old facts with `as_of`, or hide them with \
+                           `believed_only`, on the relationship reads. The result lists the \
+                           `superseded_episode_uuids`. To submit one chunk as several calls, send \
+                           `supersede: false` on every unit but the last, and pass the earlier \
+                           units' `episode_uuid`s as `same_revision_episode_uuids` on the last. \
+                           Commit your own record of a chunk as ingested only after this call \
+                           succeeds.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -492,7 +542,9 @@ pub fn registry() -> Vec<ToolSpec> {
                             "type": "string", "format": "date-time",
                             "description": "ISO 8601 timestamp; defaults to now."
                         },
-                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."}
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."},
+                        "supersede": {"type": "boolean", "default": true, "description": "Set false on every non-final unit of a chunk submitted as several calls under one chunk_id, so a unit does not supersede the previous one."},
+                        "same_revision_episode_uuids": {"type": "array", "items": {"type": "string"}, "description": "On the final unit of a multi-unit revision: episode_uuids returned by the earlier units. They stay live; the chunk's older episodes are superseded."}
                     },
                     "required": ["chunk_text", "chunk_id", "source_file"]
                 })
@@ -570,6 +622,31 @@ pub fn registry() -> Vec<ToolSpec> {
                         "group_ids": {
                             "type": "array", "items": {"type": "string"}, "minItems": 1,
                             "description": "Non-empty array of groups to restrict deletion to (required). An unscoped, all-groups delete is not supported."
+                        }
+                    },
+                    "required": ["chunk_id", "group_ids"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_mark_chunk_removed",
+            description: "Record that a chunk no longer exists in its document (issue #705). \
+                           Supersedes the chunk's live episodes with reason `chunk_removed`: the \
+                           graph stops believing the facts they asserted, but nothing is deleted \
+                           — the episodes and edges stay readable as history, and \
+                           `valid_at`/`invalid_at` are never written. Prefer this to \
+                           `knowledge_delete_chunk_episode` for a section that was removed from \
+                           a document; that method keeps its explicit-deletion contract. \
+                           Idempotent.",
+            scope: Scope::Write,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "chunk_id": {"type": "string", "description": "Chunk ID that no longer exists (required, non-empty)."},
+                        "group_ids": {
+                            "type": "array", "items": {"type": "string"}, "minItems": 1,
+                            "description": "Non-empty array of groups to restrict the supersession to (required). An unscoped, all-groups call is not supported."
                         }
                     },
                     "required": ["chunk_id", "group_ids"]
@@ -1434,11 +1511,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_46_unique_tools() {
+    fn registry_has_47_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 46);
+        assert_eq!(r.len(), 47);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 46, "tool names must be unique");
+        assert_eq!(names.len(), 47, "tool names must be unique");
     }
 
     #[test]
@@ -1446,7 +1523,7 @@ mod tests {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
         assert_eq!(count(Scope::Read), 15);
-        assert_eq!(count(Scope::Write), 15);
+        assert_eq!(count(Scope::Write), 16);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 15);
     }

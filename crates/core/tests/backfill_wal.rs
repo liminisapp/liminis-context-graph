@@ -119,6 +119,7 @@ fn make_edge_in_group(
         relation_type: rt.map(|s| s.to_string()),
         episode_uuids: vec![],
         source_descriptions: vec![],
+        ..Default::default()
     }
 }
 

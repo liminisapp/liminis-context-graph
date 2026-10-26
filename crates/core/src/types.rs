@@ -154,7 +154,24 @@ pub struct EpisodicRow {
     /// `created_at` ("YYYY-MM-DD HH:MM:SS"); empty only for a NULL column.
     #[serde(default)]
     pub ingested_at: String,
+    /// UUIDs of the **entities** this episode mentions — despite the name, NOT edge UUIDs and not
+    /// edge provenance (FR-012, issue #705). The episode that produced a `RELATES_TO` edge is
+    /// recorded on the edge itself, in `RelatesToNode_.episodes`.
     pub entity_edges: Vec<String>,
+    /// When the graph stopped believing this episode (issue #705, ADR-0705), service clock, same
+    /// format as `ingested_at`. `None` while the episode is live. Distinct from validity:
+    /// superseding an episode never writes `valid_at` / `invalid_at` on anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_at: Option<String>,
+    /// What superseded it: an episode uuid (`superseded_by_kind = "episode"`); #707 adds documents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
+    /// Kind of `superseded_by` (`episode`; `document` is reserved for #707).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by_kind: Option<String>,
+    /// Why: `revision` (the chunk was resubmitted) or `chunk_removed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersession_reason: Option<String>,
     /// Caller-supplied structured metadata (issue #528), a JSON object serialized as a string.
     /// The write path (`episode::add_episode`) and the migration/WAL-rebuild zero-fill
     /// (`schema::zero_fill_null_episodic_attributes`) both maintain the invariant that this is a
@@ -200,6 +217,19 @@ pub struct RelatesToEdge {
     pub episode_uuids: Vec<String>,
     #[serde(default)]
     pub source_descriptions: Vec<String>,
+    /// The episode(s) that produced this edge — the `RelatesToNode_.episodes` column (issue #705,
+    /// FR-005). Unlike `episode_uuids` above, this IS provenance: extraction writes exactly one
+    /// entry. Empty for direct assertions, cross-group edges and legacy rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub episodes: Vec<String>,
+    /// Why an edge with no producing episode is believed: `assertion` or `cross_group` (FR-006).
+    /// `None` on extracted edges and on legacy rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warrant: Option<String>,
+    /// Whether an extracted edge's `valid_at` came from the text (`text`) or defaulted to the
+    /// episode's `reference_time` (`reference_time`) — FR-011. `None` when not applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_at_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

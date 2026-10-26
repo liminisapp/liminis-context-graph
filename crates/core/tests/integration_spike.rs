@@ -49,6 +49,7 @@ fn round_trip_entity_and_episodic() {
         valid_at: ts.to_string(),
         entity_edges: vec![],
         attributes: "{}".to_string(),
+        ..Default::default()
     })
     .expect("insert episodic");
 

@@ -903,6 +903,7 @@ fn insert_test_edge(
         relation_type: relation_type.map(|s| s.to_string()),
         episode_uuids: vec![],
         source_descriptions: vec![],
+        ..Default::default()
     })
     .unwrap();
 }
@@ -3600,6 +3601,7 @@ async fn test_relates_to_edge_timestamp_type() {
             relation_type: None,
             episode_uuids: vec![],
             source_descriptions: vec![],
+            ..Default::default()
         })
         .unwrap();
     }
@@ -3803,6 +3805,7 @@ async fn parity_canonicalize_no_deletion_of_arrow_edges() {
                 relation_type: Some("KNOWS".to_string()),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                ..Default::default()
             })
             .unwrap();
         }
@@ -3995,6 +3998,7 @@ async fn parity_backfill_dry_run_counts() {
                 relation_type: None,
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                ..Default::default()
             })
             .unwrap();
         }
@@ -4016,6 +4020,7 @@ async fn parity_backfill_dry_run_counts() {
                 relation_type: Some("KNOWS".to_string()),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                ..Default::default()
             })
             .unwrap();
         }
@@ -4097,6 +4102,7 @@ async fn parity_backfill_live_fills_empty() {
                 relation_type: None,
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                ..Default::default()
             })
             .unwrap();
         }
@@ -4117,6 +4123,7 @@ async fn parity_backfill_live_fills_empty() {
                 relation_type: Some("KNOWS".to_string()),
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                ..Default::default()
             })
             .unwrap();
         }
@@ -4222,6 +4229,7 @@ async fn parity_backfill_idempotent() {
                 relation_type: None,
                 episode_uuids: vec![],
                 source_descriptions: vec![],
+                ..Default::default()
             })
             .unwrap();
         }
@@ -7207,6 +7215,7 @@ fn insert_test_episode(db: &Arc<Db>, uuid: &str, name: &str, group: &str, create
         valid_at: created_at.to_string(),
         entity_edges: vec![],
         attributes: "{}".to_string(),
+        ..Default::default()
     })
     .unwrap();
 }
