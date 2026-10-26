@@ -146,6 +146,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0667](0667-read-path-paging-cursor-and-status-label.md) | Read-Path Paging Cursor, Projection, All-Groups Episode Default and Status Label | 2026-10-01 |
 | [0673](0673-ingest-time-separate-from-event-time.md) | Ingest Time Is Stored Separately From Event Time (`ingested_at`) | 2026-10-03 |
 | [0690](0690-prefetch-and-cache-prebuilt-liblbug-for-release.md) | Prefetch and Cache the Pinned Prebuilt liblbug for Release Builds | 2026-10-18 |
+| [0705](0705-belief-time-separate-from-validity.md) | Belief Time Is Separate From Validity — Corrections Supersede Episodes | 2026-10-26 |
 
 ## Historical numbering
 

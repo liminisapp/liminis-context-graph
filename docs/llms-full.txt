@@ -759,11 +759,11 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (47)
+## IPC methods (48)
 
-The socket dispatch handles **47 methods**: 46 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **48 methods**: 47 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (47) and the MCP tool registry (46, below) differ by exactly one — `health_check` is
+surface (48) and the MCP tool registry (47, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -775,6 +775,7 @@ not exposed as an MCP tool.
 | Search | `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_delete_by_group`, `knowledge_clear_all` |
+| Supersession | `knowledge_mark_chunk_removed` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
 | Ontology | `knowledge_reload_ontology` |
 | Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
@@ -938,7 +939,7 @@ union of all active scopes.
 | Scope | Methods |
 |-------|---------|
 | `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections` |
-| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
+| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` |
 | `all` | every scope above (default) |
@@ -1103,6 +1104,74 @@ the compaction time, which says nothing about when the record was learned, so it
 after WAL files were pruned. The backfill is idempotent and never rewrites a record that already
 has an ingest time. See [ADR-0673](adr/0673-ingest-time-separate-from-event-time.md).
 
+### Belief time: corrections supersede, they do not delete (issue #705)
+
+Alongside event time and ingest time (above) the graph records **when it stopped believing**
+something. Belief is *transaction time*; it is deliberately separate from validity
+(`valid_at` / `invalid_at`, the world's clock). When a document is corrected, the removed fact was
+never true, so no supersession path ever writes `valid_at` or `invalid_at`: **correction ends belief
+and leaves validity alone.** See [ADR-0705](adr/0705-belief-time-separate-from-validity.md).
+
+**Corrections.** Resubmitting a `chunk_id` to `knowledge_process_chunk` supersedes that chunk's
+earlier live episodes **in the same `group_id`**, at the new episode's ingest time, and only once the
+new ingest has fully succeeded. A failed re-ingest leaves the old episode live. The result gains
+`superseded_episode_uuids`. Nothing is deleted. The same `chunk_id` in another group is never touched.
+`knowledge_add_episode` never supersedes (its `name` is free-form).
+
+To submit one chunk as several calls under one `chunk_id`, send `supersede: false` on every unit but
+the last, and pass the earlier units' `episode_uuid`s as `same_revision_episode_uuids` on the last:
+they stay live, the older episodes are superseded. **Record a chunk as ingested only after the call
+succeeds** — a client that records it first will never resend a failed correction.
+
+**Removal.** `knowledge_mark_chunk_removed {chunk_id, group_ids}` records that a chunk no longer
+exists in its document: its live episodes are superseded with reason `chunk_removed`, and nothing is
+deleted. `group_ids` is required and non-empty, as for the delete. It returns
+`{superseded_count, superseded_uuids, superseded_at}` and is idempotent (a repeat reports 0).
+`knowledge_delete_chunk_episode` is unchanged and still destroys the episodes — use it only for
+explicit deletion. After a heading rename, ingest the renamed chunks first, then report the old ids
+removed; no fact present in both revisions is unbelieved at any instant.
+
+**Episode fields.** Episodes gain `superseded_at` (null while live), `superseded_by` (the superseding
+episode, absent for `chunk_removed`), `superseded_by_kind` (`episode`) and `supersession_reason`
+(`revision`, `chunk_removed`). They appear on `knowledge_get_episodes` only when set and are accepted
+in its `fields` projection. `get_episodes` and `search_passages` still return superseded episodes by
+default.
+
+**Edge provenance.** Each extracted edge records the episode that produced it. That is
+`producing_episode_uuids` in the `belief` object below — **not** the `episode_uuids` field on edge
+reads, which remains the either-endpoint inference (episodes mentioning the source or target) and is
+not evidence for that specific relationship. Edges with no producing episode carry a `warrant`
+(`assertion` for `knowledge_assert_relationship`, `cross_group` for `knowledge_add_cross_group_edge`)
+and are believed until retracted. An extracted edge's `valid_at_source` is `text` when the extractor
+read the date from the text and `reference_time` when it defaulted. A direct assertion never
+overwrites an extracted edge's fact; it creates a separate edge.
+
+**Reading belief.** `knowledge_find_relationships`, `knowledge_list_relationships`,
+`knowledge_get_entity_neighbors`, `knowledge_get_edges_by_group` and `knowledge_get_edges_by_uuids`
+accept two optional parameters:
+
+| Parameter | Meaning |
+|---|---|
+| `believed_only` (boolean) | Drop edges the graph did not believe at `as_of` (default now). |
+| `as_of` (RFC 3339) | Evaluate belief at this time. Implies `believed_only` unless that is explicitly `false`, which annotates without filtering. |
+
+Either one adds a `belief` object to each edge: `state` (`believed`, `superseded`, `legacy`,
+`support_deleted`, `not_yet_ingested`), `believed`, `producing_episode_uuids`, and `warrant` /
+`valid_at_source` when set. An edge is believed at `t` iff it was ingested at or before `t` and either
+carries a warrant or has at least one producing episode not superseded at or before `t`; a fact is
+therefore believed on `[T1, T2)` when ingested at `T1` and superseded at `T2`, and stays believed
+while any one live source still states it. Capped reads (`find_relationships`,
+`list_relationships`, `get_entity_neighbors`) over-fetch and filter afterwards, so a filtered read can
+return fewer than `num_results`. **Without these parameters every read is unchanged** and includes
+superseded edges — making belief the default is a later, documented change.
+
+**Legacy edges.** An edge with neither a producing episode nor a warrant predates this feature. It is
+treated as believed and reported as `legacy`; `knowledge_status` returns `legacy_edge_count`. They
+cannot be soundly backfilled (endpoint co-occurrence is not provenance, #404), so re-ingest legacy
+graphs. Separately, an edge whose producing episodes were all hard-deleted
+(`knowledge_delete_episode`, `delete_by_source`, `delete_chunk_episode`) is `support_deleted` and
+unbelieved at every time.
+
 ### Bulk reads: group scope, paging, projection, prefix (issue #667)
 
 `knowledge_get_episodes` and `knowledge_list_entities` are the two bulk reads, and a large graph
@@ -1114,7 +1183,7 @@ additive parameters; with none of them the response is exactly `{<collection>, c
 | `group_ids` (array) | both | Groups to read. `knowledge_get_episodes` also accepts the single-group alias `group_id`; both given ⇒ their deduplicated union. **Neither given ⇒ every group** (episodes used to default to `liminis`). An explicit `[]` also means all groups. |
 | `last_n` / `num_results` | episodes / entities | Page size (defaults 50 / 500, unchanged). |
 | `cursor` | both | Opaque keyset cursor. Send `""` for the first page, then send back each response's `next_cursor` until it is `null`. |
-| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
+| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
 | `name_prefix` | both | Names starting with this prefix, matched literally. Case-insensitive for entities (via Cypher `lower()`, so non-ASCII folds only as far as lbug does); case-sensitive for episodes. |
 
 `next_cursor` appears only when the request contained `cursor`, `fields` or `name_prefix`; it is
@@ -1132,6 +1201,10 @@ a WAL root is configured it now also carries `"scope": "default_group"`, `"defau
 stream — read `wal_groups` for every group's position. With no WAL root the block is unchanged.
 
 ### Deletion (`delete_chunk_episode`, `delete_by_source`)
+
+> For a chunk that merely disappeared from its document, prefer
+> `knowledge_mark_chunk_removed` (see "Belief time" above), which ends belief without destroying the evidence. `knowledge_delete_chunk_episode` keeps its
+> explicit-deletion contract unchanged.
 
 **Breaking change in 0.13.2 (issue #406): `group_ids` is required and non-empty on both
 `knowledge_delete_chunk_episode` and `knowledge_delete_by_source`.** A call that previously
@@ -4404,6 +4477,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0667](0667-read-path-paging-cursor-and-status-label.md) | Read-Path Paging Cursor, Projection, All-Groups Episode Default and Status Label | 2026-10-01 |
 | [0673](0673-ingest-time-separate-from-event-time.md) | Ingest Time Is Stored Separately From Event Time (`ingested_at`) | 2026-10-03 |
 | [0690](0690-prefetch-and-cache-prebuilt-liblbug-for-release.md) | Prefetch and Cache the Pinned Prebuilt liblbug for Release Builds | 2026-10-18 |
+| [0705](0705-belief-time-separate-from-validity.md) | Belief Time Is Separate From Validity — Corrections Supersede Episodes | 2026-10-26 |
 
 ## Historical numbering
 
