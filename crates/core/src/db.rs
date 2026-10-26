@@ -1664,7 +1664,7 @@ impl<'db> Conn<'db> {
         offset: usize,
         limit: usize,
     ) -> Result<Vec<Vec<lbug::Value>>, Error> {
-        if let Some(gid) = group_id {
+        let rows = if let Some(gid) = group_id {
             self.query_params(
                 "MATCH (n:DocSupersession) WHERE n.group_id = $gid \
                  RETURN n.key, n.group_id, n.superseded_doc_id, n.superseding_doc_id, \
@@ -1680,7 +1680,21 @@ impl<'db> Conn<'db> {
                  ORDER BY n.key SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
+        };
+        match rows {
+            Err(e) if e.to_string().contains("does not exist") => Ok(Vec::new()),
+            other => other,
         }
+    }
+
+    /// Whether the `DocSupersession` table exists (a database opened without the schema step has
+    /// none).
+    pub fn has_doc_supersession_table(&self) -> bool {
+        self.query_params(
+            "MATCH (d:DocSupersession) RETURN d.key LIMIT 0",
+            serde_json::json!({}),
+        )
+        .is_ok()
     }
 
     /// Deletes the `DocSupersession` records of the given groups (group purge, issue #707).
@@ -4508,6 +4522,7 @@ pub(crate) fn doc_supersession_key(group_id: &str, superseded_doc_id: &str) -> S
 /// | `delete_relates_to_hop` (#369)          | `exec_params`    | ✓ no timestamp fields       |
 /// | `update_relates_to_attributes` (#369)   | `exec_params`    | ✓ no timestamp fields       |
 /// | `create_relates_to_direct` (#369)       | `exec_params`    | ✓ exec_params gate          |
+/// | `create_doc_supersession` (#707)        | `exec_params`    | ✓ exec_params gate          |
 /// | `delete_relates_to_direct` (#369)       | `exec_params`    | ✓ no timestamp fields       |
 /// | `dump.rs` (all node/edge types)         | `WalWriter`      | ✓ RFC-3339+µs WAL; Cypher   |
 /// |                                         |                  |   wrapper coerces on replay |
@@ -4519,7 +4534,6 @@ pub(crate) fn doc_supersession_key(group_id: &str, superseded_doc_id: &str) -> S
 /// `timestamp($new_created_at)` Cypher wrapper. This is intentional — the value arrives as a
 /// space-format string from `value_as_timestamp_str` and the wrapper handles coercion. Do NOT add
 /// `new_created_at` to this list; doing so would double-apply coercion and break the path.
-
 const TIMESTAMP_PARAM_NAMES: &[&str] = &[
     "created_at",
     "valid_at",
