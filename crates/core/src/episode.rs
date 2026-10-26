@@ -125,6 +125,18 @@ pub struct EpisodeOpts {
     pub supersede: SupersedePolicy,
 }
 
+/// Phase C's result: `(edges_inserted, edges_dropped_unresolvable,
+/// edges_reclassified_unclassified, dropped_edges, edges_dropped_self_loop,
+/// superseded_episode_uuids)`.
+type PhaseCOutcome = (
+    usize,
+    usize,
+    usize,
+    Vec<DroppedEdgeDetail>,
+    usize,
+    Vec<String>,
+);
+
 struct ActiveWriteGuard(Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for ActiveWriteGuard {
     fn drop(&mut self) {
@@ -1289,7 +1301,7 @@ pub async fn add_episode_with_opts(
         edges_dropped_self_loop,
         superseded_episode_uuids,
     ) = tokio::task::spawn_blocking(
-            move || -> Result<(usize, usize, usize, Vec<DroppedEdgeDetail>, usize, Vec<String>), Error> {
+            move || -> Result<PhaseCOutcome, Error> {
         let conn = db_c.connect()?;
         let mut edges_inserted = 0usize;
         let mut edges_dropped_unresolvable = 0usize;
