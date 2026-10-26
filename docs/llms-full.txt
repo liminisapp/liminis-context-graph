@@ -759,11 +759,11 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (50)
+## IPC methods (51)
 
-The socket dispatch handles **50 methods**: 49 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **51 methods**: 50 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (50) and the MCP tool registry (49, below) differ by exactly one — `health_check` is
+surface (51) and the MCP tool registry (50, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -776,7 +776,7 @@ not exposed as an MCP tool.
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
 | Correction reads | `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_delete_by_group`, `knowledge_clear_all` |
-| Supersession | `knowledge_mark_chunk_removed` |
+| Supersession | `knowledge_mark_chunk_removed`, `knowledge_supersede_document` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
 | Ontology | `knowledge_reload_ontology` |
 | Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
@@ -940,7 +940,7 @@ union of all active scopes.
 | Scope | Methods |
 |-------|---------|
 | `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
-| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
+| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` |
 | `all` | every scope above (default) |
@@ -1221,6 +1221,58 @@ episodes. Any state other than `closed` returns no candidates *and says why*, so
 means "nothing affected" by accident. Both reads take a uuid, derive the group from the record, and
 return an error for a missing or unknown uuid.
 
+### Document supersession: a new document replaces an old one (issue #707)
+
+A document is sometimes *replaced* rather than edited — last year's decision record superseded by a
+new one. That is a relation between two documents, and it differs from a correction in one way: the
+old decision **was true** until it was replaced. So the old facts stop being *believed* when the
+supersession is recorded, but are reported as *in force* until the date the new document took
+effect. The two axes stay separate. See [ADR-0707](adr/0707-document-supersession.md).
+
+**Document identity.** `knowledge_process_chunk` and `knowledge_add_episode` accept an optional
+`doc_id`: the stable identity of the logical document an episode came from, unique within its
+`group_id` (path-valued today). It is stored on the episode and returned by `knowledge_get_episodes`
+when set. It is never defaulted from `source_file`; an episode without one cannot take part in
+supersession, and omitting it changes nothing for existing callers. Graphs written before this
+release have none — re-ingest them.
+
+**Recording a supersession.** `knowledge_supersede_document {group_id, superseding_doc_id,
+superseded_doc_id, effective_at}` (write scope) records "A supersedes B, effective `effective_at`"
+within one group. `effective_at` is an RFC 3339 timestamp **with a timezone offset**; it may be in the
+past (the retroactive case) or the future. Supersession is always explicit — the graph never infers it
+from topic similarity. The call:
+
+- writes one durable record per superseded document (a document has at most one superseding
+  document; express successive replacement as a chain), and
+- supersedes B's live episodes in that group with `superseded_by_kind` `document`, reason
+  `document_superseded`, `superseded_by` A's `doc_id`, at the service-clock recording instant — or at
+  `effective_at` when that is later, so a decision with a future effective date stays believed and in
+  force until then. A correction to B's chunk before that date still ends belief at the correction.
+
+It returns `{success, already_recorded, group_id, superseding_doc_id, superseded_doc_id,
+effective_at, recorded_at, superseded_count, superseded_uuids}`. Episodes of B ingested *after* the
+recording are not marked. Facts A also asserts stay believed through A's own episode. A recorded
+supersession is not undone by later corrections to A.
+
+It is rejected with no side effects (nothing written, WAL untouched) when A and B are the same
+document, when either is unknown in the group (no episode carries that `doc_id`), when the relation
+would form a cycle, when `effective_at` has no timezone, or when B is already superseded by a
+*different* document or effective date. Recording the identical relation again is a no-op
+(`already_recorded: true`). `valid_at` / `invalid_at` are never written. The record is in the WAL, is
+carried by dump compaction and checkpoint restore, and is removed by `knowledge_delete_by_group`.
+
+**Reading it.** On opted-in relationship reads (`believed_only` / `as_of`, above) the `belief` object
+gains:
+
+| Field | Meaning |
+|---|---|
+| `in_force` | Whether the fact was in force at the evaluated time, **independently of `believed`**. `false` once the superseding document's effective date has been reached; `true` otherwise; `null` for a fact that was corrected (it was never true, so it makes no validity claim). An edge is in force while any producing episode is. |
+| `supersession` | Present once the fact's producing episodes are all superseded; not time-dependent, so it classifies the fact from any read. `cause` is `corrected` (revision or removal) or `document_superseded`. For the latter it also carries `superseded_by_document`, `in_force_until` (the effective date) and `recorded_at`; `superseded_at` is when belief ended. |
+
+So between the effective date and the recording date an as-of read shows the old fact `believed` with
+`in_force: false` — the graph had not yet learned otherwise. Believed-only filtering is unchanged: it
+filters on belief, not on being in force, and there is no in-force-only filter yet.
+
 ### Bulk reads: group scope, paging, projection, prefix (issue #667)
 
 `knowledge_get_episodes` and `knowledge_list_entities` are the two bulk reads, and a large graph
@@ -1232,7 +1284,7 @@ additive parameters; with none of them the response is exactly `{<collection>, c
 | `group_ids` (array) | both | Groups to read. `knowledge_get_episodes` also accepts the single-group alias `group_id`; both given ⇒ their deduplicated union. **Neither given ⇒ every group** (episodes used to default to `liminis`). An explicit `[]` also means all groups. |
 | `last_n` / `num_results` | episodes / entities | Page size (defaults 50 / 500, unchanged). |
 | `cursor` | both | Opaque keyset cursor. Send `""` for the first page, then send back each response's `next_cursor` until it is `null`. |
-| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
+| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
 | `name_prefix` | both | Names starting with this prefix, matched literally. Case-insensitive for entities (via Cypher `lower()`, so non-ASCII folds only as far as lbug does); case-sensitive for episodes. |
 
 `next_cursor` appears only when the request contained `cursor`, `fields` or `name_prefix`; it is
@@ -4528,6 +4580,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0690](0690-prefetch-and-cache-prebuilt-liblbug-for-release.md) | Prefetch and Cache the Pinned Prebuilt liblbug for Release Builds | 2026-10-18 |
 | [0705](0705-belief-time-separate-from-validity.md) | Belief Time Is Separate From Validity — Corrections Supersede Episodes | 2026-10-26 |
 | [0706](0706-correction-diff-and-affected-work-reads.md) | Correction Reads — What a Correction Changed, and What Was Written While the Old Belief Held | 2026-10-26 |
+| [0707](0707-document-supersession.md) | Document Supersession — A New Document Explicitly Replaces an Old One | 2026-10-26 |
 
 ## Historical numbering
 

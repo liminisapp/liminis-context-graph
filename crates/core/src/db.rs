@@ -799,7 +799,7 @@ impl<'db> Conn<'db> {
              entity_edges: $entity_edges, attributes: $attributes, ingested_at: $ingested_at, \
              superseded_at: $superseded_at, superseded_by: $superseded_by, \
              superseded_by_kind: $superseded_by_kind, \
-             supersession_reason: $supersession_reason})",
+             supersession_reason: $supersession_reason, doc_id: $doc_id})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -817,6 +817,7 @@ impl<'db> Conn<'db> {
                 "superseded_by": row.superseded_by,
                 "superseded_by_kind": row.superseded_by_kind,
                 "supersession_reason": row.supersession_reason,
+                "doc_id": row.doc_id,
             }),
         )
     }
@@ -1271,7 +1272,7 @@ impl<'db> Conn<'db> {
              RETURN ep.uuid, ep.name, ep.group_id, ep.created_at, ep.source, \
              ep.source_description, ep.content, ep.valid_at, ep.entity_edges, ep.attributes, \
              ep.ingested_at, ep.superseded_at, ep.superseded_by, ep.superseded_by_kind, \
-             ep.supersession_reason \
+             ep.supersession_reason, ep.doc_id \
              ORDER BY ep.created_at DESC, ep.uuid DESC LIMIT $limit"
         );
         let result = self.query_params(&cypher, params)?;
@@ -1295,6 +1296,7 @@ impl<'db> Conn<'db> {
                     superseded_by: value_as_optional_string(&row[12]),
                     superseded_by_kind: value_as_optional_string(&row[13]),
                     supersession_reason: value_as_optional_string(&row[14]),
+                    doc_id: value_as_optional_string(&row[15]),
                     ..Default::default()
                 },
                 created_us,
@@ -1480,12 +1482,17 @@ impl<'db> Conn<'db> {
         chunk_id: &str,
         group_id: &str,
         exclude: &[String],
+        as_of: &str,
     ) -> Result<Vec<String>, Error> {
+        // An episode a document supersession has scheduled to end at a future effective date
+        // (issue #707) is still live: a correction before then ends belief at the correction.
         let rows = self.query_params(
             "MATCH (ep:Episodic) \
-             WHERE ep.name = $name AND ep.group_id = $gid AND ep.superseded_at IS NULL \
+             WHERE ep.name = $name AND ep.group_id = $gid \
+             AND (ep.superseded_at IS NULL \
+                  OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
              RETURN ep.uuid",
-            serde_json::json!({ "name": chunk_id, "gid": group_id }),
+            serde_json::json!({ "name": chunk_id, "gid": group_id, "live_at": as_of }),
         )?;
         Ok(rows
             .into_iter()
@@ -1494,11 +1501,14 @@ impl<'db> Conn<'db> {
             .collect())
     }
 
-    /// Marks the given episodes superseded. uuid-keyed, fixed-valued and guarded by
-    /// `superseded_at IS NULL`, so WAL tail replay over an overlapping seq range is idempotent
-    /// (ADR-0026) and a second supersession can never overwrite the first's timestamp. Never
-    /// touches `valid_at` / `invalid_at` (FR-008). `superseded_by` is `None` for
-    /// `chunk_removed`, which has no superseding episode; the column is then left NULL.
+    /// Marks the given episodes superseded. uuid-keyed, fixed-valued and guarded, so WAL tail
+    /// replay over an overlapping seq range is idempotent (ADR-0026) and a second supersession can
+    /// never overwrite the first's timestamp. The guard is `superseded_at IS NULL`, or a document
+    /// supersession still pending at `superseded_at` (issue #707), which a correction pre-empts;
+    /// after that the kind is no longer `document`, so a replay matches nothing. Never touches
+    /// `valid_at` / `invalid_at` (FR-008). `superseded_by` is `None` for `chunk_removed`, which has
+    /// no superseding episode; the supersession columns are then cleared of any pre-empted
+    /// document supersession.
     pub fn supersede_episodes_by_uuids(
         &self,
         uuids: &[String],
@@ -1509,11 +1519,15 @@ impl<'db> Conn<'db> {
         if uuids.is_empty() {
             return Ok(());
         }
+        const GUARD: &str = "ep.uuid IN $uuids AND (ep.superseded_at IS NULL \
+             OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $superseded_at))";
         match superseded_by {
             Some(by) => self.exec_params(
-                "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids AND ep.superseded_at IS NULL \
-                 SET ep.superseded_at = $superseded_at, ep.superseded_by = $superseded_by, \
-                 ep.superseded_by_kind = 'episode', ep.supersession_reason = $reason",
+                &format!(
+                    "MATCH (ep:Episodic) WHERE {GUARD} \
+                     SET ep.superseded_at = $superseded_at, ep.superseded_by = $superseded_by, \
+                     ep.superseded_by_kind = 'episode', ep.supersession_reason = $reason"
+                ),
                 serde_json::json!({
                     "uuids": uuids,
                     "superseded_at": superseded_at,
@@ -1522,8 +1536,11 @@ impl<'db> Conn<'db> {
                 }),
             ),
             None => self.exec_params(
-                "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids AND ep.superseded_at IS NULL \
-                 SET ep.superseded_at = $superseded_at, ep.supersession_reason = $reason",
+                &format!(
+                    "MATCH (ep:Episodic) WHERE {GUARD} \
+                     SET ep.superseded_at = $superseded_at, ep.superseded_by = NULL, \
+                     ep.superseded_by_kind = NULL, ep.supersession_reason = $reason"
+                ),
                 serde_json::json!({
                     "uuids": uuids,
                     "superseded_at": superseded_at,
@@ -1531,6 +1548,164 @@ impl<'db> Conn<'db> {
                 }),
             ),
         }
+    }
+
+    /// Supersedes `uuids` for a document supersession (issue #707): kind `document`, reason
+    /// `document_superseded`, `superseded_by` the superseding document's `doc_id`. Guarded by
+    /// `superseded_at IS NULL` so replay is idempotent and an already-corrected episode is left
+    /// alone. Never touches `valid_at` / `invalid_at` (FR-008).
+    pub fn supersede_episodes_for_document(
+        &self,
+        uuids: &[String],
+        superseded_at: &str,
+        superseding_doc_id: &str,
+    ) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids AND ep.superseded_at IS NULL \
+             SET ep.superseded_at = $superseded_at, ep.superseded_by = $superseded_by, \
+             ep.superseded_by_kind = 'document', ep.supersession_reason = 'document_superseded'",
+            serde_json::json!({
+                "uuids": uuids,
+                "superseded_at": superseded_at,
+                "superseded_by": superseding_doc_id,
+            }),
+        )
+    }
+
+    /// Whether `group_id` holds at least one episode with this `doc_id`.
+    pub fn doc_is_known(&self, group_id: &str, doc_id: &str) -> Result<bool, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             RETURN ep.uuid LIMIT 1",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        )?;
+        Ok(!rows.is_empty())
+    }
+
+    /// UUIDs of the episodes of `doc_id` in `group_id` that no supersession has touched.
+    pub fn live_episode_uuids_for_doc(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+    ) -> Result<Vec<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             AND ep.superseded_at IS NULL RETURN ep.uuid ORDER BY ep.uuid",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        )?;
+        Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
+    }
+
+    /// Creates the `DocSupersession` record for `rec.superseded_doc_id`. MERGE on the key with
+    /// `ON CREATE SET`, so a replayed statement never overwrites the first record's values.
+    pub fn create_doc_supersession(
+        &self,
+        rec: &crate::belief::DocSupersessionRecord,
+        effective_at: &str,
+        recorded_at: &str,
+    ) -> Result<(), Error> {
+        self.exec_params(
+            "MERGE (d:DocSupersession {key: $key}) \
+             ON CREATE SET d.group_id = $group_id, d.superseded_doc_id = $superseded_doc_id, \
+             d.superseding_doc_id = $superseding_doc_id, d.effective_at = $effective_at, \
+             d.recorded_at = $recorded_at",
+            serde_json::json!({
+                "key": doc_supersession_key(&rec.group_id, &rec.superseded_doc_id),
+                "group_id": rec.group_id,
+                "superseded_doc_id": rec.superseded_doc_id,
+                "superseding_doc_id": rec.superseding_doc_id,
+                "effective_at": effective_at,
+                "recorded_at": recorded_at,
+            }),
+        )
+    }
+
+    /// The supersession records for the given `(group_id, superseded_doc_id)` keys, one batched
+    /// lookup. Absent keys are simply missing from the map.
+    pub fn get_doc_supersessions(
+        &self,
+        keys: &[(String, String)],
+    ) -> Result<crate::belief::DocRecords, Error> {
+        let mut out = crate::belief::DocRecords::new();
+        if keys.is_empty() {
+            return Ok(out);
+        }
+        let key_strs: Vec<String> = keys
+            .iter()
+            .map(|(g, d)| doc_supersession_key(g, d))
+            .collect();
+        let rows = self.query_params(
+            "MATCH (d:DocSupersession) WHERE d.key IN $keys \
+             RETURN d.group_id, d.superseded_doc_id, d.superseding_doc_id, \
+             d.effective_at, d.recorded_at",
+            serde_json::json!({ "keys": key_strs }),
+        )?;
+        for r in rows {
+            let rec = crate::belief::DocSupersessionRecord {
+                group_id: value_as_string(&r[0]),
+                superseded_doc_id: value_as_string(&r[1]),
+                superseding_doc_id: value_as_string(&r[2]),
+                effective_at_us: value_as_timestamp_micros(&r[3]),
+                recorded_at_us: value_as_timestamp_micros(&r[4]),
+            };
+            out.insert((rec.group_id.clone(), rec.superseded_doc_id.clone()), rec);
+        }
+        Ok(out)
+    }
+
+    /// Page of `DocSupersession` rows for dump.
+    /// Columns: [key, group_id, superseded_doc_id, superseding_doc_id, effective_at, recorded_at]
+    pub(crate) fn dump_doc_supersession_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        let rows = if let Some(gid) = group_id {
+            self.query_params(
+                "MATCH (n:DocSupersession) WHERE n.group_id = $gid \
+                 RETURN n.key, n.group_id, n.superseded_doc_id, n.superseding_doc_id, \
+                 n.effective_at, n.recorded_at \
+                 ORDER BY n.key SKIP $offset LIMIT $limit",
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            )
+        } else {
+            self.query_params(
+                "MATCH (n:DocSupersession) \
+                 RETURN n.key, n.group_id, n.superseded_doc_id, n.superseding_doc_id, \
+                 n.effective_at, n.recorded_at \
+                 ORDER BY n.key SKIP $offset LIMIT $limit",
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            )
+        };
+        match rows {
+            Err(e) if e.to_string().contains("does not exist") => Ok(Vec::new()),
+            other => other,
+        }
+    }
+
+    /// Whether the `DocSupersession` table exists (a database opened without the schema step has
+    /// none).
+    pub fn has_doc_supersession_table(&self) -> bool {
+        self.query_params(
+            "MATCH (d:DocSupersession) RETURN d.key LIMIT 0",
+            serde_json::json!({}),
+        )
+        .is_ok()
+    }
+
+    /// Deletes the `DocSupersession` records of the given groups (group purge, issue #707).
+    pub fn delete_doc_supersessions_by_group_ids(&self, group_ids: &[&str]) -> Result<(), Error> {
+        if group_ids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (d:DocSupersession) WHERE d.group_id IN $gids DELETE d",
+            serde_json::json!({ "gids": group_ids }),
+        )
     }
 
     /// `knowledge_mark_chunk_removed`'s storage half: supersedes every live episode named
@@ -1552,7 +1727,7 @@ impl<'db> Conn<'db> {
         let mut grouped: GroupedMutations = GroupedMutations::new();
         let mut all_uuids: Vec<String> = Vec::new();
         for gid in group_ids {
-            let uuids = self.live_episode_uuids_for_chunk(chunk_id, gid, &[])?;
+            let uuids = self.live_episode_uuids_for_chunk(chunk_id, gid, &[], superseded_at)?;
             if uuids.is_empty() {
                 continue;
             }
@@ -1609,7 +1784,9 @@ impl<'db> Conn<'db> {
             return Ok(out);
         }
         let rows = self.query_params(
-            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids RETURN ep.uuid, ep.superseded_at",
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids \
+             RETURN ep.uuid, ep.superseded_at, ep.superseded_by_kind, ep.superseded_by, \
+             ep.supersession_reason, ep.group_id, ep.doc_id",
             serde_json::json!({ "uuids": uuids }),
         )?;
         for r in rows {
@@ -1621,6 +1798,11 @@ impl<'db> Conn<'db> {
                 value_as_string(&r[0]),
                 crate::belief::EpisodeSupersession {
                     superseded_at_us: superseded,
+                    kind: value_as_optional_string(&r[2]),
+                    superseded_by: value_as_optional_string(&r[3]),
+                    reason: value_as_optional_string(&r[4]),
+                    group_id: value_as_string(&r[5]),
+                    doc_id: value_as_optional_string(&r[6]),
                 },
             );
         }
@@ -3992,7 +4174,7 @@ impl<'db> Conn<'db> {
     /// Page of Episodic rows for dump.
     /// Columns: [uuid, name, group_id, created_at, source, source_description, content,
     ///            content_embedding, valid_at, entity_edges, attributes, ingested_at,
-    ///            superseded_at, superseded_by, superseded_by_kind, supersession_reason]
+    ///            superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id]
     pub(crate) fn dump_episodics_page(
         &self,
         group_id: Option<&str>,
@@ -4005,7 +4187,7 @@ impl<'db> Conn<'db> {
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
-                 n.superseded_by_kind, n.supersession_reason \
+                 n.superseded_by_kind, n.supersession_reason, n.doc_id \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -4015,7 +4197,7 @@ impl<'db> Conn<'db> {
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
-                 n.superseded_by_kind, n.supersession_reason \
+                 n.superseded_by_kind, n.supersession_reason, n.doc_id \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -4298,6 +4480,12 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
         .collect()
 }
 
+/// Key of a `DocSupersession` row: `group_id ␟ superseded_doc_id` (issue #707). Keying by the
+/// superseded document makes "at most one superseding document per group" structural.
+pub(crate) fn doc_supersession_key(group_id: &str, superseded_doc_id: &str) -> String {
+    format!("{group_id}\u{1f}{superseded_doc_id}")
+}
+
 /// Parameter names that target `TIMESTAMP` columns. Only these bind an RFC-3339 or space-format
 /// string as a typed `Value::Timestamp`; every other string binds verbatim as `Value::String`.
 ///
@@ -4334,6 +4522,7 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
 /// | `delete_relates_to_hop` (#369)          | `exec_params`    | ✓ no timestamp fields       |
 /// | `update_relates_to_attributes` (#369)   | `exec_params`    | ✓ no timestamp fields       |
 /// | `create_relates_to_direct` (#369)       | `exec_params`    | ✓ exec_params gate          |
+/// | `create_doc_supersession` (#707)        | `exec_params`    | ✓ exec_params gate          |
 /// | `delete_relates_to_direct` (#369)       | `exec_params`    | ✓ no timestamp fields       |
 /// | `dump.rs` (all node/edge types)         | `WalWriter`      | ✓ RFC-3339+µs WAL; Cypher   |
 /// |                                         |                  |   wrapper coerces on replay |
@@ -4352,6 +4541,9 @@ const TIMESTAMP_PARAM_NAMES: &[&str] = &[
     "expired_at",
     "ingested_at",
     "superseded_at",
+    "live_at",
+    "effective_at",
+    "recorded_at",
 ];
 
 /// Maps a JSON param `(name, value)` to an lbug `Value`, applying timestamp typing only to

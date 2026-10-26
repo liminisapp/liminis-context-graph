@@ -600,6 +600,7 @@ pub fn registry() -> Vec<ToolSpec> {
                             "description": "ISO 8601 timestamp; defaults to now."
                         },
                         "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."},
+                        "doc_id": {"type": "string", "description": "Stable identity of the logical document this episode came from, unique within the group (issue #707). Optional; an episode without one cannot take part in document supersession. Never defaulted from source_file."},
                         "supersede": {"type": "boolean", "default": true, "description": "Set false on every non-final unit of a chunk submitted as several calls under one chunk_id, so a unit does not supersede the previous one."},
                         "same_revision_episode_uuids": {"type": "array", "items": {"type": "string"}, "description": "On the final unit of a multi-unit revision: episode_uuids returned by the earlier units. They stay live; the chunk's older episodes are superseded."}
                     },
@@ -626,7 +627,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "source_description": {"type": "string"},
                         "reference_time": {"type": "string", "format": "date-time"},
                         "group_id": {"type": "string", "default": "liminis"},
-                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."}
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."},
+                        "doc_id": {"type": "string", "description": "Stable identity of the logical document this episode came from, unique within the group (issue #707). Optional; an episode without one cannot take part in document supersession. Never defaulted from source_file."}
                     },
                     "required": ["name", "episode_body"]
                 })
@@ -707,6 +709,34 @@ pub fn registry() -> Vec<ToolSpec> {
                         }
                     },
                     "required": ["chunk_id", "group_ids"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_supersede_document",
+            description: "Record that one document replaces another (issue #707): document \
+                           `superseding_doc_id` supersedes `superseded_doc_id` in `group_id`, \
+                           effective at `effective_at`. Always explicit — supersession is never \
+                           inferred. The old document's live episodes stop being believed at the \
+                           recording instant (or at `effective_at` when that is later), but the \
+                           facts are reported as in force until `effective_at`: unlike a \
+                           correction, the old decision was true until it was replaced. \
+                           `valid_at`/`invalid_at` are never written. Rejected, with no side \
+                           effects, when the documents are the same, either is unknown in the \
+                           group, the relation would form a cycle, or the old document is \
+                           already superseded differently; recording the identical relation \
+                           again is a no-op (`already_recorded`).",
+            scope: Scope::Write,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "description": "Group both documents belong to (required, non-empty)."},
+                        "superseding_doc_id": {"type": "string", "description": "doc_id of the new document (required)."},
+                        "superseded_doc_id": {"type": "string", "description": "doc_id of the document being replaced (required)."},
+                        "effective_at": {"type": "string", "description": "When the replacement took effect: an RFC 3339 timestamp with a timezone offset (required). May be earlier than now (retroactive) or in the future."}
+                    },
+                    "required": ["group_id", "superseding_doc_id", "superseded_doc_id", "effective_at"]
                 })
             },
         },
@@ -1568,11 +1598,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_49_unique_tools() {
+    fn registry_has_50_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 49);
+        assert_eq!(r.len(), 50);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 49, "tool names must be unique");
+        assert_eq!(names.len(), 50, "tool names must be unique");
     }
 
     #[test]
@@ -1580,7 +1610,7 @@ mod tests {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
         assert_eq!(count(Scope::Read), 17);
-        assert_eq!(count(Scope::Write), 16);
+        assert_eq!(count(Scope::Write), 17);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 15);
     }
