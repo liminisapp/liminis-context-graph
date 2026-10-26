@@ -6,6 +6,7 @@ pub mod belief;
 pub mod canonicalize;
 pub mod cassette;
 pub(crate) mod checkpoint;
+pub mod correction_reads;
 pub mod corrections;
 pub mod cross_group;
 pub mod db;

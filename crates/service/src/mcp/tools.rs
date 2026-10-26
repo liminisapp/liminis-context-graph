@@ -118,11 +118,11 @@ fn with_belief(mut props: Value) -> Value {
     props
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (47 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (49 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
-        // ── read (15) ──────────────────────────────────────────────────────────────
+        // ── read (17) ──────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_status",
             description: "Get knowledge graph status: entity/episode/relationship counts, \
@@ -335,6 +335,63 @@ pub fn registry() -> Vec<ToolSpec> {
                         }
                     })),
                     "required": ["uuids"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_get_correction_changes",
+            description: "What a correction changed (issue #706). For a SUPERSEDED episode, \
+                           returns the facts it supported that its replacement does not \
+                           (`removed`) and the facts the replacement supports that it did not \
+                           (`added`); a fact on both sides appears on neither. Facts match on \
+                           (source entity, target entity, relation name, fact text), so a \
+                           reworded fact is one removal plus one addition. For a `chunk_removed` \
+                           episode `replacement` is null and `added` is empty. A split chunk's \
+                           replacement is the whole revision, not only its final unit. An episode \
+                           that was never superseded returns `status: \"not_superseded\"` and no \
+                           facts. Compares an episode with its direct superseder only (not later \
+                           generations). Read-only: writes nothing, including no \
+                           `valid_at`/`invalid_at`. Heading renames and whole-document diffs need \
+                           document identity (#707).",
+            scope: Scope::Read,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "episode_uuid": {
+                            "type": "string",
+                            "description": "UUID of the superseded episode to explain (required)."
+                        }
+                    },
+                    "required": ["episode_uuid"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_get_affected_work",
+            description: "What was written while a dropped belief held (issue #706). For an edge \
+                           that is no longer believed, returns `candidates`: episodes ingested \
+                           within the edge's belief interval [start, end) that MENTION either of \
+                           its endpoint entities, ordered by ingest time. They are candidates by \
+                           ENTITY OVERLAP (`basis: \"entity_overlap\"`), not proof that the work \
+                           used the fact; review them. The edge's own producing episodes are not \
+                           reported. `interval.state` is `closed` (candidates returned), `open` \
+                           (still believed; affected work is not defined), `no_record` (legacy \
+                           edge, or its support was hard-deleted) or `not_defined` (warranted \
+                           direct assertion); every state other than `closed` returns no \
+                           candidates and says why, so an empty list is never ambiguous. \
+                           Read-only: writes nothing.",
+            scope: Scope::Read,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "edge_uuid": {
+                            "type": "string",
+                            "description": "UUID of the dropped edge (required)."
+                        }
+                    },
+                    "required": ["edge_uuid"]
                 })
             },
         },
@@ -1511,18 +1568,18 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_47_unique_tools() {
+    fn registry_has_49_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 47);
+        assert_eq!(r.len(), 49);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 47, "tool names must be unique");
+        assert_eq!(names.len(), 49, "tool names must be unique");
     }
 
     #[test]
     fn scope_bucket_sizes_match_fr_004_table() {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
-        assert_eq!(count(Scope::Read), 15);
+        assert_eq!(count(Scope::Read), 17);
         assert_eq!(count(Scope::Write), 16);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 15);
