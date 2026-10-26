@@ -26,6 +26,9 @@ rebuild stability (WAL replay, dump, checkpoint restore).
 
 - `knowledge_get_correction_changes {episode_uuid}` — the facts the episode supported that its direct
   superseder does not (`removed`) and the reverse (`added`). A fact on both sides appears on neither.
+  Each removed fact carries `still_believed`, true when another live episode outside the replacement
+  still supports the edge (its belief interval is open), so "removed from the replacement" is not
+  mistaken for "dropped from belief".
 - `knowledge_get_affected_work {edge_uuid}` — for an edge no longer believed, the episodes ingested in
   its belief interval `[T1, T2)` that mention either endpoint entity.
 

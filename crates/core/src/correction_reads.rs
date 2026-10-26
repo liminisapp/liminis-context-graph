@@ -184,6 +184,14 @@ fn episode_json(e: &EpisodeRecord) -> Value {
     })
 }
 
+/// A removed fact, flagged `still_believed` when another live producing episode (outside the
+/// replacement) still supports the edge: it left the replacement but is not dropped from belief.
+fn removed_fact_json(e: &RelatesToEdge, still_believed: &HashSet<String>) -> Value {
+    let mut v = fact_json(e);
+    v["still_believed"] = Value::Bool(still_believed.contains(&e.uuid));
+    v
+}
+
 /// Response for `knowledge_get_correction_changes` on an episode that was never superseded
 /// (US1 AC4): nothing to compare.
 pub fn changes_not_superseded(ep: &EpisodeRecord) -> Value {
@@ -201,11 +209,13 @@ pub fn changes_not_superseded(ep: &EpisodeRecord) -> Value {
 
 /// Response for a superseded episode. `unit_uuids` is empty for `chunk_removed` (FR-005), which
 /// reports `replacement: null` and an explicit statement that no replacement exists.
+/// `still_believed` holds the uuids of `removed` edges whose belief interval is still open.
 pub fn changes_superseded(
     ep: &EpisodeRecord,
     unit_uuids: &[String],
     removed: &[RelatesToEdge],
     added: &[RelatesToEdge],
+    still_believed: &HashSet<String>,
 ) -> Value {
     let (replacement, note) = match ep.superseded_by.as_deref() {
         Some(by) => (
@@ -225,7 +235,7 @@ pub fn changes_superseded(
         "status": "superseded",
         "episode": episode_json(ep),
         "replacement": replacement,
-        "removed": removed.iter().map(fact_json).collect::<Vec<_>>(),
+        "removed": removed.iter().map(|e| removed_fact_json(e, still_believed)).collect::<Vec<_>>(),
         "removed_count": removed.len(),
         "added": added.iter().map(fact_json).collect::<Vec<_>>(),
         "added_count": added.len(),
@@ -536,9 +546,28 @@ mod tests {
     }
 
     #[test]
+    fn removed_fact_with_another_live_producer_is_flagged_still_believed() {
+        let old = ep("e1", 10, Some(20), Some("e2"));
+        let removed = [
+            edge("shared", "a", "b", "N", "f1"),
+            edge("dropped", "a", "b", "N", "f2"),
+        ];
+        let believed: HashSet<String> = ["shared".to_string()].into();
+        let v = changes_superseded(&old, &["e2".into()], &removed, &[], &believed);
+        assert_eq!(v["removed"][0]["still_believed"], true);
+        assert_eq!(v["removed"][1]["still_believed"], false);
+    }
+
+    #[test]
     fn chunk_removed_response_states_no_replacement() {
         let old = ep("e1", 10, Some(20), None);
-        let v = changes_superseded(&old, &[], &[edge("o", "a", "b", "N", "f")], &[]);
+        let v = changes_superseded(
+            &old,
+            &[],
+            &[edge("o", "a", "b", "N", "f")],
+            &[],
+            &HashSet::new(),
+        );
         assert_eq!(v["status"], "superseded");
         assert!(v["replacement"].is_null());
         assert_eq!(v["added_count"], 0);

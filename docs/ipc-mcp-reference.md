@@ -475,7 +475,7 @@ its direct superseder (E1 → E2 even if E2 was later superseded by E3):
 | `status` | `superseded`, or `not_superseded` (nothing to compare; both lists empty) |
 | `episode` | `uuid`, `name`, `group_id`, `ingested_at`, `superseded_at`, `reason` |
 | `replacement` | `{superseded_by, unit_episode_uuids}`, or `null` for `chunk_removed` (no replacement exists) |
-| `removed` / `added` (+ `*_count`) | Facts only the old / only the replacement episodes support, each with `uuid`, `source_node_uuid`, `target_node_uuid`, `name`, `fact`, `episodes` |
+| `removed` / `added` (+ `*_count`) | Facts the old episode supports that the replacement does not / the replacement supports that the old episode does not, each with `uuid`, `source_node_uuid`, `target_node_uuid`, `name`, `fact`, `episodes`. Each `removed` fact also carries `still_believed`: `true` when another live episode outside the replacement still supports the edge, so it left the replacement but is not dropped from belief (`knowledge_get_affected_work` on it returns `open`) |
 
 A fact present on both sides appears on neither. Two edges are the same fact when they share source
 entity, target entity, relation name and fact text, so a **reworded fact is one removal plus one

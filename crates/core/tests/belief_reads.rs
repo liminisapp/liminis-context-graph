@@ -257,6 +257,8 @@ async fn revision_diff_and_affected_work_window() {
     assert_eq!(c["status"], "superseded");
     assert_eq!(fact_texts(&c["removed"]), vec!["Alice joined Acme in 2019"]);
     assert_eq!(fact_texts(&c["added"]), vec!["Alice joined Acme in 2021"]);
+    // The dropped fact has no other live producer, so it is genuinely no longer believed.
+    assert_eq!(c["removed"][0]["still_believed"], false);
     assert_eq!(
         (c["removed_count"].clone(), c["added_count"].clone()),
         (json!(1), json!(1))

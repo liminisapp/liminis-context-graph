@@ -1681,7 +1681,28 @@ async fn handle_get_correction_changes(
         let old = conn.get_edges_produced_by_episodes(&ep.group_id, &[episode_uuid])?;
         let new = conn.get_edges_produced_by_episodes(&ep.group_id, &units)?;
         let (removed, added) = cr::diff_facts(old, new);
-        Ok(cr::changes_superseded(&ep, &units, &removed, &added))
+        // A removed fact can still be supported by a live episode outside the replacement.
+        let removed_uuids: Vec<String> = removed.iter().map(|e| e.uuid.clone()).collect();
+        let rows = conn.get_edge_belief_rows(&removed_uuids)?;
+        let producer_uuids: Vec<String> = rows
+            .values()
+            .flat_map(|r| r.episodes.iter().cloned())
+            .collect();
+        let producers = conn.get_episode_supersession(&producer_uuids)?;
+        let still_believed: std::collections::HashSet<String> = rows
+            .iter()
+            .filter(|(_, r)| {
+                crate::belief::belief_interval(r, &producers) == crate::belief::BeliefInterval::Open
+            })
+            .map(|(u, _)| u.clone())
+            .collect();
+        Ok(cr::changes_superseded(
+            &ep,
+            &units,
+            &removed,
+            &added,
+            &still_believed,
+        ))
     })
     .await??;
     drop(_guard);
