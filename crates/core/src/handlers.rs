@@ -173,6 +173,7 @@ async fn handle(
         "knowledge_delete_by_source" => handle_delete_by_source(req, state).await,
         "knowledge_delete_chunk_episode" => handle_delete_chunk_episode(req, state).await,
         "knowledge_mark_chunk_removed" => handle_mark_chunk_removed(req, state).await,
+        "knowledge_supersede_document" => handle_supersede_document(req, state).await,
         "knowledge_delete_by_group" => handle_delete_by_group(req, state).await,
         "knowledge_reload_ontology" => handle_reload_ontology(req, state).await,
         "knowledge_clear_all" => handle_clear_all(req, state).await,
@@ -230,9 +231,10 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         .unwrap_or(DEFAULT_GROUP_ID)
         .to_string();
     let attributes = attributes_param_to_string(&p["attributes"]);
+    let doc_id = optional_doc_id_param(&p["doc_id"])?;
 
     let source_type = SourceType::from_str_lossy(&source);
-    let result = episode::add_episode(
+    let result = episode::add_episode_with_opts(
         state,
         &name,
         &body,
@@ -243,6 +245,10 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         source_type,
         None,
         &attributes,
+        episode::EpisodeOpts {
+            doc_id,
+            ..Default::default()
+        },
     )
     .await?;
 
@@ -1109,6 +1115,8 @@ async fn handle_knowledge_process_chunk(
         } else {
             episode::SupersedePolicy::None
         },
+        // Issue #707: never defaulted from `source_file` — omitted means none (FR-001, FR-010).
+        doc_id: optional_doc_id_param(&p["doc_id"])?,
     };
     let result = episode::add_episode_with_opts(
         Arc::clone(&state),
@@ -1328,7 +1336,7 @@ fn parse_belief_query(p: &Value) -> Result<Option<BeliefQuery>, Error> {
 }
 
 /// Evaluates belief for `edges` and returns them as JSON with a `belief` annotation, dropping the
-/// unbelieved ones when the query filters. Two batched uuid-keyed lookups, so the group scoping of
+/// unbelieved ones when the query filters. Batched uuid-keyed lookups, so the group scoping of
 /// the read that produced `edges` carries over.
 fn apply_belief<T: serde::Serialize>(
     conn: &crate::db::Conn<'_>,
@@ -1345,6 +1353,16 @@ fn apply_belief<T: serde::Serialize>(
     ep_uuids.sort();
     ep_uuids.dedup();
     let episodes = conn.get_episode_supersession(&ep_uuids)?;
+    // Document supersession records (issue #707), fetched only when some producing episode was
+    // superseded by a document, so reads without one issue no extra query.
+    let mut doc_keys: Vec<(String, String)> = episodes
+        .values()
+        .filter(|e| e.kind.as_deref() == Some("document"))
+        .filter_map(|e| Some((e.group_id.clone(), e.doc_id.clone()?)))
+        .collect();
+    doc_keys.sort();
+    doc_keys.dedup();
+    let docs = conn.get_doc_supersessions(&doc_keys)?;
     let mut out = Vec::with_capacity(edges.len());
     for edge in edges {
         let uuid = uuid_of(&edge).to_string();
@@ -1360,8 +1378,15 @@ fn apply_belief<T: serde::Serialize>(
             continue;
         }
         let mut v = serde_json::to_value(&edge).unwrap_or(Value::Null);
-        v["belief"] = serde_json::to_value(crate::belief::BeliefAnnotation::new(&row, state))
-            .unwrap_or(Value::Null);
+        let in_force = crate::belief::in_force(&row, &episodes, &docs, q.as_of_us);
+        let supersession = crate::belief::supersession_info(&row, &episodes, &docs);
+        v["belief"] = serde_json::to_value(crate::belief::BeliefAnnotation::new(
+            &row,
+            state,
+            in_force,
+            supersession,
+        ))
+        .unwrap_or(Value::Null);
         out.push(v);
     }
     Ok(out)
@@ -2292,6 +2317,157 @@ async fn handle_mark_chunk_removed(req: &IpcRequest, state: Arc<AppState>) -> Re
         "superseded_uuids": superseded_uuids,
         "superseded_at": superseded_at,
     }))
+}
+
+/// Optional `doc_id` param (issue #707): absent or null means none; otherwise a non-empty string.
+fn optional_doc_id_param(v: &Value) -> Result<Option<String>, Error> {
+    match v {
+        Value::Null => Ok(None),
+        Value::String(s) if !s.is_empty() => Ok(Some(s.clone())),
+        _ => Err(Error::Ipc(
+            "doc_id must be a non-empty string when provided".to_string(),
+        )),
+    }
+}
+
+fn required_string_param(p: &Value, key: &str) -> Result<String, Error> {
+    p[key]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| Error::Ipc(format!("{key} is required and must be a non-empty string")))
+}
+
+/// `knowledge_supersede_document` (issue #707): records that document `superseding_doc_id`
+/// replaced `superseded_doc_id` in one group, effective at `effective_at`. Always explicit — the
+/// graph never infers supersession.
+///
+/// Writes one durable `DocSupersession` record and supersedes the old document's live episodes
+/// (kind `document`, reason `document_superseded`) at the service-clock recording instant, or at
+/// `effective_at` when that is later: the old decision stays believed and in force until it takes
+/// effect. For a retroactive `effective_at` belief ends at the recording instant while the record's
+/// effective date ends "in force" earlier, so as-of reads between the two see the fact believed
+/// but no longer in force. `valid_at` / `invalid_at` are never written.
+///
+/// Every check (same document, unknown document, conflict, cycle) completes under the write lock
+/// before any mutation, so a rejection leaves the graph and the WAL untouched. Recording the
+/// identical relation again is a no-op reporting `already_recorded: true`. The record and the
+/// episode statements share one WAL flush, so the WAL never holds half a supersession.
+async fn handle_supersede_document(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let group_id = extract_required_group_id(&p["group_id"])?;
+    let superseding = required_string_param(p, "superseding_doc_id")?;
+    let superseded = required_string_param(p, "superseded_doc_id")?;
+    let effective_raw = required_string_param(p, "effective_at")?;
+    let effective_us = chrono::DateTime::parse_from_rfc3339(&effective_raw)
+        .map_err(|_| {
+            Error::Ipc(format!(
+                "effective_at must be an RFC 3339 timestamp with a timezone offset: {effective_raw}"
+            ))
+        })?
+        .timestamp_micros();
+    if superseding == superseded {
+        return Err(Error::Ipc(
+            "a document cannot supersede itself (superseding_doc_id == superseded_doc_id)"
+                .to_string(),
+        ));
+    }
+    let effective_at = crate::belief::format_us(effective_us);
+
+    let db = load_db(&state)?;
+    let state_c = Arc::clone(&state);
+    let _guard = state.write_lock.write().await;
+    let response = tokio::task::spawn_blocking(move || -> Result<Value, Error> {
+        let conn = db.connect()?;
+        for (label, doc) in [
+            ("superseding_doc_id", &superseding),
+            ("superseded_doc_id", &superseded),
+        ] {
+            if !conn.doc_is_known(&group_id, doc)? {
+                return Err(Error::Ipc(format!(
+                    "{label} '{doc}' is unknown in group '{group_id}' (no episode carries that doc_id)"
+                )));
+            }
+        }
+
+        let existing =
+            conn.get_doc_supersessions(&[(group_id.clone(), superseded.clone())])?;
+        if let Some(rec) = existing.get(&(group_id.clone(), superseded.clone())) {
+            if rec.superseding_doc_id == superseding && rec.effective_at_us == effective_us {
+                return Ok(json!({
+                    "success": true,
+                    "already_recorded": true,
+                    "group_id": group_id,
+                    "superseding_doc_id": superseding,
+                    "superseded_doc_id": superseded,
+                    "effective_at": effective_at,
+                    "recorded_at": crate::belief::format_us(rec.recorded_at_us),
+                    "superseded_count": 0,
+                    "superseded_uuids": Vec::<String>::new(),
+                }));
+            }
+            return Err(Error::Ipc(format!(
+                "document '{superseded}' is already superseded by '{}' effective {}; \
+                 a different superseding document or effective date is not recorded",
+                rec.superseding_doc_id,
+                crate::belief::format_us(rec.effective_at_us)
+            )));
+        }
+
+        // Cycle check, Rust-side (ADR-0012): the new link is superseded -> superseding, so it
+        // closes a loop iff the superseding document's own chain of superseders reaches
+        // `superseded`.
+        let mut visited = std::collections::HashSet::new();
+        let mut cur = superseding.clone();
+        while visited.insert(cur.clone()) {
+            let next = conn.get_doc_supersessions(&[(group_id.clone(), cur.clone())])?;
+            let Some(rec) = next.get(&(group_id.clone(), cur.clone())) else {
+                break;
+            };
+            if rec.superseding_doc_id == superseded {
+                return Err(Error::Ipc(format!(
+                    "recording that '{superseding}' supersedes '{superseded}' would create a cycle"
+                )));
+            }
+            cur = rec.superseding_doc_id.clone();
+        }
+
+        let recorded_at = crate::db::ingested_at_or_now("");
+        let recorded_us = crate::db::parse_timestamp_str(&recorded_at)
+            .map(|d| (d.unix_timestamp_nanos() / 1_000) as i64)
+            .ok_or_else(|| Error::Ipc("service clock produced an unparseable instant".into()))?;
+        let superseded_at = if effective_us > recorded_us {
+            effective_at.clone()
+        } else {
+            recorded_at.clone()
+        };
+        let record = crate::belief::DocSupersessionRecord {
+            group_id: group_id.clone(),
+            superseded_doc_id: superseded.clone(),
+            superseding_doc_id: superseding.clone(),
+            effective_at_us: effective_us,
+            recorded_at_us: recorded_us,
+        };
+        conn.create_doc_supersession(&record, &effective_at, &recorded_at)?;
+        let uuids = conn.live_episode_uuids_for_doc(&group_id, &superseded)?;
+        conn.supersede_episodes_for_document(&uuids, &superseded_at, &superseding)?;
+        let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, conn.drain_mutations());
+        wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+        Ok(json!({
+            "success": true,
+            "already_recorded": false,
+            "group_id": group_id,
+            "superseding_doc_id": superseding,
+            "superseded_doc_id": superseded,
+            "effective_at": effective_at,
+            "recorded_at": recorded_at,
+            "superseded_count": uuids.len(),
+            "superseded_uuids": uuids,
+        }))
+    })
+    .await??;
+    drop(_guard);
+    Ok(response)
 }
 
 /// `knowledge_reload_ontology` (issue #627): discards one group's cached ontology resolution and

@@ -31,6 +31,7 @@ pub const EPISODE_FIELDS: &[&str] = &[
     "superseded_by",
     "superseded_by_kind",
     "supersession_reason",
+    "doc_id",
 ];
 
 /// Serialized keys of an entity item (embeddings are `#[serde(skip)]`, never projectable).

@@ -163,13 +163,14 @@ pub struct EpisodicRow {
     /// superseding an episode never writes `valid_at` / `invalid_at` on anything.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_at: Option<String>,
-    /// What superseded it: an episode uuid (`superseded_by_kind = "episode"`); #707 adds documents.
+    /// What superseded it: an episode uuid (`superseded_by_kind = "episode"`) or the superseding
+    /// document's `doc_id` (`"document"`, issue #707).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
-    /// Kind of `superseded_by` (`episode`; `document` is reserved for #707).
+    /// Kind of `superseded_by` (`episode` or `document`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by_kind: Option<String>,
-    /// Why: `revision` (the chunk was resubmitted) or `chunk_removed`.
+    /// Why: `revision` (the chunk was resubmitted), `chunk_removed` or `document_superseded`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersession_reason: Option<String>,
     /// Caller-supplied structured metadata (issue #528), a JSON object serialized as a string.
@@ -182,6 +183,11 @@ pub struct EpisodicRow {
     /// `value_as_string`; callers parsing this field should tolerate that rather than assume the
     /// invariant is enforced unconditionally.
     pub attributes: String,
+    /// Stable identity of the logical document this episode came from (issue #707, ADR-0707),
+    /// unique within `group_id`. `None` when the caller supplied none; such an episode cannot take
+    /// part in document supersession.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

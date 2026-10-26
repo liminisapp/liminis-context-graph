@@ -43,6 +43,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // producing episode (`assertion`, `cross_group`) and `RelatesToNode_.valid_at_source` records
     // whether an extracted edge's `valid_at` came from the text or defaulted to `reference_time`.
     // Supersession never touches `valid_at` / `invalid_at`: a correction ends belief, not validity.
+    // Issue #707 (ADR-0707) adds a sixth: `Episodic.doc_id` (the logical document an episode came
+    // from) and the `DocSupersession` record table below.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Entity (\
          uuid STRING PRIMARY KEY, \
@@ -82,7 +84,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          superseded_at TIMESTAMP, \
          superseded_by STRING, \
          superseded_by_kind STRING, \
-         supersession_reason STRING\
+         supersession_reason STRING, \
+         doc_id STRING\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -104,6 +107,22 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          valid_at_source STRING\
          )"
     ))?;
+    // Document supersession (issue #707, ADR-0707): one durable record per superseded document
+    // per group, keyed `group_id ␟ superseded_doc_id` so "at most one superseding document" is
+    // structural. `effective_at` is the instant the decision took effect (the in-force end,
+    // caller-supplied); `recorded_at` is the service-clock instant the graph learned of it.
+    // Not part of graphiti's kuzu_driver.py schema (sixth documented divergence, with
+    // `Episodic.doc_id`).
+    conn.raw_query(
+        "CREATE NODE TABLE IF NOT EXISTS DocSupersession (\
+         key STRING PRIMARY KEY, \
+         group_id STRING, \
+         superseded_doc_id STRING, \
+         superseding_doc_id STRING, \
+         effective_at TIMESTAMP, \
+         recorded_at TIMESTAMP\
+         )",
+    )?;
     // Stub tables for graphiti's community/saga subsystem (not implemented in liminis-graph;
     // see #145). They carry no read/write paths, but must EXIST so legacy WAL statements that
     // reference them — notably the bulk edge-delete `MATCH (n)-[e:MENTIONS|RELATES_TO|HAS_MEMBER]
@@ -382,6 +401,8 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
         ("Episodic", "superseded_by", "STRING"),
         ("Episodic", "superseded_by_kind", "STRING"),
         ("Episodic", "supersession_reason", "STRING"),
+        // Document identity (issue #707).
+        ("Episodic", "doc_id", "STRING"),
         ("RelatesToNode_", "warrant", "STRING"),
         ("RelatesToNode_", "valid_at_source", "STRING"),
     ] {

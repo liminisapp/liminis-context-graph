@@ -41,7 +41,13 @@ const EPISODIC_CYPHER: &str = "\
     n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END, \
     n.superseded_at = CASE WHEN $superseded_at IS NULL THEN NULL ELSE timestamp($superseded_at) END, \
     n.superseded_by = $superseded_by, n.superseded_by_kind = $superseded_by_kind, \
-    n.supersession_reason = $supersession_reason";
+    n.supersession_reason = $supersession_reason, n.doc_id = $doc_id";
+
+const DOC_SUPERSESSION_CYPHER: &str = "\
+    MERGE (n:DocSupersession {key: $key}) \
+    SET n.group_id = $group_id, n.superseded_doc_id = $superseded_doc_id, \
+    n.superseding_doc_id = $superseding_doc_id, \
+    n.effective_at = timestamp($effective_at), n.recorded_at = timestamp($recorded_at)";
 
 const RELATO_CYPHER: &str = "\
     MERGE (n:RelatesToNode_ {uuid: $uuid}) \
@@ -141,6 +147,7 @@ fn dump_nodes_phase(
     total += dump_relato_nodes(conn, writer, group_id)?;
     total += dump_community_nodes(conn, writer, group_id)?;
     total += dump_saga_nodes(conn, writer, group_id)?;
+    total += dump_doc_supersession_nodes(conn, writer, group_id)?;
     Ok(total)
 }
 
@@ -229,7 +236,7 @@ fn dump_episodic_nodes(
                 for row in &rows {
                     // cols: [uuid, name, group_id, created_at, source, source_description,
                     //         content, content_embedding, valid_at, entity_edges, attributes, ingested_at,
-                    //         superseded_at, superseded_by, superseded_by_kind, supersession_reason]
+                    //         superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -249,6 +256,8 @@ fn dump_episodic_nodes(
                     let superseded_by = value_as_string(&row[13]);
                     let superseded_by_kind = value_as_string(&row[14]);
                     let supersession_reason = value_as_string(&row[15]);
+                    // Document identity (issue #707), appended last like the columns above.
+                    let doc_id = value_as_string(&row[16]);
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -266,6 +275,7 @@ fn dump_episodic_nodes(
                         "superseded_by": superseded_by,
                         "superseded_by_kind": superseded_by_kind,
                         "supersession_reason": supersession_reason,
+                        "doc_id": doc_id,
                     });
                     w.log_mutation(EPISODIC_CYPHER, params, "")?;
                 }
@@ -410,6 +420,45 @@ fn dump_saga_nodes(
                         "created_at": created_at,
                     });
                     w.log_mutation(SAGA_CYPHER, params, "")?;
+                }
+                Ok(())
+            })?;
+            total += count;
+        }
+        if count < PAGE_SIZE {
+            break;
+        }
+        offset += count;
+    }
+    Ok(total)
+}
+
+/// Document supersession records (issue #707). Without this a compaction would silently drop
+/// them and a rebuild would lose every "in force until" answer.
+fn dump_doc_supersession_nodes(
+    conn: &Conn<'_>,
+    writer: &mut WalWriter,
+    group_id: Option<&str>,
+) -> Result<usize, Error> {
+    let mut total = 0;
+    let mut offset = 0;
+    loop {
+        let rows = conn.dump_doc_supersession_page(group_id, offset, PAGE_SIZE)?;
+        let count = rows.len();
+        if count > 0 {
+            writer.with_chunk(|w| {
+                for row in &rows {
+                    // cols: [key, group_id, superseded_doc_id, superseding_doc_id, effective_at,
+                    //         recorded_at]
+                    let params = serde_json::json!({
+                        "key": value_as_string(&row[0]),
+                        "group_id": value_as_string(&row[1]),
+                        "superseded_doc_id": value_as_string(&row[2]),
+                        "superseding_doc_id": value_as_string(&row[3]),
+                        "effective_at": dump_ts_str(&row[4]),
+                        "recorded_at": dump_ts_str(&row[5]),
+                    });
+                    w.log_mutation(DOC_SUPERSESSION_CYPHER, params, "")?;
                 }
                 Ok(())
             })?;

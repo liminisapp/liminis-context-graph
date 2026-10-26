@@ -120,6 +120,7 @@ pub fn purge_groups(
             let single = [*gid];
             conn.delete_relates_to_by_group_ids(&single)?;
             conn.delete_entities_by_group_ids(&single)?;
+            conn.delete_doc_supersessions_by_group_ids(&single)?;
             conn.delete_episodics_by_group_ids(&single)?;
             conn.drain_mutations_into(&mut grouped, gid);
         }

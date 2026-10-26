@@ -123,6 +123,9 @@ pub enum SupersedePolicy {
 #[derive(Debug, Clone, Default)]
 pub struct EpisodeOpts {
     pub supersede: SupersedePolicy,
+    /// Stable identity of the logical document the episode came from (issue #707). `None` leaves
+    /// the episode outside document supersession.
+    pub doc_id: Option<String>,
 }
 
 /// Phase C's result: `(edges_inserted, edges_dropped_unresolvable,
@@ -1247,6 +1250,7 @@ pub async fn add_episode_with_opts(
     let ref_time_owned = reference_time.to_string();
     let gid_owned = group_id.to_string();
     let supersede_policy = opts.supersede;
+    let doc_id_owned = opts.doc_id;
     let chunk_name_for_supersede = name.to_string();
     // `attributes` is expected to already be a serialized JSON object (handlers.rs's
     // `attributes_param_to_string` guarantees this for the two IPC entry points), but
@@ -1512,6 +1516,7 @@ pub async fn add_episode_with_opts(
             valid_at: ref_time_owned.clone(),
             entity_edges: entity_uuids.clone(),
             attributes: attributes_owned.clone(),
+            doc_id: doc_id_owned,
             ..Default::default()
         })?;
 
@@ -1537,6 +1542,7 @@ pub async fn add_episode_with_opts(
                 &chunk_name_for_supersede,
                 &gid_owned,
                 &exclude,
+                &commit_instant,
             )?;
             conn.supersede_episodes_by_uuids(&old, &commit_instant, Some(&ep_uuid), "revision")?;
             superseded_episode_uuids = old;

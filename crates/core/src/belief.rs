@@ -28,7 +28,36 @@ pub struct EdgeBeliefRow {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EpisodeSupersession {
     pub superseded_at_us: Option<i64>,
+    /// `episode` or `document` (issue #707); `None` for `chunk_removed` or a live episode.
+    pub kind: Option<String>,
+    /// Superseding episode uuid, or the superseding document's `doc_id`.
+    pub superseded_by: Option<String>,
+    pub reason: Option<String>,
+    pub group_id: String,
+    /// The logical document the episode came from (issue #707).
+    pub doc_id: Option<String>,
 }
+
+impl EpisodeSupersession {
+    fn is_document_superseded(&self) -> bool {
+        self.kind.as_deref() == Some("document")
+    }
+}
+
+/// One durable `DocSupersession` record (issue #707): document `superseding_doc_id` replaced
+/// `superseded_doc_id` within a group. `effective_at_us` is where "in force" ends;
+/// `recorded_at_us` is when the graph learned of it. Never an edge field: validity is untouched.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DocSupersessionRecord {
+    pub group_id: String,
+    pub superseded_doc_id: String,
+    pub superseding_doc_id: String,
+    pub effective_at_us: i64,
+    pub recorded_at_us: i64,
+}
+
+/// Document supersession records keyed by `(group_id, superseded_doc_id)`.
+pub type DocRecords = HashMap<(String, String), DocSupersessionRecord>;
 
 /// How an edge stands at the evaluated instant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -175,6 +204,120 @@ pub fn belief_interval(
     }
 }
 
+/// The document supersession record that applies to a document-superseded episode, if any.
+fn doc_record<'a>(
+    ep: &EpisodeSupersession,
+    docs: &'a DocRecords,
+) -> Option<&'a DocSupersessionRecord> {
+    if !ep.is_document_superseded() {
+        return None;
+    }
+    let doc = ep.doc_id.as_ref()?;
+    docs.get(&(ep.group_id.clone(), doc.clone()))
+}
+
+/// Whether the fact was *in force* at `t` (FR-004, FR-007), independent of whether it was
+/// believed at `t`. A producing episode is in force unless its document was superseded with an
+/// effective date at or before `t`; an episode superseded any other way (revision, removal) was
+/// corrected, so it makes no validity claim. The edge is in force iff any producing episode is
+/// (mirroring belief's "any live source" rule); `None` when every present producing episode was
+/// corrected or none remain. Edges with no producing episode (warranted, legacy) are in force.
+pub fn in_force(
+    edge: &EdgeBeliefRow,
+    episodes: &HashMap<String, EpisodeSupersession>,
+    docs: &DocRecords,
+    t_us: i64,
+) -> Option<bool> {
+    if edge.episodes.is_empty() {
+        return Some(true);
+    }
+    let mut any_ended = false;
+    for uuid in &edge.episodes {
+        let Some(ep) = episodes.get(uuid) else {
+            continue;
+        };
+        if ep.is_document_superseded() {
+            match doc_record(ep, docs) {
+                Some(rec) if rec.effective_at_us <= t_us => any_ended = true,
+                _ => return Some(true),
+            }
+        } else if ep.superseded_at_us.is_none() {
+            return Some(true);
+        }
+    }
+    if any_ended {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Why belief in a fact ended (FR-007): `corrected` (revision or removal — the fact was never
+/// true) versus `document_superseded` (true until the effective date).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupersessionCause {
+    Corrected,
+    DocumentSuperseded,
+}
+
+/// Stored supersession state of a fact, reported independently of the evaluated instant so the
+/// "corrected" / "in force until" classification is readable from any read (SC-005).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SupersessionInfo {
+    pub cause: SupersessionCause,
+    pub superseded_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_by_document: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_force_until: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<String>,
+}
+
+pub(crate) fn format_us(us: i64) -> String {
+    time::OffsetDateTime::from_unix_timestamp_nanos(us as i128 * 1_000)
+        .map(crate::db::format_datetime_rfc3339_subsecond)
+        .unwrap_or_default()
+}
+
+/// Present only when every producing episode that still exists has a recorded supersession; taken
+/// from the one that ended belief last.
+pub fn supersession_info(
+    edge: &EdgeBeliefRow,
+    episodes: &HashMap<String, EpisodeSupersession>,
+    docs: &DocRecords,
+) -> Option<SupersessionInfo> {
+    let mut last: Option<(&EpisodeSupersession, i64)> = None;
+    for uuid in &edge.episodes {
+        let Some(ep) = episodes.get(uuid) else {
+            continue;
+        };
+        let at = ep.superseded_at_us?;
+        if last.is_none_or(|(_, l)| at >= l) {
+            last = Some((ep, at));
+        }
+    }
+    let (ep, at) = last?;
+    let rec = doc_record(ep, docs);
+    let cause = if ep.is_document_superseded() {
+        SupersessionCause::DocumentSuperseded
+    } else {
+        SupersessionCause::Corrected
+    };
+    Some(SupersessionInfo {
+        cause,
+        superseded_at: format_us(at),
+        superseded_by_document: if ep.is_document_superseded() {
+            ep.superseded_by.clone()
+        } else {
+            None
+        },
+        in_force_until: rec.map(|r| format_us(r.effective_at_us)),
+        recorded_at: rec.map(|r| format_us(r.recorded_at_us)),
+    })
+}
+
 /// The `belief` annotation attached to each edge by an opted-in read (FR-009).
 #[derive(Debug, Clone, Serialize)]
 pub struct BeliefAnnotation {
@@ -185,16 +328,28 @@ pub struct BeliefAnnotation {
     pub warrant: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub valid_at_source: Option<String>,
+    /// Whether the fact was in force at the evaluated instant (issue #707), independent of
+    /// `believed`. `null` when it was corrected and so never true.
+    pub in_force: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supersession: Option<SupersessionInfo>,
 }
 
 impl BeliefAnnotation {
-    pub fn new(edge: &EdgeBeliefRow, state: BeliefState) -> Self {
+    pub fn new(
+        edge: &EdgeBeliefRow,
+        state: BeliefState,
+        in_force: Option<bool>,
+        supersession: Option<SupersessionInfo>,
+    ) -> Self {
         Self {
             state,
             believed: state.is_believed(),
             producing_episode_uuids: edge.episodes.clone(),
             warrant: edge.warrant.clone(),
             valid_at_source: edge.valid_at_source.clone(),
+            in_force,
+            supersession,
         }
     }
 }
@@ -221,6 +376,7 @@ mod tests {
                     u.to_string(),
                     EpisodeSupersession {
                         superseded_at_us: *s,
+                        ..Default::default()
                     },
                 )
             })
@@ -374,5 +530,111 @@ mod tests {
         let mut e = edge(0, &["a"], None);
         e.ingested_at_us = None;
         assert_eq!(evaluate(&e, &eps(&[("a", None)]), 1), BeliefState::Believed);
+    }
+
+    fn doc_ep(superseded: i64, doc: &str, by: &str) -> EpisodeSupersession {
+        EpisodeSupersession {
+            superseded_at_us: Some(superseded),
+            kind: Some("document".into()),
+            superseded_by: Some(by.into()),
+            reason: Some("document_superseded".into()),
+            group_id: "g".into(),
+            doc_id: Some(doc.into()),
+        }
+    }
+
+    fn corrected_ep(superseded: i64) -> EpisodeSupersession {
+        EpisodeSupersession {
+            superseded_at_us: Some(superseded),
+            kind: Some("episode".into()),
+            superseded_by: Some("new".into()),
+            reason: Some("revision".into()),
+            group_id: "g".into(),
+            doc_id: Some("B".into()),
+        }
+    }
+
+    fn rec(effective: i64, recorded: i64) -> DocRecords {
+        let mut m = DocRecords::new();
+        m.insert(
+            ("g".into(), "B".into()),
+            DocSupersessionRecord {
+                group_id: "g".into(),
+                superseded_doc_id: "B".into(),
+                superseding_doc_id: "A".into(),
+                effective_at_us: effective,
+                recorded_at_us: recorded,
+            },
+        );
+        m
+    }
+
+    #[test]
+    fn retroactive_supersession_is_believed_but_not_in_force() {
+        // Effective at 200, recorded at 300: believed on [100, 300), in force on [100, 200).
+        let e = edge(100, &["b"], None);
+        let m: HashMap<_, _> = [("b".to_string(), doc_ep(300, "B", "A"))].into();
+        let d = rec(200, 300);
+        assert_eq!(in_force(&e, &m, &d, 150), Some(true));
+        assert_eq!(in_force(&e, &m, &d, 250), Some(false));
+        assert_eq!(evaluate(&e, &m, 250), BeliefState::Believed);
+        assert_eq!(evaluate(&e, &m, 300), BeliefState::Superseded);
+        assert_eq!(in_force(&e, &m, &d, 300), Some(false));
+    }
+
+    #[test]
+    fn future_effective_date_is_believed_and_in_force_until_then() {
+        // Recorded at 200, effective at 500: superseded_at = 500.
+        let e = edge(100, &["b"], None);
+        let m: HashMap<_, _> = [("b".to_string(), doc_ep(500, "B", "A"))].into();
+        let d = rec(500, 200);
+        assert_eq!(evaluate(&e, &m, 499), BeliefState::Believed);
+        assert_eq!(in_force(&e, &m, &d, 499), Some(true));
+        assert_eq!(evaluate(&e, &m, 500), BeliefState::Superseded);
+        assert_eq!(in_force(&e, &m, &d, 500), Some(false));
+    }
+
+    #[test]
+    fn corrected_fact_has_no_in_force_claim() {
+        let e = edge(100, &["b"], None);
+        let m: HashMap<_, _> = [("b".to_string(), corrected_ep(200))].into();
+        assert_eq!(in_force(&e, &m, &DocRecords::new(), 150), None);
+        assert_eq!(in_force(&e, &m, &DocRecords::new(), 250), None);
+    }
+
+    #[test]
+    fn edge_in_force_while_any_source_is() {
+        let e = edge(100, &["b", "a"], None);
+        let m: HashMap<_, _> = [
+            ("b".to_string(), doc_ep(200, "B", "A")),
+            ("a".to_string(), EpisodeSupersession::default()),
+        ]
+        .into();
+        assert_eq!(in_force(&e, &m, &rec(200, 200), 900), Some(true));
+        let w = edge(100, &[], Some("assertion"));
+        assert_eq!(in_force(&w, &m, &rec(200, 200), 900), Some(true));
+        let mixed = edge(100, &["b", "c"], None);
+        let m2: HashMap<_, _> = [
+            ("b".to_string(), doc_ep(200, "B", "A")),
+            ("c".to_string(), corrected_ep(250)),
+        ]
+        .into();
+        assert_eq!(in_force(&mixed, &m2, &rec(200, 200), 900), Some(false));
+    }
+
+    #[test]
+    fn supersession_info_classifies_cause() {
+        let e = edge(100, &["b"], None);
+        let m: HashMap<_, _> = [("b".to_string(), doc_ep(300, "B", "A"))].into();
+        let info = supersession_info(&e, &m, &rec(200, 300)).unwrap();
+        assert_eq!(info.cause, SupersessionCause::DocumentSuperseded);
+        assert_eq!(info.superseded_by_document.as_deref(), Some("A"));
+        assert!(info.in_force_until.is_some() && info.recorded_at.is_some());
+        let c: HashMap<_, _> = [("b".to_string(), corrected_ep(300))].into();
+        let info = supersession_info(&e, &c, &DocRecords::new()).unwrap();
+        assert_eq!(info.cause, SupersessionCause::Corrected);
+        assert!(info.in_force_until.is_none());
+        let live: HashMap<_, _> = [("b".to_string(), EpisodeSupersession::default())].into();
+        assert!(supersession_info(&e, &live, &DocRecords::new()).is_none());
     }
 }
