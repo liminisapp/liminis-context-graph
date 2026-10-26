@@ -988,9 +988,9 @@ fn record_create_keeps_first_values() {
     assert_eq!(r.recorded_at_us, 1_769_904_000_000_000);
 }
 
-/// The new column and table are added to a pre-#707 database idempotently.
+/// The new `Episodic.doc_id` column is added to a pre-#707 database idempotently.
 #[test]
-fn migrate_adds_doc_id_and_record_table() {
+fn migrate_adds_doc_id_column() {
     let dir = TempDir::new().unwrap();
     let db = Db::open(dir.path().join("old.db").to_str().unwrap()).unwrap();
     let conn = db.connect().unwrap();
@@ -1009,4 +1009,40 @@ fn migrate_adds_doc_id_and_record_table() {
     schema::migrate(&conn, DIM);
     conn.run_cypher("MATCH (n:Episodic) RETURN n.doc_id LIMIT 0")
         .expect("Episodic.doc_id must bind after migrate");
+}
+
+/// A database created before #707 has no `DocSupersession` table; `init_schema` adds it
+/// (`CREATE ... IF NOT EXISTS`) and a second pass leaves its rows alone.
+#[test]
+fn init_schema_adds_record_table_to_a_pre_707_database() {
+    let (db, _d) = make_db();
+    let conn = db.connect().unwrap();
+    conn.run_cypher("DROP TABLE DocSupersession").unwrap();
+    conn.run_cypher("MATCH (d:DocSupersession) RETURN d.key LIMIT 0")
+        .expect_err("the table is gone, as in a pre-#707 database");
+
+    conn.init_schema(DIM).unwrap();
+    conn.run_cypher("MATCH (d:DocSupersession) RETURN d.key LIMIT 0")
+        .expect("init_schema must create DocSupersession");
+
+    let rec = lcg_core::belief::DocSupersessionRecord {
+        group_id: G.into(),
+        superseded_doc_id: "B".into(),
+        superseding_doc_id: "A".into(),
+        ..Default::default()
+    };
+    conn.create_doc_supersession(
+        &rec,
+        "2026-01-01T00:00:00.000000Z",
+        "2026-02-01T00:00:00.000000Z",
+    )
+    .unwrap();
+    conn.init_schema(DIM).unwrap();
+    assert_eq!(
+        conn.get_doc_supersessions(&[(G.into(), "B".into())])
+            .unwrap()
+            .len(),
+        1,
+        "a repeated init_schema must not drop the records"
+    );
 }
