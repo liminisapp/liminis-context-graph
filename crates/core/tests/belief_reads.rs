@@ -449,6 +449,58 @@ async fn non_closed_intervals_are_named_not_empty() {
     }
 }
 
+/// A removed fact that a second, live episode (outside the replacement) also produced is still
+/// believed: the changed-facts read flags it, and the affected-work read agrees the interval is open.
+#[tokio::test]
+async fn removed_fact_with_another_live_producer_is_still_believed() {
+    let (state, db, _d) = state_with(
+        vec![
+            extraction(&[("A", "B", "old fact")]),   // E1
+            extraction(&[("C", "D", "other fact")]), // live, unrelated chunk
+            extraction(&[("A", "B", "new fact")]),   // E2
+        ],
+        None,
+    );
+    let e1 = chunk(&state, G, "x", json!({})).await;
+    let other = chunk(&state, G, "other", json!({})).await;
+
+    // Edges are not deduplicated, so a shared edge is planted directly: produced by both episodes.
+    let conn = db.connect().unwrap();
+    let ents = conn.get_entities_by_group_ids(None).unwrap();
+    conn.insert_relates_to_edge(&RelatesToEdge {
+        uuid: "shared".into(),
+        name: "X".into(),
+        source_node_uuid: ents[0].uuid.clone(),
+        target_node_uuid: ents[1].uuid.clone(),
+        group_id: G.into(),
+        fact: "shared fact".into(),
+        fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+        created_at: "2026-01-01 00:00:00".into(),
+        attributes: "{}".into(),
+        episodes: vec![ep(&e1), ep(&other)],
+        ..Default::default()
+    })
+    .unwrap();
+    chunk(&state, G, "x", json!({})).await; // E2 supersedes E1
+
+    let c = changes(&state, &ep(&e1)).await;
+    let flag = |fact: &str| {
+        c["removed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["fact"] == fact)
+            .unwrap_or_else(|| panic!("{fact:?} not in removed: {c}"))["still_believed"]
+            .clone()
+    };
+    assert_eq!(flag("shared fact"), true);
+    assert_eq!(flag("old fact"), false);
+
+    let a = affected(&state, "shared").await;
+    assert_eq!(a["interval"]["state"], "open", "{a}");
+    assert_eq!(a["candidates"], json!([]));
+}
+
 /// Groups: candidates never come from another group, even when a same-named entity exists there.
 #[tokio::test]
 async fn affected_work_stays_within_the_edge_group() {
