@@ -58,8 +58,8 @@ Full detail: [docs/releases/0.18.0.md](docs/releases/0.18.0.md).
   interval that mention either endpoint entity. Affected work is labelled `basis: entity_overlap`
   (candidates, not dependents) and non-closed intervals (`open`, `no_record`, `not_defined`) are named
   rather than returned as an empty list. Both are read-only and additive.
-- **`LCG_EXTRACTION_API_KEY`** (#573, thanks @sedmondson): an optional bearer token sent as
-  `Authorization: Bearer <key>` on the HTTP extraction transport, for authenticated
+- **`LCG_EXTRACTION_API_KEY`** (#573, thanks @sedmondson): an optional key sent as a
+  bearer token in the `Authorization` header on the HTTP extraction transport, for authenticated
   OpenAI-compatible proxies. Unset sends no header; never applies to `--extractor-uds`.
 - The MCP registry is now 50 tools standalone (46 in 0.17.0): `knowledge_mark_chunk_removed`,
   `knowledge_supersede_document`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`.
