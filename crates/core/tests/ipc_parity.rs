@@ -2192,6 +2192,73 @@ async fn parity_list_relationships_nonempty() {
     assert_eq!(result["edges"].as_array().unwrap().len() as u64, count);
 }
 
+/// Edge reads return the stored `created_at` (the chunk's `reference_time`). The shared edge
+/// readers selected every column but `created_at`, so each of these surfaces returned `""`.
+#[tokio::test]
+async fn parity_edge_reads_return_created_at() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+
+    let ingest = dispatch_val(
+        4501,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_id": "chunk-created-at",
+            "source_file": "doc.txt",
+            "reference_time": "2024-01-01T00:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&ingest, 4501);
+
+    let listed = dispatch_val(
+        4502,
+        "knowledge_list_relationships",
+        json!({}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&listed, 4502);
+    let edge = &listed["result"]["edges"][0];
+    let uuid = edge["uuid"].as_str().unwrap().to_string();
+    let source = edge["source_node_uuid"].as_str().unwrap().to_string();
+
+    let reads = [
+        ("knowledge_list_relationships", json!({})),
+        ("knowledge_get_edges_by_group", json!({})),
+        ("knowledge_get_edges_by_uuids", json!({ "uuids": [uuid] })),
+        (
+            "knowledge_get_entity_neighbors",
+            json!({ "entity_uuid": source }),
+        ),
+        (
+            "knowledge_find_relationships",
+            json!({ "query": "Alice works at Acme Corp." }),
+        ),
+    ];
+    for (i, (method, params)) in reads.into_iter().enumerate() {
+        let id = 4510 + i as i64;
+        let v = dispatch_val(id, method, params, Arc::clone(&state)).await;
+        assert_ok_resp(&v, id);
+        let edges = v["result"]["edges"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{method}: no edges array: {v}"));
+        assert!(
+            !edges.is_empty(),
+            "{method}: expected the ingested edge: {v}"
+        );
+        for e in edges {
+            let created_at = e["created_at"].as_str().unwrap_or("");
+            assert!(
+                created_at.starts_with("2024-01-01"),
+                "{method}: created_at {created_at:?}: {v}"
+            );
+        }
+    }
+}
+
 // ── Tier 1b: knowledge_get_entity_neighbors ───────────────────────────────────
 
 #[tokio::test]

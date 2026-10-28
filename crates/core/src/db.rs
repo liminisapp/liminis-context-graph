@@ -2105,13 +2105,13 @@ impl<'db> Conn<'db> {
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  WHERE rn.group_id IN $gids \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at",
                 serde_json::json!({ "gids": gids }),
             ),
             None => (
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at",
                 serde_json::json!({}),
             ),
         };
@@ -2127,7 +2127,7 @@ impl<'db> Conn<'db> {
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              WHERE rn.uuid IN $uuids \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at",
             serde_json::json!({ "uuids": uuids }),
         )
     }
@@ -2152,6 +2152,7 @@ impl<'db> Conn<'db> {
                 attributes: value_as_string(&row[8]),
                 relation_type: value_as_optional_string(&row[9]),
                 ingested_at: value_as_timestamp_str(&row[10]),
+                created_at: value_as_timestamp_str(&row[11]),
                 ..Default::default()
             });
         }
@@ -2498,13 +2499,13 @@ impl<'db> Conn<'db> {
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  WHERE rn.group_id IN $gids \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at ORDER BY rn.uuid DESC LIMIT $limit",
                 serde_json::json!({ "gids": gids, "limit": limit as i64 }),
             ),
             _ => (
                 "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
                  RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit",
+                 rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at ORDER BY rn.uuid DESC LIMIT $limit",
                 serde_json::json!({ "limit": limit as i64 }),
             ),
         };
@@ -2537,13 +2538,13 @@ impl<'db> Conn<'db> {
             "MATCH (c:Entity {{uuid: $uuid}})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(n:Entity) \
              {gid_filter} \
              RETURN rn.uuid, rn.name, c.uuid, n.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at ORDER BY rn.uuid DESC LIMIT $limit"
         );
         let in_sql = format!(
             "MATCH (n:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(c:Entity {{uuid: $uuid}}) \
              {gid_filter} \
              RETURN rn.uuid, rn.name, n.uuid, c.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at ORDER BY rn.uuid DESC LIMIT $limit"
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at ORDER BY rn.uuid DESC LIMIT $limit"
         );
 
         let mut edges = self.collect_relates_to_edges(&out_sql, mk_params())?;
@@ -3570,7 +3571,7 @@ impl<'db> Conn<'db> {
              OPTIONAL MATCH (src:Entity)-[:RELATES_TO]->(rn) \
              OPTIONAL MATCH (rn)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, coalesce(src.uuid, ''), coalesce(dst.uuid, ''), \
-             rn.group_id, rn.fact, rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
+             rn.group_id, rn.fact, rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at",
             serde_json::json!({ "uuids": uuids }),
         )?;
         let mut rows = Vec::new();
@@ -3587,6 +3588,7 @@ impl<'db> Conn<'db> {
                 attributes: value_as_string(&row[8]),
                 relation_type: value_as_optional_string(&row[9]),
                 ingested_at: value_as_timestamp_str(&row[10]),
+                created_at: value_as_timestamp_str(&row[11]),
                 ..Default::default()
             });
         }
@@ -3938,7 +3940,7 @@ impl<'db> Conn<'db> {
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              WHERE rn.uuid = $uuid \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at",
             serde_json::json!({ "uuid": uuid }),
         )?;
         Ok(rows.pop())
@@ -3949,13 +3951,13 @@ impl<'db> Conn<'db> {
         let mut edges = self.collect_relates_to_edges(
             "MATCH (src:Entity {uuid: $uuid})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at",
             serde_json::json!({ "uuid": entity_uuid }),
         )?;
         edges.extend(self.collect_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
-             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at",
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at",
             serde_json::json!({ "uuid": entity_uuid }),
         )?);
         Ok(edges)
