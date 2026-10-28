@@ -9,12 +9,18 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-10-28
+
+Full detail: [docs/releases/0.18.0.md](docs/releases/0.18.0.md).
+
 ### Upgrading
 
 - **Re-ingest graphs written before this release** if you want belief time to cover them. Their edges
   have no producing episode and cannot be soundly backfilled (endpoint co-occurrence is not
   provenance, #404); they are treated as believed and reported as `legacy`
-  (`knowledge_status.legacy_edge_count`). New nullable columns are added on first start.
+  (`knowledge_status.legacy_edge_count`). New nullable columns and the `DocSupersession` table are
+  added on first start; existing rows are not rewritten. No storage migration: the storage version
+  stays 47.
 - **First start runs a one-time FTS index rebuild**, because lbug moved 0.21.1 → 0.21.2 and the #649
   marker records the exact lbug version. It is logged; a large graph starts slower that once. Later
   starts do not rebuild.
@@ -47,20 +53,49 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   object per edge. Default reads are unchanged.
 - `knowledge_status.legacy_edge_count`.
 - **`knowledge_get_correction_changes {episode_uuid}`** and **`knowledge_get_affected_work {edge_uuid}`**
-  (#706, ADR-0706; MCP `read` scope, 49 tools total): for a superseded episode, the facts it supported
+  (#706, ADR-0706; MCP `read` scope): for a superseded episode, the facts it supported
   versus the facts its replacement supports; for a dropped fact, the episodes ingested inside its belief
   interval that mention either endpoint entity. Affected work is labelled `basis: entity_overlap`
   (candidates, not dependents) and non-closed intervals (`open`, `no_record`, `not_defined`) are named
   rather than returned as an empty list. Both are read-only and additive.
+- **`LCG_EXTRACTION_API_KEY`** (#573, thanks @sedmondson): an optional bearer token sent as
+  `Authorization: Bearer <key>` on the HTTP extraction transport, for authenticated
+  OpenAI-compatible proxies. Unset sends no header; never applies to `--extractor-uds`.
+- The MCP registry is now 50 tools standalone (46 in 0.17.0): `knowledge_mark_chunk_removed`,
+  `knowledge_supersede_document`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`.
 
 ### Changed
 
 - `knowledge_assert_relationship` never overwrites an extracted edge's `fact` (#405); it creates a
   separate edge with the `assertion` warrant.
 - `Episodic.entity_edges` is documented as holding entity UUIDs, not edge provenance.
-- **lbug 0.21.1 → 0.21.2** (#699, supersedes #693). Takes upstream's scan-correctness fix
-  (`NodeGroup::scan` ran past a sub-node-group morsel's end) and buffer-manager race fix. Extensions
-  unchanged (still the `v0.21.0` path, same pinned bytes); storage version stays 47.
+- **lbug 0.21.1 → 0.21.2** (#701, supersedes #693). Takes upstream's scan-correctness fix
+  (`NodeGroup::scan` ran past a sub-node-group morsel's end) and buffer-manager race fix. Storage
+  version stays 47.
+- **Extension pins re-recorded** (#717, fixes #709). Upstream briefly served 0.22-built extensions
+  from the `v0.21.0` path (LadybugDB/ladybug#1390) and then restored it from a fresh 0.21.2 build
+  (#1403), so the bytes changed: `fts` on all four platforms and `vector` on Windows. The pin check
+  (ADR-0593) failed release builds on the mismatch, as designed; the new bytes were verified to
+  load and to create and query FTS and vector indexes before re-pinning. Still the `v0.21.0` path.
+- **Release builds prefetch and cache the pinned prebuilt liblbug** (#700, #690), so one failed
+  download no longer fails a release.
+- Dependency updates, including `rustls` 0.23.46, the docs site's `vite` 8.3.5 and `undici` 8.12.3,
+  and the Swift sidecar's `swift-transformers` 1.3.5.
+
+### Fixed
+
+- **Edge reads return `created_at`** (#722). `knowledge_list_relationships`,
+  `get_edges_by_group`, `get_edges_by_uuids`, `get_entity_neighbors` and `find_relationships`
+  returned `"created_at": ""` although the stored value was intact; the shared edge readers never
+  selected the column. Read-only: no stored data was affected.
+
+### Known issues
+
+- **Windows: lbug's CHECKPOINT can silently corrupt some STRING and INT8/UINT8 data** (#719,
+  LadybugDB/ladybug#1447). MSVC's vectorized `std::minmax_element` can return a wrong min/max for
+  some byte arrays, so a column chunk is wrongly stored as a constant. It affects the prebuilt lbug
+  0.21.2 that Windows builds link, so 0.17.x is affected too; macOS and Linux are not. The fix needs
+  an upstream release; #719 tracks it.
 
 ## [0.17.0] - 2026-10-04
 
