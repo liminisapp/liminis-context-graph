@@ -82,6 +82,13 @@ Full detail: [docs/releases/0.18.0.md](docs/releases/0.18.0.md).
 - Dependency updates, including `rustls` 0.23.46, the docs site's `vite` 8.3.5 and `undici` 8.12.3,
   and the Swift sidecar's `swift-transformers` 1.3.5.
 
+### Fixed
+
+- **Edge reads return `created_at`** (#722). `knowledge_list_relationships`,
+  `get_edges_by_group`, `get_edges_by_uuids`, `get_entity_neighbors` and `find_relationships`
+  returned `"created_at": ""` although the stored value was intact; the shared edge readers never
+  selected the column. Read-only: no stored data was affected.
+
 ### Known issues
 
 - **Windows: lbug's CHECKPOINT can silently corrupt some STRING and INT8/UINT8 data** (#719,
