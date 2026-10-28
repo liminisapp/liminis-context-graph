@@ -114,7 +114,10 @@ The app still detects it by substring, for the one optional method it keeps call
 proposal's outcome: return -32601 for an unknown method, and keep the `"Method not found: "` message
 text verbatim.** Changing the code and the string together would reclassify real failures for any
 client still substring-matching during the window between the engine change and the client update.
-Changing the code alone needs no client coordination.
+Changing the code alone needs no client coordination. It does change lcg's own expectations:
+`parity_unknown_method_returns_error` asserts -32000 (**[V]** `crates/core/tests/ipc_parity.rs:459-463`),
+and the MCP bridge defaults a missing error code to -32000 (**[V]** `crates/service/src/mcp/attached.rs:134`),
+so the fix updates that test and checks that the bridge passes -32601 through unchanged.
 
 ## 5. Where the two modes cannot be equivalent
 
