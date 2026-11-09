@@ -2,6 +2,10 @@
 
 **Status:** Architectural exploration
 
+![Proposed Liminis memory architecture](memory-architecture.svg)
+
+The diagram illustrates the proposed layering and the dependency-driven belief-revision loop. It is a vector recreation of the architectural illustration.
+
 ## Thesis
 
 Keep Liminis Context Graph's append-only JSONL WAL, episode-backed assertions, rebuildable LadybugDB indexes, belief-time semantics, correction/document supersession distinction, and group-isolated streams as the source-grounded substrate. Explore an additional layer of **derived observations**, **materialized mental models**, and **task-specific context assembly**.
