@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="920" viewBox="0 0 1200 920">
+<style>text{font-family:Arial,Helvetica,sans-serif;fill:#17233b} .title{font-size:30px;font-weight:700}.sub{font-size:16px;fill:#50617b}.h{font-size:19px;font-weight:700}.body{font-size:15px}.small{font-size:13px}.box{stroke-width:2;rx:16}.line{stroke:#334155;stroke-width:2.5;fill:none;marker-end:url(#arrow)}.dash{stroke:#8b5cf6;stroke-width:2.5;stroke-dasharray:8 6;fill:none;marker-end:url(#purple)}</style>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#334155"/></marker><marker id="purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="#8b5cf6"/></marker></defs>
+<rect width="1200" height="920" fill="#fff"/>
+<text x="42" y="52" class="title">Liminis Context Graph — Proposed Memory Architecture</text>
+<text x="42" y="79" class="sub">Source-grounded episodes → temporal graph → evidence-backed inference → agent context</text>
+<rect x="40" y="110" width="810" height="120" fill="#edf6ff" stroke="#60a5fa" class="box"/>
+<text x="60" y="140" class="h">Authoritative source data</text>
+<rect x="60" y="157" width="180" height="50" fill="#fff" stroke="#60a5fa" rx="9"/><text x="80" y="187" class="body">Source inputs</text>
+<rect x="318" y="157" width="230" height="50" fill="#f4edff" stroke="#a78bfa" rx="9"/><text x="339" y="187" class="body">JSONL WAL (per group)</text>
+<rect x="625" y="157" width="195" height="50" fill="#fff" stroke="#60a5fa" rx="9"/><text x="650" y="187" class="body">Source episodes</text>
+<path d="M240 182H315M548 182H622M445 230V262" class="line"/>
+<rect x="40" y="264" width="810" height="132" fill="#effaf3" stroke="#5bb97a" class="box"/>
+<text x="60" y="296" class="h">Temporal context graph (LadybugDB projection)</text>
+<text x="60" y="325" class="body">Extracted entities, relationships, and source assertions</text>
+<text x="60" y="350" class="body">Episode provenance · belief-time queries · correction vs. supersession</text>
+<text x="60" y="375" class="small">Rebuildable index; authoritative history remains in the WAL</text>
+<path d="M445 396V429" class="line"/>
+<rect x="40" y="432" width="810" height="152" fill="#fff8e9" stroke="#f59e0b" class="box"/>
+<text x="60" y="465" class="h">Observations — derived knowledge (proposed)</text>
+<text x="60" y="493" class="body">Inferred assertions with supporting and contradicting evidence</text>
+<text x="60" y="518" class="body">Derivation history · revisions · proposed / contested / stale / retracted</text>
+<rect x="560" y="532" width="265" height="34" fill="#fff" stroke="#f59e0b" rx="8"/>
+<text x="575" y="554" class="small">Evidence → inference → evidence</text>
+<path d="M445 584V617" class="line"/>
+<rect x="40" y="620" width="810" height="111" fill="#f6f1ff" stroke="#a78bfa" class="box"/>
+<text x="60" y="651" class="h">Mental models — materialized views (proposed)</text>
+<text x="60" y="679" class="body">Named standing questions; refreshable syntheses with citations</text>
+<text x="60" y="704" class="body">Source watermark · freshness status · incremental re-evaluation</text>
+<path d="M445 731V765" class="line"/>
+<rect x="40" y="768" width="810" height="106" fill="#eaf6ff" stroke="#60a5fa" class="box"/>
+<text x="60" y="799" class="h">Context assembly → agent / LLM</text>
+<text x="60" y="827" class="body">Task-specific, token-bounded retrieval across episodes, facts, observations, and views</text>
+<text x="60" y="852" class="body">Preserve citations, uncertainty, and source-versus-inference distinction</text>
+<rect x="884" y="264" width="280" height="467" fill="#fafaff" stroke="#a5a5bb" class="box"/>
+<text x="904" y="297" class="h">Belief revision</text>
+<rect x="904" y="321" width="240" height="57" fill="#eef2ff" stroke="#818cf8" rx="9"/>
+<text x="921" y="346" class="body">New / changed evidence</text><text x="921" y="366" class="small">episode, correction, reset</text>
+<path d="M1024 378V410" class="line"/>
+<rect x="904" y="413" width="240" height="64" fill="#fff" stroke="#818cf8" rx="9"/>
+<text x="922" y="440" class="body">Update source beliefs</text><text x="922" y="461" class="small">correct / supersede / contest</text>
+<path d="M1024 477V510" class="line"/>
+<rect x="904" y="513" width="240" height="93" fill="#f4edff" stroke="#a78bfa" rx="9"/>
+<text x="921" y="540" class="body">Track dependencies</text><text x="921" y="564" class="small">Mark observations stale</text><text x="921" y="585" class="small">Refresh dependent views</text>
+<path d="M904 556H855V507H849" class="dash"/><path d="M904 584H871V674H849" class="dash"/>
+<text x="905" y="653" class="small">Dashed arrows = invalidation</text>
+<text x="905" y="675" class="small">and refresh, not deletion.</text>
+<text x="42" y="907" class="small">Architectural proposal — derived layers are exploratory; the WAL and temporal graph are the existing foundation.</text>
+</svg>
