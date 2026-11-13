@@ -753,3 +753,59 @@ fn spot_check_notable_classifications() {
         Some(WriteClass::Exempt(_))
     ));
 }
+
+/// Every node table in `schema.rs` that declares a `group_id` column must be scanned when the
+/// guard enumerates "every group present" (`clear_all`, `apply_corrections`, healthy-DB
+/// `recover`). Derived from the schema source so a newly added group-scoped table fails here.
+#[test]
+fn group_enumeration_covers_every_group_scoped_node_table() {
+    let schema = include_str!("../src/schema.rs");
+    let mut expected: Vec<String> = Vec::new();
+    for chunk in schema.split("CREATE NODE TABLE IF NOT EXISTS ").skip(1) {
+        let name: String = chunk
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        // The column list ends at the first `)"` closing the statement.
+        let body = chunk.split(")\"").next().unwrap_or("");
+        if body.contains("group_id STRING") {
+            expected.push(name);
+        }
+    }
+    assert!(
+        expected.len() >= 6,
+        "schema extraction found too few tables: {expected:?}"
+    );
+    let mut actual: Vec<String> = lcg_core::db::GROUP_SCOPED_NODE_TABLES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    expected.sort();
+    actual.sort();
+    assert_eq!(
+        actual, expected,
+        "GROUP_SCOPED_NODE_TABLES must equal the schema's node tables that carry group_id"
+    );
+}
+
+/// A group whose only rows live in a stub/aux table (no entity, episode, relationship, or WAL
+/// directory) is still "present", so `clear_all` cannot silently destroy it.
+#[tokio::test]
+async fn clear_all_counts_groups_present_only_in_aux_tables() {
+    let f = fixture();
+    {
+        let db = f.state.db.load_full().unwrap();
+        let conn = db.connect().unwrap();
+        conn.cypher_query("CREATE (:Saga {uuid: 's1', name: 'x', group_id: 'z'})")
+            .unwrap();
+        conn.cypher_query(
+            "CREATE (:DocSupersession {key: 'k1', group_id: 'y', superseded_doc_id: 'd'})",
+        )
+        .unwrap();
+        let groups = conn.list_distinct_group_ids().unwrap();
+        assert!(groups.contains("z") && groups.contains("y"), "{groups:?}");
+    }
+    let list = policy("a");
+    let v = call(&f, Some(&list), "knowledge_clear_all", json!({})).await;
+    assert_refused(&v, "all_groups_required");
+}

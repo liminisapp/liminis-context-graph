@@ -479,6 +479,19 @@ fn build_sync_recompute_fn(
     }))
 }
 
+/// Every node table in `schema.rs` that carries a `group_id` column (issue #742). The
+/// `--writable-groups` guard enumerates "every group present" from these, so a table added to the
+/// schema with a `group_id` must be listed here — `write_policy::tests` derives the expected set
+/// from `schema.rs` and fails if this list drifts.
+pub const GROUP_SCOPED_NODE_TABLES: &[&str] = &[
+    "Entity",
+    "Episodic",
+    "RelatesToNode_",
+    "DocSupersession",
+    "Community",
+    "Saga",
+];
+
 impl<'db> Conn<'db> {
     /// Runs a raw Cypher statement returning no rows; used for DDL (schema/index) and
     /// non-parameterized statements. Records `(sql, Null)` for WAL flushing by callers.
@@ -1356,18 +1369,16 @@ impl<'db> Conn<'db> {
             .and_then(|row| value_as_optional_string(&row[0])))
     }
 
-    /// Every distinct `group_id` present in the Entity, Episodic and RelatesToNode_ tables
-    /// (issue #742). A table missing from an older/partial schema contributes nothing rather than
-    /// failing — it holds no group data. Used by the `--writable-groups` guard to decide whether a
-    /// whole-database operation touches only listed groups.
+    /// Every distinct `group_id` present in any node table that carries a `group_id` column
+    /// ([`GROUP_SCOPED_NODE_TABLES`], issue #742). A table missing from an older/partial schema
+    /// contributes nothing rather than failing — it holds no group data. Used by the
+    /// `--writable-groups` guard to decide whether a whole-database operation touches only listed
+    /// groups, so it must see every group whose rows such an operation would destroy.
     pub fn list_distinct_group_ids(&self) -> Result<std::collections::BTreeSet<String>, Error> {
         let mut out = std::collections::BTreeSet::new();
-        for q in [
-            "MATCH (n:Entity) RETURN DISTINCT n.group_id",
-            "MATCH (n:Episodic) RETURN DISTINCT n.group_id",
-            "MATCH (n:RelatesToNode_) RETURN DISTINCT n.group_id",
-        ] {
-            match self.query_params(q, serde_json::json!({})) {
+        for table in GROUP_SCOPED_NODE_TABLES {
+            let q = format!("MATCH (n:{table}) RETURN DISTINCT n.group_id");
+            match self.query_params(&q, serde_json::json!({})) {
                 Ok(rows) => {
                     for row in rows {
                         if let Some(g) = value_as_optional_string(&row[0]) {
