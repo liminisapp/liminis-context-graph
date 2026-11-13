@@ -1324,10 +1324,6 @@ async fn run_mcp_attached(
     Ok(())
 }
 
-/// The real async entry point. Split out from `main()` (which is NOT `#[tokio::main]`, see
-/// there for why) so `shutdown_timeout_ms` can be read once, before the runtime is built, and
-/// reused both for the in-body join_set/task drain and for the runtime's own blocking-pool
-/// drain bound after this function returns.
 /// Resolves the `--writable-groups` / `LCG_WRITABLE_GROUPS` allow-list from the flag value and
 /// the process environment (issue #742). A non-unicode env value is an error, not "unset".
 fn resolve_writable_groups(
@@ -1346,6 +1342,10 @@ fn resolve_writable_groups(
     lcg_core::write_policy::WritableGroups::resolve(flag, env.as_deref())
 }
 
+/// The real async entry point. Split out from `main()` (which is NOT `#[tokio::main]`, see
+/// there for why) so `shutdown_timeout_ms` can be read once, before the runtime is built, and
+/// reused both for the in-body join_set/task drain and for the runtime's own blocking-pool
+/// drain bound after this function returns.
 async fn async_main(
     shutdown_timeout_ms: u64,
     cli_mode: CliMode,
