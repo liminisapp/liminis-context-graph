@@ -62,14 +62,16 @@ pass in the handler/`cross_group` layer.
 It is derived local state: re-replaying the same stream re-derives it, no WAL format change is
 needed, and appending to the stream being replayed is the hazard documented at
 `clear_group_for_rebuild`. `demote_hopless_pointers` drains and discards `Conn`'s recorded-mutation
-buffer before returning so its `SET`s cannot leak into the first `rebind_pointers` bucket and be
+buffer before returning (on the error path too) so its `SET`s cannot leak into the first `rebind_pointers` bucket and be
 flushed to some group's WAL.
 
 ### Result shape and failure behaviour
 
 `cross_group_rebind` reuses `RebindCounts` and is non-null on every successful non-dry-run rebuild
-(a dry run never replays, so it stays `null`). If the repair errors it is logged and the field is
-`null` while the rebuild still succeeds, so a caller can tell the repair did not complete. No
+(a dry run never replays, so it stays `null`). The demotion and the rebind are independent: a
+demotion failure is logged and the rebind still runs. If the rebind itself errors it is logged and
+the field is `null` while the rebuild still succeeds, so a caller can tell the repair did not
+complete. No
 `demoted` counter is added: the demoted pointer is visible as `unbound` in `knowledge_status`
 between the rebuilds, and as `bound` in the `up` rebuild's counts once repaired.
 

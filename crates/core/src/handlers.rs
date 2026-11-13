@@ -3150,19 +3150,22 @@ async fn handle_wal_mark_delete(req: &IpcRequest, state: Arc<AppState>) -> Resul
 ///    pointing *into* `gid` (which may live on edges owned by other groups), with each
 ///    rebind mutation flushed to the group that owns the touched row (issue #383 / ADR-0385).
 ///
-/// Returns `None` (logged, non-fatal) if either step errors, so `cross_group_rebind` stays null
-/// and a caller can tell the repair did not complete.
+/// A demotion failure is logged and the rebind still runs. Returns `None` (logged, non-fatal) if
+/// the rebind errors, so `cross_group_rebind` stays null and a caller can tell the repair did
+/// not complete.
 fn post_rebuild_pointer_repair(
     state: &AppState,
     conn: &crate::db::Conn<'_>,
     gid: &str,
     log_ctx: &str,
 ) -> Option<crate::cross_group::RebindCounts> {
+    // The rebind below does not depend on the demotion succeeding (it covers pointers *into*
+    // `gid`, typically on edges owned by other groups), so a demotion failure is logged and the
+    // rebind still runs rather than skipping the whole repair.
     if let Err(e) = crate::cross_group::demote_hopless_pointers(conn, gid) {
         eprintln!(
-            "liminis-context-graph: {log_ctx}: post-rebuild hop-less pointer demotion failed (non-fatal): {e}"
+            "liminis-context-graph: {log_ctx}: post-rebuild hop-less pointer demotion failed (non-fatal; continuing to rebind): {e}"
         );
-        return None;
     }
     let ts = chrono::Utc::now().to_rfc3339();
     match crate::cross_group::rebind_pointers(conn, gid, &ts) {

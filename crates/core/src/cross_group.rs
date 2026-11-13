@@ -604,6 +604,14 @@ fn rebind_pointers_impl(
 /// `SET`s can never leak into a following [`rebind_pointers`] bucket. Returns the number of
 /// pointers demoted.
 pub fn demote_hopless_pointers(conn: &Conn, owner_group_id: &str) -> Result<u64, Error> {
+    let result = demote_hopless_pointers_impl(conn, owner_group_id);
+    // Derived state: never flushed to any WAL (see above). Drained on the error path too, so a
+    // partially-applied demotion cannot leak its `SET`s into a following rebind's bucket.
+    drop(conn.drain_mutations());
+    result
+}
+
+fn demote_hopless_pointers_impl(conn: &Conn, owner_group_id: &str) -> Result<u64, Error> {
     let mut demoted = 0u64;
     for (rn_uuid, _rn_name, rn_group_id, attrs) in conn.list_cross_group_pointer_candidates()? {
         if rn_group_id != owner_group_id {
@@ -650,7 +658,5 @@ pub fn demote_hopless_pointers(conn: &Conn, owner_group_id: &str) -> Result<u64,
             conn.update_relates_to_attributes(&rn_uuid, &new_attrs)?;
         }
     }
-    // Derived state: never flushed to any WAL (see above).
-    drop(conn.drain_mutations());
     Ok(demoted)
 }
