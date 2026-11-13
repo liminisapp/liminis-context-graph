@@ -150,6 +150,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0706](0706-correction-diff-and-affected-work-reads.md) | Correction Reads — What a Correction Changed, and What Was Written While the Old Belief Held | 2026-10-26 |
 | [0707](0707-document-supersession.md) | Document Supersession — A New Document Explicitly Replaces an Old One | 2026-10-26 |
 | [0737](0737-configurable-lbug-tuning-strict-env.md) | Configurable lbug Tuning via Strictly-Parsed Environment Variables | 2026-11-13 |
+| [0741](0741-post-rebuild-pointer-repair-and-hopless-demotion.md) | Rebuild Order Must Not Matter for Cross-Group Pointers — Demote Hop-less, Rebind After Every Rebuild | 2026-11-13 |
 
 ## Historical numbering
 

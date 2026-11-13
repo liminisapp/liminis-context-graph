@@ -170,9 +170,13 @@ the running embedder — a database-side check, not a property of the WAL or the
   silently replaying new-generation mutations on top of old-generation data (the corruption this
   issue exists to prevent; the two do not reconcile, since the native write path emits `CREATE`
   rather than `MERGE`). The result reports `reset_detected: true`, `previous_generation`,
-  `generation` (the generation just replayed), and `cross_group_rebind` (the same counts
-  `knowledge_rebind_pointers` reports), on both the streaming response and the background-job's
-  polled `result`, so a caller can tell this apart from an ordinary incremental replay. A
+  `generation` (the generation just replayed) on both the streaming response and the background-job's
+  polled `result`, so a caller can tell this apart from an ordinary incremental replay.
+  `cross_group_rebind` (the same counts `knowledge_rebind_pointers` reports) is no longer
+  reset-only: since issue #741 it is reported on **every** successful rebuild, because every
+  rebuild re-binds cross-group pointers into the rebuilt group (and first demotes pointers on
+  edges it owns whose hop could not be created), making the final graph independent of the order
+  groups are rebuilt in. A
   `dry_run: true` call against a mismatched group reports the same `reset_detected`/
   `previous_generation`/`generation` fields but purges and replays nothing — report-only, like
   every other dry-run path in this codebase.

@@ -955,7 +955,8 @@ pub fn registry() -> Vec<ToolSpec> {
                            `bound_at_seq`, `binding_state`) instead of a bare UUID FK. A foreign \
                            endpoint that doesn't currently resolve is retained as `unbound` \
                            rather than dropped — the edge is still created, just missing that \
-                           hop until a `knowledge_rebind_pointers` pass resolves it. A bare \
+                           hop until a rebuild of the target group or a \
+                           `knowledge_rebind_pointers` pass resolves it. A bare \
                            `uuid` endpoint that turns out to belong to a different group than \
                            the edge is rejected before any write. `source_kind` / `target_kind` \
                            (issue #615, optional) pin a FOREIGN endpoint's pointer to an entity \
@@ -1341,8 +1342,10 @@ pub fn registry() -> Vec<ToolSpec> {
                            against the new generation, then re-bind any cross-group pointers \
                            into it — rather than silently layering new-generation mutations onto \
                            old-generation data. The result reports `reset_detected`, \
-                           `previous_generation`, `generation`, and `cross_group_rebind` so a \
-                           caller can tell this apart from an ordinary incremental replay; a \
+                           `previous_generation`, and `generation` so a caller can tell this \
+                           apart from an ordinary incremental replay (every successful rebuild \
+                           also reports `cross_group_rebind`, and rebuild order across groups \
+                           does not matter: cross-group pointers are repaired after each); a \
                            `dry_run: true` call against a mismatched group reports the same \
                            fields but mutates nothing. Absent a detected reset, a `from_seq: 0` \
                            (default) full rebuild fails fast with an explicit error if that \
