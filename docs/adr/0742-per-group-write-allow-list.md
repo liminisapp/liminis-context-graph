@@ -55,8 +55,12 @@ attached MCP have no scopes, so "disable `cypher` scope" cannot protect them, an
 **`dry_run` has no special case**: a dry run on a non-listed group is refused, rather than
 trusting every handler's `dry_run` to be non-mutating.
 
-**Exempt:** `knowledge_recover` / `knowledge_recover_full` restore previously accepted state and a
-degraded DB must stay recoverable (ADR-0009); `strip_wal_embeddings`, `build_indices`,
+**Recovery:** `knowledge_recover` is exempt only while the DB is degraded (it must stay reachable,
+ADR-0009). On a healthy DB the handler does not refuse, and its strategies replace or rewind every
+group, so the guard requires every present group to be listed (like `clear_all`).
+`knowledge_recover_full` is a no-op on a healthy DB and stays exempt.
+
+**Exempt:** `strip_wal_embeddings`, `build_indices`,
 `prepare_checkpoint`, `dump_wal`, `wal_mark_*` and `close` touch only WAL/checkpoint files, indices
 or process state.
 

@@ -626,16 +626,48 @@ async fn reads_of_non_listed_groups_and_exempt_methods_are_unaffected() {
     assert!(v["error"].is_null(), "{v}");
     let v = call(&f, Some(&p), "knowledge_status", json!({})).await;
     assert!(v["error"].is_null(), "{v}");
-    // Recovery is exempt (ADR-0009); a bogus strategy yields the handler's own error.
+    // `knowledge_recover_full` is a no-op on a healthy DB and exempt (ADR-0009).
+    let v = call(&f, Some(&p), "knowledge_recover_full", json!({})).await;
+    assert_not_refused(&v);
+    let v = call(&f, Some(&p), "knowledge_wal_mark_list", json!({})).await;
+    assert_not_refused(&v);
+}
+
+/// `knowledge_recover` replaces or rewinds every group on a healthy DB, so it needs every present
+/// group listed; while the DB is degraded it stays open so recovery remains possible (ADR-0009).
+#[tokio::test]
+async fn recover_is_gated_on_a_healthy_db_but_open_when_degraded() {
+    let f = fixture();
+    let conn_db = f.state.db.load_full().unwrap();
+    conn_db
+        .connect()
+        .unwrap()
+        .insert_entity(&entity("B1", "b"))
+        .unwrap();
+    let params = json!({"strategy": "bogus"});
+
+    // Healthy, group `b` present but not listed: refused.
+    let v = call(&f, Some(&policy("a")), "knowledge_recover", params.clone()).await;
+    assert_refused(&v, "all_groups_required");
+    assert_eq!(v["error"]["data"]["group_ids"], json!(["b"]));
+
+    // Healthy, every present group listed: passes the guard (handler's own bogus-strategy error).
     let v = call(
         &f,
-        Some(&p),
+        Some(&policy("a,b")),
         "knowledge_recover",
-        json!({"strategy": "bogus"}),
+        params.clone(),
     )
     .await;
     assert_not_refused(&v);
-    let v = call(&f, Some(&p), "knowledge_wal_mark_list", json!({})).await;
+
+    // Unset: unchanged.
+    let v = call(&f, None, "knowledge_recover", params.clone()).await;
+    assert_not_refused(&v);
+
+    // Degraded (no DB): never refused, so a broken database stays recoverable.
+    f.state.db.store(None);
+    let v = call(&f, Some(&policy("a")), "knowledge_recover", params).await;
     assert_not_refused(&v);
 }
 
@@ -666,6 +698,10 @@ fn every_classified_method_is_a_real_handler_method() {
     assert_eq!(write_policy::classify("nope"), None);
     assert!(matches!(
         write_policy::classify("knowledge_recover"),
+        Some(WriteClass::Recover)
+    ));
+    assert!(matches!(
+        write_policy::classify("knowledge_recover_full"),
         Some(WriteClass::Exempt(_))
     ));
 }

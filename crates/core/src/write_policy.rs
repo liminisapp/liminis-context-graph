@@ -139,12 +139,17 @@ pub enum WriteClass {
     DeleteByGroup,
     /// Changes every group present.
     AllGroups,
+    /// `knowledge_recover`: exempt while the DB is degraded (a degraded database must stay
+    /// recoverable, ADR-0009), but on a healthy DB its strategies (`restore_from_backup`,
+    /// `rebuild_from_workspace_wal`, `drop_lbug_wal`) replace or rewind every group's data, so it
+    /// is treated like [`WriteClass::AllGroups`].
+    Recover,
     /// Raw Cypher cannot be scoped by group: refused outright.
     RawCypher,
 }
 
-const RECOVERY: &str = "restores previously accepted state from the WAL; a degraded database \
-                        must stay recoverable (ADR-0009)";
+const RECOVERY: &str = "a no-op on a healthy database; on a degraded one it restores previously \
+                        accepted state, and a degraded database must stay recoverable (ADR-0009)";
 const FILE_LEVEL: &str = "touches only WAL/checkpoint files, indices or process state, never \
                           group rows";
 
@@ -211,7 +216,7 @@ pub const CLASSIFICATION: &[(&str, WriteClass)] = &[
     // ── raw Cypher ──
     ("knowledge_query_cypher", WriteClass::RawCypher),
     // ── exempt ──
-    ("knowledge_recover", WriteClass::Exempt(RECOVERY)),
+    ("knowledge_recover", WriteClass::Recover),
     ("knowledge_recover_full", WriteClass::Exempt(RECOVERY)),
     ("knowledge_close", WriteClass::Exempt(FILE_LEVEL)),
     (
@@ -393,38 +398,53 @@ pub async fn check_write_allowed(
                 None => Ok(()),
             }
         }
-        WriteClass::AllGroups => {
-            let db = load_db(state)?;
-            let st = Arc::clone(state);
-            let present =
-                tokio::task::spawn_blocking(move || -> Result<BTreeSet<String>, Error> {
-                    let conn = db.connect()?;
-                    all_groups_present(&st, &conn)
-                })
-                .await??;
-            let offending: Vec<String> = present
-                .into_iter()
-                .filter(|g| !policy.contains(g))
-                .collect();
-            if offending.is_empty() {
+        WriteClass::AllGroups => require_all_groups_writable(state, method, policy).await,
+        WriteClass::Recover => {
+            // Degraded: the DB is unavailable, so there is no group data to protect and the
+            // recovery path must stay open (ADR-0009). Healthy: whole-database replacement.
+            if state.db.load_full().is_none() {
                 Ok(())
             } else {
-                Err(Error::WriteRefused {
-                    reason: "all_groups_required",
-                    message: format!(
-                        "{method} refused: it changes every group, and groups {} are not in \
-                         {FLAG} ({ENV_VAR}); writable groups: [{}]",
-                        offending
-                            .iter()
-                            .map(|g| format!("'{g}'"))
-                            .collect::<Vec<_>>()
-                            .join(", "),
-                        policy.list().join(", ")
-                    ),
-                    group_ids: offending,
-                })
+                require_all_groups_writable(state, method, policy).await
             }
         }
+    }
+}
+
+/// Refuses unless every group present (DB groups plus WAL directories) is listed.
+async fn require_all_groups_writable(
+    state: &Arc<AppState>,
+    method: &str,
+    policy: &WritableGroups,
+) -> Result<(), Error> {
+    let db = load_db(state)?;
+    let st = Arc::clone(state);
+    let present = tokio::task::spawn_blocking(move || -> Result<BTreeSet<String>, Error> {
+        let conn = db.connect()?;
+        all_groups_present(&st, &conn)
+    })
+    .await??;
+    let offending: Vec<String> = present
+        .into_iter()
+        .filter(|g| !policy.contains(g))
+        .collect();
+    if offending.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::WriteRefused {
+            reason: "all_groups_required",
+            message: format!(
+                "{method} refused: it changes every group, and groups {} are not in \
+                 {FLAG} ({ENV_VAR}); writable groups: [{}]",
+                offending
+                    .iter()
+                    .map(|g| format!("'{g}'"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                policy.list().join(", ")
+            ),
+            group_ids: offending,
+        })
     }
 }
 
