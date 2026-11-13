@@ -1356,6 +1356,32 @@ impl<'db> Conn<'db> {
             .and_then(|row| value_as_optional_string(&row[0])))
     }
 
+    /// Every distinct `group_id` present in the Entity, Episodic and RelatesToNode_ tables
+    /// (issue #742). A table missing from an older/partial schema contributes nothing rather than
+    /// failing — it holds no group data. Used by the `--writable-groups` guard to decide whether a
+    /// whole-database operation touches only listed groups.
+    pub fn list_distinct_group_ids(&self) -> Result<std::collections::BTreeSet<String>, Error> {
+        let mut out = std::collections::BTreeSet::new();
+        for q in [
+            "MATCH (n:Entity) RETURN DISTINCT n.group_id",
+            "MATCH (n:Episodic) RETURN DISTINCT n.group_id",
+            "MATCH (n:RelatesToNode_) RETURN DISTINCT n.group_id",
+        ] {
+            match self.query_params(q, serde_json::json!({})) {
+                Ok(rows) => {
+                    for row in rows {
+                        if let Some(g) = value_as_optional_string(&row[0]) {
+                            out.insert(g);
+                        }
+                    }
+                }
+                Err(e) if crate::error::is_missing_table_error(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
     /// Deletes all Episodic nodes whose source_description equals source_file or starts with
     /// source_file + ":", scoped to the given group_ids. Returns the UUIDs of deleted episodes
     /// alongside a [`GroupedMutations`] bucketing the deletion mutations by the `group_id` each

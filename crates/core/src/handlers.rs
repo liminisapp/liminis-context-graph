@@ -42,11 +42,23 @@ pub async fn dispatch(
     state: Arc<AppState>,
     progress_tx: Option<UnboundedSender<Value>>,
 ) -> IpcResponse {
+    dispatch_with_policy(req, state, progress_tx, crate::write_policy::current()).await
+}
+
+/// [`dispatch`] with an explicit `--writable-groups` policy (issue #742). `None` means every
+/// group is writable. Production callers use [`dispatch`], which reads the process-wide policy
+/// installed at startup; tests pass a policy directly so they never mutate global state.
+pub async fn dispatch_with_policy(
+    req: IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+    policy: Option<&crate::write_policy::WritableGroups>,
+) -> IpcResponse {
     let method = req.method.clone();
     let request_id = req.id.clone();
     let start = Instant::now();
 
-    let (response, success) = match handle(&req, Arc::clone(&state), progress_tx).await {
+    let (response, success) = match handle(&req, Arc::clone(&state), progress_tx, policy).await {
         Ok(result) => (IpcResponse::ok(req.id, result), true),
         Err(e) => {
             use crate::error::Error;
@@ -102,6 +114,20 @@ pub async fn dispatch(
                     ),
                     false,
                 ),
+                // A write refused by the daemon-wide `--writable-groups` allow-list (issue #742).
+                Error::WriteRefused {
+                    reason,
+                    ref group_ids,
+                    ..
+                } => (
+                    IpcResponse::err_with_data(
+                        req.id,
+                        -32004,
+                        e.to_string(),
+                        crate::write_policy::refusal_data(reason, group_ids, policy),
+                    ),
+                    false,
+                ),
                 _ => (IpcResponse::err(req.id, -32000, e.to_string()), false),
             }
         }
@@ -122,6 +148,7 @@ async fn handle(
     req: &IpcRequest,
     state: Arc<AppState>,
     progress_tx: Option<UnboundedSender<Value>>,
+    policy: Option<&crate::write_policy::WritableGroups>,
 ) -> Result<Value, Error> {
     // Degraded-mode guard: reject all methods except the recovery-safe subset
     // when the DB is unavailable. See ADR-0009.
@@ -151,6 +178,13 @@ async fn handle(
             .and_then(|g| g.clone())
             .unwrap_or_else(|| "unknown".to_string());
         return Err(Error::DbUnavailable(reason));
+    }
+
+    // Per-group write allow-list (issue #742, ADR-0742): the single enforcement point for IPC,
+    // standalone MCP and attached MCP. Runs before any handler work so a refused call writes
+    // nothing (no embedding, extraction, DB row or WAL event).
+    if let Some(policy) = policy {
+        crate::write_policy::check_write_allowed(&state, req, policy).await?;
     }
 
     match req.method.as_str() {
@@ -3029,7 +3063,7 @@ fn resolve_group_wal_dir(state: &AppState, group_id: &str) -> Result<std::path::
 
 /// Reads an optional `group_id` param, defaulting to `DEFAULT_GROUP_ID` (issue #378 FR-012) —
 /// preserves every pre-378 caller's zero-change single-group behavior.
-fn group_id_param(params: &Value) -> String {
+pub(crate) fn group_id_param(params: &Value) -> String {
     params["group_id"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -6522,7 +6556,7 @@ fn extract_optional_group_ids_preserve_empty(v: &Value) -> Option<Vec<String>> {
 /// scoped to exactly one group (`knowledge_canonicalize_relations`,
 /// `knowledge_backfill_relation_types`) rather than a set. Per #447, an omitted `group_id` must
 /// never be interpreted as "every group in the workspace."
-fn extract_required_group_id(v: &Value) -> Result<String, Error> {
+pub(crate) fn extract_required_group_id(v: &Value) -> Result<String, Error> {
     v.as_str()
         .filter(|s| !s.is_empty())
         .map(str::to_string)
@@ -6539,7 +6573,7 @@ fn extract_required_group_id(v: &Value) -> Result<String, Error> {
 /// `knowledge_delete_chunk_episode`, `knowledge_delete_by_source`) where a missing scope must
 /// never be interpreted as "all groups" (issue #406) — unlike `extract_optional_group_ids`,
 /// there is no "absent" case that resolves to anything but an error.
-fn extract_required_group_ids(v: &Value) -> Result<Vec<String>, Error> {
+pub(crate) fn extract_required_group_ids(v: &Value) -> Result<Vec<String>, Error> {
     v.as_array()
         .filter(|arr| {
             !arr.is_empty()

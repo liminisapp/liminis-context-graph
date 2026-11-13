@@ -116,6 +116,17 @@ pub enum Error {
         count: usize,
         message: String,
     },
+
+    /// A client write was refused by the daemon-wide `--writable-groups` allow-list (issue #742,
+    /// ADR-0742). `reason` is one of `group_not_writable`, `raw_cypher_disabled`,
+    /// `all_groups_required`, `unclassified_method`; `group_ids` names the offending group(s).
+    /// Raised before any handler work, so a refused call writes nothing.
+    #[error("{message}")]
+    WriteRefused {
+        reason: &'static str,
+        group_ids: Vec<String>,
+        message: String,
+    },
 }
 
 fn format_candidates(c: &[crate::types::KindCandidate]) -> String {
