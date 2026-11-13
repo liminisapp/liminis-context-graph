@@ -687,10 +687,58 @@ async fn unclassified_method_is_refused_when_a_list_is_set() {
     assert_eq!(v["error"]["code"], -32000, "{v}");
 }
 
+/// The method names `handlers::handle()` dispatches, read from its `match req.method.as_str()`
+/// arms (the arms are the only 8-space-indented `"name" =>` lines between the match and its
+/// `Method not found` fallback).
+fn dispatched_methods() -> std::collections::BTreeSet<String> {
+    let src = include_str!("../src/handlers.rs");
+    let start = src
+        .find("    match req.method.as_str() {\n        \"health_check\"")
+        .expect("handle() dispatch match not found — update this test if it moved");
+    let end = start
+        + src[start..]
+            .find("Method not found")
+            .expect("handle() fallback arm not found");
+    src[start..end]
+        .lines()
+        .filter_map(|l| {
+            let rest = l.strip_prefix("        \"")?;
+            let (name, tail) = rest.split_once('"')?;
+            tail.trim_start()
+                .starts_with("=>")
+                .then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// `CLASSIFICATION` and the dispatcher must name exactly the same methods: a stale or misspelled
+/// key is dead weight that hides a gap, and a dispatched method with no entry would be refused as
+/// `unclassified_method` (and, if it is a writer, never properly gated).
 #[test]
-fn every_classified_method_is_a_real_handler_method() {
-    // Guards against stale table keys: each non-exempt/non-readonly class must name a method the
-    // dispatcher knows. `classify` is total over the table by construction; spot-check shape.
+fn classification_table_matches_the_dispatched_methods_exactly() {
+    let dispatched = dispatched_methods();
+    assert!(
+        dispatched.len() > 40,
+        "dispatch-arm extraction looks broken: {dispatched:?}"
+    );
+    let classified: std::collections::BTreeSet<String> = write_policy::CLASSIFICATION
+        .iter()
+        .map(|(m, _)| m.to_string())
+        .collect();
+    let stale: Vec<_> = classified.difference(&dispatched).collect();
+    let missing: Vec<_> = dispatched.difference(&classified).collect();
+    assert!(
+        stale.is_empty(),
+        "CLASSIFICATION names methods handle() does not dispatch: {stale:?}"
+    );
+    assert!(
+        missing.is_empty(),
+        "handle() dispatches methods missing from CLASSIFICATION: {missing:?}"
+    );
+}
+
+#[test]
+fn spot_check_notable_classifications() {
     assert_eq!(
         write_policy::classify("knowledge_query_cypher"),
         Some(WriteClass::RawCypher)
