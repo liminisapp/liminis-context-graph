@@ -1328,6 +1328,24 @@ async fn run_mcp_attached(
 /// there for why) so `shutdown_timeout_ms` can be read once, before the runtime is built, and
 /// reused both for the in-body join_set/task drain and for the runtime's own blocking-pool
 /// drain bound after this function returns.
+/// Resolves the `--writable-groups` / `LCG_WRITABLE_GROUPS` allow-list from the flag value and
+/// the process environment (issue #742). A non-unicode env value is an error, not "unset".
+fn resolve_writable_groups(
+    flag: Option<&str>,
+) -> Result<Option<lcg_core::write_policy::WritableGroups>, String> {
+    let env = match std::env::var(lcg_core::write_policy::ENV_VAR) {
+        Ok(v) => Some(v),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(format!(
+                "invalid {}: value is not valid unicode",
+                lcg_core::write_policy::ENV_VAR
+            ))
+        }
+    };
+    lcg_core::write_policy::WritableGroups::resolve(flag, env.as_deref())
+}
+
 async fn async_main(
     shutdown_timeout_ms: u64,
     cli_mode: CliMode,
@@ -1361,6 +1379,15 @@ async fn async_main(
         let scopes = scopes.clone();
         let allow_remote_close = *allow_remote_close;
         let connect_eager = *connect_eager;
+        // Issue #742: the allow-list is enforced by the daemon this process forwards to. An
+        // inherited env var here would otherwise look like protection it does not provide.
+        if std::env::var_os(lcg_core::write_policy::ENV_VAR).is_some() {
+            eprintln!(
+                "liminis-context-graph: warning: {} is set but ignored in attached MCP mode \
+                 (--connect); the allow-list is enforced by the daemon, so set it there",
+                lcg_core::write_policy::ENV_VAR
+            );
+        }
         drop(sink_drain_handle); // attached mode emits no telemetry events; nothing to drain
         return run_mcp_attached(
             socket_path,
@@ -1385,6 +1412,35 @@ async fn async_main(
             drop(telemetry_sink);
             sink_drain_handle.await.ok();
             return Err(e.to_string().into());
+        }
+    }
+
+    // Issue #742 / ADR-0742: resolve, validate, log and install the per-group write allow-list
+    // (`--writable-groups` / `LCG_WRITABLE_GROUPS`) once, before migration and the socket bind.
+    // Same strict-env stance as the tuning knobs above: a bad value is fatal, never silently
+    // treated as "unset" (which would leave the operator believing data is protected).
+    {
+        let flag = match &cli_mode {
+            CliMode::Socket {
+                writable_groups, ..
+            }
+            | CliMode::Mcp {
+                writable_groups, ..
+            } => writable_groups.clone(),
+            _ => None,
+        };
+        match resolve_writable_groups(flag.as_deref()) {
+            Ok(Some(policy)) => {
+                eprintln!("liminis-context-graph: {}", policy.describe());
+                lcg_core::write_policy::install(policy);
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("liminis-context-graph: FATAL {e}");
+                drop(telemetry_sink);
+                sink_drain_handle.await.ok();
+                return Err(e.into());
+            }
         }
     }
 
@@ -1469,6 +1525,7 @@ async fn async_main(
         CliMode::Socket {
             embedder,
             extractor,
+            ..
         } => {
             // Bind socket FIRST — this allows health_check and recovery IPC to work even
             // when the DB is in a degraded state. See ADR-0009.
@@ -1519,6 +1576,7 @@ async fn async_main(
             scopes,
             allow_remote_close,
             connect_eager: _,
+            writable_groups: _,
         } => {
             // FR-002/FR-003: standalone --mcp-stdio mode retries an unreachable embedder with
             // bounded backoff and, if the window is exhausted, starts in degraded mode instead
