@@ -1925,7 +1925,7 @@ fn demote_then_gated_rebind_repairs_stale_bound_pointer() {
     assert_eq!(counts.bound, 1);
     assert_eq!(counts.staleness_skipped, 0);
     let hop = conn
-        .get_relates_to_by_uuids(&[edge.clone()])
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge))
         .unwrap()
         .remove(0)
         .target_node_uuid;
