@@ -202,8 +202,27 @@ mod escape_cypher_string_literal_tests {
 
 impl Db {
     pub fn open(path: &str) -> Result<Self, Error> {
+        // Issue #737: LCG_BUFFER_POOL_BYTES / LCG_MAX_THREADS are read on *every* open so that
+        // recovery, rebuild, clear and migration-validation reopens all honour them (FR-009).
+        let tuning = crate::lbug_config::LbugTuning::from_env()?;
+        Self::open_with(path, &tuning)
+    }
+
+    /// Like [`Db::open`], but with an explicit lbug tuning instead of reading the environment.
+    pub fn open_with(path: &str, tuning: &crate::lbug_config::LbugTuning) -> Result<Self, Error> {
         let _open_guard = OPEN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let inner = lbug::Database::new(path, lbug::SystemConfig::default())?;
+        let inner = lbug::Database::new(path, tuning.system_config()).map_err(|e| {
+            if tuning.is_customized() {
+                // Embed the original message verbatim so substring-based classification of
+                // real corruption (`is_recoverable` in the service) is unaffected.
+                Error::Config(format!(
+                    "{}: {e}; if the configured pool is too small, raise or unset it",
+                    tuning.open_failure_context()
+                ))
+            } else {
+                Error::from(e)
+            }
+        })?;
         // Both INSTALL and LOAD EXTENSION are write transactions in lbug,
         // and both must run before any vector / FTS use. Extensions persist at
         // the Database level (not per-Connection), so we set them up once here

@@ -99,7 +99,7 @@ fn many_reexecutions_all_reflect_the_latest_write() {
 /// mitigation for our pinned version, but it's still confirmed present as defense-in-depth for
 /// any future regression in the cached-prepared-statement path. Out of Scope: this issue does
 /// not enable it by default, so this only proves the lever exists and works -- it does not
-/// change `Db::open`'s `SystemConfig::default()`.
+/// change the default lbug `SystemConfig` that `Db::open` uses when no `LCG_*` tuning is set.
 #[test]
 fn enable_cached_prepared_statement_setting_exists_and_is_settable() {
     let dir = tempfile::TempDir::new().unwrap();

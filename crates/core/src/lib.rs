@@ -25,6 +25,7 @@ pub mod handlers;
 pub mod identifier_veto;
 pub mod identity_stamp;
 pub mod ipc;
+pub mod lbug_config;
 pub(crate) mod lbug_extension_home;
 pub(crate) mod legacy_wal;
 pub mod llm_router;
