@@ -70,6 +70,11 @@ github-build-setup = "../build-setup.yml"
 allow-dirty = ["ci"]
 
 [workspace.metadata.dist.github-custom-runners]
+# aarch64-apple-darwin pinned to macos-15: cargo-dist 0.32.0's default is
+# macos-14, which GitHub retired on 2026-11-02 (actions/runner-images#13518).
+# Every Release run on main since then cancelled its macOS build with "The
+# configuration 'macos-14-arm64-us-default' is not supported".
+aarch64-apple-darwin = "macos-15"
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
 # x86_64 pinned to 24.04 (GCC 13+): lbug's headers use the C++20 <format>
 # header, absent from cargo-dist's default ubuntu-22.04 (GCC 11). The v0.9.0
