@@ -266,6 +266,8 @@ Source: https://docs.liminis.app/liminis-context-graph/configuration
 | `ANTHROPIC_API_KEY` | No | API key for Anthropic entity/relationship extraction. When set (and no explicit `--extractor-uds`/`--extractor-http` flag is passed), extraction uses the hosted Anthropic API for ingestion (`knowledge_process_chunk` / `knowledge_add_episode`) and entity/relation re-classification (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`). When unset, extraction requires an explicit `--extractor-uds`/`--extractor-http` flag or `LCG_EXTRACTION_URL` pointing at a local OpenAI-compatible endpoint — it is not auto-detected — see [Extractor: local or hosted](#extractor-local-or-hosted) below. Not needed for read-only, embedding-only, or non-LLM tools. |
 | `LIMINIS_WORKSPACE_ROOT` | No* | Absolute path to the workspace root. **Required** for the three corrections IPC methods (`knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types`). If unset, those methods return a `-32000` error. The corrections file is read from `{LIMINIS_WORKSPACE_ROOT}/.liminis/knowledge-corrections.yaml`. |
 | `LCG_REPLAY_BATCH_SIZE` | No | Rows per batch during WAL replay (default `64`, valid range `1`–`256`). Lower values reduce peak memory on a large rebuild; higher values replay faster. |
+| `LCG_BUFFER_POOL_BYTES` | No | Upper bound on lbug's buffer pool (its page cache). A positive integer byte count (`2147483648`) or an integer with a binary suffix `KiB`, `MiB` or `GiB`, case-insensitive (`2GiB`, `512 mib`). Fractions (`2.5GiB`), decimal suffixes (`2GB`), `0`, an empty value and overflow are rejected. Unset = lbug's own default (roughly 80% of system memory). **An invalid value fails startup** with an error naming the variable and the value — it never silently falls back to the default. Applies to every database open (startup, recovery, rebuild, migration validation). lbug enforces its own minimum pool size; the service imposes no floor. The effective value is logged once at startup: `liminis-context-graph: lbug buffer pool: 2.0 GiB (2147483648 bytes) (LCG_BUFFER_POOL_BYTES); max threads: default (lbug auto: one per CPU)`. See [Memory sizing in containers](operations.md#memory-sizing-in-containers) and [ADR-0737](adr/0737-configurable-lbug-tuning-strict-env.md). |
+| `LCG_MAX_THREADS` | No | Upper bound on lbug's worker threads. A positive integer. Unset = lbug's default (one per CPU, read from the host, which is misleading inside a CPU-limited container). `0`, an empty value or a non-numeric value fails startup with an error naming the variable and the value. Logged in the same startup line as `LCG_BUFFER_POOL_BYTES`. |
 | `LCG_REPLAY_EMBED_WINDOW_SIZE` | No | Rows buffered before their embedding recompute is resolved via one batched embedder call during WAL replay (default `64`, valid range `1`–`256`). Independent of `LCG_REPLAY_BATCH_SIZE` — this bounds embedder round-trips, not Cypher execution batches. Lower values reduce cancellation latency, peak memory, and per-failure blast radius (one transient embedder failure degrades every row in its window, not just one — set to `1` to reproduce pre-batching per-row isolation exactly); higher values reduce embedder round-trips on a large rebuild. See [ADR-0486](adr/0486-batch-wal-replay-embedding-recompute.md). |
 | `LCG_REPLAY_FAILURE_SAMPLES` | No | How many distinct failing lines to retain and report per WAL replay (default `10`). Samples are deduplicated by failure shape, so one bad template cannot crowd out the rest. |
 | `LCG_REPLAY_FIDELITY_THRESHOLD` | No | Float `0.0`–`1.0`. Replay warns when the fraction of successfully applied mutations falls below this, i.e. the rebuilt graph is not a faithful reconstruction of the WAL. |
@@ -2853,6 +2855,43 @@ Supervisor liveness probes should treat any response with `ok: true` as alive an
 `degraded` = alive but unusable; no answer = dead or wedged. Full contract:
 [IPC reference: Health check contract](ipc-mcp-reference.md#health-check-contract).
 
+## Memory sizing in containers
+
+By default lbug sizes its buffer pool at roughly 80% of system memory and its worker count from the
+host's CPUs. On a dedicated machine that is fine; in a memory-limited container that also hosts an
+embedder sidecar and the host application it leaves too little for everything else. The pool grows
+with the working set, so the failure is latent: a deployment can run for weeks and then be
+OOM-killed once the graph is big enough — most visibly during a full WAL rebuild on first start.
+Because every restart begins the rebuild again, the service never becomes ready and
+`health_check` reports `busy` / `rebuilding` indefinitely (see
+[`busy` is alive, not dead](#self-healing-and-degraded-mode) and #612). Quadrupling the container
+memory only moves the failure point; bounding the pool fixes it.
+
+Set [`LCG_BUFFER_POOL_BYTES`](configuration.md) (and optionally `LCG_MAX_THREADS`) to bound lbug:
+
+```sh
+LCG_BUFFER_POOL_BYTES=2GiB LCG_MAX_THREADS=2 liminis-context-graph ...
+```
+
+- **Sizing.** Start with a container limit of **pool size + about 1.5 GB**, e.g. a 2 GiB pool in a
+  3.5 GB container. That headroom is a starting recommendation, not a guarantee: the real figure
+  depends on your embedder sidecar and host application. A graph larger than the pool still
+  rebuilds — more slowly, because pages are evicted and re-read — but without growing past the
+  bound.
+- **Verify.** The startup log shows what was applied: `lbug buffer pool: 2.0 GiB (...)`. It says
+  `default (lbug auto: ~80% of system memory)` when the variable is unset.
+- **The memory peak is the first start after an lbug version change.** That start rebuilds the
+  full-text-search index and is the most memory-hungry operation the service performs. Size (or
+  temporarily raise) the container for it before upgrading, not after the first OOM.
+- **Invalid values are fatal.** A mistyped value (`2 gigs`, `0`, empty) exits at startup, before
+  any database is opened. It does not fall back to the default, which would reintroduce the
+  failure this setting exists to prevent.
+- **Too small a pool.** lbug enforces its own minimum; if it refuses to open, the error names
+  `LCG_BUFFER_POOL_BYTES` and the configured value. Raise or unset the variable.
+- **It applies everywhere the DB is opened**, including recovery, rebuild, `knowledge_clear` and
+  the validation open performed by workspace migration — a very small pool can therefore also fail
+  a migration.
+
 ## `knowledge_status` health fields
 
 Beyond the [ontology summary](ontology.md#knowledge_status-summary), `knowledge_status` reports:
@@ -4582,6 +4621,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0705](0705-belief-time-separate-from-validity.md) | Belief Time Is Separate From Validity — Corrections Supersede Episodes | 2026-10-26 |
 | [0706](0706-correction-diff-and-affected-work-reads.md) | Correction Reads — What a Correction Changed, and What Was Written While the Old Belief Held | 2026-10-26 |
 | [0707](0707-document-supersession.md) | Document Supersession — A New Document Explicitly Replaces an Old One | 2026-10-26 |
+| [0737](0737-configurable-lbug-tuning-strict-env.md) | Configurable lbug Tuning via Strictly-Parsed Environment Variables | 2026-11-13 |
 
 ## Historical numbering
 
