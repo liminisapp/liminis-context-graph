@@ -234,6 +234,76 @@ perform arbitrary mutations, and it bypasses the WAL-ordering and embedding inva
 structured write tools maintain. It is never implicitly included in `read`, `write`, or `admin`;
 operators must opt in explicitly (or via `all`).
 
+#### Per-group write allow-list
+
+`--scope` decides which *tools* a connection sees; it does not limit *which groups* a
+write-capable connection may change. When one daemon holds groups with different owners — say
+layer groups hydrated from streams other parties publish, beside the group the local user
+authors — start it with `--writable-groups=<g1,g2,…>` (or `LCG_WRITABLE_GROUPS`; see
+[Configuration](configuration.md)). The list is enforced **inside the daemon**, at the one point
+every request reaches, so it holds for the IPC socket (which has no scopes at all), standalone
+`--mcp-stdio` and attached `--mcp-stdio --connect` alike. It is one list per daemon: there is no
+per-client identity, and per-group *read* restriction is out of scope. Unset, nothing changes.
+
+The check is made against the groups a call **actually changes**, not every group it mentions:
+
+- An omitted (or `null`/non-string) `group_id` resolves to the default group, `liminis` — **the
+  default group must be listed to stay writable.** `group_id: ""` is a distinct group that can
+  never be listed, so it is always refused.
+- `knowledge_add_cross_group_edge` is checked against the edge's own `group_id`. The
+  `source_group_id` of a foreign endpoint is a read-only pointer and is not checked: with
+  `--writable-groups=a`, `{group_id: "a", target: {source_group_id: "b", …}}` succeeds and
+  `{group_id: "b", …}` is refused.
+- A call that changes several groups needs **every** one listed, otherwise it is refused whole
+  and nothing is written.
+- The check runs before any handler work, so a refused call does no embedding or extraction and
+  writes no database row and no WAL event. Reads of any group, and read-only tools, are never
+  affected. `dry_run` gets no special case: a dry run on a non-listed group is refused too.
+- Daemon-internal work — startup WAL replay, auto-heal index builds, degraded-mode recovery — is
+  not a client request and is not blocked.
+
+| Tool(s) | Group(s) that must be listed |
+|---------|------------------------------|
+| `knowledge_add_episode`, `knowledge_process_chunk`, `knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_merge_entities`, `knowledge_add_cross_group_edge`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types` | `group_id` (default group if omitted) |
+| `knowledge_supersede_document`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` | the required `group_id` |
+| `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed` | every entry of `group_ids` |
+| `knowledge_delete_episode` | the group that owns the episode (looked up; a missing episode is a no-op) |
+| `knowledge_delete_by_group`, `knowledge_rebuild_from_wal` (every call, not just `force_clear`) | the target group(s) **and** every group owning a cross-group pointer row into them (ADR-0385: the purge/replay rebinds those rows) |
+| `knowledge_rebind_pointers` | every group that owns a pointer row into `source_group_id` (those rows are what it rewrites; `source_group_id` itself is not written) |
+| `knowledge_clear_all`, `knowledge_apply_corrections` | **every group present** (DB groups plus WAL directories). `apply_corrections` carries no group in its request and resolves names across all groups, so it fails closed |
+| `knowledge_query_cypher` | refused entirely — see below |
+| `knowledge_recover`, `knowledge_recover_full` | exempt: they restore previously accepted state from the WAL, and a degraded database must stay recoverable ([ADR-0009](adr/0009-degraded-mode-startup-and-recovery.md)) |
+| `knowledge_strip_wal_embeddings`, `knowledge_build_indices`, `knowledge_prepare_checkpoint`, `knowledge_dump_wal`, `knowledge_wal_mark_*`, `knowledge_close` | exempt: they touch only WAL/checkpoint files, indices or process state, never group rows |
+
+A consequence worth knowing: purging or rebuilding a listed group is refused while a non-listed
+group still holds a pointer into it — list the owner too, or remove the pointer first.
+(`force_clear` has been group-scoped since #378, not whole-database; only `knowledge_clear_all`
+and `knowledge_recover`'s `rebuild_from_workspace_wal` span every group.)
+
+**Raw Cypher is refused while a list is set.** `knowledge_query_cypher` cannot be scoped by group
+— any statement can write anywhere — and the IPC socket and attached MCP have no scopes to turn
+off, so the daemon refuses the method outright, reads included, with reason `raw_cypher_disabled`.
+Use the structured `knowledge_*` read tools instead. It is refused rather than filtered because
+no keyword scan can reliably tell a read from a write in Cypher (`CALL` procedures, `COPY`,
+`LOAD`, `ALTER`, …). With the list unset, `cypher` scope is unchanged.
+
+**Error shape.** A refused call fails with JSON-RPC code `-32004` and structured `data`; over MCP
+the same object arrives as the tool error's `data`:
+
+```json
+{"code": -32004,
+ "message": "knowledge_assert_entity refused: group 'b' not writable: not in --writable-groups (LCG_WRITABLE_GROUPS); writable groups: [a]",
+ "data": {"reason": "group_not_writable", "group_ids": ["b"],
+          "setting": "--writable-groups", "env": "LCG_WRITABLE_GROUPS",
+          "writable_groups": ["a"]}}
+```
+
+`reason` is `group_not_writable`, `all_groups_required` (a whole-database operation with unlisted
+groups present), `raw_cypher_disabled`, or `unclassified_method` (a method with no write
+classification is refused rather than assumed safe). An attached MCP process cannot enforce the
+list itself and rejects `--writable-groups` alongside `--connect`; set it on the daemon. See
+[ADR-0742](adr/0742-per-group-write-allow-list.md).
+
 **`knowledge_close` in attached mode is a footgun without `--allow-remote-close`.** In
 **standalone** mode, `knowledge_close` is always advertised under `admin` scope and shuts down
 only this MCP process's own DB connection. In **attached** mode, calling it would shut down the
