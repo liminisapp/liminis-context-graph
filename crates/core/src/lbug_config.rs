@@ -180,7 +180,18 @@ impl LbugTuning {
         format!("lbug buffer pool: {pool}; max threads: {threads}")
     }
 
-    /// Annotation appended to an lbug open failure when a knob is set.
+    /// Operator hint appended to an lbug open failure. Only emitted when a pool size is
+    /// configured (a thread-only override cannot cause a too-small pool), and phrased as a
+    /// possibility because the failure may be unrelated (corruption, permissions).
+    pub fn open_failure_hint(&self) -> &'static str {
+        if self.buffer_pool_bytes.is_some() {
+            "; if this failure is memory-related, the configured LCG_BUFFER_POOL_BYTES may be too small — raise or unset it"
+        } else {
+            ""
+        }
+    }
+
+    /// Annotation prefixed to an lbug open failure when a knob is set.
     pub fn open_failure_context(&self) -> String {
         let pool = self
             .buffer_pool_bytes
@@ -197,6 +208,16 @@ impl LbugTuning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_failure_hint_only_when_pool_set() {
+        assert_eq!(LbugTuning::default().open_failure_hint(), "");
+        let threads_only = LbugTuning::from_vars(None, Some("2")).unwrap();
+        assert_eq!(threads_only.open_failure_hint(), "");
+        let pool = LbugTuning::from_vars(Some("1MiB"), None).unwrap();
+        assert!(pool.open_failure_hint().contains("LCG_BUFFER_POOL_BYTES"));
+        assert!(pool.open_failure_hint().contains("if"));
+    }
 
     fn pool(s: &str) -> Result<u64, Error> {
         parse_byte_size(s)

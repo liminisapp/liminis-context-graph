@@ -216,8 +216,9 @@ impl Db {
                 // Embed the original message verbatim so substring-based classification of
                 // real corruption (`is_recoverable` in the service) is unaffected.
                 Error::Config(format!(
-                    "{}: {e}; if the configured pool is too small, raise or unset it",
-                    tuning.open_failure_context()
+                    "{}: {e}{}",
+                    tuning.open_failure_context(),
+                    tuning.open_failure_hint()
                 ))
             } else {
                 Error::from(e)
