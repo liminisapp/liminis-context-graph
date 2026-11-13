@@ -382,7 +382,7 @@ mod tests {
                 connect_eager,
                 embedder,
                 extractor,
-                writable_groups,
+                writable_groups: _,
             } => {
                 assert_eq!(connect, None);
                 assert_eq!(scopes, Scope::ALL.to_vec());
