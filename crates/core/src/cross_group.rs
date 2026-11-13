@@ -577,3 +577,80 @@ fn rebind_pointers_impl(
 
     Ok((counts, grouped))
 }
+
+/// Demotes `Bound` pointers whose hop was never materialised to `Unbound` (issue #741).
+///
+/// Scoped to edges **owned** by `owner_group_id` (`RelatesToNode_.group_id`) — the group whose
+/// WAL was just replayed — not to the group a pointer points *into* (that is what
+/// [`rebind_pointers`]'s `source_group_id` means; the two are different groups for a genuine
+/// cross-group edge). When such a group is replayed before the group a pointer targets, the
+/// edge's hop writes (`MATCH (…{uuid}) … MERGE`) find no endpoint and silently do nothing, while
+/// the `RelatesToNode_` `CREATE` replays the cached `attributes` verbatim — leaving a pointer
+/// that claims `Bound` (and `bound_at_seq` at/after the target's replayed position, so
+/// [`rebind_pointers`]'s staleness gate would skip it) with no hop behind it.
+///
+/// For every non-invalidated edge owned by `owner_group_id`, each side whose pointer is `Bound`
+/// with a `resolved_uuid` but whose actual hop (read via `get_relates_to_by_uuids`, the same
+/// `OPTIONAL MATCH` [`rebind_pointers`] diffs against) is absent is rewritten as `Unbound` with
+/// `resolved_uuid` and `bound_at_seq` cleared. `knowledge_status` then reports it honestly, and
+/// the next [`rebind_pointers`] pass always re-resolves it (issue #392). Only hop *presence* is
+/// checked: a present hop at a different uuid is an ordinary stale pointer, which the rebind
+/// path already handles.
+///
+/// The demotion is **derived local state and is deliberately not WAL'd**: no WAL format change is
+/// needed, appending to the stream being replayed is the hazard documented at
+/// `clear_group_for_rebuild`, and re-replaying from a checkpoint re-derives the same result. The
+/// recorded mutation buffer is therefore drained and discarded before returning, so these
+/// `SET`s can never leak into a following [`rebind_pointers`] bucket. Returns the number of
+/// pointers demoted.
+pub fn demote_hopless_pointers(conn: &Conn, owner_group_id: &str) -> Result<u64, Error> {
+    let mut demoted = 0u64;
+    for (rn_uuid, _rn_name, rn_group_id, attrs) in conn.list_cross_group_pointer_candidates()? {
+        if rn_group_id != owner_group_id {
+            continue;
+        }
+        let mut pointers = pointer::read_pointers(&attrs);
+        let current_hop = conn
+            .get_relates_to_by_uuids(std::slice::from_ref(&rn_uuid))?
+            .into_iter()
+            .next();
+        let (actual_src, actual_dst) = current_hop
+            .map(|e| (e.source_node_uuid, e.target_node_uuid))
+            .unwrap_or_default();
+
+        let mut changed = false;
+        for side in [EndpointSide::Src, EndpointSide::Dst] {
+            let Some(existing) = pointers.get(side).cloned() else {
+                continue;
+            };
+            if existing.binding_state != BindingState::Bound || existing.resolved_uuid.is_none() {
+                continue;
+            }
+            let actual_uuid = match side {
+                EndpointSide::Src => &actual_src,
+                EndpointSide::Dst => &actual_dst,
+            };
+            if !actual_uuid.is_empty() {
+                continue;
+            }
+            pointers.set(
+                side,
+                CrossGroupPointer {
+                    resolved_uuid: None,
+                    bound_at_seq: None,
+                    binding_state: BindingState::Unbound,
+                    ..existing
+                },
+            );
+            demoted += 1;
+            changed = true;
+        }
+        if changed {
+            let new_attrs = pointer::write_pointers(&attrs, &pointers);
+            conn.update_relates_to_attributes(&rn_uuid, &new_attrs)?;
+        }
+    }
+    // Derived state: never flushed to any WAL (see above).
+    drop(conn.drain_mutations());
+    Ok(demoted)
+}
