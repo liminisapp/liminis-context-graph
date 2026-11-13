@@ -1670,8 +1670,8 @@ mod tests {
                 _ => assert_ne!(
                     class,
                     WriteClass::ReadOnly,
-                    "{}-scope tool {} must not be classified ReadOnly",
-                    format!("{:?}", tool.scope),
+                    "{:?}-scope tool {} must not be classified ReadOnly",
+                    tool.scope,
                     tool.name
                 ),
             }

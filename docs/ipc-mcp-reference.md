@@ -272,7 +272,7 @@ The check is made against the groups a call **actually changes**, not every grou
 | `knowledge_rebind_pointers` | every group that owns a pointer row into `source_group_id` (those rows are what it rewrites; `source_group_id` itself is not written) |
 | `knowledge_clear_all`, `knowledge_apply_corrections` | **every group present** (DB groups plus WAL directories). `apply_corrections` carries no group in its request and resolves names across all groups, so it fails closed |
 | `knowledge_query_cypher` | refused entirely — see below |
-| `knowledge_recover`, `knowledge_recover_full` | exempt: they restore previously accepted state from the WAL, and a degraded database must stay recoverable ([ADR-0009](adr/0009-degraded-mode-startup-and-recovery.md)) |
+| `knowledge_recover`, `knowledge_recover_full` | exempt: they restore previously accepted state from the WAL, and a degraded database must stay recoverable ([ADR-0009](adr/0009-degraded-mode-startup-recovery.md)) |
 | `knowledge_strip_wal_embeddings`, `knowledge_build_indices`, `knowledge_prepare_checkpoint`, `knowledge_dump_wal`, `knowledge_wal_mark_*`, `knowledge_close` | exempt: they touch only WAL/checkpoint files, indices or process state, never group rows |
 
 A consequence worth knowing: purging or rebuilding a listed group is refused while a non-listed
