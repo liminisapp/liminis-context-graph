@@ -1372,6 +1372,22 @@ async fn async_main(
         .await;
     }
 
+    // Issue #737 / ADR-0737: validate LCG_BUFFER_POOL_BYTES / LCG_MAX_THREADS once, before any
+    // database open (migration validation opens the DB too) and before the socket bind. An
+    // invalid value is fatal by design: it must never reach the `is_recoverable` substring
+    // classifier (which would route it into degraded mode) nor silently fall back to lbug's
+    // ~80%-of-memory default, which is the failure these knobs exist to prevent. `Db::open`
+    // re-reads the same variables on every open so recovery/rebuild reopens honour them too.
+    match lcg_core::lbug_config::LbugTuning::from_env() {
+        Ok(tuning) => eprintln!("liminis-context-graph: {}", tuning.describe()),
+        Err(e) => {
+            eprintln!("liminis-context-graph: FATAL {e}");
+            drop(telemetry_sink);
+            sink_drain_handle.await.ok();
+            return Err(e.to_string().into());
+        }
+    }
+
     // Structured workspace migration: .graphiti/ → .lcg/ with file-layout restructuring.
     // Runs before path resolution so deprecated GRAPHITI_* env-var paths can be rewritten
     // below, preventing create_dir_all from crashing on the legacy file-as-dir layout.
