@@ -313,6 +313,43 @@ Supervisor liveness probes should treat any response with `ok: true` as alive an
 `degraded` = alive but unusable; no answer = dead or wedged. Full contract:
 [IPC reference: Health check contract](ipc-mcp-reference.md#health-check-contract).
 
+## Memory sizing in containers
+
+By default lbug sizes its buffer pool at roughly 80% of system memory and its worker count from the
+host's CPUs. On a dedicated machine that is fine; in a memory-limited container that also hosts an
+embedder sidecar and the host application it leaves too little for everything else. The pool grows
+with the working set, so the failure is latent: a deployment can run for weeks and then be
+OOM-killed once the graph is big enough — most visibly during a full WAL rebuild on first start.
+Because every restart begins the rebuild again, the service never becomes ready and
+`health_check` reports `busy` / `rebuilding` indefinitely (see
+[`busy` is alive, not dead](#self-healing-and-degraded-mode) and #612). Quadrupling the container
+memory only moves the failure point; bounding the pool fixes it.
+
+Set [`LCG_BUFFER_POOL_BYTES`](configuration.md) (and optionally `LCG_MAX_THREADS`) to bound lbug:
+
+```sh
+LCG_BUFFER_POOL_BYTES=2GiB LCG_MAX_THREADS=2 liminis-context-graph ...
+```
+
+- **Sizing.** Start with a container limit of **pool size + about 1.5 GB**, e.g. a 2 GiB pool in a
+  3.5 GB container. That headroom is a starting recommendation, not a guarantee: the real figure
+  depends on your embedder sidecar and host application. A graph larger than the pool still
+  rebuilds — more slowly, because pages are evicted and re-read — but without growing past the
+  bound.
+- **Verify.** The startup log shows what was applied: `lbug buffer pool: 2.0 GiB (...)`. It says
+  `default (lbug auto: ~80% of system memory)` when the variable is unset.
+- **The memory peak is the first start after an lbug version change.** That start rebuilds the
+  full-text-search index and is the most memory-hungry operation the service performs. Size (or
+  temporarily raise) the container for it before upgrading, not after the first OOM.
+- **Invalid values are fatal.** A mistyped value (`2 gigs`, `0`, empty) exits at startup, before
+  any database is opened. It does not fall back to the default, which would reintroduce the
+  failure this setting exists to prevent.
+- **Too small a pool.** lbug enforces its own minimum; if it refuses to open, the error names
+  `LCG_BUFFER_POOL_BYTES` and the configured value. Raise or unset the variable.
+- **It applies everywhere the DB is opened**, including recovery, rebuild, `knowledge_clear` and
+  the validation open performed by workspace migration — a very small pool can therefore also fail
+  a migration.
+
 ## `knowledge_status` health fields
 
 Beyond the [ontology summary](ontology.md#knowledge_status-summary), `knowledge_status` reports:
