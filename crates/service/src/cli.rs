@@ -24,6 +24,9 @@ pub enum CliMode {
     Socket {
         embedder: Option<EmbedderFlag>,
         extractor: Option<ExtractorFlag>,
+        /// Raw `--writable-groups` value (issue #742). Validated at startup, together with
+        /// `LCG_WRITABLE_GROUPS`, by `lcg_core::write_policy::WritableGroups::resolve`.
+        writable_groups: Option<String>,
     },
     /// `--mcp-stdio`: run an MCP server over stdin/stdout (FR-001).
     Mcp {
@@ -39,6 +42,9 @@ pub enum CliMode {
         /// the pre-#575 behavior of dialling `connect` at startup and exiting on failure,
         /// instead of the new default of deferring the dial until the first `tools/call`.
         connect_eager: bool,
+        /// Raw `--writable-groups` value (issue #742). Rejected with `--connect` (the daemon
+        /// enforces it), so `Some` only ever appears in standalone mode.
+        writable_groups: Option<String>,
     },
     /// `--help` / `-h`: caller should print `usage()` and exit successfully.
     Help,
@@ -73,6 +79,13 @@ OPTIONS:
                                default the dial is deferred until the first tools/call, so
                                initialize and tools/list succeed even before the daemon is up.
                                No effect without --connect.
+    --writable-groups <LIST>   Comma-separated group ids clients may change (also settable via
+                               LCG_WRITABLE_GROUPS; the flag wins). Writes to any other group
+                               are refused with JSON-RPC error -32004, and knowledge_query_cypher
+                               is disabled. Group-less writes go to the default group, which must
+                               be listed to stay writable. Unset = every group writable. An empty
+                               or malformed list fails startup. Not valid with --connect: set it
+                               on the daemon.
     --embedder-uds <SOCKET>    Reach the embedding sidecar over this Unix socket.
     --embedder-http <URL>      Reach the embedding sidecar over this HTTP URL.
                                (--embedder-uds and --embedder-http are mutually exclusive.)
@@ -94,6 +107,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     let mut mcp_stdio = false;
     let mut connect: Option<String> = None;
     let mut scope_arg: Option<String> = None;
+    let mut writable_groups: Option<String> = None;
     let mut allow_remote_close = false;
     let mut connect_eager = false;
     let mut cli_uds: Option<String> = None;
@@ -155,9 +169,19 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
                 i += 1;
                 scope_arg = Some(args.get(i).cloned().ok_or("--scope requires a value")?);
             }
+            "--writable-groups" => {
+                i += 1;
+                writable_groups = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or("--writable-groups requires a value")?,
+                );
+            }
             arg => {
                 if let Some(v) = arg.strip_prefix("--scope=") {
                     scope_arg = Some(v.to_string());
+                } else if let Some(v) = arg.strip_prefix("--writable-groups=") {
+                    writable_groups = Some(v.to_string());
                 } else {
                     // Previously unknown arguments were silently ignored, so a typo like
                     // `--scoep=read` ran with default scope with no warning. Reject them.
@@ -211,7 +235,17 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         return Ok(CliMode::Socket {
             embedder,
             extractor,
+            writable_groups,
         });
+    }
+
+    if connect.is_some() && writable_groups.is_some() {
+        return Err(
+            "--writable-groups cannot be combined with --connect: the allow-list is \
+             enforced by the daemon, so set --writable-groups (or LCG_WRITABLE_GROUPS) on the \
+             daemon, not on the attached MCP process"
+                .to_string(),
+        );
     }
 
     if allow_remote_close && connect.is_none() {
@@ -236,6 +270,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         scopes,
         allow_remote_close,
         connect_eager,
+        writable_groups,
     })
 }
 
@@ -253,7 +288,8 @@ mod tests {
             parse_args(&args(&[])).unwrap(),
             CliMode::Socket {
                 embedder: None,
-                extractor: None
+                extractor: None,
+                writable_groups: None
             }
         );
     }
@@ -264,7 +300,8 @@ mod tests {
             parse_args(&args(&["--embedder-uds", "/tmp/x.sock"])).unwrap(),
             CliMode::Socket {
                 embedder: Some(EmbedderFlag::Uds("/tmp/x.sock".to_string())),
-                extractor: None
+                extractor: None,
+                writable_groups: None
             }
         );
     }
@@ -287,7 +324,8 @@ mod tests {
             parse_args(&args(&["--extractor-uds", "/tmp/x.sock"])).unwrap(),
             CliMode::Socket {
                 embedder: None,
-                extractor: Some(ExtractorFlag::Uds("/tmp/x.sock".to_string()))
+                extractor: Some(ExtractorFlag::Uds("/tmp/x.sock".to_string())),
+                writable_groups: None
             }
         );
     }
@@ -298,7 +336,8 @@ mod tests {
             parse_args(&args(&["--extractor-http", "http://x"])).unwrap(),
             CliMode::Socket {
                 embedder: None,
-                extractor: Some(ExtractorFlag::Http("http://x".to_string()))
+                extractor: Some(ExtractorFlag::Http("http://x".to_string())),
+                writable_groups: None
             }
         );
     }
@@ -327,7 +366,8 @@ mod tests {
             .unwrap(),
             CliMode::Socket {
                 embedder: Some(EmbedderFlag::Uds("/tmp/e.sock".to_string())),
-                extractor: Some(ExtractorFlag::Http("http://x".to_string()))
+                extractor: Some(ExtractorFlag::Http("http://x".to_string())),
+                writable_groups: None
             }
         );
     }
@@ -342,6 +382,7 @@ mod tests {
                 connect_eager,
                 embedder,
                 extractor,
+                writable_groups: _,
             } => {
                 assert_eq!(connect, None);
                 assert_eq!(scopes, Scope::ALL.to_vec());
@@ -491,9 +532,67 @@ mod tests {
             parse_args(&args(&["--embedder-uds", "/tmp/x.sock"])).unwrap(),
             CliMode::Socket {
                 embedder: Some(EmbedderFlag::Uds("/tmp/x.sock".to_string())),
-                extractor: None
+                extractor: None,
+                writable_groups: None
             }
         );
+    }
+
+    #[test]
+    fn writable_groups_both_forms_in_socket_and_standalone_mcp() {
+        for form in [
+            args(&["--writable-groups", "a,b"]),
+            args(&["--writable-groups=a,b"]),
+        ] {
+            match parse_args(&form).unwrap() {
+                CliMode::Socket {
+                    writable_groups, ..
+                } => assert_eq!(writable_groups.as_deref(), Some("a,b")),
+                other => panic!("expected Socket, got {other:?}"),
+            }
+        }
+        match parse_args(&args(&["--mcp-stdio", "--writable-groups=a"])).unwrap() {
+            CliMode::Mcp {
+                writable_groups, ..
+            } => assert_eq!(writable_groups.as_deref(), Some("a")),
+            other => panic!("expected Mcp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_groups_defaults_to_none_and_keeps_raw_empty_value_for_startup_validation() {
+        match parse_args(&args(&[])).unwrap() {
+            CliMode::Socket {
+                writable_groups, ..
+            } => assert_eq!(writable_groups, None),
+            other => panic!("{other:?}"),
+        }
+        // Validation (empty / malformed) is deliberately deferred to startup so flag and env
+        // share one strict resolver; the parser must not swallow an empty value.
+        match parse_args(&args(&["--writable-groups="])).unwrap() {
+            CliMode::Socket {
+                writable_groups, ..
+            } => assert_eq!(writable_groups.as_deref(), Some("")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn writable_groups_requires_a_value() {
+        let err = parse_args(&args(&["--writable-groups"])).unwrap_err();
+        assert!(err.contains("--writable-groups requires a value"), "{err}");
+    }
+
+    #[test]
+    fn writable_groups_is_rejected_with_connect() {
+        let err = parse_args(&args(&[
+            "--mcp-stdio",
+            "--connect",
+            ".lcg/service.sock",
+            "--writable-groups=a",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("--connect") && err.contains("daemon"), "{err}");
     }
 
     #[test]
@@ -504,6 +603,7 @@ mod tests {
             "--scope",
             "--connect",
             "--connect-eager",
+            "--writable-groups",
             "--embedder-uds",
             "--extractor-uds",
             "--help",

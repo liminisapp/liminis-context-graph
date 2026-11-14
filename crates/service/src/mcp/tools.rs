@@ -1117,7 +1117,9 @@ pub fn registry() -> Vec<ToolSpec> {
             name: "knowledge_query_cypher",
             description: "Execute raw Cypher against the graph. Can perform arbitrary reads or \
                            mutations and bypasses the WAL/embedding invariants that structured \
-                           write tools maintain — use with caution.",
+                           write tools maintain — use with caution. Refused entirely (JSON-RPC \
+                           error -32004, reason raw_cypher_disabled) when the daemon runs with \
+                           --writable-groups, because raw Cypher cannot be restricted by group.",
             scope: Scope::Cypher,
             input_schema: || {
                 json!({
@@ -1638,6 +1640,54 @@ mod tests {
             .map(|t| t.name)
             .collect();
         assert_eq!(cypher_tools, vec!["knowledge_query_cypher"]);
+    }
+
+    /// MCP-less methods the dispatcher handles that are therefore absent from the registry.
+    const NON_MCP_CLASSIFIED: &[&str] = &["health_check"];
+
+    /// FR-013 (issue #742): every registered tool has a group-write classification, and the
+    /// classification agrees with the tool's scope, so a newly added write tool that nobody
+    /// classified fails here instead of silently bypassing `--writable-groups`.
+    #[test]
+    fn every_registered_tool_has_a_consistent_write_classification() {
+        use lcg_core::write_policy::{classify, WriteClass, CLASSIFICATION};
+        let reg = registry();
+        for tool in &reg {
+            let class = classify(tool.name).unwrap_or_else(|| {
+                panic!(
+                    "tool {} has no entry in lcg_core::write_policy::CLASSIFICATION — classify \
+                     it (group-write check) before adding it",
+                    tool.name
+                )
+            });
+            match tool.scope {
+                Scope::Read => assert_eq!(
+                    class,
+                    WriteClass::ReadOnly,
+                    "read-scope tool {} must be ReadOnly",
+                    tool.name
+                ),
+                _ => assert_ne!(
+                    class,
+                    WriteClass::ReadOnly,
+                    "{:?}-scope tool {} must not be classified ReadOnly",
+                    tool.scope,
+                    tool.name
+                ),
+            }
+            if tool.scope == Scope::Cypher {
+                assert_eq!(class, WriteClass::RawCypher, "{}", tool.name);
+            }
+        }
+        // No stale keys: every classified method is a registered tool or a known non-MCP one.
+        let names: std::collections::HashSet<&str> = reg.iter().map(|t| t.name).collect();
+        for (m, _) in CLASSIFICATION {
+            assert!(
+                names.contains(m) || NON_MCP_CLASSIFIED.contains(m),
+                "CLASSIFICATION names {m}, which is neither a registered tool nor in \
+                 NON_MCP_CLASSIFIED"
+            );
+        }
     }
 
     #[test]
