@@ -9,6 +9,54 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-13
+
+Full detail: [docs/releases/0.18.1.md](docs/releases/0.18.1.md).
+
+### Upgrading
+
+- **No migration.** No schema or storage change; storage stays 47 and lbug stays 0.21.2. Every new
+  setting is opt-in, and with none set behaviour matches 0.18.0 except for the cross-group fix below.
+
+### Added
+
+- **`LCG_BUFFER_POOL_BYTES` and `LCG_MAX_THREADS`** (#737, ADR-0737): bound lbug's buffer pool
+  (bytes, or `KiB`/`MiB`/`GiB`) and worker threads, for memory-limited containers where lbug's
+  default (about 80% of system memory) led to OOM-kill loops during startup WAL rebuild. Unset keeps
+  lbug's defaults. Invalid values are fatal at startup; there is no silent fallback.
+- **Per-group write allow-list: `--writable-groups=<g1,g2,…>` / `LCG_WRITABLE_GROUPS`** (#742,
+  implements #740, ADR-0742). Enforced in the daemon for IPC, standalone `--mcp-stdio` and attached
+  `--mcp-stdio --connect` alike. A write to an unlisted group is refused with JSON-RPC `-32004`
+  before any work is done. An omitted `group_id` is checked against the default group. Purges,
+  rebuilds and rebinds also need every group that owns a cross-group pointer into the target.
+  Whole-database operations need every present group listed. `knowledge_query_cypher` is refused
+  outright while a list is set, reads included. Unset leaves every group writable.
+
+### Fixed
+
+- **Cross-group edges no longer go missing when groups are rebuilt in the "wrong" order** (#741,
+  fixes #739, ADR-0741). Rebuilding the group that owns a cross-group edge before the group its
+  pointer targets left the edge absent while `knowledge_status` reported the pointer `bound`, and no
+  later rebuild repaired it. Every successful `knowledge_rebuild_from_wal` now demotes hop-less
+  pointers to `unbound` and re-binds pointers into the rebuilt group, so the result no longer
+  depends on rebuild order. `cross_group_rebind` is now non-null on every successful non-dry-run
+  rebuild. An ordinary rebuild can now append rebind writes to *another* group's WAL stream, which
+  previously happened only after a WAL reset.
+
+### Changed
+
+- **macOS release builds run on `macos-15`** (#735). GitHub retired `macos-14`; binaries still
+  target macOS 11.0.
+- Dependencies: `rmcp` 3.7.0 → 3.8.0 (#726); `swift-transformers` 1.3.5 → 1.4.0 in the local
+  inference sidecar (#730); Astro and Starlight patch updates for the docs site (#729).
+
+### Known issues
+
+- **Windows: lbug's CHECKPOINT can silently corrupt some STRING and INT8/UINT8 data** (#719,
+  LadybugDB/ladybug#1447). Unchanged from 0.18.0, and now reproduced on Windows x64 through lcg
+  itself. Graphs can be restored from lcg's own WAL with `knowledge_rebuild_from_wal`. The fix
+  needs an upstream lbug release; #719 tracks it.
+
 ## [0.18.0] - 2026-10-28
 
 Full detail: [docs/releases/0.18.0.md](docs/releases/0.18.0.md).
