@@ -230,6 +230,7 @@ Source: https://docs.liminis.app/liminis-context-graph/configuration
 | `--scope=<list>` | MCP-stdio only. Comma-separated list of scopes to advertise in `tools/list` (default `all`): `read`, `write`, `cypher`, `admin`. |
 | `--connect <path>` | MCP-stdio only. Attached mode: forward every `tools/call` as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly. |
 | `--allow-remote-close` | MCP-stdio attached mode only. Advertise and allow `knowledge_close`, forwarding the shutdown to the remote service. No effect in standalone mode. |
+| `--writable-groups=<g1,g2,…>` | Daemon-wide **write allow-list**: only the listed groups may be changed by any client, over any connection path (IPC, standalone MCP, attached MCP). Writes to any other group are refused with JSON-RPC error `-32004` and write nothing. Exact, case-sensitive group ids; unset = every group writable. An empty or malformed list fails startup. A call with no `group_id` targets the default group (`liminis`), which must be listed to stay writable. `knowledge_query_cypher` is refused entirely while the list is set. Not accepted with `--connect` (set it on the daemon). See [Per-group write allow-list](ipc-mcp-reference.md#per-group-write-allow-list). Env equivalent: `LCG_WRITABLE_GROUPS`. |
 | `--help` | Print usage and exit. |
 | `--version` | Print the binary's version and exit. |
 
@@ -268,6 +269,7 @@ Source: https://docs.liminis.app/liminis-context-graph/configuration
 | `LCG_REPLAY_BATCH_SIZE` | No | Rows per batch during WAL replay (default `64`, valid range `1`–`256`). Lower values reduce peak memory on a large rebuild; higher values replay faster. |
 | `LCG_BUFFER_POOL_BYTES` | No | Upper bound on lbug's buffer pool (its page cache). A positive integer byte count (`2147483648`) or an integer with a binary suffix `KiB`, `MiB` or `GiB`, case-insensitive (`2GiB`, `512 mib`). Fractions (`2.5GiB`), decimal suffixes (`2GB`), `0`, an empty value and overflow are rejected. Unset = lbug's own default (roughly 80% of system memory). **An invalid value fails startup** with an error naming the variable and the value — it never silently falls back to the default. Applies to every database open (startup, recovery, rebuild, migration validation). lbug enforces its own minimum pool size; the service imposes no floor. The effective value is logged once at startup: `liminis-context-graph: lbug buffer pool: 2.0 GiB (2147483648 bytes) (LCG_BUFFER_POOL_BYTES); max threads: default (lbug auto: one per CPU)`. See [Memory sizing in containers](operations.md#memory-sizing-in-containers) and [ADR-0737](adr/0737-configurable-lbug-tuning-strict-env.md). |
 | `LCG_MAX_THREADS` | No | Upper bound on lbug's worker threads. A positive integer. Unset = lbug's default (one per CPU, read from the host, which is misleading inside a CPU-limited container). `0`, an empty value or a non-numeric value fails startup with an error naming the variable and the value. Logged in the same startup line as `LCG_BUFFER_POOL_BYTES`. |
+| `LCG_WRITABLE_GROUPS` | No | Environment equivalent of `--writable-groups`: a comma-separated allow-list of the groups clients may change (e.g. `LCG_WRITABLE_GROUPS=mine` or `mine,scratch`). Entries are trimmed; duplicates collapse; matching is exact and case-sensitive. **Strictly parsed:** a set-but-empty value, an empty entry (`a,,b`, a leading/trailing comma) or an entry containing whitespace fails startup with an error naming the variable — it is never treated as "unset". The `--writable-groups` flag wins when both are given (the env value is then not parsed). Unset (and no flag) = every group writable. Read once at startup; changing it needs a restart. The effective list is logged once: `liminis-context-graph: writable groups: [a, b] (all other groups are read-only)`. Ignored, with a warning, by an attached MCP process (`--connect`) — the daemon enforces it. See [Per-group write allow-list](ipc-mcp-reference.md#per-group-write-allow-list) and [ADR-0742](adr/0742-per-group-write-allow-list.md). |
 | `LCG_REPLAY_EMBED_WINDOW_SIZE` | No | Rows buffered before their embedding recompute is resolved via one batched embedder call during WAL replay (default `64`, valid range `1`–`256`). Independent of `LCG_REPLAY_BATCH_SIZE` — this bounds embedder round-trips, not Cypher execution batches. Lower values reduce cancellation latency, peak memory, and per-failure blast radius (one transient embedder failure degrades every row in its window, not just one — set to `1` to reproduce pre-batching per-row isolation exactly); higher values reduce embedder round-trips on a large rebuild. See [ADR-0486](adr/0486-batch-wal-replay-embedding-recompute.md). |
 | `LCG_REPLAY_FAILURE_SAMPLES` | No | How many distinct failing lines to retain and report per WAL replay (default `10`). Samples are deduplicated by failure shape, so one bad template cannot crowd out the rest. |
 | `LCG_REPLAY_FIDELITY_THRESHOLD` | No | Float `0.0`–`1.0`. Replay warns when the fraction of successfully applied mutations falls below this, i.e. the rebuilt graph is not a faithful reconstruction of the WAL. |
@@ -953,6 +955,77 @@ raw Cypher with no param interpolation or value coercion — despite being a "qu
 perform arbitrary mutations, and it bypasses the WAL-ordering and embedding invariants that the
 structured write tools maintain. It is never implicitly included in `read`, `write`, or `admin`;
 operators must opt in explicitly (or via `all`).
+
+#### Per-group write allow-list
+
+`--scope` decides which *tools* a connection sees; it does not limit *which groups* a
+write-capable connection may change. When one daemon holds groups with different owners — say
+layer groups hydrated from streams other parties publish, beside the group the local user
+authors — start it with `--writable-groups=<g1,g2,…>` (or `LCG_WRITABLE_GROUPS`; see
+[Configuration](configuration.md)). The list is enforced **inside the daemon**, at the one point
+every request reaches, so it holds for the IPC socket (which has no scopes at all), standalone
+`--mcp-stdio` and attached `--mcp-stdio --connect` alike. It is one list per daemon: there is no
+per-client identity, and per-group *read* restriction is out of scope. Unset, nothing changes.
+
+The check is made against the groups a call **actually changes**, not every group it mentions:
+
+- An omitted (or `null`/non-string) `group_id` resolves to the default group, `liminis` — **the
+  default group must be listed to stay writable.** `group_id: ""` is a distinct group that can
+  never be listed, so it is always refused.
+- `knowledge_add_cross_group_edge` is checked against the edge's own `group_id`. The
+  `source_group_id` of a foreign endpoint is a read-only pointer and is not checked: with
+  `--writable-groups=a`, `{group_id: "a", target: {source_group_id: "b", …}}` succeeds and
+  `{group_id: "b", …}` is refused.
+- A call that changes several groups needs **every** one listed, otherwise it is refused whole
+  and nothing is written.
+- The check runs before any handler work, so a refused call does no embedding or extraction and
+  writes no database row and no WAL event. Reads of any group, and read-only tools, are never
+  affected. `dry_run` gets no special case: a dry run on a non-listed group is refused too.
+- Daemon-internal work — startup WAL replay, auto-heal index builds, degraded-mode recovery — is
+  not a client request and is not blocked.
+
+| Tool(s) | Group(s) that must be listed |
+|---------|------------------------------|
+| `knowledge_add_episode`, `knowledge_process_chunk`, `knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_merge_entities`, `knowledge_add_cross_group_edge`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types` | `group_id` (default group if omitted) |
+| `knowledge_supersede_document`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` | the required `group_id` |
+| `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed` | every entry of `group_ids` |
+| `knowledge_delete_episode` | the group that owns the episode (looked up; a missing episode is a no-op) |
+| `knowledge_delete_by_group`, `knowledge_rebuild_from_wal` (every call, not just `force_clear`) | the target group(s) **and** every group owning a cross-group pointer row into them (ADR-0385: the purge/replay rebinds those rows) |
+| `knowledge_rebind_pointers` | every group that owns a pointer row into `source_group_id` (those rows are what it rewrites; `source_group_id` itself is not written) |
+| `knowledge_clear_all`, `knowledge_apply_corrections` | **every group present** (DB groups plus WAL directories). `apply_corrections` carries no group in its request and resolves names across all groups, so it fails closed |
+| `knowledge_query_cypher` | refused entirely — see below |
+| `knowledge_recover` | **while the database is degraded: exempt**, because a degraded database must stay recoverable ([ADR-0009](adr/0009-degraded-mode-startup-recovery.md)). **While it is healthy: every group present must be listed**, like `knowledge_clear_all`, because its strategies (`restore_from_backup`, `rebuild_from_workspace_wal`, `drop_lbug_wal`) replace or rewind every group's data |
+| `knowledge_recover_full` | exempt: a no-op on a healthy database, and on a degraded one it only restores previously accepted state |
+| `knowledge_strip_wal_embeddings`, `knowledge_build_indices`, `knowledge_prepare_checkpoint`, `knowledge_dump_wal`, `knowledge_wal_mark_*`, `knowledge_close` | exempt: they touch only WAL/checkpoint files, indices or process state, never group rows |
+
+A consequence worth knowing: purging or rebuilding a listed group is refused while a non-listed
+group still holds a pointer into it — list the owner too, or remove the pointer first.
+(`force_clear` has been group-scoped since #378, not whole-database; only `knowledge_clear_all`
+and `knowledge_recover`'s `rebuild_from_workspace_wal` span every group.)
+
+**Raw Cypher is refused while a list is set.** `knowledge_query_cypher` cannot be scoped by group
+— any statement can write anywhere — and the IPC socket and attached MCP have no scopes to turn
+off, so the daemon refuses the method outright, reads included, with reason `raw_cypher_disabled`.
+Use the structured `knowledge_*` read tools instead. It is refused rather than filtered because
+no keyword scan can reliably tell a read from a write in Cypher (`CALL` procedures, `COPY`,
+`LOAD`, `ALTER`, …). With the list unset, `cypher` scope is unchanged.
+
+**Error shape.** A refused call fails with JSON-RPC code `-32004` and structured `data`; over MCP
+the same object arrives as the tool error's `data`:
+
+```json
+{"code": -32004,
+ "message": "knowledge_assert_entity refused: group 'b' not writable: not in --writable-groups (LCG_WRITABLE_GROUPS); writable groups: [a]",
+ "data": {"reason": "group_not_writable", "group_ids": ["b"],
+          "setting": "--writable-groups", "env": "LCG_WRITABLE_GROUPS",
+          "writable_groups": ["a"]}}
+```
+
+`reason` is `group_not_writable`, `all_groups_required` (a whole-database operation with unlisted
+groups present), `raw_cypher_disabled`, or `unclassified_method` (a method with no write
+classification is refused rather than assumed safe). An attached MCP process cannot enforce the
+list itself and rejects `--writable-groups` alongside `--connect`; set it on the daemon. See
+[ADR-0742](adr/0742-per-group-write-allow-list.md).
 
 **`knowledge_close` in attached mode is a footgun without `--allow-remote-close`.** In
 **standalone** mode, `knowledge_close` is always advertised under `admin` scope and shuts down
@@ -4646,6 +4719,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0707](0707-document-supersession.md) | Document Supersession — A New Document Explicitly Replaces an Old One | 2026-10-26 |
 | [0737](0737-configurable-lbug-tuning-strict-env.md) | Configurable lbug Tuning via Strictly-Parsed Environment Variables | 2026-11-13 |
 | [0741](0741-post-rebuild-pointer-repair-and-hopless-demotion.md) | Rebuild Order Must Not Matter for Cross-Group Pointers — Demote Hop-less, Rebind After Every Rebuild | 2026-11-13 |
+| [0742](0742-per-group-write-allow-list.md) | Per-Group Write Allow-List (`--writable-groups`) Enforced in the Daemon | 2026-11-13 |
 
 ## Historical numbering
 
