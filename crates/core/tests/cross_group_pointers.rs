@@ -1764,3 +1764,170 @@ fn rebind_from_unbound_to_bound_creates_direct_compat_rel() {
         "rebind must create the direct compat rel once both endpoints resolve"
     );
 }
+
+// ── Issue #741: demote_hopless_pointers ───────────────────────────────────────────────────────
+
+fn make_bound_edge(
+    conn: &lcg_core::db::Conn<'_>,
+    owner: &str,
+    target_group: &str,
+) -> (String, String) {
+    let alice = make_entity("Alice", owner, TS);
+    conn.insert_entity(&alice).unwrap();
+    let bob = make_entity("Bob", target_group, TS);
+    conn.insert_entity(&bob).unwrap();
+    let edge = cross_group::create_cross_group_edge(
+        conn,
+        CreateCrossGroupEdgeParams {
+            name: "KNOWS".to_string(),
+            source: EndpointSpec::Uuid(alice.uuid.clone()),
+            target: EndpointSpec::Foreign {
+                kind: None,
+                source_group_id: target_group.to_string(),
+                endpoint_name: "Bob".to_string(),
+            },
+            group_id: owner.to_string(),
+            fact: "Alice knows Bob".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: None,
+        },
+        TS,
+    )
+    .unwrap();
+    (edge.uuid, bob.uuid)
+}
+
+fn dst_pointer(conn: &lcg_core::db::Conn<'_>, edge_uuid: &str) -> pointer::CrossGroupPointer {
+    let e = conn
+        .get_relates_to_by_uuids(&[edge_uuid.to_string()])
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    pointer::read_pointers(&e.attributes)
+        .get(EndpointSide::Dst)
+        .cloned()
+        .unwrap()
+}
+
+#[test]
+fn demote_hopless_pointers_demotes_bound_pointer_whose_hop_is_missing() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+    let (edge, bob) = make_bound_edge(&conn, GROUP_LAYER, GROUP_A);
+    assert_eq!(dst_pointer(&conn, &edge).binding_state, BindingState::Bound);
+
+    // Simulate the wrong-order replay: the target entity (and so the hop) is absent while the
+    // pointer's cached attributes still say `bound`.
+    conn.delete_entities_by_group_ids(&[GROUP_A]).unwrap();
+    assert!(conn.get_entity_by_uuid(&bob).unwrap().is_none());
+
+    let demoted = cross_group::demote_hopless_pointers(&conn, GROUP_LAYER).unwrap();
+    assert_eq!(demoted, 1);
+    let p = dst_pointer(&conn, &edge);
+    assert_eq!(p.binding_state, BindingState::Unbound);
+    assert_eq!(p.resolved_uuid, None);
+    assert_eq!(p.bound_at_seq, None);
+    assert_eq!(p.endpoint_name, "bob", "the assertion itself is preserved");
+
+    // Idempotent: already unbound.
+    assert_eq!(
+        cross_group::demote_hopless_pointers(&conn, GROUP_LAYER).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn demote_hopless_pointers_leaves_pointer_with_hop_present_untouched() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+    let (edge, bob) = make_bound_edge(&conn, GROUP_LAYER, GROUP_A);
+    let before = dst_pointer(&conn, &edge);
+
+    assert_eq!(
+        cross_group::demote_hopless_pointers(&conn, GROUP_LAYER).unwrap(),
+        0
+    );
+    let after = dst_pointer(&conn, &edge);
+    assert_eq!(before, after);
+    assert_eq!(after.resolved_uuid, Some(bob));
+}
+
+#[test]
+fn demote_hopless_pointers_ignores_edges_owned_by_other_groups() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+    let (edge, _bob) = make_bound_edge(&conn, GROUP_LAYER, GROUP_A);
+    conn.delete_entities_by_group_ids(&[GROUP_A]).unwrap();
+
+    // Scoped to the *owning* group, not the group pointed into.
+    assert_eq!(
+        cross_group::demote_hopless_pointers(&conn, GROUP_A).unwrap(),
+        0
+    );
+    assert_eq!(
+        cross_group::demote_hopless_pointers(&conn, "unrelated").unwrap(),
+        0
+    );
+    assert_eq!(dst_pointer(&conn, &edge).binding_state, BindingState::Bound);
+}
+
+#[test]
+fn demote_hopless_pointers_does_not_leak_mutations_into_a_following_rebind() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+    let (_edge, _bob) = make_bound_edge(&conn, GROUP_LAYER, GROUP_A);
+    conn.delete_entities_by_group_ids(&[GROUP_A]).unwrap();
+    // Discard setup mutations so only the demotion's own could remain.
+    drop(conn.drain_mutations());
+
+    assert_eq!(
+        cross_group::demote_hopless_pointers(&conn, GROUP_LAYER).unwrap(),
+        1
+    );
+    assert!(
+        conn.drain_mutations().is_empty(),
+        "the demotion is derived state and must leave nothing to flush to any WAL"
+    );
+}
+
+/// The wrong-order scenario end to end at the cross_group level: the gate alone would skip the
+/// stale-`bound` pointer, demotion makes the gated rebind repair it.
+#[test]
+fn demote_then_gated_rebind_repairs_stale_bound_pointer() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+    conn.set_wal_position(GROUP_A, 4, None, None).unwrap();
+    let (edge, bob) = make_bound_edge(&conn, GROUP_LAYER, GROUP_A);
+
+    // Remove only the hop, leaving the entity and the cached `bound` pointer: exactly what a
+    // layer-first replay followed by the target's replay produces.
+    conn.delete_relates_to_hop(&edge, EndpointSide::Dst)
+        .unwrap();
+
+    let (skipped, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(
+        skipped.staleness_skipped, 1,
+        "the gate alone cannot see this"
+    );
+
+    assert_eq!(
+        cross_group::demote_hopless_pointers(&conn, GROUP_LAYER).unwrap(),
+        1
+    );
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.bound, 1);
+    assert_eq!(counts.staleness_skipped, 0);
+    let hop = conn
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge))
+        .unwrap()
+        .remove(0)
+        .target_node_uuid;
+    assert_eq!(hop, bob);
+}

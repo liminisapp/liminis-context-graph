@@ -3138,6 +3138,57 @@ async fn handle_wal_mark_delete(req: &IpcRequest, state: Arc<AppState>) -> Resul
     Ok(json!({ "success": true, "name": name, "group_id": group_id }))
 }
 
+/// Post-replay cross-group pointer repair shared by both `knowledge_rebuild_from_wal` paths
+/// (streaming and background job; issue #741).
+///
+/// `gid` is the group that was just replayed. Two steps, in this order:
+/// 1. [`crate::cross_group::demote_hopless_pointers`] — pointers on edges *owned by* `gid`
+///    whose hop was never materialised (their target group was not yet replayed) are demoted
+///    from a cached `Bound` to `Unbound`, so status reports them honestly and the gate below
+///    cannot skip them. Local derived state; never WAL'd.
+/// 2. [`crate::cross_group::rebind_pointers`] — the staleness-gated rebind of pointers
+///    pointing *into* `gid` (which may live on edges owned by other groups), with each
+///    rebind mutation flushed to the group that owns the touched row (issue #383 / ADR-0385).
+///
+/// A demotion failure is logged and the rebind still runs. Returns `None` (logged, non-fatal) if
+/// the rebind errors, so `cross_group_rebind` stays null and a caller can tell the repair did
+/// not complete.
+fn post_rebuild_pointer_repair(
+    state: &AppState,
+    conn: &crate::db::Conn<'_>,
+    gid: &str,
+    log_ctx: &str,
+) -> Option<crate::cross_group::RebindCounts> {
+    // The rebind below does not depend on the demotion succeeding (it covers pointers *into*
+    // `gid`, typically on edges owned by other groups), so a demotion failure is logged and the
+    // rebind still runs rather than skipping the whole repair.
+    if let Err(e) = crate::cross_group::demote_hopless_pointers(conn, gid) {
+        eprintln!(
+            "liminis-context-graph: {log_ctx}: post-rebuild hop-less pointer demotion failed (non-fatal; continuing to rebind): {e}"
+        );
+    }
+    let ts = chrono::Utc::now().to_rfc3339();
+    match crate::cross_group::rebind_pointers(conn, gid, &ts) {
+        Ok((counts, grouped)) => {
+            // `grouped` attributes each rebind mutation to the group whose RelatesToNode_ row it
+            // actually touched (issue #385 / ADR-0385), never `gid` itself — flush each bucket
+            // to its own group's writer, advancing that group's own WAL position (issue #383),
+            // mirroring handle_rebind_pointers's own flush.
+            for (group_id, mutations) in grouped {
+                let seq = wal_exec::wal_flush_ungrouped(state, &group_id, mutations);
+                wal_exec::advance_wal_position(conn, &group_id, seq, state);
+            }
+            Some(counts)
+        }
+        Err(e) => {
+            eprintln!(
+                "liminis-context-graph: {log_ctx}: post-rebuild cross-group rebind failed (non-fatal): {e}"
+            );
+            None
+        }
+    }
+}
+
 /// Warns (non-fatally, does not block or alter the rebuild) when a non-full (`from_seq > 0`)
 /// `knowledge_rebuild_from_wal` call may have skipped a range of WAL content relative to the
 /// DB's `applied_seq` before this rebuild started. `from_seq` is trusted at face value by the
@@ -3393,6 +3444,7 @@ async fn handle_rebuild_from_wal(
         let shutdown_cancelled = Arc::new(AtomicBool::new(false));
         let shutdown_flag_cancel = state.cancel_token.clone();
         let shutdown_cancelled_inner = Arc::clone(&shutdown_cancelled);
+        let shutdown_cancelled_repair = Arc::clone(&shutdown_cancelled);
 
         // Write lock held in async scope; guard released after spawn_blocking completes. A
         // dry run takes a *read* guard instead: it never mutates the DB, but it does read it,
@@ -3594,47 +3646,23 @@ async fn handle_rebuild_from_wal(
                             generation_for_replay.as_deref(),
                             group_embedding_identity,
                         ) {
-                            Ok(()) => {
-                                // FR-010: a reset-triggered self-heal also re-binds cross-group
-                                // pointers into this group, immediately after the full replay
-                                // completes, as part of the same recovery operation — not left
-                                // as a separate, operator-triggered step. The ordinary
-                                // staleness-gated rebind_pointers (not the `_forced` variant
-                                // group_purge already ran pre-replay) correctly re-checks every
-                                // affected pointer now that applied_seq has advanced past what
-                                // was recorded pre-purge.
-                                if reset_detected {
-                                    let ts = chrono::Utc::now().to_rfc3339();
-                                    match crate::cross_group::rebind_pointers(&conn, &gid_c, &ts) {
-                                        Ok((counts, grouped)) => {
-                                            // `grouped` attributes each rebind mutation to the
-                                            // group whose RelatesToNode_ row it actually touched
-                                            // (issue #385 / ADR-0385), never gid_c itself — flush
-                                            // each bucket to its own group's writer, advancing
-                                            // that group's own WAL position (issue #383),
-                                            // mirroring handle_rebind_pointers's own flush.
-                                            for (group_id, mutations) in grouped {
-                                                let seq = wal_exec::wal_flush_ungrouped(
-                                                    &state_c, &group_id, mutations,
-                                                );
-                                                wal_exec::advance_wal_position(
-                                                    &conn, &group_id, seq, &state_c,
-                                                );
-                                            }
-                                            rebind_counts = Some(counts);
-                                        }
-                                        Err(e) => eprintln!(
-                                            "liminis-context-graph: reload: post-reset cross-group rebind failed (non-fatal): {e}"
-                                        ),
-                                    }
-                                }
-                            }
+                            Ok(()) => {}
                             Err(e) => {
                                 eprintln!(
                                     "liminis-context-graph: reload: failed to persist applied_seq={seq} (non-fatal): {e}"
                                 );
                             }
                         }
+                    }
+                    // Issue #741: demote hop-less pointers on edges this group owns, then run the
+                    // staleness-gated rebind of pointers into this group — after *every*
+                    // successful replay (full or incremental, reset or not), so the final graph
+                    // does not depend on the order groups are rebuilt in. Runs after the position
+                    // write above so the gate sees this replay's applied_seq. Skipped when
+                    // shutdown cancelled the replay: a partial replay must not drive repairs.
+                    if !shutdown_cancelled_repair.load(Ordering::Relaxed) {
+                        rebind_counts =
+                            post_rebuild_pointer_repair(&state_c, &conn, &gid_c, "reload");
                     }
                 }
                 Ok((stats, build_ok, lookup_key_backfill_ok, rebind_counts))
@@ -4075,32 +4103,7 @@ async fn handle_rebuild_from_wal(
                             bg_current_generation_for_replay.as_deref(),
                             group_embedding_identity,
                         ) {
-                            Ok(()) => {
-                                // FR-010: same post-replay re-bind as the streaming path — part
-                                // of the same reset-triggered recovery operation, not a separate
-                                // operator-triggered step.
-                                if reset_detected {
-                                    let ts = chrono::Utc::now().to_rfc3339();
-                                    match crate::cross_group::rebind_pointers(&conn, &bg_gid, &ts) {
-                                        Ok((counts, grouped)) => {
-                                            // Same per-group flush of the rebind's grouped
-                                            // mutations as the streaming path above.
-                                            for (group_id, mutations) in grouped {
-                                                let seq = wal_exec::wal_flush_ungrouped(
-                                                    &bg_state, &group_id, mutations,
-                                                );
-                                                wal_exec::advance_wal_position(
-                                                    &conn, &group_id, seq, &bg_state,
-                                                );
-                                            }
-                                            rebind_counts = Some(counts);
-                                        }
-                                        Err(e) => eprintln!(
-                                            "liminis-context-graph: reload(bg): post-reset cross-group rebind failed (non-fatal): {e}"
-                                        ),
-                                    }
-                                }
-                            }
+                            Ok(()) => {}
                             Err(e) => {
                                 eprintln!(
                                     "liminis-context-graph: reload(bg): failed to persist applied_seq={seq} (non-fatal): {e}"
@@ -4108,6 +4111,10 @@ async fn handle_rebuild_from_wal(
                             }
                         }
                     }
+                    // Issue #741: same post-replay pointer repair as the streaming path (the
+                    // background job has no cancel hook, so no cancel gate).
+                    rebind_counts =
+                        post_rebuild_pointer_repair(&bg_state, &conn, &bg_gid, "reload(bg)");
                 }
                 Ok((stats, build_ok, lookup_key_backfill_ok, rebind_counts))
             },

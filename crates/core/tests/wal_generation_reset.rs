@@ -945,8 +945,14 @@ async fn story3_cross_group_pointer_rebinds_to_new_generation_after_reset() {
     )
     .await;
     assert_eq!(boot_v["result"]["success"], true, "{boot_v}");
-    // First bind is an ordinary, explicit rebind call (no reset — FR-010's auto-rebind only
-    // fires on a detected reset).
+    // Issue #741: even an ordinary, non-reset rebuild re-binds pointers into the rebuilt group
+    // and reports it — no separate `knowledge_rebind_pointers` call is needed for the first bind.
+    assert_eq!(
+        boot_v["result"]["cross_group_rebind"]["bound"], 1,
+        "an ordinary rebuild must bind the pointer and report cross_group_rebind: {boot_v}"
+    );
+    assert_eq!(boot_v["result"]["reset_detected"], false, "{boot_v}");
+    // An explicit rebind afterwards is a gated no-op.
     let rebind_v = dispatch_val(
         3,
         "knowledge_rebind_pointers",
@@ -954,7 +960,7 @@ async fn story3_cross_group_pointer_rebinds_to_new_generation_after_reset() {
         Arc::clone(&state),
     )
     .await;
-    assert_eq!(rebind_v["result"]["bound"], 1, "{rebind_v}");
+    assert_eq!(rebind_v["result"]["staleness_skipped"], 1, "{rebind_v}");
 
     let bound_before = {
         let db2 = state.db.load_full().unwrap();

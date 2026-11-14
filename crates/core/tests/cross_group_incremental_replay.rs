@@ -148,6 +148,27 @@ fn snapshot_group_wal_dir(
     )
 }
 
+/// Seeds an entity of group B straight into the DB — *without* a `knowledge_rebuild_from_wal`
+/// of B. Since issue #741 every rebuild re-binds pointers into the rebuilt group itself, so
+/// tests that must drive the standalone `knowledge_rebind_pointers` path (rather than the
+/// rebuild's own repair) make the target present this way instead.
+fn seed_group_b_entity(state: &Arc<AppState>, uuid: &str, name: &str) {
+    let db = state.db.load_full().unwrap();
+    let conn = db.connect().unwrap();
+    conn.insert_entity(&EntityRow {
+        uuid: uuid.to_string(),
+        name: name.to_string(),
+        group_id: GROUP_B.to_string(),
+        labels: vec!["Entity".to_string()],
+        created_at: "2026-05-22 00:00:00".to_string(),
+        name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+        summary: "s".to_string(),
+        attributes: "{}".to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+}
+
 async fn dispatch_val(id: i64, method: &str, params: Value, state: Arc<AppState>) -> Value {
     let req = IpcRequest {
         jsonrpc: "2.0".to_string(),
@@ -275,24 +296,27 @@ async fn cross_group_pointer_resolves_after_target_groups_incremental_replay() {
         "incremental replay of group B must succeed: {rebuild_v}"
     );
 
-    // Group L's own position is untouched by B's replay (SC-002, re-confirmed here as this
-    // test's own setup, not just Task 11's dedicated coverage).
-    let (layer_applied, group_b_applied) = {
+    // Issue #741: the rebuild of B itself re-binds the pointer into B and reports it — no
+    // separate `knowledge_rebind_pointers` call is needed.
+    assert_eq!(
+        rebuild_v["result"]["cross_group_rebind"]["bound"], 1,
+        "the rebuild's own post-replay rebind must bind the pointer: {rebuild_v}"
+    );
+    // The rebind's mutations are flushed to the *owning* group L's stream (FR-005 / #385), so L's
+    // own position legitimately moves off the 999 sentinel; B's is its own replay position.
+    let group_b_applied = {
         let db2 = state.db.load_full().unwrap();
         let conn = db2.connect().unwrap();
-        (
+        assert_ne!(
             conn.get_wal_position(GROUP_LAYER).unwrap().applied_seq,
-            conn.get_wal_position(GROUP_B).unwrap().applied_seq,
-        )
+            Some(999),
+            "L's position must reflect the rebind mutations flushed to L's stream"
+        );
+        conn.get_wal_position(GROUP_B).unwrap().applied_seq
     };
-    assert_eq!(
-        layer_applied,
-        Some(999),
-        "group L's position must be untouched by group B's replay"
-    );
     assert_eq!(group_b_applied, Some(0));
 
-    // Re-bind pointers sourced from group B. Must resolve against B's now-populated state.
+    // An explicit re-bind afterwards is a gated no-op: nothing left to do.
     let rebind_v = dispatch_val(
         3,
         "knowledge_rebind_pointers",
@@ -301,8 +325,8 @@ async fn cross_group_pointer_resolves_after_target_groups_incremental_replay() {
     )
     .await;
     assert_ok_resp(&rebind_v, 3);
-    assert_eq!(rebind_v["result"]["checked"], 1, "{rebind_v}");
-    assert_eq!(rebind_v["result"]["bound"], 1, "{rebind_v}");
+    assert_eq!(rebind_v["result"]["checked"], 0, "{rebind_v}");
+    assert_eq!(rebind_v["result"]["staleness_skipped"], 1, "{rebind_v}");
 
     let (final_hop, final_attrs) = {
         let db3 = state.db.load_full().unwrap();
@@ -524,14 +548,22 @@ async fn rebind_after_incremental_replay_is_idempotent_on_second_pass() {
     )
     .await;
     assert_ok_resp(&rebuild_v, 2);
+    // Issue #741: the rebuild itself re-binds pointers into B and reports it.
+    assert_eq!(
+        rebuild_v["result"]["cross_group_rebind"]["bound"], 1,
+        "the rebuild's own post-replay rebind must bind the pointer: {rebuild_v}"
+    );
 
     {
         let db2 = state.db.load_full().unwrap();
         let conn = db2.connect().unwrap();
         let ts = "2026-05-22T00:00:00Z";
         let (first, _) = cross_group::rebind_pointers(&conn, GROUP_B, ts).unwrap();
-        assert_eq!(first.checked, 1);
-        assert_eq!(first.bound, 1);
+        assert_eq!(
+            first.checked, 0,
+            "already bound and current after the rebuild's own rebind: {first:?}"
+        );
+        assert_eq!(first.staleness_skipped, 1);
 
         let (second, _) = cross_group::rebind_pointers(&conn, GROUP_B, ts).unwrap();
         assert_eq!(
@@ -603,13 +635,9 @@ async fn standalone_rebind_pointers_routes_to_owning_group_not_source_or_default
         widget_wal_line(0, &widget_uuid) + "\n",
     )
     .unwrap();
-    let rebuild_v = dispatch_rebuild_sync(
-        2,
-        json!({"group_id": GROUP_B, "from_seq": 0}),
-        Arc::clone(&state),
-    )
-    .await;
-    assert_ok_resp(&rebuild_v, 2);
+    // Target made present without a rebuild of B (see `seed_group_b_entity`), so the standalone
+    // rebind below — not the rebuild's own #741 repair — is what binds the pointer.
+    seed_group_b_entity(&state, &widget_uuid, "widget");
     let b_snapshot_before_rebind = snapshot_group_wal_dir(&wal_root, GROUP_B);
 
     // The standalone rebind call — real IPC dispatch, exercising handle_rebind_pointers's own
@@ -730,13 +758,9 @@ async fn standalone_rebind_pointers_attributes_each_owning_group_to_its_own_stre
             + "\n",
     )
     .unwrap();
-    let rebuild_v = dispatch_rebuild_sync(
-        3,
-        json!({"group_id": GROUP_B, "from_seq": 0}),
-        Arc::clone(&state),
-    )
-    .await;
-    assert_ok_resp(&rebuild_v, 3);
+    // As above: present in the DB without a rebuild of B, so the standalone call does the bind.
+    seed_group_b_entity(&state, &widget_uuid, "widget");
+    seed_group_b_entity(&state, &gadget_uuid, "gadget");
 
     let rebind_v = dispatch_val(
         4,

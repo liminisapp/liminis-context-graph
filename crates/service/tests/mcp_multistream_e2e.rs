@@ -572,18 +572,40 @@ fn multistream_layer_graph_composition() {
 
     let positions_after_rebuild = wal_groups(&mut client);
 
-    // ── Assertions (g)/(h): replaying A's own WAL leaves B's and C's WAL positions untouched
-    //    (#378) ────────────────────────────────────────────────────────────────────────────
-    for group_id in ["B", "C"] {
-        assert_eq!(
-            positions_before_rebuild.get(group_id),
-            positions_after_rebuild.get(group_id),
-            "replaying group A's own WAL must leave group {group_id}'s WAL position \
-             byte-identical (#378): before={:?} after={:?}",
-            positions_before_rebuild.get(group_id),
-            positions_after_rebuild.get(group_id)
-        );
-    }
+    // ── Assertion (g): replaying A's own WAL leaves B's WAL position untouched (#378) ────────
+    assert_eq!(
+        positions_before_rebuild.get("B"),
+        positions_after_rebuild.get("B"),
+        "replaying group A's own WAL must leave group B's WAL position byte-identical (#378): \
+         before={:?} after={:?}",
+        positions_before_rebuild.get("B"),
+        positions_after_rebuild.get("B")
+    );
+
+    // ── Assertion (h): C's pointers into A are re-bound by A's rebuild itself (#741) ─────────
+    // C holds cross-group pointers *into* A, so since #741 every successful rebuild of A re-binds
+    // them and flushes the resulting mutations to C's own stream (ADR-0385). C's applied position
+    // therefore legitimately advances (never regresses) — this is a correct write to C's own
+    // stream, not #378-style cross-contamination, and B (no pointers into A) must not move. The
+    // pointers are `bound` right after the rebuild, with no `knowledge_rebind_pointers` call.
+    let seq_of = |m: &Value| m.get("C").and_then(|p| p["applied_seq"].as_u64());
+    assert!(
+        seq_of(&positions_after_rebuild) >= seq_of(&positions_before_rebuild),
+        "C's applied position must not regress across A's rebuild: before={:?} after={:?}",
+        positions_before_rebuild.get("C"),
+        positions_after_rebuild.get("C")
+    );
+    let c_after_rebuild = c_bindings(&mut client);
+    let into_a_after_rebuild = binding_states_into(&c_after_rebuild, "A");
+    assert!(
+        !into_a_after_rebuild.is_empty() && into_a_after_rebuild.iter().all(|s| *s == "bound"),
+        "A's rebuild must itself re-bind C's pointers into A (#741) — into_a=\
+         {into_a_after_rebuild:?} c_bindings={c_after_rebuild:?}"
+    );
+    assert!(
+        rebuild_result["cross_group_rebind"].is_object(),
+        "every successful rebuild reports cross_group_rebind (#741): {rebuild_result}"
+    );
 
     // ── Edge case (FR-003): B's on-disk WAL directory is untouched by A's
     //    dry-run/purge/rebuild (#385) ─────────────────────────────────────────────────────────

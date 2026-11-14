@@ -994,6 +994,21 @@ this lets a preview surface the problem before you commit to a real rebuild. Non
 to an incremental `from_seq > 0` resume, which intentionally targets a group that already has
 state.
 
+**Rebuild order across groups does not matter, and every rebuild reports `cross_group_rebind`
+(issue #741).** A cross-group edge lives in the WAL of the group that *owns* it (say `layer`) but
+points at an entity in another group (say `up`). Rebuilding `layer` before `up` used to leave that
+edge permanently missing: its hop writes found no endpoint and did nothing, yet the pointer kept the
+`bound` state cached in its WAL attributes. Now, after **every** successful rebuild — full or
+incremental, reset-triggered or not, foreground or background job — the service (1) demotes any
+`bound` pointer on an edge owned by the rebuilt group whose hop was not actually created to
+`unbound` (local derived state, not written to any WAL), so `knowledge_status.cross_group_pointers`
+reports the gap instead of claiming `bound`, and (2) runs the staleness-gated `rebind_pointers`
+for pointers pointing *into* the rebuilt group, flushing each resulting mutation to the group that
+owns the edge. Rebuilding `layer` then `up` therefore ends in the same graph as `up` then `layer`,
+with no manual `knowledge_rebind_pointers` call. The result's `cross_group_rebind` carries the same
+counts `knowledge_rebind_pointers` reports (zeros when nothing needed attention); it is `null` only
+on a `dry_run`, or if the repair itself errored (logged, and the rebuild still succeeds).
+
 **`to_seq` bounds replay from the other end: `from_seq <= seq <= to_seq`.** Pass an inclusive
 upper bound to exclude a mutation (and everything after it) from a rebuild — e.g. a WAL-recorded
 mutation that corrupted the graph. Omit `to_seq` for today's unbounded behavior (replay to the
@@ -1578,7 +1593,8 @@ completely unaffected: pointers only ever exist on edges created through this to
 - **A foreign endpoint that doesn't currently resolve is `unbound`, not dropped.** Unlike
   ordinary extraction (which hard-drops an unresolvable endpoint at commit — see
   [ADR-0051](adr/0051-edge-endpoint-salvage-and-deferred-drop.md)), the edge is still created;
-  only the hop to that side is missing until a later `knowledge_rebind_pointers` call resolves
+  only the hop to that side is missing until the target group is (re)built — which re-binds it
+  automatically, see `knowledge_rebuild_from_wal` — or a `knowledge_rebind_pointers` call resolves
   it. A `binding_state` of `ambiguous` means more than one entity currently matches the name —
   also retained, also missing that hop, never a silently-guessed winner.
 - **A bare-UUID endpoint that turns out to belong to a different group than the edge is
@@ -1587,7 +1603,10 @@ completely unaffected: pointers only ever exist on edges created through this to
 - **`knowledge_rebind_pointers`** (`{"source_group_id": "..."}`, required) re-resolves every
   pointer whose `source_group_id` matches, after that source group's own hydration, incremental
   replay, or refresh cycle — including an ordinary `knowledge_rebuild_from_wal` targeting that one
-  group, not only a full purge-and-rehydrate (issue #378). A pointer currently `bound` is skipped
+  group, not only a full purge-and-rehydrate (issue #378). Since issue #741 every successful
+  `knowledge_rebuild_from_wal` already runs this pass for the rebuilt group and reports it as
+  `cross_group_rebind`, so a manual call is only needed after hydrating a group by some other
+  route (e.g. assertion-API writes). A pointer currently `bound` is skipped
   once its `bound_at_seq` is already at or past `source_group_id`'s **own** applied WAL position —
   never any other group's, even when the edge carrying the pointer lives in a third, different
   group — this staleness gate is what makes a second call with no intervening change to
@@ -2712,9 +2731,13 @@ the running embedder — a database-side check, not a property of the WAL or the
   silently replaying new-generation mutations on top of old-generation data (the corruption this
   issue exists to prevent; the two do not reconcile, since the native write path emits `CREATE`
   rather than `MERGE`). The result reports `reset_detected: true`, `previous_generation`,
-  `generation` (the generation just replayed), and `cross_group_rebind` (the same counts
-  `knowledge_rebind_pointers` reports), on both the streaming response and the background-job's
-  polled `result`, so a caller can tell this apart from an ordinary incremental replay. A
+  `generation` (the generation just replayed) on both the streaming response and the background-job's
+  polled `result`, so a caller can tell this apart from an ordinary incremental replay.
+  `cross_group_rebind` (the same counts `knowledge_rebind_pointers` reports) is no longer
+  reset-only: since issue #741 it is reported on **every** successful rebuild, because every
+  rebuild re-binds cross-group pointers into the rebuilt group (and first demotes pointers on
+  edges it owns whose hop could not be created), making the final graph independent of the order
+  groups are rebuilt in. A
   `dry_run: true` call against a mismatched group reports the same `reset_detected`/
   `previous_generation`/`generation` fields but purges and replays nothing — report-only, like
   every other dry-run path in this codebase.
@@ -4622,6 +4645,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0706](0706-correction-diff-and-affected-work-reads.md) | Correction Reads — What a Correction Changed, and What Was Written While the Old Belief Held | 2026-10-26 |
 | [0707](0707-document-supersession.md) | Document Supersession — A New Document Explicitly Replaces an Old One | 2026-10-26 |
 | [0737](0737-configurable-lbug-tuning-strict-env.md) | Configurable lbug Tuning via Strictly-Parsed Environment Variables | 2026-11-13 |
+| [0741](0741-post-rebuild-pointer-repair-and-hopless-demotion.md) | Rebuild Order Must Not Matter for Cross-Group Pointers — Demote Hop-less, Rebind After Every Rebuild | 2026-11-13 |
 
 ## Historical numbering
 

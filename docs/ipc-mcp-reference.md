@@ -274,6 +274,21 @@ this lets a preview surface the problem before you commit to a real rebuild. Non
 to an incremental `from_seq > 0` resume, which intentionally targets a group that already has
 state.
 
+**Rebuild order across groups does not matter, and every rebuild reports `cross_group_rebind`
+(issue #741).** A cross-group edge lives in the WAL of the group that *owns* it (say `layer`) but
+points at an entity in another group (say `up`). Rebuilding `layer` before `up` used to leave that
+edge permanently missing: its hop writes found no endpoint and did nothing, yet the pointer kept the
+`bound` state cached in its WAL attributes. Now, after **every** successful rebuild — full or
+incremental, reset-triggered or not, foreground or background job — the service (1) demotes any
+`bound` pointer on an edge owned by the rebuilt group whose hop was not actually created to
+`unbound` (local derived state, not written to any WAL), so `knowledge_status.cross_group_pointers`
+reports the gap instead of claiming `bound`, and (2) runs the staleness-gated `rebind_pointers`
+for pointers pointing *into* the rebuilt group, flushing each resulting mutation to the group that
+owns the edge. Rebuilding `layer` then `up` therefore ends in the same graph as `up` then `layer`,
+with no manual `knowledge_rebind_pointers` call. The result's `cross_group_rebind` carries the same
+counts `knowledge_rebind_pointers` reports (zeros when nothing needed attention); it is `null` only
+on a `dry_run`, or if the repair itself errored (logged, and the rebuild still succeeds).
+
 **`to_seq` bounds replay from the other end: `from_seq <= seq <= to_seq`.** Pass an inclusive
 upper bound to exclude a mutation (and everything after it) from a rebuild — e.g. a WAL-recorded
 mutation that corrupted the graph. Omit `to_seq` for today's unbounded behavior (replay to the
@@ -858,7 +873,8 @@ completely unaffected: pointers only ever exist on edges created through this to
 - **A foreign endpoint that doesn't currently resolve is `unbound`, not dropped.** Unlike
   ordinary extraction (which hard-drops an unresolvable endpoint at commit — see
   [ADR-0051](adr/0051-edge-endpoint-salvage-and-deferred-drop.md)), the edge is still created;
-  only the hop to that side is missing until a later `knowledge_rebind_pointers` call resolves
+  only the hop to that side is missing until the target group is (re)built — which re-binds it
+  automatically, see `knowledge_rebuild_from_wal` — or a `knowledge_rebind_pointers` call resolves
   it. A `binding_state` of `ambiguous` means more than one entity currently matches the name —
   also retained, also missing that hop, never a silently-guessed winner.
 - **A bare-UUID endpoint that turns out to belong to a different group than the edge is
@@ -867,7 +883,10 @@ completely unaffected: pointers only ever exist on edges created through this to
 - **`knowledge_rebind_pointers`** (`{"source_group_id": "..."}`, required) re-resolves every
   pointer whose `source_group_id` matches, after that source group's own hydration, incremental
   replay, or refresh cycle — including an ordinary `knowledge_rebuild_from_wal` targeting that one
-  group, not only a full purge-and-rehydrate (issue #378). A pointer currently `bound` is skipped
+  group, not only a full purge-and-rehydrate (issue #378). Since issue #741 every successful
+  `knowledge_rebuild_from_wal` already runs this pass for the rebuilt group and reports it as
+  `cross_group_rebind`, so a manual call is only needed after hydrating a group by some other
+  route (e.g. assertion-API writes). A pointer currently `bound` is skipped
   once its `bound_at_seq` is already at or past `source_group_id`'s **own** applied WAL position —
   never any other group's, even when the edge carrying the pointer lives in a third, different
   group — this staleness gate is what makes a second call with no intervening change to
