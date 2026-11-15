@@ -1439,8 +1439,12 @@ oversample the nearest-neighbour probe), so a selective filter can return fewer 
   `knowledge_mark_chunk_removed` with `origin: "derived"` or `"answer"` on such a chunk (the removal
   path takes an optional `origin`; omitted means `primary`); or a `knowledge_supersede_document` whose
   superseding document is derived and whose superseded document is primary or external. Primary
-  content may supersede derived content freely.
-- is refused when its `doc_id` already carries a different origin: one document has one origin.
+  content may supersede derived content freely by `chunk_id` revision (no `doc_id` involved) or by
+  `knowledge_supersede_document`.
+- is refused when its `doc_id` already carries a different origin: one document has one origin. This
+  applies in both directions, so a `primary` submission cannot take over a `derived` `doc_id` by reusing
+  it. To replace an agent-written document with a human-written one, use a new `doc_id` and
+  `knowledge_supersede_document`, or re-stamp the old document with `knowledge_stamp_origin`.
 
 A rebuild cannot re-open a protected fact: these decisions are baked into the statements the WAL
 records.

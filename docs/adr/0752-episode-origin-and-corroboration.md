@@ -37,6 +37,10 @@ per-document record would need new schema, dump, replay and group-purge handling
 cost). Instead every episode carries origin and, when a `doc_id` is supplied, ingest refuses a
 submission whose origin differs from the one already recorded for that `(group, doc_id)`. The check
 runs only when a `doc_id` is present, so plain ingest pays no extra scan.
+The rule is symmetric (FR-013): a `primary` submission to a `doc_id` that holds `derived` episodes is
+refused too, so a human cannot take over an agent-written page by reusing its `doc_id`. Primary content
+replaces derived content through a new `doc_id` plus `knowledge_supersede_document`, through a
+`chunk_id` revision with no `doc_id`, or after re-stamping the document.
 
 **4. Support counts distinct documents, over same-fact siblings.** Ingest never deduplicates edges
 (ADR-0705), so a derived page restating a fact produces a *second edge*. Reversing that decision
