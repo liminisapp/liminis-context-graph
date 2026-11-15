@@ -158,6 +158,9 @@ OPTIONS:
                                  --record-cassette writes nothing.
     -h, --help                   Print this help and exit.
 
+RETRIEVAL EVAL:
+    lcg-eval retrieval --help    Retrieval-quality eval (LCG vs qmd) — a separate mode.
+
 Documentation: https://github.com/liminisapp/liminis-context-graph — see README.md's
 'Extraction-quality eval harness' section for cost implications before running.
 "
