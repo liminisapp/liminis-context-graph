@@ -832,7 +832,7 @@ impl<'db> Conn<'db> {
              entity_edges: $entity_edges, attributes: $attributes, ingested_at: $ingested_at, \
              superseded_at: $superseded_at, superseded_by: $superseded_by, \
              superseded_by_kind: $superseded_by_kind, \
-             supersession_reason: $supersession_reason, doc_id: $doc_id})",
+             supersession_reason: $supersession_reason, doc_id: $doc_id, origin: $origin})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -851,6 +851,7 @@ impl<'db> Conn<'db> {
                 "superseded_by_kind": row.superseded_by_kind,
                 "supersession_reason": row.supersession_reason,
                 "doc_id": row.doc_id,
+                "origin": row.origin,
             }),
         )
     }
@@ -1305,7 +1306,7 @@ impl<'db> Conn<'db> {
              RETURN ep.uuid, ep.name, ep.group_id, ep.created_at, ep.source, \
              ep.source_description, ep.content, ep.valid_at, ep.entity_edges, ep.attributes, \
              ep.ingested_at, ep.superseded_at, ep.superseded_by, ep.superseded_by_kind, \
-             ep.supersession_reason, ep.doc_id \
+             ep.supersession_reason, ep.doc_id, ep.origin \
              ORDER BY ep.created_at DESC, ep.uuid DESC LIMIT $limit"
         );
         let result = self.query_params(&cypher, params)?;
@@ -1330,6 +1331,7 @@ impl<'db> Conn<'db> {
                     superseded_by_kind: value_as_optional_string(&row[13]),
                     supersession_reason: value_as_optional_string(&row[14]),
                     doc_id: value_as_optional_string(&row[15]),
+                    origin: value_as_optional_string(&row[16]),
                     ..Default::default()
                 },
                 created_us,
@@ -1864,6 +1866,180 @@ impl<'db> Conn<'db> {
             );
         }
         Ok(out)
+    }
+
+    // ── Episode origin (issue #752, ADR-0752) ─────────────────────────────────
+
+    /// Origin, document and supersession state of the given episodes (one batched, uuid-keyed
+    /// lookup). A UUID absent from the result no longer exists (hard-deleted).
+    pub fn get_episode_origin_info(
+        &self,
+        uuids: &[String],
+    ) -> Result<HashMap<String, crate::origin::EpisodeOriginInfo>, Error> {
+        let mut out = HashMap::new();
+        if uuids.is_empty() {
+            return Ok(out);
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids \
+             RETURN ep.uuid, coalesce(ep.origin, ''), ep.doc_id, ep.superseded_at, ep.group_id",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        for r in rows {
+            out.insert(
+                value_as_string(&r[0]),
+                episode_origin_info_from_cols(&r[1], &r[2], &r[3], &r[4]),
+            );
+        }
+        Ok(out)
+    }
+
+    /// The distinct origins already recorded for episodes of `doc_id` in `group_id` (superseded
+    /// episodes included: a document has one origin for its whole life, FR-013).
+    pub fn origins_for_doc(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+    ) -> Result<Vec<crate::origin::Origin>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             RETURN DISTINCT coalesce(ep.origin, '')",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        )?;
+        let mut out: Vec<crate::origin::Origin> = Vec::new();
+        for r in rows {
+            let o = crate::origin::Origin::from_stored(Some(&value_as_string(&r[0])));
+            if !out.contains(&o) {
+                out.push(o);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Origins of the episodes of `group_id` named `chunk_id` that are live at `as_of` (the same
+    /// predicate as [`Self::live_episode_uuids_for_chunk`]).
+    pub fn live_origins_for_chunk(
+        &self,
+        chunk_id: &str,
+        group_id: &str,
+        as_of: &str,
+    ) -> Result<Vec<crate::origin::Origin>, Error> {
+        let uuids = self.live_episode_uuids_for_chunk(chunk_id, group_id, &[], as_of)?;
+        let info = self.get_episode_origin_info(&uuids)?;
+        Ok(info.values().map(|i| i.origin).collect())
+    }
+
+    /// Origin rows of the episodes that mention each of `entity_uuids`
+    /// (`Episodic-[:MENTIONS]->Entity`): `(entity uuid, episode uuid, info)`.
+    pub fn entity_mention_origins(
+        &self,
+        entity_uuids: &[String],
+    ) -> Result<Vec<(String, String, crate::origin::EpisodeOriginInfo)>, Error> {
+        if entity_uuids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) WHERE n.uuid IN $uuids \
+             RETURN DISTINCT n.uuid, ep.uuid, coalesce(ep.origin, ''), ep.doc_id, \
+             ep.superseded_at, ep.group_id",
+            serde_json::json!({ "uuids": entity_uuids }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    value_as_string(&r[0]),
+                    value_as_string(&r[1]),
+                    episode_origin_info_from_cols(&r[2], &r[3], &r[4], &r[5]),
+                )
+            })
+            .collect())
+    }
+
+    /// Entities among `entity_uuids` with at least one live primary or external mention — the
+    /// set a derived or answer episode may not rewrite or merge into (FR-010).
+    pub fn entities_with_corroborating_mention(
+        &self,
+        entity_uuids: &[String],
+        as_of_us: i64,
+    ) -> Result<std::collections::HashSet<String>, Error> {
+        Ok(self
+            .entity_mention_origins(entity_uuids)?
+            .into_iter()
+            .filter(|(_, _, i)| i.origin.is_corroborating() && i.is_live(as_of_us))
+            .map(|(e, _, _)| e)
+            .collect())
+    }
+
+    /// Edges sharing `(group, source entity, target entity, name)` with any of `keys`' edges —
+    /// the read-time "same fact" equivalence class (ADR-0752): `(edge uuid, group, source,
+    /// target, name, producing episodes)`. Over-matches on the src×dst cross product are filtered
+    /// by the caller.
+    pub fn sibling_edge_rows(
+        &self,
+        group_ids: &[String],
+        source_uuids: &[String],
+        target_uuids: &[String],
+    ) -> Result<Vec<SiblingEdgeRow>, Error> {
+        if group_ids.is_empty() || source_uuids.is_empty() || target_uuids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = self.query_params(
+            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+             WHERE rn.group_id IN $gids AND src.uuid IN $srcs AND dst.uuid IN $dsts \
+             RETURN rn.uuid, rn.group_id, src.uuid, dst.uuid, rn.name, rn.episodes",
+            serde_json::json!({
+                "gids": group_ids, "srcs": source_uuids, "dsts": target_uuids,
+            }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| SiblingEdgeRow {
+                uuid: value_as_string(&r[0]),
+                group_id: value_as_string(&r[1]),
+                source_uuid: value_as_string(&r[2]),
+                target_uuid: value_as_string(&r[3]),
+                name: value_as_string(&r[4]),
+                episodes: value_as_str_list(&r[5]),
+            })
+            .collect())
+    }
+
+    /// Every episode of `group_id` with the columns a stamp rule selects on (no content, no
+    /// embedding), ordered by uuid. An admin-only full scan.
+    pub fn stamp_candidates(&self, group_id: &str) -> Result<Vec<StampCandidate>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid \
+             RETURN ep.uuid, ep.doc_id, coalesce(ep.origin, ''), ep.source_description, \
+             ep.attributes ORDER BY ep.uuid",
+            serde_json::json!({ "gid": group_id }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| StampCandidate {
+                uuid: value_as_string(&r[0]),
+                doc_id: value_as_optional_string(&r[1]),
+                origin: crate::origin::Origin::from_stored(Some(&value_as_string(&r[2]))),
+                source_description: value_as_string(&r[3]),
+                attributes: value_as_string(&r[4]),
+            })
+            .collect())
+    }
+
+    /// Sets `origin` on the given episodes. uuid-keyed and fixed-valued, so replaying it (also
+    /// over an overlapping tail range) is idempotent. No LLM or embedding is involved.
+    pub fn stamp_origin(
+        &self,
+        uuids: &[String],
+        origin: crate::origin::Origin,
+    ) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids SET ep.origin = $origin",
+            serde_json::json!({ "uuids": uuids, "origin": origin.as_str() }),
+        )
     }
 
     // ── Correction reads (issue #706, ADR-0706) ───────────────────────────────
@@ -2415,22 +2591,64 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<PassageResult>, Error> {
-        let gid_filter = match group_ids {
-            Some(gids) if !gids.is_empty() => "WHERE node.group_id IN $gids",
-            _ => "",
+        self.vector_search_episodic_origins(embedding, group_ids, limit, None)
+    }
+
+    /// [`Self::vector_search_episodic`] with an optional episode-`origins` filter (issue #752,
+    /// FR-014): `Some(origins)` keeps only passages whose episode's origin is in the list (a NULL
+    /// or empty stored origin is `primary`). Like the group filter it runs after the ANN probe,
+    /// so the probe is oversampled ([`KIND_ANN_OVERSAMPLE`]) to keep a rare origin from being
+    /// crowded out; recall of a rare origin is mitigated, not guaranteed. Every returned passage
+    /// carries its episode's `origin`.
+    pub fn vector_search_episodic_origins(
+        &self,
+        embedding: &[f32],
+        group_ids: Option<&[&str]>,
+        limit: usize,
+        origins: Option<&[crate::origin::Origin]>,
+    ) -> Result<Vec<PassageResult>, Error> {
+        let mut preds: Vec<&str> = Vec::new();
+        if matches!(group_ids, Some(g) if !g.is_empty()) {
+            preds.push("node.group_id IN $gids");
+        }
+        if origins.is_some() {
+            preds.push("coalesce(node.origin, '') IN $origins");
+        }
+        let where_clause = if preds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", preds.join(" AND "))
+        };
+        let probe = if origins.is_some() {
+            limit.saturating_mul(KIND_ANN_OVERSAMPLE)
+        } else {
+            limit
         };
         let cypher = format!(
-            "CALL QUERY_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx', $emb, $limit) \
-             WITH node, distance {gid_filter} \
+            "CALL QUERY_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx', $emb, $probe) \
+             WITH node, distance {where_clause} \
              RETURN node.uuid, node.name, node.content, node.source_description, \
-             node.group_id, node.created_at, node.valid_at, node.attributes, distance \
+             node.group_id, node.created_at, node.valid_at, node.attributes, distance, \
+             coalesce(node.origin, '') \
              ORDER BY distance ASC LIMIT $limit"
         );
-        let mut params = serde_json::json!({ "emb": embedding, "limit": limit as i64 });
+        let mut params = serde_json::json!({
+            "emb": embedding,
+            "limit": limit as i64,
+            "probe": probe as i64,
+        });
         if let Some(gids) = group_ids {
             if !gids.is_empty() {
                 params["gids"] = serde_json::json!(gids);
             }
+        }
+        if let Some(origins) = origins {
+            let mut names: Vec<&str> = origins.iter().map(|o| o.as_str()).collect();
+            // A never-stamped episode is stored as NULL (or "" after a dump round trip).
+            if origins.contains(&crate::origin::Origin::Primary) {
+                names.push("");
+            }
+            params["origins"] = serde_json::json!(names);
         }
         let result = self.query_params(&cypher, params)?;
         let mut rows = Vec::new();
@@ -2449,6 +2667,9 @@ impl<'db> Conn<'db> {
                 valid_at,
                 attributes: value_as_string(&row[7]),
                 score: value_as_f64(&row[8]),
+                origin: crate::origin::Origin::from_stored(Some(&value_as_string(&row[9])))
+                    .as_str()
+                    .to_string(),
             });
         }
         Ok(rows)
@@ -4233,7 +4454,7 @@ impl<'db> Conn<'db> {
     /// Page of Episodic rows for dump.
     /// Columns: [uuid, name, group_id, created_at, source, source_description, content,
     ///            content_embedding, valid_at, entity_edges, attributes, ingested_at,
-    ///            superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id]
+    ///            superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, origin]
     pub(crate) fn dump_episodics_page(
         &self,
         group_id: Option<&str>,
@@ -4246,7 +4467,7 @@ impl<'db> Conn<'db> {
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
-                 n.superseded_by_kind, n.supersession_reason, n.doc_id \
+                 n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -4256,7 +4477,7 @@ impl<'db> Conn<'db> {
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
-                 n.superseded_by_kind, n.supersession_reason, n.doc_id \
+                 n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -4786,6 +5007,44 @@ pub(crate) fn value_as_optional_timestamp_str(v: &lbug::Value) -> Option<String>
     match v {
         lbug::Value::Null(_) => None,
         other => Some(value_as_timestamp_str(other)),
+    }
+}
+
+/// One `RelatesToNode_` row with its endpoints, for the "same fact" sibling grouping (ADR-0752).
+#[derive(Debug, Clone)]
+pub struct SiblingEdgeRow {
+    pub uuid: String,
+    pub group_id: String,
+    pub source_uuid: String,
+    pub target_uuid: String,
+    pub name: String,
+    pub episodes: Vec<String>,
+}
+
+/// The columns an origin-stamp rule selects on (issue #752).
+#[derive(Debug, Clone)]
+pub struct StampCandidate {
+    pub uuid: String,
+    pub doc_id: Option<String>,
+    pub origin: crate::origin::Origin,
+    pub source_description: String,
+    pub attributes: String,
+}
+
+fn episode_origin_info_from_cols(
+    origin: &lbug::Value,
+    doc_id: &lbug::Value,
+    superseded_at: &lbug::Value,
+    group_id: &lbug::Value,
+) -> crate::origin::EpisodeOriginInfo {
+    crate::origin::EpisodeOriginInfo {
+        origin: crate::origin::Origin::from_stored(Some(&value_as_string(origin))),
+        doc_id: value_as_optional_string(doc_id),
+        superseded_at_us: match superseded_at {
+            lbug::Value::Null(_) => None,
+            other => Some(value_as_timestamp_micros(other)),
+        },
+        group_id: value_as_string(group_id),
     }
 }
 

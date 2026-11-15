@@ -135,6 +135,7 @@ pub async fn search_passages(
     group_ids: Option<Vec<String>>,
     num_results: usize,
     min_score: f64,
+    origins: Option<Vec<crate::origin::Origin>>,
 ) -> Result<Vec<PassageResult>, Error> {
     let embedding = embedder.embed(query).await?;
     let overdraw = num_results * 3;
@@ -144,8 +145,12 @@ pub async fn search_passages(
         let gid_refs: Option<Vec<&str>> = group_ids
             .as_ref()
             .map(|v| v.iter().map(String::as_str).collect());
-        let mut passages =
-            conn.vector_search_episodic(&embedding, gid_refs.as_deref(), overdraw)?;
+        let mut passages = conn.vector_search_episodic_origins(
+            &embedding,
+            gid_refs.as_deref(),
+            overdraw,
+            origins.as_deref(),
+        )?;
 
         for p in &mut passages {
             p.score = 1.0 - p.score;

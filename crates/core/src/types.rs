@@ -188,6 +188,10 @@ pub struct EpisodicRow {
     /// part in document supersession.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doc_id: Option<String>,
+    /// Caller-declared origin (issue #752, ADR-0752): `primary`, `external`, `derived` or
+    /// `answer`. `None` (a NULL column) reads as `primary`; see `crate::origin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -385,6 +389,9 @@ pub struct PassageResult {
     /// The originating episode's structured metadata (issue #528, FR-010) — a JSON object
     /// serialized as a string, sourced from `Episodic.attributes`. See ADR-0528.
     pub attributes: String,
+    /// The originating episode's declared origin (issue #752): `primary`, `external`, `derived`
+    /// or `answer`. A never-stamped episode reads as `primary`.
+    pub origin: String,
 }
 
 /// Why an entity was returned by `knowledge_find_entities` (issue #629): the fused RRF score

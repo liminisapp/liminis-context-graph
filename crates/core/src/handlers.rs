@@ -208,6 +208,7 @@ async fn handle(
         "knowledge_delete_chunk_episode" => handle_delete_chunk_episode(req, state).await,
         "knowledge_mark_chunk_removed" => handle_mark_chunk_removed(req, state).await,
         "knowledge_supersede_document" => handle_supersede_document(req, state).await,
+        "knowledge_stamp_origin" => handle_stamp_origin(req, state).await,
         "knowledge_delete_by_group" => handle_delete_by_group(req, state).await,
         "knowledge_reload_ontology" => handle_reload_ontology(req, state).await,
         "knowledge_clear_all" => handle_clear_all(req, state).await,
@@ -266,6 +267,8 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         .to_string();
     let attributes = attributes_param_to_string(&p["attributes"]);
     let doc_id = optional_doc_id_param(&p["doc_id"])?;
+    // Validated before anything runs: an invalid origin writes no episode and no WAL entry (FR-001).
+    let origin = crate::origin::parse_origin_param(p)?;
 
     let source_type = SourceType::from_str_lossy(&source);
     let result = episode::add_episode_with_opts(
@@ -281,6 +284,7 @@ async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Va
         &attributes,
         episode::EpisodeOpts {
             doc_id,
+            origin,
             ..Default::default()
         },
     )
@@ -1093,6 +1097,7 @@ async fn handle_knowledge_process_chunk(
         .unwrap_or(DEFAULT_GROUP_ID)
         .to_string();
     let attributes = attributes_param_to_string(&p["attributes"]);
+    let origin = crate::origin::parse_origin_param(p)?;
 
     let ref_time = match p["reference_time"].as_str() {
         Some(s) => {
@@ -1151,6 +1156,9 @@ async fn handle_knowledge_process_chunk(
         },
         // Issue #707: never defaulted from `source_file` — omitted means none (FR-001, FR-010).
         doc_id: optional_doc_id_param(&p["doc_id"])?,
+        origin,
+        // `chunk_id` is a chunk identity here: a derived/answer unit may not revise a primary one.
+        guard_chunk_collision: true,
     };
     let result = episode::add_episode_with_opts(
         Arc::clone(&state),
@@ -1282,6 +1290,15 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let kind = optional_kind_param(&p["kind"])?;
     // Optional similarity floor (issue #629), parsed once and reused by the retry below.
     let min_similarity = optional_min_similarity_param(&p["min_similarity"])?;
+    // Optional origin filter (issue #752, FR-014). Applied after fusion — the BM25/vector pools
+    // know nothing about origin — so over-fetch like the belief filter and truncate afterwards.
+    let origins = crate::origin::parse_origins_param(p)?;
+    let requested = limit;
+    let limit = if origins.is_some() {
+        limit.saturating_mul(BELIEF_OVERFETCH)
+    } else {
+        limit
+    };
 
     let result = search::hybrid_entity_search_scored(
         load_db(&state)?,
@@ -1323,8 +1340,33 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
         Err(e) => return Err(e),
     };
 
-    let count = entities.len();
-    Ok(json!({"nodes": entities, "count": count}))
+    // `support` (always) and the `origins` filter (opt-in), derived from mentioning episodes.
+    let db = load_db(&state)?;
+    let nodes = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, Error> {
+        let conn = db.connect()?;
+        let uuids: Vec<String> = entities.iter().map(|e| e.entity.uuid.clone()).collect();
+        let sup = crate::origin_reads::entity_support(
+            &conn,
+            &uuids,
+            origins.as_deref(),
+            chrono::Utc::now().timestamp_micros(),
+        )?;
+        let mut out = Vec::with_capacity(entities.len());
+        for e in entities {
+            let s = &sup[&e.entity.uuid];
+            if origins.is_some() && !s.matches {
+                continue;
+            }
+            let mut v = serde_json::to_value(&e).unwrap_or(Value::Null);
+            s.annotate(&mut v);
+            out.push(v);
+        }
+        out.truncate(requested);
+        Ok(out)
+    })
+    .await??;
+    let count = nodes.len();
+    Ok(json!({"nodes": nodes, "count": count}))
 }
 
 // ── Belief-time reads (issue #705, ADR-0705) ──────────────────────────────────
@@ -1433,10 +1475,11 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     let limit = p["num_results"].as_u64().unwrap_or(10) as usize;
     let min_similarity = optional_min_similarity_param(&p["min_similarity"])?;
     let belief = parse_belief_query(p)?;
+    let origins = crate::origin::parse_origins_param(p)?;
     let requested = limit;
-    // Belief filtering happens after fusion (the FTS/vector candidate pools know nothing about
-    // supersession), so over-fetch when it is on and truncate afterwards.
-    let limit = if belief.as_ref().is_some_and(|b| b.filter) {
+    // Belief and origin filtering happen after fusion (the FTS/vector candidate pools know nothing
+    // about supersession or origin), so over-fetch when either is on and truncate afterwards.
+    let limit = if belief.as_ref().is_some_and(|b| b.filter) || origins.is_some() {
         limit.saturating_mul(BELIEF_OVERFETCH)
     } else {
         limit
@@ -1480,18 +1523,51 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
         Err(e) => return Err(e),
     };
 
-    if let Some(q) = belief {
-        let db = load_db(&state)?;
-        let mut edges = tokio::task::spawn_blocking(move || {
-            let conn = db.connect()?;
-            apply_belief(&conn, edges, |e| e.edge.uuid.as_str(), &q)
-        })
-        .await??;
-        edges.truncate(requested);
-        let count = edges.len();
-        return Ok(json!({"edges": edges, "count": count}));
-    }
-
+    let db = load_db(&state)?;
+    let mut edges = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, Error> {
+        let conn = db.connect()?;
+        // `support` (always) and the `origins` filter (opt-in), from each edge's producing
+        // episodes and its same-fact siblings (issue #752).
+        let keys: Vec<crate::origin_reads::EdgeKey> = edges
+            .iter()
+            .map(|e| crate::origin_reads::EdgeKey {
+                uuid: e.edge.uuid.clone(),
+                group_id: e.edge.group_id.clone(),
+                source_uuid: e.edge.source_node_uuid.clone(),
+                target_uuid: e.edge.target_node_uuid.clone(),
+                name: e.edge.name.clone(),
+            })
+            .collect();
+        let sup = crate::origin_reads::edge_support(
+            &conn,
+            &keys,
+            origins.as_deref(),
+            chrono::Utc::now().timestamp_micros(),
+        )?;
+        let edges: Vec<_> = if origins.is_some() {
+            edges
+                .into_iter()
+                .filter(|e| sup[&e.edge.uuid].matches)
+                .collect()
+        } else {
+            edges
+        };
+        let mut vals: Vec<Value> = match &belief {
+            Some(q) => apply_belief(&conn, edges, |e| e.edge.uuid.as_str(), q)?,
+            None => edges
+                .iter()
+                .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+                .collect(),
+        };
+        for v in &mut vals {
+            if let Some(s) = v["uuid"].as_str().and_then(|u| sup.get(u)) {
+                s.clone().annotate(v);
+            }
+        }
+        Ok(vals)
+    })
+    .await??;
+    edges.truncate(requested);
     let count = edges.len();
     Ok(json!({"edges": edges, "count": count}))
 }
@@ -1897,6 +1973,7 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
     let num_results = (p["num_results"].as_u64().unwrap_or(10) as usize).clamp(1, 100);
     let min_score = p["min_score"].as_f64().unwrap_or(0.5).clamp(0.0, 1.0);
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
+    let origins = crate::origin::parse_origins_param(p)?;
 
     let result = search::search_passages(
         load_db(&state)?,
@@ -1905,6 +1982,7 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
         group_ids.clone(),
         num_results,
         min_score,
+        origins.clone(),
     )
     .await;
 
@@ -1920,6 +1998,7 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
                     group_ids,
                     num_results,
                     min_score,
+                    origins,
                 )
                 .await
                 .map_err(|e2| {
@@ -2323,6 +2402,10 @@ async fn handle_mark_chunk_removed(req: &IpcRequest, state: Arc<AppState>) -> Re
         .ok_or_else(|| Error::Ipc("chunk_id is required and must be non-empty".to_string()))?
         .to_string();
     let group_ids_owned = extract_required_group_ids(&p["group_ids"])?;
+    // The origin acting on the chunk (issue #752, FR-012). Absent means `primary`, so a client that
+    // never sends it is never refused.
+    let acting_origin =
+        crate::origin::parse_origin_param(p)?.unwrap_or(crate::origin::Origin::Primary);
 
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
@@ -2332,6 +2415,20 @@ async fn handle_mark_chunk_removed(req: &IpcRequest, state: Arc<AppState>) -> Re
             let conn = db.connect()?;
             let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
             let superseded_at = crate::db::ingested_at_or_now("");
+            // A derived/answer removal must not end belief in a primary/external episode. Checked
+            // for every group before the first mutation, so a refusal writes nothing.
+            if !acting_origin.is_corroborating() {
+                for gid in &gid_refs {
+                    let live = conn.live_origins_for_chunk(&chunk_id, gid, &superseded_at)?;
+                    if live.iter().any(|o| o.is_corroborating()) {
+                        return Err(crate::origin::conflict(format!(
+                            "chunk {chunk_id:?} in group {gid:?} has a live primary or external \
+                             episode; a {:?} removal would end belief in it and is refused",
+                            acting_origin.as_str()
+                        )));
+                    }
+                }
+            }
             let (uuids, grouped) =
                 conn.supersede_chunk_episodes(&chunk_id, &gid_refs, &superseded_at)?;
             // Per-group attribution, as in `handle_delete_chunk_episode` (issue #402/#385).
@@ -2362,6 +2459,100 @@ fn optional_doc_id_param(v: &Value) -> Result<Option<String>, Error> {
             "doc_id must be a non-empty string when provided".to_string(),
         )),
     }
+}
+
+/// Cap on the `changes` list of a `knowledge_stamp_origin` reply (the counts are always exact).
+const STAMP_CHANGES_CAP: usize = 200;
+/// Episodes per `SET` statement when stamping.
+const STAMP_BATCH: usize = 500;
+
+/// `knowledge_stamp_origin` (issue #752, ADR-0752): sets `origin` on **existing** episodes of one
+/// group, selected by `source_path_prefix` and/or `attributes_kind` rules — the migration path for
+/// a graph that predates origin. No extraction, no embedding. `dry_run` reports and writes nothing.
+///
+/// Idempotent (an episode already at its target is not rewritten), whole-document (an episode with
+/// a `doc_id` pulls in its document, and conflicting origins for one document are refused), and
+/// never retroactive: past supersessions and invalidations are not revisited. The statements are
+/// uuid-keyed and fixed-valued, so WAL replay — including over an overlapping tail range — is
+/// idempotent and a rebuild preserves the stamped origins.
+async fn handle_stamp_origin(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let group_id = extract_required_group_id(&p["group_id"])?;
+    let rules = crate::origin::parse_stamp_rules(p)?;
+    let dry_run = match &p["dry_run"] {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        _ => return Err(Error::Ipc("dry_run must be a boolean".to_string())),
+    };
+
+    let db = load_db(&state)?;
+    let state_c = Arc::clone(&state);
+    let gid = group_id.clone();
+    let plan_and_write = move |write: bool| -> Result<crate::origin::StampPlan, Error> {
+        let conn = db.connect()?;
+        let inputs: Vec<crate::origin::StampInput> = conn
+            .stamp_candidates(&gid)?
+            .into_iter()
+            .map(|c| crate::origin::StampInput {
+                uuid: c.uuid,
+                doc_id: c.doc_id,
+                current: c.origin,
+                source_description: c.source_description,
+                attributes: c.attributes,
+            })
+            .collect();
+        let plan = crate::origin::plan_stamp(&inputs, &rules)?;
+        if write && !plan.changes.is_empty() {
+            for origin in crate::origin::ALL {
+                let uuids: Vec<String> = plan
+                    .changes
+                    .iter()
+                    .filter(|c| c.to == origin)
+                    .map(|c| c.uuid.clone())
+                    .collect();
+                for batch in uuids.chunks(STAMP_BATCH) {
+                    conn.stamp_origin(batch, origin)?;
+                }
+            }
+            let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid, conn.drain_mutations());
+            wal_exec::advance_wal_position(&conn, &gid, seq, &state_c);
+        }
+        Ok(plan)
+    };
+
+    let plan = if dry_run {
+        let _guard = state.write_lock.read().await;
+        tokio::task::spawn_blocking(move || plan_and_write(false)).await??
+    } else {
+        let _guard = state.write_lock.write().await;
+        tokio::task::spawn_blocking(move || plan_and_write(true)).await??
+    };
+
+    let changed = plan.changes.len();
+    let truncated = changed > STAMP_CHANGES_CAP;
+    let changes: Vec<Value> = plan
+        .changes
+        .iter()
+        .take(STAMP_CHANGES_CAP)
+        .map(|c| {
+            json!({
+                "uuid": c.uuid,
+                "doc_id": c.doc_id,
+                "from": c.from.as_str(),
+                "to": c.to.as_str(),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "success": true,
+        "dry_run": dry_run,
+        "group_id": group_id,
+        "matched": plan.matched,
+        "changed": changed,
+        "unchanged": plan.matched - changed,
+        "changes": changes,
+        "truncated": truncated,
+    }))
 }
 
 fn required_string_param(p: &Value, key: &str) -> Result<String, Error> {
@@ -2423,6 +2614,19 @@ async fn handle_supersede_document(req: &IpcRequest, state: Arc<AppState>) -> Re
                     "{label} '{doc}' is unknown in group '{group_id}' (no episode carries that doc_id)"
                 )));
             }
+        }
+
+        // A derived/answer document may not supersede a primary/external one (issue #752,
+        // FR-011). Checked before anything is written, so a refusal leaves the graph untouched.
+        let superseding_origins = conn.origins_for_doc(&group_id, &superseding)?;
+        let superseded_origins = conn.origins_for_doc(&group_id, &superseded)?;
+        if superseding_origins.iter().any(|o| !o.is_corroborating())
+            && superseded_origins.iter().any(|o| o.is_corroborating())
+        {
+            return Err(crate::origin::conflict(format!(
+                "document '{superseding}' is derived content and cannot supersede '{superseded}', \
+                 which has primary or external origin"
+            )));
         }
 
         let existing =

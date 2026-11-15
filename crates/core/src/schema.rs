@@ -85,7 +85,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          superseded_by STRING, \
          superseded_by_kind STRING, \
          supersession_reason STRING, \
-         doc_id STRING\
+         doc_id STRING, \
+         origin STRING\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -403,6 +404,8 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
         ("Episodic", "supersession_reason", "STRING"),
         // Document identity (issue #707).
         ("Episodic", "doc_id", "STRING"),
+        // Episode origin (issue #752, ADR-0752). NULL / empty reads as `primary`, so no backfill.
+        ("Episodic", "origin", "STRING"),
         ("RelatesToNode_", "warrant", "STRING"),
         ("RelatesToNode_", "valid_at_source", "STRING"),
     ] {

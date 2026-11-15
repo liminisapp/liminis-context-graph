@@ -31,6 +31,8 @@ pub(crate) mod legacy_wal;
 pub mod llm_router;
 pub mod ontology;
 pub mod ontology_sidecar;
+pub mod origin;
+pub mod origin_reads;
 pub mod pointer;
 pub mod prompts;
 pub mod read_page;
