@@ -533,6 +533,16 @@ jobs:
           ts="$(date +%s)"
           find target/release -exec touch -h -d "@$ts" {} +
 
+      - name: DIAG 758 - why does cargo think workspace units are dirty
+        env:
+          CARGO_TERM_COLOR: never
+          CARGO_LOG: cargo::core::compiler::fingerprint=info
+          LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
+        run: |
+          cargo test --release --no-run -v > /tmp/diag.log 2>&1 || true
+          grep -E 'Dirty|dirty|stale|Compiling|fingerprint.*(changed|mismatch|missing|newer)' /tmp/diag.log | grep -v -E 'Fresh' | head -120 || true
+          ls -la --time-style=full-iso crates/core/benches/common/ crates/core/src/lint/ | head -30
+
       - name: cargo test --release (restored build; captured for recompile-regression check)
         env:
           # Greppable log; the guard below is colour-safe regardless.
