@@ -329,6 +329,33 @@ fn contradiction_two_live_targets_one_finding_and_supersession_removes_it() {
 }
 
 #[test]
+fn contradiction_skips_and_counts_subjects_with_too_many_targets() {
+    let n = contradiction::MAX_SIDES + 1;
+    let mut edges: Vec<_> = (0..n)
+        .map(|i| {
+            edge(
+                &format!("r{i:03}"),
+                "alice",
+                &format!("t{i:03}"),
+                "related_to",
+                &["e1"],
+            )
+        })
+        .collect();
+    edges.push(edge("s1", "bob", "x", "related_to", &["e1"]));
+    edges.push(edge("s2", "bob", "y", "related_to", &["e1"]));
+    let snap = LintSnapshot {
+        episodes: vec![ep("e1", Some("d1"), Origin::Primary)],
+        edges,
+        ..Default::default()
+    };
+    let a = run(&snap, &contradiction_req(&["related_to"]));
+    let c = &a.summary["categories"]["contradiction"];
+    assert_eq!(c["skipped_subjects"], 1, "alice is skipped");
+    assert_eq!(c["count"], 1, "bob's single pair is still reported");
+}
+
+#[test]
 fn contradiction_merges_sibling_edges_into_one_side() {
     let snap = LintSnapshot {
         episodes: vec![
