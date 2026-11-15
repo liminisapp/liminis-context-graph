@@ -66,6 +66,6 @@ stale record.
 ## Consequences
 
 - A document's supersession is permanent; withdrawing one is a later primitive.
-- Existence and uniqueness lookups on `doc_id` are scans (no index), as chunk lookups are.
+- Existence and uniqueness lookups on `doc_id` were scans, as chunk lookups were; ADR-0291 (issue #291) removed both with native ART indexes on `Episodic.doc_id` and `Episodic.name`.
 - `effective_at` is supplied by the caller as an absolute timestamp; extracting it from text, an
   in-force-only filter, and fact-level supersession are out of scope.
