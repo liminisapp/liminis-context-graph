@@ -39,6 +39,10 @@ Ingestion belongs in lcg, end to end. lcg should accept **either**:
 converging on the same stored shape and the same extraction machinery: episodes with rich
 attributes and the best entity/relationship extraction achievable *given the context provided*.
 
+**Origin is document metadata.** Document mode must carry `origin` (`primary` / `external` / `derived` /
+`answer`, ADR-0752 / #752) alongside `doc_id` and the other metadata: one document has one origin, and
+an agent-written page is derived as a whole. Chunk mode keeps passing it per call.
+
 Both modes are revisable as of the Temporal work. §5 argues where they still differ: document mode can
 carry a **completeness claim**, chunk mode cannot, and that decides which of them can retract by
 absence.

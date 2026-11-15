@@ -7752,3 +7752,77 @@ async fn status_wal_block_labelled_only_with_wal_root_667() {
     assert_eq!(wal["see"], "wal_groups", "{v}");
     assert!(v["result"]["wal_groups"].is_object(), "{v}");
 }
+
+// ── #752: episode origin — additive only, a client that never sends `origin` sees no change ────
+
+/// An episode stored without an origin serializes exactly as before (no `origin` key), reads as
+/// `primary` in search, and `knowledge_stamp_origin` answers with its documented shape.
+#[tokio::test]
+async fn origin_is_additive_for_clients_that_never_send_it_752() {
+    let (db, _dir) = make_db(4);
+    insert_test_episode(&db, "ep-legacy", "legacy", "g", "2026-01-01 00:00:00");
+    let state = make_state_with_mock_embed(db);
+
+    let v = dispatch_val(
+        1,
+        "knowledge_get_episodes",
+        json!({"group_ids": ["g"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    let ep = &v["result"]["episodes"][0];
+    assert_eq!(ep["uuid"], "ep-legacy", "{v}");
+    assert!(
+        ep.get("origin").is_none(),
+        "a never-stamped episode keeps its pre-#752 shape: {ep}"
+    );
+
+    // Unknown origins are rejected up front, on writes and reads alike.
+    for (method, params) in [
+        (
+            "knowledge_process_chunk",
+            json!({"chunk_text": "t", "chunk_id": "c", "source_file": "f", "origin": "x"}),
+        ),
+        (
+            "knowledge_add_episode",
+            json!({"name": "n", "episode_body": "b", "origin": "x"}),
+        ),
+        (
+            "knowledge_search_passages",
+            json!({"query": "q", "origins": []}),
+        ),
+    ] {
+        let v = dispatch_val(2, method, params, Arc::clone(&state)).await;
+        assert_eq!(v["error"]["code"], -32000, "{method}: {v}");
+    }
+
+    // The stamp method: dry run reports, writes nothing.
+    let v = dispatch_val(
+        3,
+        "knowledge_stamp_origin",
+        json!({"group_id": "g", "dry_run": true,
+               "rules": [{"origin": "derived", "source_path_prefix": "do"}]}),
+        Arc::clone(&state),
+    )
+    .await;
+    let r = &v["result"];
+    assert_eq!(r["success"], true, "{v}");
+    assert_eq!(
+        (r["matched"].as_u64(), r["changed"].as_u64()),
+        (Some(1), Some(1)),
+        "{v}"
+    );
+    assert_eq!(r["changes"][0]["from"], "primary");
+    assert_eq!(r["changes"][0]["to"], "derived");
+    let v = dispatch_val(
+        4,
+        "knowledge_get_episodes",
+        json!({"group_ids": ["g"]}),
+        state,
+    )
+    .await;
+    assert!(
+        v["result"]["episodes"][0].get("origin").is_none(),
+        "dry run wrote: {v}"
+    );
+}

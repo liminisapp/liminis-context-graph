@@ -764,11 +764,11 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (51)
+## IPC methods (52)
 
-The socket dispatch handles **51 methods**: 50 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **52 methods**: 51 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (51) and the MCP tool registry (50, below) differ by exactly one — `health_check` is
+surface (52) and the MCP tool registry (51, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -782,6 +782,7 @@ not exposed as an MCP tool.
 | Correction reads | `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_delete_by_group`, `knowledge_clear_all` |
 | Supersession | `knowledge_mark_chunk_removed`, `knowledge_supersede_document` |
+| Episode origin | `knowledge_stamp_origin` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
 | Ontology | `knowledge_reload_ontology` |
 | Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
@@ -947,7 +948,7 @@ union of all active scopes.
 | `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
 | `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
-| `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` |
+| `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |
 | `all` | every scope above (default) |
 
 **`cypher` is a power scope, not bundled into anything else.** `knowledge_query_cypher` executes
@@ -987,7 +988,7 @@ The check is made against the groups a call **actually changes**, not every grou
 | Tool(s) | Group(s) that must be listed |
 |---------|------------------------------|
 | `knowledge_add_episode`, `knowledge_process_chunk`, `knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_merge_entities`, `knowledge_add_cross_group_edge`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types` | `group_id` (default group if omitted) |
-| `knowledge_supersede_document`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` | the required `group_id` |
+| `knowledge_supersede_document`, `knowledge_stamp_origin`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` | the required `group_id` |
 | `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed` | every entry of `group_ids` |
 | `knowledge_delete_episode` | the group that owns the episode (looked up; a missing episode is a no-op) |
 | `knowledge_delete_by_group`, `knowledge_rebuild_from_wal` (every call, not just `force_clear`) | the target group(s) **and** every group owning a cross-group pointer row into them (ADR-0385: the purge/replay rebinds those rows) |
@@ -1363,6 +1364,113 @@ gains:
 So between the effective date and the recording date an as-of read shows the old fact `believed` with
 `in_force: false` — the graph had not yet learned otherwise. Believed-only filtering is unchanged: it
 filters on belief, not on being in force, and there is no in-force-only filter yet.
+
+### Episode origin: derived pages never corroborate themselves (issue #752)
+
+Systems that keep an "LLM wiki" write agent-authored summary, topic and synthesis pages back into the
+same notebook that holds the human's notes. Indexed like any other note, such a page returns a fact
+the agent *derived* from note A as a second, apparently independent episode supporting it: support
+counts inflate, retrieval re-reads the agent's own pages as evidence, and an error in a page
+propagates. **Origin** is the field that lets a client say which is which. See
+[ADR-0752](adr/0752-episode-origin-and-corroboration.md).
+
+**Vocabulary.** `knowledge_process_chunk` and `knowledge_add_episode` accept an optional `origin`:
+
+| Origin | Meaning | Counts as corroboration |
+|---|---|---|
+| `primary` | a human-written note (**the default**) | yes |
+| `external` | clipped or imported third-party material | yes |
+| `derived` | an agent-written page or a consolidation | no |
+| `answer` | a filed Q&A response | no |
+
+The set is closed: any other value is rejected before anything is written (no episode, no WAL entry),
+with an error naming the allowed values. An episode with no `origin` is `primary`, so a client that
+never sends the field sees no change. The value is stored on the episode, written to the WAL, carried
+by dump compaction, and restored by `knowledge_rebuild_from_wal`. A WAL written before this feature
+replays with every episode `primary`. `knowledge_get_episodes` reports the origin of an episode that
+has one, and `knowledge_search_passages` reports it on every passage (`primary` when none was
+recorded).
+
+> **Origin is a claim, not an authenticated attribute.** LCG records and enforces what the caller
+> declares; it does not detect a misdeclared origin.
+
+**Support, not a head count.** Relationship and entity reads (`knowledge_find_relationships`,
+`knowledge_find_entities`) carry two additive fields:
+
+```json
+"support": {"primary": 2, "external": 1, "derived": 3, "answer": 0},
+"corroboration": 3
+```
+
+`support` counts **distinct source documents** per origin: a `doc_id` is one document, however many
+chunks it was split into, and an episode with no `doc_id` counts as its own document. `corroboration`
+is `primary + external`; a `derived` or `answer` episode is a *citation* (it stays linked for
+provenance) and never adds to it. Counts are over episodes that are live now, so a corrected episode
+stops contributing. For a relationship, `support` is derived from the edge's producing `episodes` and
+those of its **same-fact siblings** — edges with the same endpoints and relation name. (Ingest does
+not deduplicate edges, [ADR-0705](adr/0705-belief-time-separate-from-validity.md), so a page that
+restates a fact produces a second edge; the grouping happens at read time.) It never comes from the
+either-endpoint `episode_uuids` inference. Supply a `doc_id` for notes split into chunks: without one,
+each chunk counts as a separate document.
+
+**Filtering.** `knowledge_find_relationships`, `knowledge_find_entities` and
+`knowledge_search_passages` accept `origins`, a non-empty array drawn from the vocabulary; an empty
+list or unknown value is rejected. A relationship matches if one of *its own* live producing episodes
+has a listed origin, an entity if one of its live mentioning episodes does, a passage if its episode
+does. Asserted facts, entities with no episode at all, and pre-#705 edges count as `primary`. Omitted,
+nothing changes. `origins: ["primary", "external"]` is what an agent should send while refreshing its
+own page. The filter runs after retrieval (relationships and entities over-fetch ×3; passages
+oversample the nearest-neighbour probe), so a selective filter can return fewer than `num_results`.
+
+**Derived content never overrides primary content.** A `derived` or `answer` submission:
+
+- never rewrites the summary of, or merges by embedding or LLM verdict into, an entity that has a live
+  `primary` or `external` mention. An exact or identical-normalized name match still *links* the
+  episode to the entity (provenance) but leaves its summary alone; an embedding or judged match keeps
+  the extracted entity separate. An entity with no mentioning episode (`knowledge_assert_entity`) is not
+  protected. The guard is best-effort against a concurrent primary ingest (the ADR-0029 trade-off).
+- never invalidates a fact: ingest does not do that for any origin, so a derived page saying
+  "X uses MySQL" is stored as its own derived-only fact beside the primary "X uses Postgres", which
+  stays valid and believed. The conflict is visible: the new fact has `corroboration: 0` and is
+  excluded by `origins: ["primary", "external"]`.
+- is **refused** — error message prefixed `origin_conflict:`, code `-32000`, nothing written, no WAL
+  entry — when it would end belief in a `primary` or `external` episode: a `knowledge_process_chunk`
+  whose `chunk_id` has a live primary or external episode (whatever `supersede` says); a
+  `knowledge_mark_chunk_removed` with `origin: "derived"` or `"answer"` on such a chunk (the removal
+  path takes an optional `origin`; omitted means `primary`); or a `knowledge_supersede_document` whose
+  superseding document is derived and whose superseded document is primary or external. Primary
+  content may supersede derived content freely.
+- is refused when its `doc_id` already carries a different origin: one document has one origin.
+
+A rebuild cannot re-open a protected fact: these decisions are baked into the statements the WAL
+records.
+
+**`knowledge_stamp_origin`** (admin scope) stamps origin onto *existing* episodes, for a graph that
+predates the field and so reads entirely `primary`. It re-extracts nothing and calls no LLM or
+embedder.
+
+```json
+{"group_id": "liminis", "dry_run": true, "rules": [
+  {"origin": "derived", "source_path_prefix": "wiki/"},
+  {"origin": "derived", "attributes_kind": "knowledge"}
+]}
+```
+
+Rules are evaluated in order and the first match wins; each needs at least one selector, and selectors
+within a rule are ANDed. `source_path_prefix` matches the start of the episode's `source_description`
+(`<source_file>:<chunk_id>`); `attributes_kind` matches `attributes.kind` exactly. An episode with a
+`doc_id` pulls in the rest of its document, and rules that would give one document two origins are
+refused. The reply is `{success, dry_run, group_id, matched, changed, unchanged, changes:
+[{uuid, doc_id, from, to}], truncated}` (`changes` is capped at 200; the counts are exact).
+`dry_run: true` writes nothing. A repeat run changes nothing and writes no WAL entry. The stamp is
+fixed-valued per episode, so it survives rebuild and overlapping tail replay. It is not retroactive:
+supersessions and invalidations already made are not revisited. Episodes with
+`attributes.kind = "knowledge"` are **not** treated as derived until you stamp them.
+
+**Operating an LLM wiki.** Send `origin: "derived"` (and a `doc_id`) for every page the agent writes
+and `"external"` for clipped material; leave notes unmarked. Search with
+`origins: ["primary", "external"]` while the agent refreshes a page. To adopt this on an existing
+notebook, run `knowledge_stamp_origin` as a dry run, check `changes`, then run it for real.
 
 ### Bulk reads: group scope, paging, projection, prefix (issue #667)
 
@@ -4720,6 +4828,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0737](0737-configurable-lbug-tuning-strict-env.md) | Configurable lbug Tuning via Strictly-Parsed Environment Variables | 2026-11-13 |
 | [0741](0741-post-rebuild-pointer-repair-and-hopless-demotion.md) | Rebuild Order Must Not Matter for Cross-Group Pointers — Demote Hop-less, Rebind After Every Rebuild | 2026-11-13 |
 | [0742](0742-per-group-write-allow-list.md) | Per-Group Write Allow-List (`--writable-groups`) Enforced in the Daemon | 2026-11-13 |
+| [0752](0752-episode-origin-and-corroboration.md) | Episode Origin — Derived Content Cites But Never Corroborates | 2026-11-15 |
 
 ## Historical numbering
 

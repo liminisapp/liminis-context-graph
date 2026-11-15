@@ -67,6 +67,10 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // `Entity.attributes`/`RelatesToNode_.attributes`) directly on the episode node, co-located
     // with the facts extracted from that episode's prose (reachable via the existing MENTIONS
     // edge to Entity). See ADR-0528.
+    // `origin` (issue #752) is a second deliberate divergence from graphiti's kuzu_driver.py, like
+    // `attributes` above: a closed-vocabulary label (`primary` / `external` / `derived` / `answer`)
+    // the caller declares for the episode. NULL or empty reads as `primary`, so — unlike
+    // `attributes` — a pre-existing row or a pre-feature WAL replay needs no backfill. See ADR-0752.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Episodic (\
          uuid STRING PRIMARY KEY, \
