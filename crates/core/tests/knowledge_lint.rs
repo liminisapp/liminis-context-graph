@@ -809,3 +809,54 @@ fn lint_full_pass_scales_near_linearly() {
     // Near-linear would be ~5x; 10x the size may cost at most ~12x, so 5x may cost ~6x.
     assert!(ratio < 12.0, "ratio {ratio:.1} is far from near-linear");
 }
+
+/// An entity anchored only by a cross-group edge keyed on another group (ADR-0615) is not an
+/// orphan, whether lint is scoped to its group or not.
+#[tokio::test]
+async fn cross_group_edge_keeps_scoped_entity_from_being_an_orphan() {
+    let (state, db, _d) = state_with(vec![], None);
+    {
+        let conn = db.connect().unwrap();
+        for (uuid, name, group) in [("hub", "hub", "layer"), ("w1", "widget", "other")] {
+            conn.insert_entity(&lcg_core::EntityRow {
+                uuid: uuid.into(),
+                name: name.into(),
+                group_id: group.into(),
+                labels: vec!["Entity".into()],
+                created_at: "2026-01-01 00:00:00".into(),
+                name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                summary: "s".into(),
+                attributes: "{}".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+    }
+    call(
+        "knowledge_add_cross_group_edge",
+        json!({
+            "name": "REFERENCES", "group_id": "layer", "source": {"uuid": "hub"},
+            "target": {"source_group_id": "other", "endpoint_name": "widget"},
+            "fact": "hub references widget",
+        }),
+        &state,
+    )
+    .await;
+
+    for scope in [
+        json!(["other"]),
+        json!(["layer"]),
+        json!(["layer", "other"]),
+    ] {
+        let r = call(
+            "knowledge_lint",
+            json!({"group_ids": scope, "categories": ["orphan_entity"]}),
+            &state,
+        )
+        .await;
+        assert_eq!(
+            r["summary"]["categories"]["orphan_entity"]["count"], 0,
+            "scope {scope}: {r}"
+        );
+    }
+}
