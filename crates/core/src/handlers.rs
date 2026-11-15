@@ -196,6 +196,7 @@ async fn handle(
         "knowledge_resolve_entity" => handle_resolve_entity(req, state).await,
         "knowledge_find_relationships" => handle_find_relationships(req, state).await,
         "knowledge_get_episodes" => handle_get_episodes(req, state).await,
+        "knowledge_lint" => handle_lint(req, state).await,
         "knowledge_delete_episode" => handle_delete_episode(req, state).await,
         "knowledge_get_nodes_by_group" => handle_get_nodes_by_group(req, state).await,
         "knowledge_get_edges_by_group" => handle_get_edges_by_group(req, state).await,
@@ -1658,6 +1659,59 @@ async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<V
     } else {
         Ok(json!({"episodes": episodes, "count": count}))
     }
+}
+
+/// `knowledge_lint` (issue #755, ADR-0755): a deterministic, LLM-free, read-only health report.
+///
+/// Validation (including the cursor) happens before any DB work. The read lock is held only while
+/// the snapshot loads — a consistent view — and released before the CPU-bound analysis, so writers
+/// never queue behind it; it is re-taken briefly to hydrate the returned page with entity names.
+async fn handle_lint(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    use crate::lint;
+
+    let p = &req.params;
+    let lreq = lint::LintRequest::parse(p, episode_group_scope(p))?;
+    // Embedding- and LLM-free by construction: nothing below touches `state.embedder` or
+    // `state.extractor`.
+    let as_of_us = chrono::Utc::now().timestamp_micros();
+
+    let db = load_db(&state)?;
+    let lreq = Arc::new(lreq);
+    let snap = {
+        let _guard = state.write_lock.read().await;
+        let (db, lreq) = (Arc::clone(&db), Arc::clone(&lreq));
+        tokio::task::spawn_blocking(move || {
+            let conn = db.connect()?;
+            lint::snapshot::LintSnapshot::load(
+                &conn,
+                lreq.groups.as_deref(),
+                lreq.needs(),
+                lint::snapshot::DEFAULT_CHUNK,
+            )
+        })
+        .await??
+    };
+
+    let analysis = {
+        let lreq = Arc::clone(&lreq);
+        tokio::task::spawn_blocking(move || lint::analyse(&snap, &lreq, as_of_us)).await?
+    };
+
+    let findings = {
+        let _guard = state.write_lock.read().await;
+        let page = analysis.page;
+        tokio::task::spawn_blocking(move || {
+            let conn = db.connect()?;
+            lint::hydrate(&conn, page)
+        })
+        .await??
+    };
+    Ok(lint::response(
+        &lreq,
+        analysis.summary,
+        findings,
+        analysis.next_cursor,
+    ))
 }
 
 /// Effective group scope for `knowledge_get_episodes` (issue #667): the deduplicated union of

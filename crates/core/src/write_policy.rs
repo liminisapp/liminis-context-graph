@@ -164,6 +164,7 @@ pub const CLASSIFICATION: &[(&str, WriteClass)] = &[
     ("knowledge_resolve_entity", WriteClass::ReadOnly),
     ("knowledge_find_relationships", WriteClass::ReadOnly),
     ("knowledge_get_episodes", WriteClass::ReadOnly),
+    ("knowledge_lint", WriteClass::ReadOnly),
     ("knowledge_get_nodes_by_group", WriteClass::ReadOnly),
     ("knowledge_get_edges_by_group", WriteClass::ReadOnly),
     ("knowledge_get_edges_by_uuids", WriteClass::ReadOnly),
