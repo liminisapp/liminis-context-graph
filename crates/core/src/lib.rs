@@ -28,6 +28,7 @@ pub mod ipc;
 pub mod lbug_config;
 pub(crate) mod lbug_extension_home;
 pub(crate) mod legacy_wal;
+pub mod lint;
 pub mod llm_router;
 pub mod ontology;
 pub mod ontology_sidecar;
