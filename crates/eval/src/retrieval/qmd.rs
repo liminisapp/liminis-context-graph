@@ -103,7 +103,10 @@ pub fn note_of_path(path: &str) -> Option<String> {
 pub fn parse_results(stdout: &str) -> Result<Vec<QmdHit>, String> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
-        return Ok(Vec::new());
+        // A successful `query --json` prints at least `[]`; nothing at all means the JSON went
+        // elsewhere or qmd misbehaved. Erroring (not `Ok(vec![])`) keeps that from being scored
+        // as an all-miss run (FR-007: skipped, never zero).
+        return Err("qmd produced no output (expected a JSON array)".into());
     }
     let v: Value = serde_json::from_str(trimmed)
         .or_else(|_| {
@@ -352,7 +355,12 @@ mod tests {
         assert_eq!(h.len(), 1);
         let h = parse_results("{\"results\":[{\"file\":\"a.md\"}]}").unwrap();
         assert_eq!(h.len(), 1);
-        assert!(parse_results("").unwrap().is_empty());
+        // A valid empty array is a real "no hits"; blank output is an error, not an all-miss.
+        assert!(parse_results("[]").unwrap().is_empty());
+        assert!(parse_results("")
+            .unwrap_err()
+            .contains("produced no output"));
+        assert!(parse_results("  \n").is_err());
         assert!(parse_results("garbage").is_err());
     }
 
@@ -454,5 +462,19 @@ mod tests {
             notes: Arc::new(BTreeMap::new()),
         };
         assert!(rt.retrieve("x", 3).await.unwrap_err().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn silent_success_is_an_error_not_an_empty_result() {
+        let r = Arc::new(FakeRunner::new(|_| ok("")));
+        let rt = QmdRetriever {
+            runner: r,
+            index_name: "idx".into(),
+            rerank: false,
+            id: "qmd",
+            notes: Arc::new(BTreeMap::new()),
+        };
+        let e = rt.retrieve("q", 3).await.unwrap_err();
+        assert!(e.contains("produced no output"), "{e}");
     }
 }

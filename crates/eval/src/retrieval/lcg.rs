@@ -157,15 +157,29 @@ pub async fn service_version(bin: &Path) -> String {
     }
 }
 
+/// Last few lines of the service's captured stderr, for startup-failure messages.
+fn stderr_tail(path: &Path) -> String {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return "(no stderr output)".into();
+    }
+    lines[lines.len().saturating_sub(5)..].join(" | ")
+}
+
 pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     validate_embedder(o, std::env::var("LCG_EMBEDDING_URL").ok().as_deref())?;
     let ws = tempfile::tempdir().map_err(|e| format!("cannot create workspace: {e}"))?;
+    // Keep the service's stderr so a startup failure can be reported with its real cause.
+    let stderr_path = ws.path().join("service.stderr.log");
+    let stderr_file = std::fs::File::create(&stderr_path)
+        .map_err(|e| format!("cannot create stderr log: {e}"))?;
     let mut cmd = tokio::process::Command::new(&o.bin);
     cmd.args(service_args(o))
         .current_dir(ws.path())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(stderr_file)
         .kill_on_drop(true);
     if let Some(p) = &o.replay_cassette {
         cmd.env("LCG_REPLAY_LLM", p);
@@ -173,7 +187,7 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     if let Some(p) = &o.record_cassette {
         cmd.env("LCG_RECORD_LLM", p);
     }
-    let child = cmd.spawn().map_err(|e| {
+    let mut child = cmd.spawn().map_err(|e| {
         format!(
             "cannot start service '{}': {e} (pass --service-bin, or build with `cargo build --release -p lcg-service`)",
             o.bin.display()
@@ -182,6 +196,14 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     let sock = ws.path().join(".lcg").join("service.sock");
     let deadline = Instant::now() + Duration::from_secs(120);
     let client = loop {
+        // Fail fast if the service died at startup (bad embedder URL, conflicting record/replay
+        // env, workspace error) instead of polling for the whole deadline.
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!(
+                "service exited during startup ({status}): {}",
+                stderr_tail(&stderr_path)
+            ));
+        }
         if sock.exists() {
             if let Ok(c) = UdsClient::connect(&sock).await {
                 if c.call("knowledge_status", json!({})).await.is_ok() {
@@ -190,7 +212,10 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
             }
         }
         if Instant::now() > deadline {
-            return Err("service did not become ready within 120s".into());
+            return Err(format!(
+                "service did not become ready within 120s; stderr: {}",
+                stderr_tail(&stderr_path)
+            ));
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
@@ -680,6 +705,38 @@ mod tests {
         let t = FakeTransport::new(|_, _| Err("boom".into()));
         let e = ingest(&t, &fixture()).await.unwrap_err();
         assert!(e.contains("'old'") && e.contains("boom"), "{e}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn service_that_dies_at_startup_fails_fast_with_its_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("fake-service");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\necho 'embedder unreachable: boom' >&2\nexit 3\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let o = ServiceOpts {
+            bin,
+            embedder_http: Some("http://127.0.0.1:1".into()),
+            ..Default::default()
+        };
+        let t0 = Instant::now();
+        let e = match spawn_service(&o).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected startup failure"),
+        };
+        assert!(
+            t0.elapsed() < Duration::from_secs(20),
+            "must not wait out the deadline"
+        );
+        assert!(
+            e.contains("exited during startup") && e.contains("embedder unreachable: boom"),
+            "{e}"
+        );
     }
 
     #[tokio::test]

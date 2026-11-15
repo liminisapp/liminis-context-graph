@@ -195,6 +195,15 @@ pub async fn score_config(
             errors.first().map(String::as_str).unwrap_or("none")
         ));
     }
+    // A judge failure part-way through leaves only the earlier answer questions grounded-scored;
+    // drop those so the configuration is cleanly "grounded: skipped", not a partial mean that is
+    // not comparable with other configurations.
+    if judge_failure.is_some() {
+        for s in &mut scores {
+            s.grounded_recall = None;
+            s.grounded_mrr = None;
+        }
+    }
     let (overall, by_category) = summarize_by_category(&scores);
     let grounded = match (judge, judge_failure) {
         (None, _) => Grounded::Skipped(judge_skip_reason.to_string()),
@@ -679,5 +688,53 @@ mod tests {
         };
         assert_eq!(a.scores, b.scores);
         assert_eq!(a.overall, b.overall);
+    }
+
+    /// Judge that works once and then fails, like one transient API error mid-run.
+    struct FlakyJudge(std::sync::atomic::AtomicUsize);
+    impl EvidenceJudge for FlakyJudge {
+        fn model(&self) -> &str {
+            "flaky"
+        }
+        fn supports<'a>(&'a self, k: &'a str, e: &'a str) -> BoxFuture<'a, Result<bool, String>> {
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let r = if n >= 1 {
+                Err("transient 529".to_string())
+            } else {
+                Ok(e.contains(k))
+            };
+            Box::pin(async move { r })
+        }
+    }
+
+    #[tokio::test]
+    async fn mid_run_judge_failure_drops_partial_grounded_scores() {
+        let mut questions = qs();
+        let mut second = questions[1].clone();
+        second.id = "a2".into();
+        second.evidence[0].key_fact = "green".into();
+        questions.push(second);
+        let r = Canned {
+            id: "c",
+            notes: vec!["a".into()],
+            evidence: vec!["the sky is blue".into()],
+            fail: false,
+        };
+        let d = tempfile::tempdir().unwrap();
+        let inner = FlakyJudge(Default::default());
+        let j = CachedEvidenceJudge::load(&inner, &d.path().join("c.jsonl")).unwrap();
+        let Status::Ran(run) = score_config(&r, &questions, 10, Some(&j), "").await else {
+            panic!()
+        };
+        // a1 was judged before the failure, but its grounded score must not survive alone.
+        assert_eq!(run.overall.grounded_recall, None);
+        assert_eq!(run.overall.n_grounded, 0);
+        assert!(run
+            .scores
+            .iter()
+            .all(|s| s.grounded_recall.is_none() && s.grounded_mrr.is_none()));
+        assert!(matches!(run.grounded, Grounded::Skipped(ref w) if w.contains("judge failed")));
+        // Note-level metrics are unaffected.
+        assert_eq!(run.overall.recall, Some(1.0));
     }
 }
