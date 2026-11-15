@@ -2,6 +2,8 @@
 
 > **Amended by ADR-0615 (issue #615):** the key is now `group_id ␟ kind ␟ lower(trim(name))` (kind defaults to `Entity`), the `SchemaState` marker is `entity_kind_lookup_key_v2`, and the post-replay backfill covers `kind IS NULL OR lookup_key IS NULL`. "Unique" means enforced by `write_lock` plus kind-scoped resolution — the index leaves remain non-unique, as here.
 
+> **Extended by ADR-0291 (issue #291):** the same native-ART approach now covers `Episodic.name` and `Episodic.doc_id` (`episodic_name_idx`, `episodic_doc_id_idx`).
+
 **Status**: Accepted
 **Date**: 2026-08-23
 **Issue**: #221; supersedes ADR-0038 (issue #219) and its narrowing amendment ADR-0283

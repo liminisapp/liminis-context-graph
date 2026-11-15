@@ -6415,6 +6415,13 @@ async fn recover_drop_lbug_wal(
                     "liminis-context-graph: recover_drop_lbug_wal: entity_lookup_key_idx build failed (non-fatal): {e}"
                 );
             }
+            // Same for the Episodic.name / Episodic.doc_id ART indexes (issue #291): a checkpoint
+            // predating them has none. Idempotent and non-fatal.
+            if let Err(e) = conn.create_episodic_lookup_indexes() {
+                eprintln!(
+                    "liminis-context-graph: recover_drop_lbug_wal: episodic lookup index build failed (non-fatal): {e}"
+                );
+            }
         }
         Ok(RecoverOutcome {
             db: Some(db),
@@ -6612,6 +6619,13 @@ async fn recover_restore_from_backup(
             if let Err(e) = conn.create_entity_lookup_key_index() {
                 eprintln!(
                     "liminis-context-graph: recover_restore_from_backup: entity_lookup_key_idx build failed (non-fatal): {e}"
+                );
+            }
+            // Same for the Episodic.name / Episodic.doc_id ART indexes (issue #291): a checkpoint
+            // predating them has none. Idempotent and non-fatal.
+            if let Err(e) = conn.create_episodic_lookup_indexes() {
+                eprintln!(
+                    "liminis-context-graph: recover_restore_from_backup: episodic lookup index build failed (non-fatal): {e}"
                 );
             }
         }

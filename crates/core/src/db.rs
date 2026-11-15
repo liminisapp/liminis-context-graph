@@ -770,12 +770,14 @@ impl<'db> Conn<'db> {
         Ok(())
     }
 
-    /// Creates HNSW vector indexes, FTS indexes, and the `Entity.lookup_key` secondary ART
-    /// index (issue #221); idempotent.
+    /// Creates HNSW vector indexes, FTS indexes, the `Entity.lookup_key` secondary ART
+    /// index (issue #221) and the `Episodic.name` / `Episodic.doc_id` ART indexes
+    /// (issue #291); idempotent.
     pub fn build_indices_and_constraints(&self) -> Result<(), Error> {
         self.create_vector_indexes()?;
         crate::schema::create_fts_indexes(self)?;
-        self.create_entity_lookup_key_index()
+        self.create_entity_lookup_key_index()?;
+        self.create_episodic_lookup_indexes()
     }
 
     // ── Entity/Episodic insert ─────────────────────────────────────────────────
@@ -1241,6 +1243,30 @@ impl<'db> Conn<'db> {
                 )
             {
                 return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Creates the secondary ART indexes on `Episodic.name` and `Episodic.doc_id` (issue #291,
+    /// ADR-0291), removing the O(episodes-in-group) scan behind the per-call `chunk_id` lookup
+    /// of `knowledge_process_chunk` and the `doc_id` existence/uniqueness checks. The database
+    /// maintains both indexes, so no in-process map or invalidation hook is needed. Idempotent,
+    /// with the same "already exists in catalog" suppression as
+    /// [`Conn::create_entity_lookup_key_index`]; a genuine failure propagates.
+    pub fn create_episodic_lookup_indexes(&self) -> Result<(), Error> {
+        for (index, column) in [
+            ("episodic_name_idx", "name"),
+            ("episodic_doc_id_idx", "doc_id"),
+        ] {
+            if let Err(e) = self.raw_query(&format!(
+                "CREATE ART INDEX {index} FOR (ep:Episodic) ON (ep.{column})"
+            )) {
+                if !crate::error::is_already_exists_error(&e)
+                    && !crate::error::is_named_catalog_entry_already_exists_error(&e, index)
+                {
+                    return Err(e);
+                }
             }
         }
         Ok(())
@@ -5445,6 +5471,21 @@ mod lookup_key_index_ddl_tests {
         assert!(conn.create_entity_lookup_key_index().is_ok());
         assert!(
             conn.create_entity_lookup_key_index().is_ok(),
+            "a second CREATE ART INDEX call must be swallowed as already-exists, not fail"
+        );
+    }
+
+    /// Issue #291: `create_episodic_lookup_indexes` (two ART indexes) is idempotent too.
+    #[test]
+    fn episodic_lookup_indexes_double_create_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        assert!(conn.create_episodic_lookup_indexes().is_ok());
+        assert!(
+            conn.create_episodic_lookup_indexes().is_ok(),
             "a second CREATE ART INDEX call must be swallowed as already-exists, not fail"
         );
     }

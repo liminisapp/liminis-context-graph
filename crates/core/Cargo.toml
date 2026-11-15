@@ -62,6 +62,10 @@ name = "name_lookup"
 harness = false
 
 [[bench]]
+name = "episode_lookup"
+harness = false
+
+[[bench]]
 name = "hybrid_search"
 harness = false
 
