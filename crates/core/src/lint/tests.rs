@@ -519,6 +519,28 @@ fn unlinked_mentions_unavailable_without_page_or_link_data() {
 }
 
 #[test]
+fn doc_less_page_declaration_is_ignored() {
+    let snap = LintSnapshot {
+        episodes: vec![
+            with_attrs(
+                ep("p", None, Origin::Primary),
+                json!({"page_for": "x-uuid"}),
+            ),
+            with_attrs(ep("e1", Some("d1"), Origin::Primary), json!({"links": []})),
+        ],
+        entities: vec![entity("x-uuid", "X")],
+        mentions: vec![("e1".into(), "x-uuid".into())],
+        ..Default::default()
+    };
+    let a = run(&snap, &req(&[Category::UnlinkedMention]));
+    assert_eq!(
+        a.summary["categories"]["unlinked_mention"]["reason"], "no_page_data",
+        "a page without a doc_id cannot be linked to, so it is not a page"
+    );
+    assert!(a.page.is_empty());
+}
+
+#[test]
 fn unlinked_mentions_and_missing_pages() {
     let snap = LintSnapshot {
         episodes: vec![
