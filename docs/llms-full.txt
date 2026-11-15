@@ -1574,7 +1574,7 @@ both keys somewhere. Whether the notes app writes this convention is for the app
 categories: chunked, uuid-keyed scans (no content, no embeddings) into memory, then pure analysis;
 the cursor only selects which slice of the ordered result is returned, and only that page is
 hydrated with entity names. Time grows near-linearly with group size (`benches/lint.rs` measures
-1k/10k/50k episodes; run it with `gh workflow run bench.yml`). The read lock is held only while the
+1k/10k/50k episodes; run it with `cargo bench --bench lint`). The read lock is held only while the
 snapshot loads, so writers do not queue behind the analysis; the page may reflect a slightly newer
 graph than the summary. Near-duplicate candidates come from a deterministic blocking scheme (shared
 long token or shared 3-character prefix of the sorted-token name) so work stays bounded; a block of
