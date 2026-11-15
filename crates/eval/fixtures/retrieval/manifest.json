@@ -1,0 +1,175 @@
+{
+  "corpus_version": "fernhill-notebook-1",
+  "description": "Synthetic small-company notebook (fictional 'Fernhill' bike-share). Written in the style of a Liminis notebook; contains no real or private data. 8 decisions are later replaced by a newer note.",
+  "chunking": {
+    "max_tokens": 900
+  },
+  "notes": [
+    {
+      "id": "team-roster",
+      "reference_time": "2025-09-01T09:00:00Z"
+    },
+    {
+      "id": "decision-hosting-harbor",
+      "reference_time": "2025-09-12T09:00:00Z"
+    },
+    {
+      "id": "process-standup-weekly",
+      "reference_time": "2025-09-20T09:00:00Z"
+    },
+    {
+      "id": "decision-supplier-orbis",
+      "reference_time": "2025-09-30T09:00:00Z"
+    },
+    {
+      "id": "decision-pricing-flat",
+      "reference_time": "2025-10-03T09:00:00Z"
+    },
+    {
+      "id": "decision-office-pier-street",
+      "reference_time": "2025-10-22T09:00:00Z"
+    },
+    {
+      "id": "decision-tracker-trackly",
+      "reference_time": "2025-11-05T09:00:00Z"
+    },
+    {
+      "id": "policy-support-hours-office",
+      "reference_time": "2025-11-18T09:00:00Z"
+    },
+    {
+      "id": "reading-notes-cooperatives",
+      "reference_time": "2025-11-30T20:00:00Z"
+    },
+    {
+      "id": "plan-launch-march",
+      "reference_time": "2025-12-01T09:00:00Z"
+    },
+    {
+      "id": "faq-helmet-policy",
+      "reference_time": "2025-12-10T09:00:00Z"
+    },
+    {
+      "id": "ops-maintenance-checklist",
+      "reference_time": "2025-12-15T09:00:00Z"
+    },
+    {
+      "id": "finance-budget-2026",
+      "reference_time": "2026-01-05T09:00:00Z"
+    },
+    {
+      "id": "meeting-kickoff-2026-01",
+      "reference_time": "2026-01-09T09:00:00Z"
+    },
+    {
+      "id": "recipe-team-lunch",
+      "reference_time": "2026-01-15T12:00:00Z"
+    },
+    {
+      "id": "ideas-partnerships",
+      "reference_time": "2026-01-20T09:00:00Z"
+    },
+    {
+      "id": "project-station-sensors",
+      "reference_time": "2026-02-02T09:00:00Z"
+    },
+    {
+      "id": "journal-2026-02-12",
+      "reference_time": "2026-02-12T21:00:00Z"
+    },
+    {
+      "id": "decision-pricing-usage",
+      "reference_time": "2026-02-18T09:00:00Z"
+    },
+    {
+      "id": "project-mobile-app",
+      "reference_time": "2026-02-25T09:00:00Z"
+    },
+    {
+      "id": "plan-launch-june",
+      "reference_time": "2026-02-27T09:00:00Z"
+    },
+    {
+      "id": "decision-supplier-kestrel",
+      "reference_time": "2026-03-05T09:00:00Z"
+    },
+    {
+      "id": "decision-hosting-tern",
+      "reference_time": "2026-03-20T09:00:00Z"
+    },
+    {
+      "id": "meeting-board-2026-03",
+      "reference_time": "2026-03-26T09:00:00Z"
+    },
+    {
+      "id": "process-async-updates",
+      "reference_time": "2026-03-30T09:00:00Z"
+    },
+    {
+      "id": "journal-2026-04-03",
+      "reference_time": "2026-04-03T21:00:00Z"
+    },
+    {
+      "id": "decision-tracker-kanbo",
+      "reference_time": "2026-04-08T09:00:00Z"
+    },
+    {
+      "id": "research-interviews-summary",
+      "reference_time": "2026-04-10T09:00:00Z"
+    },
+    {
+      "id": "decision-remote-first",
+      "reference_time": "2026-04-15T09:00:00Z"
+    },
+    {
+      "id": "policy-support-hours-extended",
+      "reference_time": "2026-04-22T09:00:00Z"
+    },
+    {
+      "id": "trip-lisbon",
+      "reference_time": "2026-05-02T20:00:00Z"
+    }
+  ],
+  "supersedes": [
+    {
+      "old_note": "decision-hosting-harbor",
+      "new_note": "decision-hosting-tern",
+      "effective_at": "2026-03-20T09:00:00Z"
+    },
+    {
+      "old_note": "decision-pricing-flat",
+      "new_note": "decision-pricing-usage",
+      "effective_at": "2026-02-18T09:00:00Z"
+    },
+    {
+      "old_note": "decision-tracker-trackly",
+      "new_note": "decision-tracker-kanbo",
+      "effective_at": "2026-04-08T09:00:00Z"
+    },
+    {
+      "old_note": "plan-launch-march",
+      "new_note": "plan-launch-june",
+      "effective_at": "2026-02-27T09:00:00Z"
+    },
+    {
+      "old_note": "process-standup-weekly",
+      "new_note": "process-async-updates",
+      "effective_at": "2026-03-30T09:00:00Z"
+    },
+    {
+      "old_note": "decision-office-pier-street",
+      "new_note": "decision-remote-first",
+      "effective_at": "2026-04-15T09:00:00Z"
+    },
+    {
+      "old_note": "decision-supplier-orbis",
+      "new_note": "decision-supplier-kestrel",
+      "effective_at": "2026-03-05T09:00:00Z"
+    },
+    {
+      "old_note": "policy-support-hours-office",
+      "new_note": "policy-support-hours-extended",
+      "effective_at": "2026-04-22T09:00:00Z"
+    }
+  ]
+}
