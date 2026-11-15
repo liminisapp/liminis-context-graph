@@ -773,3 +773,39 @@ async fn scan_chunk_boundaries_lose_and_duplicate_nothing() {
         6
     );
 }
+
+/// SC-004 probe: a full pass at 10× the episodes should cost no more than about 12× the time (probed here at 5×).
+/// Timing-sensitive, so it never runs by default; `cargo test -p lcg-core --test knowledge_lint
+/// --release -- --ignored --nocapture` prints the measured ratio. `benches/lint.rs` is the
+/// canonical measurement.
+#[path = "../benches/common/lint_fixture.rs"]
+mod lint_fixture;
+
+#[test]
+#[ignore = "timing probe for SC-004; run explicitly"]
+fn lint_full_pass_scales_near_linearly() {
+    let time_at = |n: usize| {
+        let (db, _dir) = lint_fixture::seed(n);
+        let req = lcg_core::lint::LintRequest::parse(
+            &json!({"limit": 500, "single_valued_relations": ["related_to"]}),
+            Some(vec![lint_fixture::GROUP.to_string()]),
+        )
+        .unwrap();
+        let conn = db.connect().unwrap();
+        let now = now_us();
+        let start = std::time::Instant::now();
+        let r = lcg_core::lint::run_lint(&conn, &req, now).unwrap();
+        let elapsed = start.elapsed();
+        eprintln!(
+            "n={n}: {elapsed:?}, total findings {}",
+            r["summary"]["total"]
+        );
+        elapsed
+    };
+    let small = time_at(1_000);
+    let large = time_at(5_000);
+    let ratio = large.as_secs_f64() / small.as_secs_f64();
+    eprintln!("5x episodes -> {ratio:.1}x time");
+    // Near-linear would be ~5x; 10x the size may cost at most ~12x, so 5x may cost ~6x.
+    assert!(ratio < 12.0, "ratio {ratio:.1} is far from near-linear");
+}

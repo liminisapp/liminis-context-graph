@@ -764,11 +764,11 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (52)
+## IPC methods (53)
 
-The socket dispatch handles **52 methods**: 51 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **53 methods**: 52 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (52) and the MCP tool registry (51, below) differ by exactly one — `health_check` is
+surface (53) and the MCP tool registry (52, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -780,6 +780,7 @@ not exposed as an MCP tool.
 | Search | `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
 | Correction reads | `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
+| Notebook health | `knowledge_lint` |
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_delete_by_group`, `knowledge_clear_all` |
 | Supersession | `knowledge_mark_chunk_removed`, `knowledge_supersede_document` |
 | Episode origin | `knowledge_stamp_origin` |
@@ -945,7 +946,7 @@ union of all active scopes.
 
 | Scope | Methods |
 |-------|---------|
-| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
+| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint` |
 | `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |
@@ -1477,6 +1478,117 @@ supersessions and invalidations already made are not revisited. Episodes with
 and `"external"` for clipped material; leave notes unmarked. Search with
 `origins: ["primary", "external"]` while the agent refreshes a page. To adopt this on an existing
 notebook, run `knowledge_stamp_origin` as a dry run, check `changes`, then run it for real.
+
+### Notebook health: `knowledge_lint` (issue #755)
+
+Wiki-style notebooks need a health pass — contradictions, stale agent-written pages, thinly
+supported facts, orphans, missing links. Doing it by having an LLM re-read the notes is slow,
+nondeterministic and grows with the notebook. LCG already holds the structure (belief time,
+document supersession, episode origin), so `knowledge_lint` answers the same questions as graph
+queries: **no LLM call, no embedding-model call, read-only, deterministic**. It reports; it never
+merges, edits, deletes or suggests a fix — that stays with the caller. `read` scope, `ReadOnly` for
+`--writable-groups`.
+
+**Request** (all optional):
+
+| Parameter | Meaning |
+|---|---|
+| `group_ids` / `group_id` | Groups to lint, as `knowledge_get_episodes`. Omitted ⇒ every group; every finding states its `group_id`. A group that does not exist is an empty report, not an error. |
+| `categories` | Subset of the six below (default all). An unselected category costs no work and is absent from `summary`. |
+| `limit` | Findings per page, `1..=500` (default 50). |
+| `cursor` | Opaque keyset cursor; pass back `next_cursor` until it is `null`. Bound to the groups, categories, thresholds and single-valued set it was issued for; replaying it against another query fails with `invalid cursor: …`. |
+| `single_valued_relations` | Relation names (matched against a fact's `name` or `relation_type`, trimmed and case-insensitive) that hold at most one target per source, e.g. `["lives_in"]`. Needed for `contradiction`. |
+| `near_duplicate_threshold` | Similarity in `(0, 1]` at or above which two entities are a candidate merge. Default `0.9`. |
+| `min_mentions` | Distinct documents that must mention an entity before it is reported as lacking a page. Default `3`. |
+
+Invalid input (unknown category, `limit` outside `1..=500`, threshold outside `(0, 1]`,
+`min_mentions < 1`, malformed cursor) is rejected with the usual `-32000` before any work is done.
+
+**Response**: `{findings, count, next_cursor, summary, effective}`. `next_cursor` is always present
+(`null` on the last page). `effective` echoes the categories, `limit`, `near_duplicate_threshold`,
+`min_mentions` and normalised `single_valued_relations` that were used. `summary` is computed over
+the **whole scope on every call**, so it is identical on every page of one report and its counts
+equal the findings you page through:
+
+```json
+{"summary": {"categories": {
+   "weak_support": {"status": "ok", "count": 12},
+   "contradiction": {"status": "unavailable", "count": 0, "reason": "no_single_valued_relations"},
+   "near_duplicate_entity": {"status": "ok", "count": 3, "skipped_blocks": 0}},
+  "total": 15}}
+```
+
+`unavailable` (with a `reason`) means the category could not be evaluated; it is not the same as
+`ok` with count `0`, and it is not counted as healthy. Findings are ordered by category (the fixed
+order below), then by `id`. The response carries no timestamp: an unchanged graph returns
+byte-identical output.
+
+**A finding**: `{id, category, group_id, reason, details, citations}`. `details` holds the numbers
+behind the decision. `citations` carries sorted lists — `episodes` (uuids), `documents` (`doc_id`s;
+an episode without one is cited by episode only), `entities` (`{uuid, name}`) and `facts`
+(`{uuid, source, target, relation}` with endpoint names) — each capped at 25 with a `*_total`
+beside it, enough to open the cited notes and check the claim.
+
+**Stable ids.** `id` is the SHA-256 of the category, the group and the identities of the subject
+items (stored uuids, `doc_id`s and the designation) — never of the time of the run, the page
+position or the row order. It is unchanged by unrelated ingests, a WAL rebuild or a checkpoint
+restore, and a finding that disappears and later reappears carries the same id, so an app can track
+and dismiss findings over time. LCG stores nothing about findings. A finding whose subject changes
+(a contradiction side replaced; a document re-ingested under new fact uuids) is a new finding.
+
+| Category | `reason` | What it reports |
+|---|---|---|
+| `contradiction` | `single_valued_conflict` | Two currently-believed facts with the same source and a relation you designated single-valued, but different targets. One finding per pair of targets; sibling edges to one target form one side. `details.sides` carries each side's `support`. `unavailable` (`no_single_valued_relations`) without a designation. |
+| `stale_derived_page` | `lost_corroboration` | A document made only of `derived` episodes that restates a fact whose primary/external support has since been corrected (`corrected`), removed (`removed`), had its document superseded (`document_superseded`) or otherwise superseded, so nothing live backs it any more. One finding per document; `details` has `affected_facts` / `total_facts` and the formerly supporting episodes with their cause. |
+| `weak_support` | `derived_only`, `single_source` | A believed fact with zero, or exactly one, corroborating (primary + external) source documents. `details.support` is the per-origin breakdown. Facts with no producing episode (asserted, cross-group, legacy) are `primary` and are not reported. |
+| `orphan_entity` | `support_lost`, `never_supported` | An entity with no live mention and no believed relationship. `support_lost` cites the superseded episodes that once mentioned it. |
+| `near_duplicate_entity` | `similar_name` | Two entities of the same group and kind whose normalised names (lowercase, punctuation stripped, tokens sorted) have a Levenshtein ratio at or above the threshold. Each pair appears once, ordered by uuid. `details.score` is the name score; `details.embedding_cosine` is the cosine of the stored `name_embedding`s when both exist (informative only — never a gate, and no embedding is computed). |
+| `unlinked_mention` | `unlinked_mention`, `missing_page` | A document that mentions an entity with a page but does not link to it; or an entity mentioned by at least `min_mentions` documents that has no page. See the convention below. |
+
+**Stale pages and corrections.** Detection reads supersession state at the time of the call, so a
+correction (ADR-0705) or document supersession (ADR-0707) is reflected as soon as it is recorded,
+with no re-ingest of the derived page. LCG does not record which note a derived page was written
+from; the relation is inferred through shared facts using the same-fact key of
+[ADR-0752](adr/0752-episode-origin-and-corroboration.md). A fact that never had primary support is
+`weak_support`, not stale. A corroborating episode that was hard-deleted has no readable origin and
+is ignored.
+
+**Contradictions are deliberately narrow.** LCG stores no contradiction signal (ingest never
+invalidates one fact because of another), and without an LLM the only non-noisy deterministic rule
+is the single-valued-relation one. "X is in Berlin" against "X moved to Paris" under different
+relations is out of reach.
+
+**The page/link convention (`unlinked_mention`).** LCG does not model notebook pages or links, so
+the category reads a convention in episode `attributes` (ADR-0528), parsed only when the category is
+selected and never by text matching:
+
+- `{"page_for": "<entity uuid or name>"}` on any live episode makes that episode's document the
+  entity's page (a uuid is exact; a name must match one entity in the group, case-insensitively).
+- `{"links": ["<doc_id>", …]}` on any live episode opts its document into link tracking (an empty
+  array counts); the union over its live episodes is its outgoing link set.
+
+The category is `unavailable` — reason `no_page_data` or `no_link_data` — until the scope carries
+both keys somewhere. Whether the notes app writes this convention is for the app to agree.
+
+**Cost model.** Because counts are exact on every call, each call is a full pass over the selected
+categories: chunked, uuid-keyed scans (no content, no embeddings) into memory, then pure analysis;
+the cursor only selects which slice of the ordered result is returned, and only that page is
+hydrated with entity names. Time grows near-linearly with group size (`benches/lint.rs` measures
+1k/10k/50k episodes; run it with `gh workflow run bench.yml`). The read lock is held only while the
+snapshot loads, so writers do not queue behind the analysis; the page may reflect a slightly newer
+graph than the summary. Near-duplicate candidates come from a deterministic blocking scheme (shared
+long token or shared 3-character prefix of the sorted-token name) so work stays bounded; a block of
+more than 200 entities is skipped and counted in `summary…skipped_blocks`, and a near-duplicate
+sharing no block with its twin is not found. Findings depend on the evaluated instant (a
+future-dated document supersession takes effect when its time arrives), so determinism holds for an
+unchanged graph at the same instant.
+
+**Origin is a claim.** Lint reads origin exactly as ADR-0752 does: the caller's label, never
+authenticated. Derived and answer content never counts as corroboration in any category. A group in
+degraded mode fails like every other read. Start with the
+[Episode origin](#episode-origin-derived-pages-never-corroborate-themselves-issue-752) and
+[Belief time](#belief-time-corrections-supersede-they-do-not-delete-issue-705) sections; design in
+[ADR-0755](adr/0755-knowledge-lint-deterministic-health.md).
 
 ### Bulk reads: group scope, paging, projection, prefix (issue #667)
 
@@ -4836,6 +4948,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0741](0741-post-rebuild-pointer-repair-and-hopless-demotion.md) | Rebuild Order Must Not Matter for Cross-Group Pointers — Demote Hop-less, Rebind After Every Rebuild | 2026-11-13 |
 | [0742](0742-per-group-write-allow-list.md) | Per-Group Write Allow-List (`--writable-groups`) Enforced in the Daemon | 2026-11-13 |
 | [0752](0752-episode-origin-and-corroboration.md) | Episode Origin — Derived Content Cites But Never Corroborates | 2026-11-15 |
+| [0755](0755-knowledge-lint-deterministic-health.md) | `knowledge_lint` — A Deterministic, LLM-Free Notebook Health Report | 2026-11-15 |
 
 ## Historical numbering
 
