@@ -19,6 +19,4 @@ sha2 = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true }
-
-[dev-dependencies]
 tempfile = { workspace = true }

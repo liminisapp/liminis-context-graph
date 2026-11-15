@@ -31,6 +31,11 @@ use lcg_eval::scoring::score_candidate;
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `lcg-eval retrieval …` (#754) is dispatched before the flat extraction parser, which is
+    // left untouched (FR-001).
+    if args.first().map(String::as_str) == Some("retrieval") {
+        std::process::exit(lcg_eval::retrieval::run_cli(&args[1..]).await);
+    }
     let cli = match parse_args(&args) {
         Ok(cli) => cli,
         Err(e) => {
