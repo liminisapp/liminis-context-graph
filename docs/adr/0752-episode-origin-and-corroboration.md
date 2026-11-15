@@ -87,7 +87,8 @@ reads and on `knowledge_search_passages` is validated (non-empty, known values).
 over retrieval pools that know nothing about origin, so relationships and entities over-fetch ×3 (as
 belief does) and passages oversample the ANN probe ×10 (as the `kind` filter does); a selective filter
 can return fewer than `num_results`. Edges with no producing episode (asserted, cross-group, legacy)
-and mention-less entities count as `primary`. Counts reflect live episodes at read time.
+and mention-less entities count as `primary`. Counts reflect live episodes at read time; on `knowledge_find_relationships` a belief query's `as_of` replaces
+"read time" for both `support` and the `origins` filter, so they agree with the `belief` block.
 
 **8. Stamping.** `knowledge_stamp_origin` (admin scope, write-policy class `GroupRequired`) sets origin
 on existing episodes by ordered rules `{origin, source_path_prefix?, attributes_kind?}` (selectors

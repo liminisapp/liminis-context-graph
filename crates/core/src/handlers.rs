@@ -1524,6 +1524,9 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
     };
 
     let db = load_db(&state)?;
+    let support_as_of_us = belief
+        .as_ref()
+        .map_or_else(|| chrono::Utc::now().timestamp_micros(), |b| b.as_of_us);
     let mut edges = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, Error> {
         let conn = db.connect()?;
         // `support` (always) and the `origins` filter (opt-in), from each edge's producing
@@ -1542,7 +1545,9 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
             &conn,
             &keys,
             origins.as_deref(),
-            chrono::Utc::now().timestamp_micros(),
+            // Evaluate liveness at the belief query's instant when one is present, so `as_of` +
+            // `origins` / `support` agree with the `belief` block; otherwise "now".
+            support_as_of_us,
         )?;
         let edges: Vec<_> = if origins.is_some() {
             edges

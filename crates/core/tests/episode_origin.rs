@@ -744,6 +744,35 @@ async fn derived_removal_cannot_end_belief_in_a_primary_chunk() {
     assert_eq!(r["superseded_count"], 1);
 }
 
+/// `as_of` + `origins` / `support` are evaluated at the `as_of` instant (not "now"), so they agree
+/// with the `belief` block: an episode live at T0 and removed afterwards still supports the edge
+/// when read as of T0.
+#[tokio::test]
+async fn as_of_read_evaluates_origins_and_support_at_that_instant() {
+    let (state, _db, _d) = state_with(vec![fact("A", "B", "f")], None);
+    put(&state, "chunk", None, None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let t0 = chrono::Utc::now().to_rfc3339();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let r = call(
+        "knowledge_mark_chunk_removed",
+        json!({"chunk_id": "chunk", "group_ids": [G]}),
+        &state,
+    )
+    .await;
+    assert_eq!(r["superseded_count"], 1);
+
+    // As of T0 the primary episode was live: the edge is returned and its support counts it.
+    let past = relationships(&state, json!({"as_of": t0, "origins": ["primary"]})).await;
+    assert_eq!(past.len(), 1, "{past:?}");
+    assert_eq!(past[0]["support"]["primary"], 1, "{:?}", past[0]);
+    assert_eq!(past[0]["corroboration"], 1);
+
+    // Read now, the episode is superseded, so nothing primary supports the edge any more.
+    let now = relationships(&state, json!({"origins": ["primary"]})).await;
+    assert!(now.is_empty(), "{now:?}");
+}
+
 // ── US4: WAL rebuild ─────────────────────────────────────────────────────────────────────────
 
 async fn replayed(source: &Path) -> (Arc<AppState>, Arc<Db>, TempDir) {

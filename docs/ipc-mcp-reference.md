@@ -684,7 +684,9 @@ recorded).
 chunks it was split into, and an episode with no `doc_id` counts as its own document. `corroboration`
 is `primary + external`; a `derived` or `answer` episode is a *citation* (it stays linked for
 provenance) and never adds to it. Counts are over episodes that are live now, so a corrected episode
-stops contributing. For a relationship, `support` is derived from the edge's producing `episodes` and
+stops contributing. On `knowledge_find_relationships`, when a belief query (`as_of`) is given, liveness
+(for both `support` and the `origins` filter) is evaluated at that `as_of` instant instead, so it agrees
+with the `belief` block. For a relationship, `support` is derived from the edge's producing `episodes` and
 those of its **same-fact siblings** — edges with the same endpoints and relation name. (Ingest does
 not deduplicate edges, [ADR-0705](adr/0705-belief-time-separate-from-validity.md), so a page that
 restates a fact produces a second edge; the grouping happens at read time.) It never comes from the
