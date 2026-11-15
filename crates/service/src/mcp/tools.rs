@@ -142,7 +142,7 @@ fn with_belief(mut props: Value) -> Value {
     props
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (51 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (52 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -288,6 +288,76 @@ pub fn registry() -> Vec<ToolSpec> {
                         "origins": origins_prop()
                     })),
                     "required": ["query"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_lint",
+            description: "Deterministic notebook health report for a group (issue #755): a \
+                           paged list of cited findings plus per-category counts, computed from \
+                           the graph with no LLM and no embedding-model call. Categories: \
+                           `contradiction` (two currently-believed facts with the same source and \
+                           a relation you designate in `single_valued_relations`, different \
+                           targets; `unavailable` without that list), `stale_derived_page` (a \
+                           `derived` document restating facts whose primary/external support was \
+                           since corrected, removed or superseded), `weak_support` (believed \
+                           facts backed by derived content only or a single source document), \
+                           `orphan_entity`, `near_duplicate_entity` (name similarity >= \
+                           `near_duplicate_threshold`, same kind) and `unlinked_mention` (needs \
+                           `page_for` / `links` in episode attributes, else `unavailable`). Every \
+                           finding has a content-derived stable `id` (survives unrelated \
+                           ingests, WAL rebuild and checkpoint restore, so you can track and \
+                           dismiss it), a `reason`, the numbers behind it and `citations` \
+                           (episodes, documents, entities, facts). `summary` counts every \
+                           selected category over the whole scope on every page. Page with \
+                           `cursor`/`next_cursor`. Read-only: it never merges, edits or deletes \
+                           anything and suggests no fix. Origin is a caller claim, not \
+                           authenticated (ADR-0752).",
+            scope: Scope::Read,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_ids": group_ids_prop(),
+                        "group_id": {
+                            "type": "string",
+                            "description": "Single-group alias for `group_ids`; unioned with it \
+                                             when both are given. Omit both for all groups."
+                        },
+                        "categories": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": [
+                                "contradiction", "stale_derived_page", "weak_support",
+                                "orphan_entity", "near_duplicate_entity", "unlinked_mention"
+                            ]},
+                            "description": "Categories to evaluate (default: all). Unselected \
+                                             categories cost no work and are absent from `summary`."
+                        },
+                        "limit": {
+                            "type": "integer", "minimum": 1, "maximum": 500, "default": 50,
+                            "description": "Findings per page."
+                        },
+                        "cursor": cursor_prop(),
+                        "single_valued_relations": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "Relation names (matched against a fact's name or \
+                                             relation_type, trimmed and case-insensitive) that \
+                                             hold at most one target per source, e.g. \
+                                             `[\"lives_in\"]`. Required for `contradiction`; \
+                                             without it that category is `unavailable`."
+                        },
+                        "near_duplicate_threshold": {
+                            "type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 0.9,
+                            "description": "Normalised-name similarity at or above which two \
+                                             entities of one group and kind are a candidate \
+                                             merge. Echoed back as `effective`."
+                        },
+                        "min_mentions": {
+                            "type": "integer", "minimum": 1, "default": 3,
+                            "description": "Distinct documents that must mention an entity \
+                                             before it is reported as lacking a page."
+                        }
+                    }
                 })
             },
         },
@@ -1711,18 +1781,18 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_51_unique_tools() {
+    fn registry_has_52_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 51);
+        assert_eq!(r.len(), 52);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 51, "tool names must be unique");
+        assert_eq!(names.len(), 52, "tool names must be unique");
     }
 
     #[test]
     fn scope_bucket_sizes_match_fr_004_table() {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
-        assert_eq!(count(Scope::Read), 17);
+        assert_eq!(count(Scope::Read), 18);
         assert_eq!(count(Scope::Write), 17);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 16);
