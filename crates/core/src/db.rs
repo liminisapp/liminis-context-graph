@@ -2068,6 +2068,231 @@ impl<'db> Conn<'db> {
         )
     }
 
+    // ── Notebook lint scans (issue #755, ADR-0755) ────────────────────────────
+    //
+    // Read-only, keyset-chunked (`uuid > $after ORDER BY uuid LIMIT $limit`) scans that fill a
+    // `LintSnapshot`. No content and no embedding is read; aggregation happens in Rust (the
+    // pattern `origin_reads` uses) so no aggregating Cypher is needed.
+
+    /// One chunk of episodes ordered by uuid, optionally group-scoped.
+    pub fn lint_scan_episodes(
+        &self,
+        group_ids: Option<&[String]>,
+        after: Option<&str>,
+        limit: usize,
+        with_attributes: bool,
+    ) -> Result<Vec<crate::lint::snapshot::LintEpisode>, Error> {
+        let mut preds: Vec<&str> = Vec::new();
+        if group_ids.is_some() {
+            preds.push("ep.group_id IN $gids");
+        }
+        if after.is_some() {
+            preds.push("ep.uuid > $after");
+        }
+        let where_clause = if preds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", preds.join(" AND "))
+        };
+        let attrs = if with_attributes {
+            ", ep.attributes"
+        } else {
+            ""
+        };
+        let cypher = format!(
+            "MATCH (ep:Episodic) {where_clause}RETURN ep.uuid, ep.group_id, ep.doc_id, \
+             coalesce(ep.origin, ''), ep.superseded_at, ep.superseded_by_kind, \
+             ep.supersession_reason{attrs} ORDER BY ep.uuid LIMIT $limit"
+        );
+        let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
+        if let Some(g) = group_ids {
+            params["gids"] = serde_json::json!(g);
+        }
+        if let Some(a) = after {
+            params["after"] = serde_json::json!(a);
+        }
+        let rows = self.query_params(&cypher, params)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::lint::snapshot::LintEpisode {
+                uuid: value_as_string(&r[0]),
+                group_id: value_as_string(&r[1]),
+                doc_id: value_as_optional_string(&r[2]),
+                origin: crate::origin::Origin::from_stored(Some(&value_as_string(&r[3]))),
+                superseded_at_us: match &r[4] {
+                    lbug::Value::Null(_) => None,
+                    other => Some(value_as_timestamp_micros(other)),
+                },
+                superseded_by_kind: value_as_optional_string(&r[5]),
+                supersession_reason: value_as_optional_string(&r[6]),
+                attributes: if with_attributes {
+                    value_as_optional_string(&r[7])
+                } else {
+                    None
+                },
+            })
+            .collect())
+    }
+
+    /// One chunk of edges (with endpoints and their groups) ordered by edge uuid.
+    pub fn lint_scan_edges(
+        &self,
+        group_ids: Option<&[String]>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::lint::snapshot::LintEdge>, Error> {
+        let mut preds: Vec<&str> = Vec::new();
+        if group_ids.is_some() {
+            preds.push("rn.group_id IN $gids");
+        }
+        if after.is_some() {
+            preds.push("rn.uuid > $after");
+        }
+        let where_clause = if preds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", preds.join(" AND "))
+        };
+        let cypher = format!(
+            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+             {where_clause}RETURN rn.uuid, rn.group_id, src.uuid, dst.uuid, src.group_id, \
+             dst.group_id, rn.name, rn.relation_type, rn.episodes, rn.warrant, rn.ingested_at \
+             ORDER BY rn.uuid LIMIT $limit"
+        );
+        let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
+        if let Some(g) = group_ids {
+            params["gids"] = serde_json::json!(g);
+        }
+        if let Some(a) = after {
+            params["after"] = serde_json::json!(a);
+        }
+        let rows = self.query_params(&cypher, params)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::lint::snapshot::LintEdge {
+                belief: crate::belief::EdgeBeliefRow {
+                    uuid: value_as_string(&r[0]),
+                    ingested_at_us: match &r[10] {
+                        lbug::Value::Null(_) => None,
+                        other => Some(value_as_timestamp_micros(other)),
+                    },
+                    episodes: value_as_str_list(&r[8]),
+                    warrant: value_as_optional_string(&r[9]),
+                    valid_at_source: None,
+                },
+                group_id: value_as_string(&r[1]),
+                source: value_as_string(&r[2]),
+                target: value_as_string(&r[3]),
+                source_group: value_as_string(&r[4]),
+                target_group: value_as_string(&r[5]),
+                name: value_as_string(&r[6]),
+                relation_type: value_as_optional_string(&r[7]),
+            })
+            .collect())
+    }
+
+    /// One chunk of entities (uuid, group, name, kind) ordered by uuid.
+    pub fn lint_scan_entities(
+        &self,
+        group_ids: Option<&[String]>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<crate::lint::snapshot::LintEntity>, Error> {
+        let mut preds: Vec<&str> = Vec::new();
+        if group_ids.is_some() {
+            preds.push("e.group_id IN $gids");
+        }
+        if after.is_some() {
+            preds.push("e.uuid > $after");
+        }
+        let where_clause = if preds.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", preds.join(" AND "))
+        };
+        let cypher = format!(
+            "MATCH (e:Entity) {where_clause}RETURN e.uuid, e.group_id, e.name, e.kind \
+             ORDER BY e.uuid LIMIT $limit"
+        );
+        let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
+        if let Some(g) = group_ids {
+            params["gids"] = serde_json::json!(g);
+        }
+        if let Some(a) = after {
+            params["after"] = serde_json::json!(a);
+        }
+        let rows = self.query_params(&cypher, params)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::lint::snapshot::LintEntity {
+                uuid: value_as_string(&r[0]),
+                group_id: value_as_string(&r[1]),
+                name: value_as_string(&r[2]),
+                kind: value_as_kind(&r[3]),
+            })
+            .collect())
+    }
+
+    /// `(episode uuid, entity uuid)` for every `MENTIONS` edge of the given episodes.
+    pub fn lint_scan_mentions(
+        &self,
+        episode_uuids: &[String],
+    ) -> Result<Vec<(String, String)>, Error> {
+        if episode_uuids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) WHERE ep.uuid IN $uuids \
+             RETURN DISTINCT ep.uuid, n.uuid",
+            serde_json::json!({ "uuids": episode_uuids }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (value_as_string(&r[0]), value_as_string(&r[1])))
+            .collect())
+    }
+
+    /// Names of the given entities, for citing a report page. A uuid absent from the result no
+    /// longer exists.
+    pub fn lint_entity_names(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>, Error> {
+        let mut out = std::collections::HashMap::new();
+        for part in uuids.chunks(1000) {
+            let rows = self.query_params(
+                "MATCH (e:Entity) WHERE e.uuid IN $uuids RETURN e.uuid, e.name",
+                serde_json::json!({ "uuids": part }),
+            )?;
+            for r in rows {
+                out.insert(value_as_string(&r[0]), value_as_string(&r[1]));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Stored `name_embedding` of the given entities (empty embeddings omitted). Read only for the
+    /// handful of entities on one report page; no embedding is ever computed.
+    pub fn lint_entity_embeddings(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<f32>>, Error> {
+        let mut out = std::collections::HashMap::new();
+        for part in uuids.chunks(1000) {
+            let rows = self.query_params(
+                "MATCH (e:Entity) WHERE e.uuid IN $uuids RETURN e.uuid, e.name_embedding",
+                serde_json::json!({ "uuids": part }),
+            )?;
+            for r in rows {
+                let emb = value_as_float_array(&r[1]);
+                if !emb.is_empty() {
+                    out.insert(value_as_string(&r[0]), emb);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     // ── Correction reads (issue #706, ADR-0706) ───────────────────────────────
 
     /// Full belief-relevant episode rows for the given UUIDs. A UUID absent from the result was
