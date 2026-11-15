@@ -386,6 +386,13 @@ pub struct LcgEntitiesFacts {
     pub belief: bool,
 }
 
+/// Per-read `num_results` for the entities+facts configurations: k is split across the entity and
+/// fact reads (rounding up, so an odd k asks for one extra) so the retrieval budget is about k, the
+/// same as the single-read configurations. An entity can still expand to several notes.
+pub fn per_read_budget(k: usize) -> usize {
+    k.div_ceil(2).max(1)
+}
+
 /// Interleaves two ranked lists (a0, b0, a1, b1, …) so neither dominates the top ranks.
 pub fn interleave<T: Clone>(a: &[T], b: &[T]) -> Vec<T> {
     let mut out = Vec::with_capacity(a.len() + b.len());
@@ -410,21 +417,24 @@ impl Retriever for LcgEntitiesFacts {
     }
     fn description(&self) -> String {
         format!(
-            "knowledge_find_entities + knowledge_find_relationships (hybrid, RRF), min_similarity=0, {}; entity and fact ranks interleaved",
+            "knowledge_find_entities + knowledge_find_relationships (hybrid, RRF), min_similarity=0, {}; k split across the two reads (ceil(k/2) each), ranks interleaved",
             if self.belief { "facts read with believed_only=true" } else { "default reads" }
         )
     }
     fn retrieve<'a>(&'a self, q: &'a str, k: usize) -> BoxFuture<'a, Result<RankedResult, String>> {
         Box::pin(async move {
             let t0 = Instant::now();
+            // Split k across the two reads so this configuration spends the same retrieval budget
+            // (k results) as `lcg-passages` and qmd, instead of 2k entity + fact results.
+            let per_read = per_read_budget(k);
             let ents = self
                 .t
                 .call(
                     "knowledge_find_entities",
-                    json!({"query": q, "num_results": k, "min_similarity": 0.0, "group_ids": [EVAL_GROUP]}),
+                    json!({"query": q, "num_results": per_read, "min_similarity": 0.0, "group_ids": [EVAL_GROUP]}),
                 )
                 .await?;
-            let mut fact_params = json!({"query": q, "num_results": k, "min_similarity": 0.0, "group_ids": [EVAL_GROUP]});
+            let mut fact_params = json!({"query": q, "num_results": per_read, "min_similarity": 0.0, "group_ids": [EVAL_GROUP]});
             if self.belief {
                 fact_params["believed_only"] = json!(true);
             }
@@ -614,7 +624,13 @@ mod tests {
             .find(|(m, _)| m == "knowledge_find_entities")
             .unwrap();
         assert!(ent_call.1.get("believed_only").is_none());
-        assert_eq!(ent_call.1["num_results"], 5);
+        assert_eq!(
+            ent_call.1["num_results"], 3,
+            "k=5 is split across the entity and fact reads (ceil(5/2))"
+        );
+        assert_eq!(fact_call.1["num_results"], 3);
+        assert_eq!(per_read_budget(10), 5);
+        assert_eq!(per_read_budget(1), 1);
     }
 
     #[tokio::test]

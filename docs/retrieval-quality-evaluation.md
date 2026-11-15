@@ -24,7 +24,7 @@ It is a separate mode of the existing `lcg-eval` binary. The extraction eval
 | Configuration | What runs |
 |---|---|
 | `lcg-passages` | `knowledge_search_passages`. **Vector-only**: this method does no FTS and no RRF. |
-| `lcg-entities-facts` | `knowledge_find_entities` + `knowledge_find_relationships` (hybrid FTS + vector, RRF), default reads. Entity and fact ranks are interleaved. |
+| `lcg-entities-facts` | `knowledge_find_entities` + `knowledge_find_relationships` (hybrid FTS + vector, RRF), default reads. k is split across the two reads (`ceil(k/2)` entities + `ceil(k/2)` facts) and the ranks are interleaved. |
 | `qmd` | `qmd query --no-rerank` (query expansion on). |
 | `qmd-rerank` | `qmd query` with its LLM reranker. |
 | `lcg-entities-facts-belief` | *Extra, clearly labelled variant.* As `lcg-entities-facts`, but facts are read with `believed_only=true`. |
@@ -37,6 +37,11 @@ hypothesis would test the configuration, not the architecture.
 Every configuration runs over the same corpus and question set with the **same k**
 (`--k`, default 10). Score floors are set to zero (`min_score=0`, `min_similarity=0`) so a floor
 never truncates a result list below k.
+
+For `lcg-entities-facts*` the shared k is a *retrieval budget* split across the entity and fact
+reads, so the configuration does not get 2k results against the other configurations' k. One
+asymmetry remains by design: an entity maps to every note it was extracted from, so a single
+entity result can credit several notes before the list is cut to k notes.
 
 ### Metrics
 
