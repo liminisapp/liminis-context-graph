@@ -76,6 +76,16 @@ must exist before any of them can be judged.
 - Published numbers are deliberately absent from the docs until a maintainer has run the
   comparison.
 
+## Open items
+
+- **qmd interface not verified against a live install.** The qmd commands and the `--no-rerank`
+  toggle come from qmd's README; its JSON output shape and `--version` output are not documented
+  there, so the parser in `retrieval/qmd.rs` is deliberately tolerant. Any qmd failure marks the
+  qmd configurations skipped with a reason rather than scoring zero. The first maintainer run
+  should confirm the shape against the pinned qmd version and record that version in the docs.
+- **No end-to-end run yet.** The LCG service spawn, a real embedder and the grounded-evidence
+  judge are covered only by canned-responder tests; the first live run is still ahead.
+
 ## References
 
 ADR-0048 (eval harness), ADR-0052 (`--dry-run` shares the resolution path — `retrieval::resolve`
