@@ -8,7 +8,7 @@
 //     purge, reopen and WAL replay all leave the lookups equal to a direct, unindexed query.
 //   FR-003/FR-010: group isolation and multiple episodes per name.
 
-use lcg_core::{Conn, Db, EpisodicRow};
+use lcg_core::{Conn, Db, EpisodicRow, WalReplayer};
 use tempfile::TempDir;
 
 const DIM: usize = 4;
@@ -368,4 +368,38 @@ fn index_creation_is_idempotent_and_backfills_existing_rows() {
         vec!["e1".to_string()]
     );
     assert!(conn.doc_is_known(GROUP, "old-doc").unwrap());
+}
+
+/// WAL replay executes raw Cypher against the same table (bypassing `insert_episodic`), so
+/// replayed rows are covered by the DB-maintained indexes with no backfill (FR-006).
+#[test]
+fn wal_replayed_episodes_are_found_by_indexed_lookups() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let wal_dir = TempDir::new().unwrap();
+    let line = r#"{"seq":0,"ts":"2026-05-19T03:00:00.000000+00:00","db":"","cypher":"CREATE (:Episodic {uuid: 'replayed-1', name: 'replayed-chunk', group_id: 'g1', created_at: timestamp('2026-05-19 00:00:00'), source: 'text', source_description: 's', content: 'c', content_embedding: [0.1, 0.1, 0.1, 0.1], valid_at: timestamp('2026-05-19 00:00:00'), entity_edges: [], attributes: '{}', doc_id: 'replayed-doc'})","params":{}}"#;
+    std::fs::write(
+        wal_dir.path().join("20260519_030000_aaa111_0000.jsonl"),
+        format!("{line}\n"),
+    )
+    .unwrap();
+
+    WalReplayer::new(wal_dir.path())
+        .replay(&conn, lcg_core::zero_vector_embed_fn(DIM), DIM)
+        .unwrap();
+    assert_eq!(conn.count_nodes("Episodic").unwrap(), 1);
+
+    assert_eq!(
+        conn.live_episode_uuids_for_chunk("replayed-chunk", GROUP, &[], AS_OF)
+            .unwrap(),
+        vec!["replayed-1".to_string()]
+    );
+    assert!(conn.doc_is_known(GROUP, "replayed-doc").unwrap());
+    assert_eq!(
+        conn.live_episode_uuids_for_doc(GROUP, "replayed-doc")
+            .unwrap(),
+        oracle_by_doc(&conn, GROUP, "replayed-doc")
+    );
 }
