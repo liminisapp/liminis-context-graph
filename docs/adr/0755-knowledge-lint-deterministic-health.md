@@ -94,7 +94,7 @@ cursor keeps decoding. Unlike the older reads, `next_cursor` is always present (
   (`skipped_subjects`) rather than expanded; it almost always means a multi-valued relation was designated
   single-valued by mistake.
 - **Unlinked mention / missing page**: reads a convention in episode `attributes` (ADR-0528) — `page_for`
-  (entity uuid, or a unique case-insensitive name in the group) marks a page; `links: [doc_id…]` opts a
+  (entity uuid, or a unique case-insensitive name in the group) marks a page (its episode must carry a `doc_id`, else the declaration is ignored); `links: [doc_id…]` opts a
   document into link tracking. `unavailable` (`no_page_data` / `no_link_data`) until the scope carries both.
   No text matching at lint time. The convention is a contract to agree with the notes app; until the app
   writes it, the category reports `unavailable`.

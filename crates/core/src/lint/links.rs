@@ -5,7 +5,8 @@
 //! never by text matching:
 //!
 //! * `page_for: "<entity uuid or entity name>"` on any live episode of a document makes that
-//!   document the entity's page. A uuid is exact; otherwise a unique case-insensitive name match
+//!   document the entity's page (the episode must carry a `doc_id`; a doc-less declaration is
+//!   ignored, since nothing could link to it). A uuid is exact; otherwise a unique case-insensitive name match
 //!   within the group is used.
 //! * `links: ["<doc_id>", …]` on any live episode of a document opts it into link tracking (an
 //!   empty array counts); the union over its live episodes is its outgoing link set.
@@ -65,7 +66,9 @@ pub fn analyse(ctx: &Ctx<'_>, min_mentions: usize) -> CategoryResult {
             continue;
         };
         if let Some(Value::String(r)) = obj.get("page_for") {
-            if !r.trim().is_empty() {
+            // A page must carry a `doc_id`: `links` entries are doc_ids, so a doc-less page
+            // (`ep:` key) could never be linked to and would flag every document as unlinked.
+            if !r.trim().is_empty() && key.1.starts_with("doc:") {
                 page_decls.push((key.0.clone(), key.1.clone(), r.trim().to_string()));
             }
         }

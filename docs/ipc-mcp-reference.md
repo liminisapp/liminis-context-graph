@@ -842,6 +842,8 @@ selected and never by text matching:
 
 - `{"page_for": "<entity uuid or name>"}` on any live episode makes that episode's document the
   entity's page (a uuid is exact; a name must match one entity in the group, case-insensitively).
+  The episode must carry a `doc_id`: `links` entries are `doc_id`s, so a doc-less page could never be
+  linked to and its declaration is ignored.
 - `{"links": ["<doc_id>", …]}` on any live episode opts its document into link tracking (an empty
   array counts); the union over its live episodes is its outgoing link set.
 
