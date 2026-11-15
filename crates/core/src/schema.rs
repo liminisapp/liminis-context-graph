@@ -67,6 +67,10 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // `Entity.attributes`/`RelatesToNode_.attributes`) directly on the episode node, co-located
     // with the facts extracted from that episode's prose (reachable via the existing MENTIONS
     // edge to Entity). See ADR-0528.
+    // `origin` (issue #752) is a second deliberate divergence from graphiti's kuzu_driver.py, like
+    // `attributes` above: a closed-vocabulary label (`primary` / `external` / `derived` / `answer`)
+    // the caller declares for the episode. NULL or empty reads as `primary`, so — unlike
+    // `attributes` — a pre-existing row or a pre-feature WAL replay needs no backfill. See ADR-0752.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Episodic (\
          uuid STRING PRIMARY KEY, \
@@ -85,7 +89,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          superseded_by STRING, \
          superseded_by_kind STRING, \
          supersession_reason STRING, \
-         doc_id STRING\
+         doc_id STRING, \
+         origin STRING\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -403,6 +408,8 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
         ("Episodic", "supersession_reason", "STRING"),
         // Document identity (issue #707).
         ("Episodic", "doc_id", "STRING"),
+        // Episode origin (issue #752, ADR-0752). NULL / empty reads as `primary`, so no backfill.
+        ("Episodic", "origin", "STRING"),
         ("RelatesToNode_", "warrant", "STRING"),
         ("RelatesToNode_", "valid_at_source", "STRING"),
     ] {

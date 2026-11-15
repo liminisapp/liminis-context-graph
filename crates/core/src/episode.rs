@@ -106,6 +106,47 @@ pub struct AddEpisodeResult {
     pub superseded_episode_uuids: Vec<String>,
 }
 
+/// Whether an ingest needs the origin guards at all: only a `doc_id` (FR-013) or a non-
+/// corroborating chunk (FR-012) can be refused, so a plain primary ingest pays no extra query.
+fn guard_needed(origin: crate::origin::Origin, doc_id: Option<&str>, chunk_guard: bool) -> bool {
+    doc_id.is_some() || (chunk_guard && !origin.is_corroborating())
+}
+
+/// The origin refusals of an ingest (FR-012, FR-013). Pure reads: returns `Err` before the caller
+/// has written anything.
+fn check_origin_guards(
+    conn: &crate::db::Conn<'_>,
+    name: &str,
+    group_id: &str,
+    origin: crate::origin::Origin,
+    doc_id: Option<&str>,
+    chunk_guard: bool,
+) -> Result<(), Error> {
+    if let Some(doc) = doc_id {
+        let existing = conn.origins_for_doc(group_id, doc)?;
+        if let Some(other) = existing.iter().find(|o| **o != origin) {
+            return Err(crate::origin::conflict(format!(
+                "doc_id {doc:?} already has origin {:?}; a submission with origin {:?} is refused \
+                 (one document has one origin)",
+                other.as_str(),
+                origin.as_str()
+            )));
+        }
+    }
+    if chunk_guard && !origin.is_corroborating() {
+        let now = crate::db::ingested_at_or_now("");
+        let live = conn.live_origins_for_chunk(name, group_id, &now)?;
+        if live.iter().any(|o| o.is_corroborating()) {
+            return Err(crate::origin::conflict(format!(
+                "chunk {name:?} has a live primary or external episode; a {:?} submission would \
+                 revise it and is refused",
+                origin.as_str()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Whether an ingest ends belief in earlier episodes of the same chunk (issue #705, FR-003).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum SupersedePolicy {
@@ -126,6 +167,12 @@ pub struct EpisodeOpts {
     /// Stable identity of the logical document the episode came from (issue #707). `None` leaves
     /// the episode outside document supersession.
     pub doc_id: Option<String>,
+    /// Caller-declared origin (issue #752, ADR-0752). `None` is `primary`.
+    pub origin: Option<crate::origin::Origin>,
+    /// Treat `name` as a chunk id for the origin guard (FR-012): a `derived`/`answer` ingest whose
+    /// chunk has a live `primary`/`external` episode is refused whatever `supersede` says. Set by
+    /// `knowledge_process_chunk`, whose `name` is a chunk id; `knowledge_add_episode`'s is free-form.
+    pub guard_chunk_collision: bool,
 }
 
 /// Phase C's result: `(edges_inserted, edges_dropped_unresolvable,
@@ -464,6 +511,25 @@ pub async fn add_episode_with_opts(
     // identity-bearing set in a way that would reinterpret existing entities is refused here,
     // before any extraction, without touching data or other groups.
     state.check_identity(group_id)?;
+
+    // Origin guards (issue #752, FR-012/FR-013), cheap and before any extraction: nothing has been
+    // written, so a refusal leaves the graph and the WAL untouched. Re-run under the write lock
+    // before Phase C's first mutation, which is the authority.
+    let origin = opts.origin.unwrap_or(crate::origin::Origin::Primary);
+    if guard_needed(origin, opts.doc_id.as_deref(), opts.guard_chunk_collision) {
+        let db_g = load_db(&state)?;
+        let (n, g, d, c) = (
+            name.to_string(),
+            group_id.to_string(),
+            opts.doc_id.clone(),
+            opts.guard_chunk_collision,
+        );
+        tokio::task::spawn_blocking(move || {
+            let conn = db_g.connect()?;
+            check_origin_guards(&conn, &n, &g, origin, d.as_deref(), c)
+        })
+        .await??;
+    }
 
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
     // Resolves this group's own ontology file if one exists, else falls back to the
@@ -1069,6 +1135,42 @@ pub async fn add_episode_with_opts(
             }),
         }
     };
+    // Origin guard (issue #752, FR-010): a derived/answer episode may not rewrite an entity that
+    // has a live primary/external mention, nor merge into it on the strength of an embedding or
+    // an LLM verdict. Identity-level matches (exact or identical-normalized name) still *link*
+    // the episode to the entity — provenance, FR-006 — but leave its summary and embedding alone.
+    // Best-effort like all of Phase B: a concurrent primary ingest can add a mention after this
+    // read (the accepted ADR-0029 TOCTOU); the decision is baked into the statements Phase C
+    // logs, so WAL replay reproduces it verbatim.
+    let protected: std::collections::HashSet<String> = if origin.is_corroborating() {
+        std::collections::HashSet::new()
+    } else {
+        let mut uuids: Vec<String> = phase_b_results
+            .iter()
+            .filter_map(|r| match r {
+                PhaseBResult::NameMatch { existing } => Some(existing.uuid.clone()),
+                PhaseBResult::EmbeddingCandidate {
+                    candidate: Some(existing),
+                    ..
+                } => Some(existing.uuid.clone()),
+                _ => None,
+            })
+            .collect();
+        uuids.sort();
+        uuids.dedup();
+        let db_p = Arc::clone(&db_shared);
+        let now_us = chrono::Utc::now().timestamp_micros();
+        tokio::task::spawn_blocking(move || {
+            db_p.connect()?
+                .entities_with_corroborating_mention(&uuids, now_us)
+        })
+        .await??
+    };
+    let link_only = |existing: &EntityRow| DedupDecision::Merge {
+        existing_uuid: existing.uuid.clone(),
+        merged_summary: existing.summary.clone(),
+        summary_embedding: None,
+    };
     let mut decisions: Vec<Option<DedupDecision>> = Vec::with_capacity(extraction.entities.len());
     // (entity index, pair) for each candidate that survived the veto and still needs a verdict.
     let mut pending: Vec<(usize, DuplicatePair)> = Vec::new();
@@ -1091,22 +1193,9 @@ pub async fn add_episode_with_opts(
                     );
                 }
                 dedup_paths.exact_name += 1;
-                merge_into(
-                    &state,
-                    &mut merge_state,
-                    decisions.len(),
-                    existing,
-                    &extracted.summary,
-                )
-                .await?
-            }
-            PhaseBResult::EmbeddingCandidate {
-                candidate: Some(existing),
-                ..
-            } => {
-                if normalize_name(&existing.name) == normalize_name(&extracted.name) {
-                    // Identical normalized names: the same entity, no judgement needed (FR-005).
-                    dedup_paths.embedding_merge += 1;
+                if protected.contains(&existing.uuid) {
+                    link_only(existing)
+                } else {
                     merge_into(
                         &state,
                         &mut merge_state,
@@ -1115,6 +1204,31 @@ pub async fn add_episode_with_opts(
                         &extracted.summary,
                     )
                     .await?
+                }
+            }
+            PhaseBResult::EmbeddingCandidate {
+                candidate: Some(existing),
+                ..
+            } => {
+                if normalize_name(&existing.name) == normalize_name(&extracted.name) {
+                    // Identical normalized names: the same entity, no judgement needed (FR-005).
+                    dedup_paths.embedding_merge += 1;
+                    if protected.contains(&existing.uuid) {
+                        link_only(existing)
+                    } else {
+                        merge_into(
+                            &state,
+                            &mut merge_state,
+                            decisions.len(),
+                            existing,
+                            &extracted.summary,
+                        )
+                        .await?
+                    }
+                } else if protected.contains(&existing.uuid) {
+                    // A judged merge on a derived episode's authority alone is refused (FR-010):
+                    // keep the extracted entity separate, and skip the judge call entirely.
+                    make_insert_row(i)
                 } else {
                     pending.push((i, pair_from(existing, extracted)));
                     decisions.push(None);
@@ -1251,6 +1365,7 @@ pub async fn add_episode_with_opts(
     let gid_owned = group_id.to_string();
     let supersede_policy = opts.supersede;
     let doc_id_owned = opts.doc_id;
+    let chunk_guard = opts.guard_chunk_collision;
     let chunk_name_for_supersede = name.to_string();
     // `attributes` is expected to already be a serialized JSON object (handlers.rs's
     // `attributes_param_to_string` guarantees this for the two IPC entry points), but
@@ -1310,6 +1425,18 @@ pub async fn add_episode_with_opts(
     ) = tokio::task::spawn_blocking(
             move || -> Result<PhaseCOutcome, Error> {
         let conn = db_c.connect()?;
+        // Authoritative origin guards (issue #752): every refusal precedes the first mutation, so
+        // a refused ingest writes nothing (lbug auto-commits per statement, ADR-0705).
+        if guard_needed(origin, doc_id_owned.as_deref(), chunk_guard) {
+            check_origin_guards(
+                &conn,
+                &chunk_name_for_supersede,
+                &gid_owned,
+                origin,
+                doc_id_owned.as_deref(),
+                chunk_guard,
+            )?;
+        }
         let mut edges_inserted = 0usize;
         let mut edges_dropped_unresolvable = 0usize;
         let mut edges_dropped_self_loop = 0usize;
@@ -1517,6 +1644,7 @@ pub async fn add_episode_with_opts(
             entity_edges: entity_uuids.clone(),
             attributes: attributes_owned.clone(),
             doc_id: doc_id_owned,
+            origin: Some(origin.as_str().to_string()),
             ..Default::default()
         })?;
 
