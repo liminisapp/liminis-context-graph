@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -45,26 +45,70 @@ pub struct ProcessRunner {
     pub bin: PathBuf,
 }
 
+/// Ceiling for `update` / `embed`, which may download models and embed the whole corpus.
+pub const SETUP_TIMEOUT: Duration = Duration::from_secs(1800);
+/// Ceiling for one `query` (or `--version` / `status`): expansion and rerank load models per
+/// process, so this is generous, but finite so a stalled model load cannot hang the eval.
+pub const QUERY_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The qmd subcommand: the first argument, or the one after `--index NAME`. (Not a scan of every
+/// argument — a question that happens to say "embed" is still a query.)
+fn subcommand(args: &[String]) -> Option<&str> {
+    let i = if args.first().is_some_and(|a| a == "--index") {
+        2
+    } else {
+        0
+    };
+    args.get(i).map(String::as_str)
+}
+
+fn timeout_for(args: &[String]) -> Duration {
+    if matches!(subcommand(args), Some("embed" | "update")) {
+        SETUP_TIMEOUT
+    } else {
+        QUERY_TIMEOUT
+    }
+}
+
+/// Runs `bin args` with a hard ceiling. The child is killed on drop, so a timeout (or a cancelled
+/// run) never leaves a qmd process behind. A timeout is reported as an unsuccessful
+/// [`QmdOutput`], so callers turn it into a skipped configuration or a per-question error rather
+/// than a hang or a zero score.
+async fn run_bounded(bin: &Path, args: &[String], timeout: Duration) -> Result<QmdOutput, Skipped> {
+    let child = tokio::process::Command::new(bin)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let out = match tokio::time::timeout(timeout, child).await {
+        Ok(r) => r,
+        Err(_) => {
+            return Ok(QmdOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: format!(
+                    "qmd did not finish within {}s (stalled model download or load?)",
+                    timeout.as_secs_f64()
+                ),
+            })
+        }
+    };
+    let out = out.map_err(|e| {
+        Skipped(format!(
+            "qmd binary '{}' could not be started: {e} (install it out of band, see docs/retrieval-quality-evaluation.md)",
+            bin.display()
+        ))
+    })?;
+    Ok(QmdOutput {
+        success: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    })
+}
+
 impl QmdRunner for ProcessRunner {
     fn run<'a>(&'a self, args: &'a [String]) -> BoxFuture<'a, Result<QmdOutput, Skipped>> {
-        Box::pin(async move {
-            let out = tokio::process::Command::new(&self.bin)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .output()
-                .await
-                .map_err(|e| {
-                    Skipped(format!(
-                        "qmd binary '{}' could not be started: {e} (install it out of band, see docs/retrieval-quality-evaluation.md)",
-                        self.bin.display()
-                    ))
-                })?;
-            Ok(QmdOutput {
-                success: out.status.success(),
-                stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-            })
-        })
+        Box::pin(async move { run_bounded(&self.bin, args, timeout_for(args)).await })
     }
 }
 
@@ -397,6 +441,38 @@ mod tests {
             Some("guide-v2")
         );
         assert_eq!(note_of_path("///").as_deref(), None);
+    }
+
+    #[tokio::test]
+    async fn a_stalled_qmd_process_times_out_and_is_killed_not_hung() {
+        let started = Instant::now();
+        let out = run_bounded(
+            Path::new("/bin/sleep"),
+            &["30".to_string()],
+            Duration::from_millis(150),
+        )
+        .await
+        .unwrap();
+        assert!(!out.success);
+        assert!(
+            out.stderr.contains("did not finish within"),
+            "{}",
+            out.stderr
+        );
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn setup_commands_get_the_longer_timeout() {
+        let a = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(timeout_for(&a(&["--index", "i", "embed"])), SETUP_TIMEOUT);
+        assert_eq!(timeout_for(&a(&["--index", "i", "update"])), SETUP_TIMEOUT);
+        assert_eq!(
+            timeout_for(&a(&["--index", "i", "query", "--json", "embed"])),
+            QUERY_TIMEOUT,
+            "a question that says 'embed' is still a query"
+        );
+        assert_eq!(timeout_for(&a(&["--version"])), QUERY_TIMEOUT);
     }
 
     #[tokio::test]
