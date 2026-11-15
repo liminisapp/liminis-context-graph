@@ -2143,7 +2143,10 @@ impl<'db> Conn<'db> {
     ) -> Result<Vec<crate::lint::snapshot::LintEdge>, Error> {
         let mut preds: Vec<&str> = Vec::new();
         if group_ids.is_some() {
-            preds.push("rn.group_id IN $gids");
+            // An edge is in scope when it, or either endpoint, belongs to a scoped group: a
+            // cross-group edge (ADR-0615) is keyed on one group but still anchors the entity in
+            // the other, which orphan detection must see.
+            preds.push("(rn.group_id IN $gids OR src.group_id IN $gids OR dst.group_id IN $gids)");
         }
         if after.is_some() {
             preds.push("rn.uuid > $after");

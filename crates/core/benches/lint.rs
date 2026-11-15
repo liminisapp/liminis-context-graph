@@ -1,8 +1,8 @@
 //! Issue #755 / ADR-0755, SC-004: `knowledge_lint` must scale near-linearly with group size — a
 //! full pass at 10× the episodes should cost no more than about 12× the time. One `[[bench]]`
-//! target (ADR-0316), run on demand through `bench.yml`; the ratio is read off the Criterion output
-//! (and recorded in the PR), deliberately not asserted here: a timing gate in a shared-runner run
-//! would be flaky.
+//! target (ADR-0316), run on demand with `cargo bench --bench lint` (not yet wired into
+//! `bench.yml`); the ratio is read off the Criterion output (and recorded in the PR), deliberately
+//! not asserted here: a timing gate in a shared-runner run would be flaky.
 //!
 //! The fixture is `n` episodes, each primary with its own `doc_id`, producing one fact between two
 //! entities and mentioning both. A tenth of the episodes are derived pages restating the previous
