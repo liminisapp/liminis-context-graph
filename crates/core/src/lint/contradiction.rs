@@ -13,6 +13,12 @@ use super::classes::Ctx;
 use super::ids::finding_id;
 use super::{Category, CategoryResult, Citations, Finding};
 
+/// Most distinct believed targets one `(group, source, designation)` may have before its pairs are
+/// skipped. k targets yield k(k-1)/2 findings, so a mis-designated multi-valued relation (e.g.
+/// `related_to`) would otherwise blow up time and memory. Skipped subjects are counted in
+/// `summary…skipped_subjects`, never silently.
+pub const MAX_SIDES: usize = 50;
+
 /// The designation `edge` falls under: its `name` first, then its `relation_type`, compared
 /// trimmed and ASCII-case-insensitively against the normalised set.
 fn designation(
@@ -51,7 +57,12 @@ pub fn analyse(ctx: &Ctx<'_>, single_valued: &[String]) -> CategoryResult {
     }
 
     let mut out = Vec::new();
+    let mut skipped_subjects = 0usize;
     for ((group, src, desig), sides) in &by_subject {
+        if sides.len() > MAX_SIDES {
+            skipped_subjects += 1;
+            continue;
+        }
         let targets: Vec<(&String, &Vec<usize>)> = sides.iter().collect();
         for a in 0..targets.len() {
             for b in (a + 1)..targets.len() {
@@ -98,5 +109,7 @@ pub fn analyse(ctx: &Ctx<'_>, single_valued: &[String]) -> CategoryResult {
             }
         }
     }
-    CategoryResult::ok(out)
+    let mut r = CategoryResult::ok(out);
+    r.extra = Some(json!({"skipped_subjects": skipped_subjects}));
+    r
 }

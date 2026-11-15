@@ -89,6 +89,10 @@ cursor keeps decoding. Unlike the older reads, `next_cursor` is always present (
   (shared token of ≥ 4 characters, or shared 3-character prefix of the sorted-token key), so raising the
   threshold can only shrink the result. A block over 200 entities is skipped and counted
   (`skipped_blocks`), never silently; near-duplicates sharing no block are not found.
+- **Contradiction bound**: findings are per unordered pair of targets, so k targets give k(k-1)/2 findings.
+  A `(group, source, designation)` with more than 50 distinct believed targets is skipped and counted
+  (`skipped_subjects`) rather than expanded; it almost always means a multi-valued relation was designated
+  single-valued by mistake.
 - **Unlinked mention / missing page**: reads a convention in episode `attributes` (ADR-0528) — `page_for`
   (entity uuid, or a unique case-insensitive name in the group) marks a page; `links: [doc_id…]` opts a
   document into link tracking. `unavailable` (`no_page_data` / `no_link_data`) until the scope carries both.

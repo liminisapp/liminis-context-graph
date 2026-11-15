@@ -1579,7 +1579,9 @@ snapshot loads, so writers do not queue behind the analysis; the page may reflec
 graph than the summary. Near-duplicate candidates come from a deterministic blocking scheme (shared
 long token or shared 3-character prefix of the sorted-token name) so work stays bounded; a block of
 more than 200 entities is skipped and counted in `summary…skipped_blocks`, and a near-duplicate
-sharing no block with its twin is not found. Findings depend on the evaluated instant (a
+sharing no block with its twin is not found. Likewise a `(source, relation)` with more than 50
+distinct believed targets is skipped for `contradiction` (it would yield one finding per pair) and
+counted in `summary…skipped_subjects`. Findings depend on the evaluated instant (a
 future-dated document supersession takes effect when its time arrives), so determinism holds for an
 unchanged graph at the same instant.
 

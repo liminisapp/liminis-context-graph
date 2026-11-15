@@ -167,7 +167,7 @@ A user wants to know which documents mention an entity without linking to its pa
 - Finding IDs must survive unrelated graph churn: adding unrelated episodes, rebuilding from the WAL, or restoring a checkpoint must not change the ID of an unchanged finding. A finding whose subject changes materially (e.g. a contradiction side is replaced) is a new finding with a new ID.
 - A finding that disappears and later reappears carries the same ID (so dismissal tracking can notice a resurfaced problem).
 - The graph changes between pages: cursors are keyset-based (ADR-0667), so paging never duplicates a finding but may reflect newer state; the response says so by omission, not by locking.
-- Very large groups: the report must still return a first page within the performance bound (SC-004) and not materialise every finding before responding where avoidable.
+- Very large groups: the report must still return a first page within the performance bound (SC-004). *(Amended by ADR-0755: every call is a full pass because summary counts are exact; only the returned page is hydrated.)*
 - A group in degraded mode (ADR-0009) or still rebuilding: the report fails the same way other reads do, with no partial or misleading result.
 - Origin is the caller's claim and is not authenticated (ADR-0752); lint inherits that and states it in the reference docs.
 
@@ -211,7 +211,7 @@ A user wants to know which documents mention an entity without linking to its pa
 - **SC-001**: On `demo-notebook`, one request returns every category (or marks it `unavailable` with a reason), and for a sample of at least 10 findings across categories a reviewer can confirm each one by opening only the cited notes.
 - **SC-002**: A full report runs with zero LLM and zero embedding-model calls (verified by running with those backends disabled or absent).
 - **SC-003**: Repeated requests on an unchanged graph return byte-identical findings and IDs, and the IDs of unaffected findings are unchanged after a WAL rebuild and after unrelated ingests.
-- **SC-004**: Report time grows near-linearly with group size: on groups of 1k, 10k and 50k episodes (the sizes already used by the benchmark suite), time for a full pass at 10× the size is no more than about 12× the time at 1×, and the first page of a single-category request returns without a full-group pass where the category allows.
+- **SC-004**: Report time grows near-linearly with group size: on groups of 1k, 10k and 50k episodes (the sizes already used by the benchmark suite), time for a full pass at 10× the size is no more than about 12× the time at 1×, and the first page of a single-category request returns without a full-group pass where the category allows. *(Amended by ADR-0755: the exact summary of FR-005 requires a full pass on every call, so the first-page clause does not hold; the near-linear full-pass bound is the criterion.)*
 - **SC-005**: After correcting or superseding a primary document, the next report lists every derived page that rested solely on it and no derived page that retains live primary support, with no re-ingest of the derived pages.
 - **SC-006**: Paging a report to exhaustion returns each finding exactly once, and the summed page sizes equal the summary count for each category.
 - **SC-007**: A lint run leaves the graph, the WAL, and the index state byte-for-byte unchanged.
