@@ -47,6 +47,30 @@ fn kind_filter_prop() -> Value {
     })
 }
 
+fn origin_prop() -> Value {
+    json!({
+        "type": "string", "enum": ["primary", "external", "derived", "answer"],
+        "description": "What kind of content this episode is (issue #752): `primary` (a \
+                         human-written note — the default when omitted), `external` (clipped or \
+                         imported third-party material), `derived` (an agent-written page or a \
+                         consolidation) or `answer` (a filed Q&A response). A claim by the \
+                         caller, not authenticated. `derived` and `answer` episodes are cited \
+                         but never counted as corroboration, never override primary/external \
+                         content, and every episode of one `doc_id` must share one origin."
+    })
+}
+
+fn origins_prop() -> Value {
+    json!({
+        "type": "array", "minItems": 1,
+        "items": {"type": "string", "enum": ["primary", "external", "derived", "answer"]},
+        "description": "Optional origin filter (issue #752): keep only results supported by at \
+                         least one episode with one of these origins (e.g. [\"primary\", \
+                         \"external\"] to exclude an agent's own derived pages). Omitted: no \
+                         filter. An empty list or unknown value is rejected."
+    })
+}
+
 fn cursor_prop() -> Value {
     json!({
         "type": "string",
@@ -118,7 +142,7 @@ fn with_belief(mut props: Value) -> Value {
     props
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (49 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (51 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -172,7 +196,14 @@ pub fn registry() -> Vec<ToolSpec> {
                            match while a gibberish query returns nothing. Unset, there is no \
                            floor. With `kind`, the floor applies on top of the kind path's \
                            bounded nearest-neighbour probe, which can already miss a rare \
-                           kind.",
+                           kind. Every node also carries `support` (issue #752): the number of \
+                           distinct source documents mentioning it per origin (`primary`, \
+                           `external`, `derived`, `answer`; a `doc_id` is one document, an \
+                           episode without one counts as its own) and `corroboration` \
+                           (primary + external). Counts reflect live episodes now. `origins` \
+                           keeps only entities mentioned by an episode of one of those origins; \
+                           over-fetched and post-filtered, so fewer than `num_results` can come \
+                           back.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -185,7 +216,8 @@ pub fn registry() -> Vec<ToolSpec> {
                             "type": "integer", "minimum": 1, "default": 10,
                             "description": "Maximum number of entities to return."
                         },
-                        "min_similarity": min_similarity_prop()
+                        "min_similarity": min_similarity_prop(),
+                        "origins": origins_prop()
                     },
                     "required": ["query"]
                 })
@@ -231,7 +263,16 @@ pub fn registry() -> Vec<ToolSpec> {
                            the edge reports null (`text_match` false). Optional \
                            `min_similarity` (0-1, clamped, no default) drops fact-vector \
                            candidates below that cosine similarity before fusion; full-text \
-                           matches stay eligible regardless. Unset, there is no floor.",
+                           matches stay eligible regardless. Unset, there is no floor. Every \
+                           edge also carries `support` (issue #752): distinct source documents \
+                           per origin (`primary`, `external`, `derived`, `answer`) across the \
+                           episodes that produced it and its same-fact siblings (edges sharing \
+                           endpoints and relation name), and `corroboration` (primary + \
+                           external). A derived restatement adds to `derived`, never to \
+                           `corroboration`. Derived from `episodes`, never `episode_uuids`; \
+                           counts reflect live episodes now. `origins` keeps only edges whose \
+                           own producing episodes include one of those origins; over-fetched \
+                           and post-filtered, so fewer than `num_results` can come back.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -243,7 +284,8 @@ pub fn registry() -> Vec<ToolSpec> {
                             "type": "integer", "minimum": 1, "default": 10,
                             "description": "Maximum number of relationships to return."
                         },
-                        "min_similarity": min_similarity_prop()
+                        "min_similarity": min_similarity_prop(),
+                        "origins": origins_prop()
                     })),
                     "required": ["query"]
                 })
@@ -285,7 +327,7 @@ pub fn registry() -> Vec<ToolSpec> {
                         "fields": fields_prop(
                             "uuid, name, group_id, created_at, ingested_at, source, source_description, \
                              content, valid_at, entity_edges, attributes, superseded_at, superseded_by, \
-                             superseded_by_kind, supersession_reason"
+                             superseded_by_kind, supersession_reason, doc_id, origin"
                         )
                     }
                 })
@@ -400,7 +442,11 @@ pub fn registry() -> Vec<ToolSpec> {
             description: "Semantic passage search over ingested episode text, returning \
                            scored text snippets. Each result includes the `attributes` (issue \
                            #528) of the episode it belongs to — no separate per-episode fetch \
-                           is needed to obtain them.",
+                           is needed to obtain them. Each result also carries the `origin` \
+                           (issue #752) of its episode, and `origins` restricts results to \
+                           episodes of those origins (e.g. exclude an agent's own derived \
+                           pages); the filter runs after the nearest-neighbour probe, which is \
+                           oversampled, so fewer than `num_results` can come back.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -415,7 +461,8 @@ pub fn registry() -> Vec<ToolSpec> {
                             "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5,
                             "description": "Minimum similarity score (clamped 0.0-1.0)."
                         },
-                        "group_ids": group_ids_prop()
+                        "group_ids": group_ids_prop(),
+                        "origins": origins_prop()
                     },
                     "required": ["query"]
                 })
@@ -585,7 +632,13 @@ pub fn registry() -> Vec<ToolSpec> {
                            `supersede: false` on every unit but the last, and pass the earlier \
                            units' `episode_uuid`s as `same_revision_episode_uuids` on the last. \
                            Commit your own record of a chunk as ingested only after this call \
-                           succeeds.",
+                           succeeds. `origin` (issue #752) declares what kind of content the \
+                           chunk is; a `derived` or `answer` chunk is cited for provenance but \
+                           never counted as corroboration, may not rewrite or merge into an \
+                           entity with primary/external support, and is refused (error message \
+                           prefixed `origin_conflict:`, nothing written) when its `chunk_id` \
+                           has a live primary/external episode or its `doc_id` already has a \
+                           different origin.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -601,6 +654,7 @@ pub fn registry() -> Vec<ToolSpec> {
                         },
                         "attributes": {"type": "object", "description": "Arbitrary JSON object, stored JSON-serialized on the resulting episode. Defaults to {} when omitted or non-object."},
                         "doc_id": {"type": "string", "description": "Stable identity of the logical document this episode came from, unique within the group (issue #707). Optional; an episode without one cannot take part in document supersession. Never defaulted from source_file."},
+                        "origin": origin_prop(),
                         "supersede": {"type": "boolean", "default": true, "description": "Set false on every non-final unit of a chunk submitted as several calls under one chunk_id, so a unit does not supersede the previous one."},
                         "same_revision_episode_uuids": {"type": "array", "items": {"type": "string"}, "description": "On the final unit of a multi-unit revision: episode_uuids returned by the earlier units. They stay live; the chunk's older episodes are superseded."}
                     },
@@ -615,13 +669,19 @@ pub fn registry() -> Vec<ToolSpec> {
                            written directly to the resulting episode node — structured metadata \
                            co-located with, but independent of, the facts extracted from the \
                            episode's body (reachable from the episode via a MENTIONS hop). \
-                           Returned by `knowledge_get_episodes` and `knowledge_search_passages`.",
+                           Returned by `knowledge_get_episodes` and `knowledge_search_passages`. \
+                           `origin` (issue #752) declares what kind of content the episode is \
+                           (default `primary`); `derived` and `answer` episodes never count as \
+                           corroboration and may not rewrite entities with primary/external \
+                           support. A `doc_id` whose origin differs from the one already \
+                           recorded is refused with an `origin_conflict:` error.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
                     "type": "object",
                     "properties": {
                         "name": {"type": "string", "description": "Episode name."},
+                        "origin": origin_prop(),
                         "episode_body": {"type": "string", "description": "Episode content."},
                         "source": {"type": "string", "default": "text", "description": "Source type (e.g. \"text\", \"json\")."},
                         "source_description": {"type": "string"},
@@ -696,13 +756,17 @@ pub fn registry() -> Vec<ToolSpec> {
                            `valid_at`/`invalid_at` are never written. Prefer this to \
                            `knowledge_delete_chunk_episode` for a section that was removed from \
                            a document; that method keeps its explicit-deletion contract. \
-                           Idempotent.",
+                           Idempotent. Optional `origin` (issue #752) is the origin acting on \
+                           the chunk: a `derived` or `answer` removal of a chunk with a live \
+                           primary/external episode is refused (`origin_conflict:`, nothing \
+                           written). Omitted, the call behaves exactly as before.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
                     "type": "object",
                     "properties": {
                         "chunk_id": {"type": "string", "description": "Chunk ID that no longer exists (required, non-empty)."},
+                        "origin": origin_prop(),
                         "group_ids": {
                             "type": "array", "items": {"type": "string"}, "minItems": 1,
                             "description": "Non-empty array of groups to restrict the supersession to (required). An unscoped, all-groups call is not supported."
@@ -724,8 +788,10 @@ pub fn registry() -> Vec<ToolSpec> {
                            `valid_at`/`invalid_at` are never written. Rejected, with no side \
                            effects, when the documents are the same, either is unknown in the \
                            group, the relation would form a cycle, or the old document is \
-                           already superseded differently; recording the identical relation \
-                           again is a no-op (`already_recorded`).",
+                           already superseded differently, or (issue #752) the superseding \
+                           document is `derived`/`answer` and the superseded one is \
+                           `primary`/`external` (`origin_conflict:`); recording the identical \
+                           relation again is a no-op (`already_recorded`).",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -1131,7 +1197,49 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── admin (15) — WAL/lifecycle/recovery/index maintenance ────────────────────
+        // ── admin (16) — WAL/lifecycle/recovery/index maintenance ────────────────────
+        ToolSpec {
+            name: "knowledge_stamp_origin",
+            description: "Stamp `origin` (issue #752) onto EXISTING episodes of one group, without \
+                           re-extraction — the migration path for a graph that predates origin, \
+                           where every episode reads as `primary`. `rules` is an ordered list of \
+                           `{origin, source_path_prefix?, attributes_kind?}`; each rule needs at \
+                           least one selector, selectors within a rule are ANDed, and the first \
+                           matching rule wins. `source_path_prefix` matches the start of the \
+                           episode's `source_description` (`<source_file>:<chunk_id>`); \
+                           `attributes_kind` matches `attributes.kind` exactly (e.g. \
+                           `knowledge` → `derived`). An episode with a `doc_id` pulls in its \
+                           whole document, and rules that would give one document two origins \
+                           are refused. `dry_run: true` reports `{matched, changed, unchanged, \
+                           changes[{uuid, doc_id, from, to}], truncated}` and writes nothing. \
+                           Idempotent, recorded in the WAL (survives rebuild), makes no LLM or \
+                           embedding call, and never revisits supersessions or invalidations \
+                           already made.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "description": "Group whose episodes to stamp (required, non-empty)."},
+                        "rules": {
+                            "type": "array", "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "origin": origin_prop(),
+                                    "source_path_prefix": {"type": "string", "description": "Match episodes whose source_description starts with this."},
+                                    "attributes_kind": {"type": "string", "description": "Match episodes whose attributes.kind equals this."}
+                                },
+                                "required": ["origin"]
+                            },
+                            "description": "Ordered stamp rules; the first matching rule wins."
+                        },
+                        "dry_run": {"type": "boolean", "default": false, "description": "Report what would change and write nothing."}
+                    },
+                    "required": ["group_id", "rules"]
+                })
+            },
+        },
         ToolSpec {
             name: "knowledge_dump_wal",
             description: "Snapshot the current graph contents into a fresh compacted WAL \
@@ -1603,11 +1711,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_50_unique_tools() {
+    fn registry_has_51_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 50);
+        assert_eq!(r.len(), 51);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 50, "tool names must be unique");
+        assert_eq!(names.len(), 51, "tool names must be unique");
     }
 
     #[test]
@@ -1617,7 +1725,7 @@ mod tests {
         assert_eq!(count(Scope::Read), 17);
         assert_eq!(count(Scope::Write), 17);
         assert_eq!(count(Scope::Cypher), 1);
-        assert_eq!(count(Scope::Admin), 15);
+        assert_eq!(count(Scope::Admin), 16);
     }
 
     #[test]
