@@ -51,6 +51,12 @@ pub struct RankedResult {
 pub trait Retriever: Send + Sync {
     fn id(&self) -> &str;
     fn description(&self) -> String;
+    /// True when every query spawns a fresh process (qmd). A full warm-up pass cannot make such a
+    /// retriever warm — each timed query reloads its models regardless — so it gets a single
+    /// warm-up query (absorbing one-off model download / disk-cache cost) instead of a whole pass.
+    fn per_process(&self) -> bool {
+        false
+    }
     fn retrieve<'a>(
         &'a self,
         question: &'a str,
@@ -133,8 +139,9 @@ pub fn render_plan(p: &Plan) -> String {
     s
 }
 
-/// Scores one configuration: one unmeasured warm-up pass over every question, then one measured
-/// pass (warm latency convention). A question whose query errors is listed in `query_errors` and
+/// Scores one configuration: one unmeasured warm-up pass over every question (a single query for
+/// per-process retrievers, see [`Retriever::per_process`]), then one measured pass (warm latency
+/// convention). A question whose query errors is listed in `query_errors` and
 /// left out of the means — never scored as zero. If *every* query fails the configuration is
 /// reported as skipped.
 pub async fn score_config(
@@ -144,7 +151,8 @@ pub async fn score_config(
     judge: Option<&CachedEvidenceJudge<'_>>,
     judge_skip_reason: &str,
 ) -> Status {
-    for q in questions {
+    let warm_n = if r.per_process() { 1 } else { questions.len() };
+    for q in questions.iter().take(warm_n) {
         let _ = r.retrieve(&q.text, k).await;
     }
     let mut scores: Vec<QuestionScore> = Vec::new();
@@ -394,6 +402,7 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
         ingest_cost.lcg_chunks = map.chunks;
         ingest_cost.lcg_extraction_requests = map.extraction_requests;
         ingest_cost.lcg_rpc_calls = map.rpc_calls;
+        ingest_cost.lcg_unconfirmed_entity_links = map.unconfirmed_entity_links;
         for id in a.configs.iter().filter(|c| c.starts_with("lcg-")) {
             let r: Box<dyn Retriever> = match id.as_str() {
                 "lcg-passages" => Box::new(lcg::LcgPassages {
@@ -541,6 +550,63 @@ mod tests {
         evidence: Vec<String>,
         fail: bool,
     }
+
+    /// Counts calls and reports itself as process-per-query.
+    struct CountingPerProcess {
+        calls: std::sync::atomic::AtomicUsize,
+        per_process: bool,
+    }
+    impl Retriever for CountingPerProcess {
+        fn id(&self) -> &str {
+            "counting"
+        }
+        fn description(&self) -> String {
+            "counting".into()
+        }
+        fn per_process(&self) -> bool {
+            self.per_process
+        }
+        fn retrieve<'a>(
+            &'a self,
+            _q: &'a str,
+            _k: usize,
+        ) -> BoxFuture<'a, Result<RankedResult, String>> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async {
+                Ok(RankedResult {
+                    notes: vec!["a".into()],
+                    evidence: vec![],
+                    model_calls: None,
+                    lookup_calls: 0,
+                    latency: Duration::from_millis(1),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn per_process_retrievers_get_one_warm_up_query_not_a_full_pass() {
+        let qs = qs();
+        let n = qs.len();
+        let full = CountingPerProcess {
+            calls: Default::default(),
+            per_process: false,
+        };
+        let _ = score_config(&full, &qs, 10, None, "").await;
+        assert_eq!(full.calls.load(std::sync::atomic::Ordering::Relaxed), 2 * n);
+        let spawn = CountingPerProcess {
+            calls: Default::default(),
+            per_process: true,
+        };
+        let _ = score_config(&spawn, &qs, 10, None, "").await;
+        assert_eq!(
+            spawn.calls.load(std::sync::atomic::Ordering::Relaxed),
+            1 + n,
+            "one warm-up query plus the measured pass"
+        );
+    }
+
     impl Retriever for Canned {
         fn id(&self) -> &str {
             self.id

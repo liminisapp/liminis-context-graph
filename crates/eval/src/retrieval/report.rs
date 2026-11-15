@@ -69,6 +69,7 @@ pub struct IngestCost {
     pub lcg_chunks: usize,
     pub lcg_extraction_requests: usize,
     pub lcg_rpc_calls: usize,
+    pub lcg_unconfirmed_entity_links: usize,
     pub qmd_seconds: Option<f64>,
 }
 
@@ -231,6 +232,22 @@ impl Report {
         (h1, h2)
     }
 
+    /// `false-pos@k` is 1 whenever anything is returned, and every configuration runs with its score
+    /// floor at 0, so a vector search returns k results for any query. When every configuration
+    /// that has negative questions is pinned at 1.0 the column carries no signal; say so.
+    pub fn false_positive_note(&self) -> Option<String> {
+        let rates: Vec<f64> = self
+            .ran()
+            .iter()
+            .filter_map(|(_, r)| r.overall.false_positive_rate)
+            .collect();
+        if !rates.is_empty() && rates.iter().all(|v| (*v - 1.0).abs() < 1e-12) {
+            Some("> **false-pos@k is non-discriminating in this run:** every configuration scored 1.0 because score floors are 0 (so each system returns results for any query). Do not read it as a quality difference.".to_string())
+        } else {
+            None
+        }
+    }
+
     pub fn render_markdown(&self) -> String {
         let m = &self.meta;
         let mut o = String::new();
@@ -261,6 +278,10 @@ impl Report {
         self.table(&mut o, None);
         let w = self.winners(None);
         let _ = writeln!(o, "\nBest overall by nDCG@k: {}.", fmt_winners(&w));
+
+        if let Some(note) = self.false_positive_note() {
+            let _ = writeln!(o, "\n{note}");
+        }
 
         let _ = writeln!(o, "\n## Per category\n");
         for cat in Category::ALL {
@@ -297,7 +318,7 @@ impl Report {
         );
 
         let _ = writeln!(o, "\n## Cost\n");
-        let _ = writeln!(o, "Per query, **warm** (indices built and one unmeasured warm-up pass before timing). qmd runs as one process per query, so its latency includes model load.\n");
+        let _ = writeln!(o, "Per query, **warm** (indices built and one unmeasured warm-up pass before timing). qmd runs as one process per query, so its latency is **per-process** (it includes model load) and it gets a single warm-up query rather than a full pass.\n");
         let _ = writeln!(o, "| config | p50 ms | p95 ms | model calls/query | lookup calls | query errors | grounded judge |");
         let _ = writeln!(o, "|---|---|---|---|---|---|---|");
         for (c, r) in self.ran() {
@@ -336,6 +357,13 @@ impl Report {
             i.lcg_extraction_requests,
             i.lcg_rpc_calls
         );
+        if i.lcg_unconfirmed_entity_links > 0 {
+            let _ = writeln!(
+                o,
+                "- **Caution:** {} entity→note link(s) were accepted without `episode_uuids` confirmation (the `source` filter is a substring match), so `lcg-entities-facts*` note credit may be over-attributed.",
+                i.lcg_unconfirmed_entity_links
+            );
+        }
         let _ = writeln!(
             o,
             "- qmd index: {} s.",
@@ -497,7 +525,9 @@ impl Report {
             "ingest": {
                 "lcg_seconds": self.ingest.lcg_seconds, "lcg_chunks": self.ingest.lcg_chunks,
                 "lcg_extraction_requests": self.ingest.lcg_extraction_requests,
-                "lcg_rpc_calls": self.ingest.lcg_rpc_calls, "qmd_seconds": self.ingest.qmd_seconds,
+                "lcg_rpc_calls": self.ingest.lcg_rpc_calls,
+                "lcg_unconfirmed_entity_links": self.ingest.lcg_unconfirmed_entity_links,
+                "qmd_seconds": self.ingest.qmd_seconds,
             },
             "configs": configs,
             "winners": Category::ALL.iter().map(|c| (c.label().to_string(), self.winners(Some(*c)))).collect::<BTreeMap<_, _>>(),
@@ -660,5 +690,31 @@ mod tests {
         assert_eq!(best_value(&[Some(1.0), Some(1.0)], true), None);
         assert_eq!(best_value(&[Some(1.0), None], true), None);
         assert_eq!(best_value(&[Some(0.2), Some(0.5)], false), Some(0.2));
+    }
+
+    #[test]
+    fn false_positive_note_only_when_every_config_is_pinned_at_one() {
+        let mut r = report();
+        for c in &mut r.configs {
+            if let Status::Ran(run) = &mut c.status {
+                run.overall.false_positive_rate = Some(1.0);
+            }
+        }
+        assert!(r.false_positive_note().is_some());
+        assert!(r.render_markdown().contains("non-discriminating"));
+        if let Status::Ran(run) = &mut r.configs[0].status {
+            run.overall.false_positive_rate = Some(0.5);
+        }
+        assert!(r.false_positive_note().is_none());
+    }
+
+    #[test]
+    fn unconfirmed_entity_links_are_surfaced_only_when_present() {
+        let mut r = report();
+        assert!(!r.render_markdown().contains("without `episode_uuids`"));
+        r.ingest.lcg_unconfirmed_entity_links = 4;
+        let md = r.render_markdown();
+        assert!(md.contains("4 entity→note link(s) were accepted without `episode_uuids`"));
+        assert_eq!(r.to_json()["ingest"]["lcg_unconfirmed_entity_links"], 4);
     }
 }

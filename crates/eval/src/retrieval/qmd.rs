@@ -232,6 +232,10 @@ impl Retriever for QmdRetriever {
         self.id
     }
 
+    fn per_process(&self) -> bool {
+        true
+    }
+
     fn description(&self) -> String {
         format!(
             "qmd query {} (query expansion on; per-process spawn, latency includes model load)",

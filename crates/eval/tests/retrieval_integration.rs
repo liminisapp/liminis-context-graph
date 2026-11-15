@@ -215,6 +215,7 @@ async fn full_run(
             lcg_chunks: map.chunks,
             lcg_extraction_requests: map.extraction_requests,
             lcg_rpc_calls: map.rpc_calls,
+            lcg_unconfirmed_entity_links: map.unconfirmed_entity_links,
             qmd_seconds,
         },
         configs,

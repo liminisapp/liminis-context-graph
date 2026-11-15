@@ -51,10 +51,13 @@ never truncates a result list below k.
   superseded note outranks the best-ranked current note (or appears in the top k at all). Lower
   is better. A stale hit with no current hit counts as stale-above-current.
 - **false-pos@k** for negative questions (no relevant note exists): 1 if anything was returned.
-  Negatives are *excluded* from recall/MRR/nDCG means.
+  Negatives are *excluded* from recall/MRR/nDCG means. Because every configuration runs with its
+  score floor at 0, a system normally returns results for any query, so this column is usually
+  pinned at 1.0 for all of them; the report says so ("non-discriminating") rather than marking a
+  winner. It only separates systems that return fewer than k results on their own (e.g. qmd).
 - **Latency** p50/p95 per query, **warm only**: indices are built explicitly and one unmeasured
-  pass runs before the timed pass. qmd runs as one process per query, so its latency includes
-  model load.
+  pass runs before the timed pass. qmd runs as one process per query, so its latency is
+  per-process (it includes model load) and it gets a single warm-up query rather than a full pass.
 - **Query-time model calls.** LCG: one embedder call per read (a fallback `get_edges_by_uuids`
   lookup, if the read path omits provenance, is counted separately). qmd does not expose its
   expansion/rerank call counts, so they are reported as `n/a (not exposed)`, never as 0.

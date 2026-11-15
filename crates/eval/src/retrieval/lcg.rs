@@ -237,6 +237,10 @@ pub struct IngestMap {
     /// `knowledge_process_chunk` calls — each makes ≥1 extraction-LLM call (not individually counted).
     pub extraction_requests: usize,
     pub rpc_calls: usize,
+    /// Entity→note links accepted although the service reported no `episode_uuids` to confirm
+    /// them (the `source` filter is a CONTAINS match). Non-zero means `lcg-entities-facts`
+    /// note credit may be over-attributed; surfaced in the report.
+    pub unconfirmed_entity_links: usize,
     pub seconds: f64,
 }
 
@@ -320,6 +324,9 @@ pub async fn ingest(t: &dyn RpcTransport, fx: &Fixture) -> Result<IngestMap, Str
             let belongs =
                 eps.is_empty() || mine.is_some_and(|m| eps.iter().any(|e| m.contains(*e)));
             if belongs {
+                if eps.is_empty() {
+                    map.unconfirmed_entity_links += 1;
+                }
                 map.entity_notes
                     .entry(uuid.to_string())
                     .or_default()
@@ -685,6 +692,10 @@ mod tests {
         assert!(
             m.entity_notes["e2"].contains("new"),
             "no episode_uuids reported → accepted"
+        );
+        assert_eq!(
+            m.unconfirmed_entity_links, 1,
+            "the link accepted without episode_uuids is counted, not hidden"
         );
         let log = t.log.lock().unwrap();
         let order: Vec<&str> = log.iter().map(|(m, _)| m.as_str()).collect();
