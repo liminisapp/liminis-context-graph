@@ -186,7 +186,7 @@ pub async fn prepare(
             index_name,
         ]))
         .await?;
-    if !add.success && !add.stderr.to_lowercase().contains("exist") {
+    if !add.success && !collection_already_exists(&add) {
         return Err(Skipped(format!(
             "qmd collection add failed: {}",
             first_line(&add.stderr, &add.stdout)
@@ -211,6 +211,15 @@ pub async fn prepare(
         index_name: index_name.to_string(),
         index_seconds: started.elapsed().as_secs_f64(),
     })
+}
+
+/// True only when a failed `collection add` means the collection is already registered (a re-run
+/// against an existing index). A bare `"exist"` match is not enough: "directory does not exist"
+/// is a real failure that would otherwise score both qmd configurations against a stale or empty
+/// index.
+fn collection_already_exists(out: &QmdOutput) -> bool {
+    let text = format!("{} {}", out.stderr, out.stdout).to_lowercase();
+    text.contains("already exist") && !text.contains("not exist")
 }
 
 fn first_line(a: &str, b: &str) -> String {
@@ -392,6 +401,42 @@ mod tests {
         };
         let e = prepare(&r, "idx", Path::new("/x")).await.unwrap_err();
         assert!(e.0.contains("could not be started"), "{}", e.0);
+    }
+
+    fn failing_add(stderr: &'static str) -> FakeRunner {
+        FakeRunner::new(move |a| {
+            if a.contains(&"collection".to_string()) {
+                Ok(QmdOutput {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: stderr.into(),
+                })
+            } else {
+                ok("qmd 1.2.3\n")
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn collection_add_for_a_missing_directory_is_skipped_not_treated_as_existing() {
+        for msg in [
+            "Error: directory does not exist: /nope",
+            "path /nope does not exist",
+        ] {
+            let e = prepare(&failing_add(msg), "idx", Path::new("/nope"))
+                .await
+                .unwrap_err();
+            assert!(e.0.contains("collection add failed"), "{msg}: {}", e.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn collection_add_already_exists_is_benign_on_rerun() {
+        let r = failing_add("Collection 'idx' already exists");
+        let info = prepare(&r, "idx", Path::new("/notes")).await.unwrap();
+        assert_eq!(info.index_name, "idx");
+        let log = r.log.lock().unwrap();
+        assert!(log.iter().any(|a| a.contains(&"embed".to_string())));
     }
 
     #[tokio::test]
