@@ -199,6 +199,29 @@ The companion [observations proposal](derived-observations-and-mental-models.md)
 
 Keeping these separate prevents extraction mistakes from being promoted into seemingly authoritative inferred knowledge.
 
+## Relationship to the ingestion-surface proposal
+
+[`ingestion-surface-consolidation.md`](ingestion-surface-consolidation.md) (#567) reaches the same
+conclusion from the ingestion side: lcg should accept a **document mode** (a document plus
+metadata, chunked internally) beside chunk mode, converging on the same stored shape. This
+document is the extraction and reconciliation half of that document mode. The two are one track,
+#733, and should be specified together.
+
+Items consolidated into that track during the 2026-11-15 backlog review:
+
+- **Unchanged-text no-op:** skip chunks whose content hash has not changed before extraction (the
+  surviving half of #284, now closed). This is also what removes #288's wasted extraction.
+- **Server-side splitting** of oversized input inside document mode (#282 / #284).
+- **Structural fix for #292** through a revision identity.
+- **Origin as document metadata (#752):** `primary` / `external` / `derived` / `answer`, so
+  agent-written notebook pages are interpreted as citing their sources rather than as new
+  evidence. In document mode, origin is a property of the document revision.
+- **Per-collection source descriptions** (from qmd): a short "what this source is" description
+  attached to each hit, so context assembly can tell an ADR from meeting notes or a clipped article.
+
+#291 (the unindexed `Episodic.name` / `doc_id` lookup, now on every call) stays a separate
+performance fix, but document mode's bulk re-ingest depends on it.
+
 ## Architectural recommendation
 
 **Introduce a first-class document/revision concept and a document-scoped extraction-and-reconciliation workflow. Retain chunk-level episodes as evidence units and `knowledge_process_chunk` as a low-level primitive.** Benchmark chunk-only, whole-document, and hybrid extraction before committing to a more complex production pipeline.
