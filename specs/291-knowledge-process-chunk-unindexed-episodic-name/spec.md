@@ -2,7 +2,15 @@
 
 **Feature Branch**: `fabrik/issue-291`
 **Created**: 2026-11-15
-**Status**: Specified
+**Status**: Specified — design superseded by [ADR-0291](../../docs/adr/0291-native-art-index-for-episodic-lookups.md)
+**Design note**: This spec was written around an in-process, non-persisted accelerator
+(FR-004 – FR-008, FR-011, FR-013 and the "transitional, #221 deletes it" assumptions). The
+implementation instead uses database-native ART indexes on `Episodic.name` and `Episodic.doc_id`,
+because #221 had already replaced the `NameIndex` precedent with native indexes (lbug ≥ 0.18).
+The index is persisted by the database, so FR-011's "in-process only" and FR-013's "transitional"
+do not apply as written; FR-004 – FR-008 hold because the database maintains the index. The
+goals (FR-001 – FR-003, FR-009, FR-010, SC-001 – SC-005) are unchanged. See ADR-0291 for the
+requirement-by-requirement mapping.
 **Input**: User description: "
 
 ## Background
