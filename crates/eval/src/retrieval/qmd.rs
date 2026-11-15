@@ -73,6 +73,9 @@ pub struct QmdInfo {
     pub version: String,
     pub index_name: String,
     pub index_seconds: f64,
+    /// `collection add` reported the collection already existed, so qmd keeps whatever directory
+    /// it was first registered with.
+    pub reused_collection: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -186,7 +189,8 @@ pub async fn prepare(
             index_name,
         ]))
         .await?;
-    if !add.success && !collection_already_exists(&add) {
+    let reused_collection = !add.success && collection_already_exists(&add);
+    if !add.success && !reused_collection {
         return Err(Skipped(format!(
             "qmd collection add failed: {}",
             first_line(&add.stderr, &add.stdout)
@@ -210,6 +214,7 @@ pub async fn prepare(
         version,
         index_name: index_name.to_string(),
         index_seconds: started.elapsed().as_secs_f64(),
+        reused_collection,
     })
 }
 
@@ -435,6 +440,7 @@ mod tests {
         let r = failing_add("Collection 'idx' already exists");
         let info = prepare(&r, "idx", Path::new("/notes")).await.unwrap();
         assert_eq!(info.index_name, "idx");
+        assert!(info.reused_collection);
         let log = r.log.lock().unwrap();
         assert!(log.iter().any(|a| a.contains(&"embed".to_string())));
     }

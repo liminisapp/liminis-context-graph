@@ -236,6 +236,17 @@ fn fake_qmd(fx: &Fixture) -> Arc<dyn QmdRunner> {
 // ── fixture sanity (SC-003, FR-011, FR-012) ──────────────────────────────────────
 
 #[test]
+fn default_qmd_index_name_changes_with_the_corpus_hash() {
+    let fx = fixture::load(&fixture_dir()).unwrap();
+    let name = lcg_eval::retrieval::default_qmd_index(&fx);
+    assert!(name.starts_with("lcg-eval-"), "{name}");
+    assert!(
+        name.ends_with(&fx.corpus_hash[..8]),
+        "index name must carry the corpus hash so an edited corpus gets a fresh qmd collection: {name}"
+    );
+}
+
+#[test]
 fn checked_in_fixture_loads_and_covers_every_category() {
     let fx = fixture::load(&fixture_dir()).expect("fixture must validate");
     let mut by: HashMap<Category, usize> = HashMap::new();

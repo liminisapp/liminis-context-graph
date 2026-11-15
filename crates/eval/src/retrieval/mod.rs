@@ -81,6 +81,14 @@ pub struct Plan {
     pub warnings: Vec<String>,
 }
 
+/// Default qmd index name. Includes a corpus-hash prefix because qmd keeps a collection's original
+/// directory: reusing a name across a different or edited corpus would score qmd against the old
+/// one while the report prints the new corpus hash.
+pub fn default_qmd_index(fx: &Fixture) -> String {
+    let hash: String = fx.corpus_hash.chars().take(8).collect();
+    format!("lcg-eval-{}-{hash}", fx.manifest.corpus_version)
+}
+
 pub fn resolve(args: &RetrievalArgs, fx: &Fixture) -> Plan {
     let mut category_counts: BTreeMap<Category, usize> =
         Category::ALL.iter().map(|c| (*c, 0)).collect();
@@ -108,7 +116,7 @@ pub fn resolve(args: &RetrievalArgs, fx: &Fixture) -> Plan {
         qmd_index: args
             .qmd_index
             .clone()
-            .unwrap_or_else(|| format!("lcg-eval-{}", fx.manifest.corpus_version)),
+            .unwrap_or_else(|| default_qmd_index(fx)),
         needs_lcg: args.configs.iter().any(|c| c.starts_with("lcg-")),
         needs_qmd: args.configs.iter().any(|c| c.starts_with("qmd")),
         warnings,
@@ -437,6 +445,14 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
         );
         match qmd::prepare(runner.as_ref(), &plan.qmd_index, &fx.notes_dir()).await {
             Ok(info) => {
+                if info.reused_collection {
+                    eprintln!(
+                        "lcg-eval retrieval: WARNING: qmd index '{}' already existed and keeps its original directory; \
+                         if --corpus changed or notes were edited, use a new --qmd-index (or `qmd collection remove`) \
+                         so qmd is scored against this corpus",
+                        info.index_name
+                    );
+                }
                 meta.qmd_version = info.version.clone();
                 ingest_cost.qmd_seconds = Some(info.index_seconds);
                 meta.qmd_models = match runner

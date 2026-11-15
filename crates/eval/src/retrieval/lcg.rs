@@ -35,7 +35,13 @@ pub trait RpcTransport: Send + Sync {
 pub struct UdsClient {
     conn: Mutex<BufReader<UnixStream>>,
     next_id: AtomicU64,
+    timeout: Duration,
 }
+
+/// Per-request ceiling. Generous because `knowledge_process_chunk` makes extraction-LLM calls and
+/// `knowledge_build_indices` can be slow, but finite so a hung service fails the run instead of
+/// stalling it forever.
+pub const RPC_TIMEOUT: Duration = Duration::from_secs(900);
 
 impl UdsClient {
     pub async fn connect(path: &Path) -> Result<Self, String> {
@@ -45,13 +51,17 @@ impl UdsClient {
         Ok(Self {
             conn: Mutex::new(BufReader::new(s)),
             next_id: AtomicU64::new(1),
+            timeout: RPC_TIMEOUT,
         })
     }
-}
 
-impl RpcTransport for UdsClient {
-    fn call<'a>(&'a self, method: &'a str, params: Value) -> BoxFuture<'a, Result<Value, String>> {
-        Box::pin(async move {
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    async fn exchange(&self, method: &str, params: Value) -> Result<Value, String> {
+        {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let mut line = serde_json::to_string(
                 &json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}),
@@ -86,6 +96,21 @@ impl RpcTransport for UdsClient {
                 }
                 return Ok(v["result"].clone());
             }
+        }
+    }
+}
+
+impl RpcTransport for UdsClient {
+    fn call<'a>(&'a self, method: &'a str, params: Value) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            tokio::time::timeout(self.timeout, self.exchange(method, params))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "{method}: no response from the service within {}s",
+                        self.timeout.as_secs_f64()
+                    ))
+                })
         })
     }
 }
@@ -206,7 +231,13 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
         }
         if sock.exists() {
             if let Ok(c) = UdsClient::connect(&sock).await {
-                if c.call("knowledge_status", json!({})).await.is_ok() {
+                // The socket can be bound before the service answers; bound the probe by what is
+                // left of the startup deadline so a silent service cannot outlive it.
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if tokio::time::timeout(remaining, c.call("knowledge_status", json!({})))
+                    .await
+                    .is_ok_and(|r| r.is_ok())
+                {
                     break c;
                 }
             }
@@ -672,6 +703,26 @@ mod tests {
         let f = super::super::fixture::load(d.path()).unwrap();
         std::mem::forget(d);
         f
+    }
+
+    #[tokio::test]
+    async fn a_silent_service_times_out_instead_of_hanging() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("s.sock");
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        // Accepts the connection, reads nothing back, never answers.
+        let _server = tokio::spawn(async move {
+            let (_s, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let c = UdsClient::connect(&sock)
+            .await
+            .unwrap()
+            .with_timeout(Duration::from_millis(100));
+        let started = Instant::now();
+        let e = c.call("knowledge_status", json!({})).await.unwrap_err();
+        assert!(e.contains("no response"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[tokio::test]

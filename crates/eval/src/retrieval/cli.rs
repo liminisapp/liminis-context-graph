@@ -67,7 +67,7 @@ OPTIONS:
     --record-cassette <PATH>   Record ingest extraction to a cassette (LCG_RECORD_LLM).
     --qmd-bin <PATH>           qmd executable (default: qmd). Installed out of band; if it cannot
                                run, the qmd configurations are reported as skipped.
-    --qmd-index <NAME>         qmd named index to create (default: lcg-eval-<corpus_version>).
+    --qmd-index <NAME>         qmd named index to create (default: lcg-eval-<corpus_version>-<corpus_hash8>).
     --judge-model <MODEL>      Grounded-evidence judge model (default: claude-sonnet-4-6).
     --judge-cache <PATH>       JSONL verdict cache (default: retrieval_evidence_cache.jsonl).
     --no-grounded              Skip grounded-evidence judging (reported as skipped).
