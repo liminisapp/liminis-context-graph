@@ -70,6 +70,7 @@ every group in the database — treat the process boundary as the trust boundary
 - **[Operations](operations.md)** — WAL administration, degraded mode, and self-healing recovery.
 - **[Testing & Evaluation](testing-and-evaluation.md)** — LLM cassettes and the extraction-quality eval harness.
 - **[Extraction-Quality Evaluation](extraction-quality-evaluation.md)** — evaluation methodology, model rankings, and local-LLM guidance.
+- **[Retrieval-Quality Evaluation](retrieval-quality-evaluation.md)** — `lcg-eval retrieval`: LCG vs qmd on a notebook corpus, the question/judgement format, and how to run it.
 - **[Full-Corpus Extraction Benchmark Runbook](eval-full-corpus-runbook.md)** — maintainer procedure for full-corpus model comparison.
 - **[Release Process](release-process.md)** — maintainer procedure for verifying CI status before cutting a release.
 - **[ADR Index](adr/index.md)** — architecture decision records (historical, not current-state, documentation — see the index for framing).

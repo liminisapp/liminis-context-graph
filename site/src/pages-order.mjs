@@ -24,6 +24,7 @@ export const PAGES = [
   ['testing-and-evaluation', 'Testing & Evaluation'],
   ['eval-full-corpus-runbook', 'Full-Corpus Benchmark Runbook'],
   ['extraction-quality-evaluation', 'Extraction-Quality Evaluation'],
+  ['retrieval-quality-evaluation', 'Retrieval-Quality Evaluation'],
   ['release-process', 'Release Process'],
 ]
 

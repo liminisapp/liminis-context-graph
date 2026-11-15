@@ -80,6 +80,7 @@ ORDERED=(
   "testing-and-evaluation.md:${SITE_URL}/testing-and-evaluation"
   "eval-full-corpus-runbook.md:${SITE_URL}/eval-full-corpus-runbook"
   "extraction-quality-evaluation.md:${SITE_URL}/extraction-quality-evaluation"
+  "retrieval-quality-evaluation.md:${SITE_URL}/retrieval-quality-evaluation"
   "release-process.md:${SITE_URL}/release-process"
   # The decision records are not part of the site any more — the site redirects
   # /adr/* to GitHub. The index still belongs in this bundle, since it is real
