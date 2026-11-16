@@ -1,5 +1,7 @@
 # ADR-0705: Belief Time Is Separate From Validity — Corrections Supersede Episodes
 
+> **Amended by ADR-0292 (issue #292):** a revision supersedes only the same-named episodes it can attribute to `knowledge_process_chunk` (or that predate the `write_path` marker); a same-named episode written by another path is left alone.
+
 **Status**: Accepted
 **Date**: 2026-10-26
 **Issue**: #705 (part 1 of 3; #706 and #707 build on it)

@@ -71,6 +71,10 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // `attributes` above: a closed-vocabulary label (`primary` / `external` / `derived` / `answer`)
     // the caller declares for the episode. NULL or empty reads as `primary`, so — unlike
     // `attributes` — a pre-existing row or a pre-feature WAL replay needs no backfill. See ADR-0752.
+    // `write_path` (issue #292, ADR-0292) is a third deliberate divergence from graphiti's
+    // kuzu_driver.py, like `origin`: which write path produced the episode (`chunk` for
+    // `knowledge_process_chunk`, `episode` for every other path). Distinct from `origin`, which is
+    // content kind. NULL means written before the column existed, so no backfill.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Episodic (\
          uuid STRING PRIMARY KEY, \
@@ -90,7 +94,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          superseded_by_kind STRING, \
          supersession_reason STRING, \
          doc_id STRING, \
-         origin STRING\
+         origin STRING, \
+         write_path STRING\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -410,6 +415,8 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
         ("Episodic", "doc_id", "STRING"),
         // Episode origin (issue #752, ADR-0752). NULL / empty reads as `primary`, so no backfill.
         ("Episodic", "origin", "STRING"),
+        // Write-path provenance (issue #292, ADR-0292). NULL = pre-marker row; no backfill.
+        ("Episodic", "write_path", "STRING"),
         ("RelatesToNode_", "warrant", "STRING"),
         ("RelatesToNode_", "valid_at_source", "STRING"),
     ] {
