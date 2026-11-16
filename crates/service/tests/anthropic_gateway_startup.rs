@@ -196,10 +196,13 @@ fn anthropic_base_url_flag_wins_over_env() {
     );
 }
 
+/// (env vars, extra CLI args, substring the startup error must contain).
+type Case<'a> = (&'a [(&'a str, &'a str)], &'a [&'a str], &'a str);
+
 /// SC-005: each documented invalid configuration fails startup with an error naming the setting.
 #[test]
 fn invalid_gateway_config_fails_startup_naming_the_setting() {
-    let cases: &[(&[(&str, &str)], &[&str], &str)] = &[
+    let cases: &[Case] = &[
         (
             &[("ANTHROPIC_BASE_URL", "not a url")],
             &[],

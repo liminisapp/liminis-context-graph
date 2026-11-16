@@ -1041,6 +1041,7 @@ async fn bootstrap_app_state(
 /// self-recovery branch's `spawn_blocking` task, if already running, is not aborted by this — it
 /// keeps running detached, bounded by `main()`'s own `runtime.shutdown_timeout`, exactly as it
 /// already is for a normal shutdown.
+#[allow(clippy::too_many_arguments)] // thin forwarder to `bootstrap_app_state`; mirrors its parameters
 async fn bootstrap_or_exit_on_signal(
     shutdown_ct: &CancellationToken,
     telemetry_sink: Arc<dyn TelemetrySink>,

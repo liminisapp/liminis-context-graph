@@ -11,6 +11,8 @@ use lcg_core::telemetry::NoopSink;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
+type Seen = (String, Vec<String>, serde_json::Value);
+
 #[tokio::test]
 async fn primary_and_fallback_share_the_gateway_config() {
     std::env::set_var("LCG_EXTRACTION_LLM", "primary-model:fallback-model");
@@ -18,8 +20,7 @@ async fn primary_and_fallback_share_the_gateway_config() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     // (request line, lower-cased headers, body) per request.
-    let seen: Arc<Mutex<Vec<(String, Vec<String>, serde_json::Value)>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let seen: Arc<Mutex<Vec<Seen>>> = Arc::new(Mutex::new(Vec::new()));
     let seen_task = Arc::clone(&seen);
     tokio::spawn(async move {
         let mut n = 0;
