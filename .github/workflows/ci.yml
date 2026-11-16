@@ -542,11 +542,11 @@ jobs:
           # Greppable log; the guard below is colour-safe regardless.
           CARGO_TERM_COLOR: never
           LCG_LBUG_HOME: ${{ github.workspace }}/lbug-extension-bundle
-          # Cargo logs why it considers a unit dirty (stale file, changed env, rustc, ...) at
-          # info level. It lands in build.log, and assert-no-compiling.sh prints those lines if
-          # the guard trips, so an intermittent recompile explains itself on the run it happens.
-          CARGO_LOG: cargo::core::compiler::fingerprint=info
-        run: cargo test --release 2>&1 | tee /tmp/build.log
+        # `-v` makes cargo print a `Dirty <pkg>: <reason>` status line for every unit it rebuilds
+        # (changed file with both mtimes, changed env var, ...). assert-no-compiling.sh prints
+        # those if the guard trips, so an intermittent recompile explains itself on the run where
+        # it happens. (#764 tried CARGO_LOG=...fingerprint=info; cargo 1.100 logged nothing.)
+        run: cargo test --release -v 2>&1 | tee /tmp/build.log
 
       # Issue #500 FR-006/SC-004: regression guard for leaked, orphaned liminis-context-graph
       # processes. crates/service/tests/ spawns the built binary as a subprocess in many
