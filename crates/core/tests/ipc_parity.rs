@@ -331,6 +331,30 @@ async fn parity_get_episodes_empty() {
 }
 
 #[tokio::test]
+async fn parity_lint_empty() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        90,
+        "knowledge_lint",
+        json!({"group_ids": ["parity_group"], "limit": 10}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 90);
+    let r = &v["result"];
+    assert!(r["findings"].is_array(), "expected findings array: {v}");
+    assert_eq!(r["count"], 0);
+    assert!(
+        r["next_cursor"].is_null(),
+        "next_cursor is always present: {v}"
+    );
+    assert_eq!(r["summary"]["total"], 0);
+    assert_eq!(r["summary"]["categories"]["weak_support"]["status"], "ok");
+    assert!(r["effective"].is_object());
+}
+
+#[tokio::test]
 async fn parity_get_nodes_by_group_empty() {
     let (db, _dir) = make_db(4);
     let state = make_state(db);

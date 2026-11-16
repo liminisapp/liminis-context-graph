@@ -52,6 +52,8 @@ pub const ENTITY_FIELDS: &[&str] = &[
 
 pub const EPISODES_TAG: &str = "episodes";
 pub const ENTITIES_TAG: &str = "entities";
+/// `knowledge_lint` (issue #755, ADR-0755).
+pub const LINT_TAG: &str = "lint";
 
 const CURSOR_VERSION: u64 = 1;
 
@@ -153,6 +155,42 @@ pub fn shape_hash(
         g
     });
     let canonical = json!([tag, groups, kind, name_prefix]).to_string();
+    hex_encode(&Sha256::digest(canonical.as_bytes()))
+}
+
+/// Shape of a `knowledge_lint` query (issue #755). Covers everything that changes which findings
+/// exist or in what order: the groups, the selected categories, the near-duplicate threshold, the
+/// minimum-mentions bound and the normalised single-valued relation set. The page `limit` is
+/// excluded (it never changes membership). A separate function so [`shape_hash`] — and with it every
+/// live `episodes` / `entities` cursor — is untouched.
+pub fn lint_shape_hash(
+    groups: Option<&[String]>,
+    categories: &[&str],
+    near_duplicate_threshold: f64,
+    min_mentions: usize,
+    single_valued: &[String],
+) -> String {
+    let groups = groups.map(|g| {
+        let mut g: Vec<&str> = g.iter().map(String::as_str).collect();
+        g.sort_unstable();
+        g.dedup();
+        g
+    });
+    let mut cats: Vec<&str> = categories.to_vec();
+    cats.sort_unstable();
+    cats.dedup();
+    let mut sv: Vec<&str> = single_valued.iter().map(String::as_str).collect();
+    sv.sort_unstable();
+    sv.dedup();
+    let canonical = json!([
+        LINT_TAG,
+        groups,
+        cats,
+        near_duplicate_threshold,
+        min_mentions,
+        sv
+    ])
+    .to_string();
     hex_encode(&Sha256::digest(canonical.as_bytes()))
 }
 
@@ -286,6 +324,44 @@ mod tests {
             None,
         );
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn existing_shape_hash_is_unchanged_by_lint_support() {
+        // Pinned: live `episodes` / `entities` cursors must keep decoding after #755.
+        let canonical = json!(["episodes", ["g"], null, null]).to_string();
+        assert_eq!(
+            shape_hash(EPISODES_TAG, Some(&["g".to_string()]), None, None),
+            hex_encode(&Sha256::digest(canonical.as_bytes()))
+        );
+    }
+
+    #[test]
+    fn lint_shape_covers_every_query_input() {
+        let g = ["g".to_string()];
+        let sv = ["manager".to_string()];
+        let base = lint_shape_hash(Some(&g), &["weak_support"], 0.9, 3, &sv);
+        assert_eq!(
+            base,
+            lint_shape_hash(Some(&g), &["weak_support"], 0.9, 3, &sv)
+        );
+        for other in [
+            lint_shape_hash(None, &["weak_support"], 0.9, 3, &sv),
+            lint_shape_hash(Some(&g), &["orphan_entity"], 0.9, 3, &sv),
+            lint_shape_hash(Some(&g), &["weak_support"], 0.8, 3, &sv),
+            lint_shape_hash(Some(&g), &["weak_support"], 0.9, 4, &sv),
+            lint_shape_hash(Some(&g), &["weak_support"], 0.9, 3, &[]),
+        ] {
+            assert_ne!(base, other);
+        }
+        // Category and group order are irrelevant.
+        assert_eq!(
+            lint_shape_hash(Some(&g), &["a", "b"], 0.9, 3, &sv),
+            lint_shape_hash(Some(&g), &["b", "a"], 0.9, 3, &sv)
+        );
+        // A lint cursor never decodes as an episodes cursor.
+        let c = encode_cursor(LINT_TAG, &base, json!({"c": 0}));
+        assert!(decode_cursor(&c, EPISODES_TAG, &base).is_err());
     }
 
     #[test]

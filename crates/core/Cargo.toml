@@ -66,6 +66,10 @@ name = "episode_lookup"
 harness = false
 
 [[bench]]
+name = "lint"
+harness = false
+
+[[bench]]
 name = "hybrid_search"
 harness = false
 

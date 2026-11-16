@@ -155,6 +155,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0742](0742-per-group-write-allow-list.md) | Per-Group Write Allow-List (`--writable-groups`) Enforced in the Daemon | 2026-11-13 |
 | [0752](0752-episode-origin-and-corroboration.md) | Episode Origin — Derived Content Cites But Never Corroborates | 2026-11-15 |
 | [0754](0754-retrieval-eval-architecture.md) | Retrieval-Quality Eval Architecture — Service-Spawn Driver, qmd Baseline, Metric Definitions | 2026-11-15 |
+| [0755](0755-knowledge-lint-deterministic-health.md) | `knowledge_lint` — A Deterministic, LLM-Free Notebook Health Report | 2026-11-15 |
 
 ## Historical numbering
 

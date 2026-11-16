@@ -9,6 +9,15 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+### Added
+
+- **`knowledge_lint`** (#755, ADR-0755): a deterministic, LLM-free, read-only notebook health report
+  (`read` scope). Paged, with per-category counts and stable finding ids, it reports live
+  contradictions on relations you declare single-valued, stale derived pages whose primary evidence
+  was corrected or superseded, weakly supported facts, orphan and near-duplicate entities, and
+  unlinked mentions. Each finding cites the episodes, documents, entities and facts involved. No
+  schema or storage change; no model call; nothing is modified. The MCP registry grows to 52 tools.
+
 ## [0.18.1] - 2026-11-13
 
 Full detail: [docs/releases/0.18.1.md](docs/releases/0.18.1.md).
