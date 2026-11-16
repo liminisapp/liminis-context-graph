@@ -9,6 +9,19 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`knowledge_process_chunk` no longer ends belief in an episode it did not write** (#292,
+  ADR-0292). A chunk resubmission superseded every live same-named episode in the group, including
+  a `knowledge_add_episode` row whose free-form `name` happened to equal the `chunk_id`. Episodes now
+  carry a nullable `Episodic.write_path` provenance marker (`chunk` / `episode`); a revision
+  supersedes only `chunk`-marked rows and legacy NULL rows, leaves any other same-named row alone,
+  logs a `WARN`, and reports its UUID in a new `left_alone_episode_uuids` result field (present only
+  when non-empty). The column is added on first start by `ALTER TABLE ... ADD` with **no backfill**
+  and no storage-version change; the WAL and `knowledge_dump_wal` carry it. **Caveat:** rows written
+  before this change are NULL and keep today's name-based behaviour, so a pre-upgrade foreign row
+  remains exposed to the collision.
+
 ### Added
 
 - **`knowledge_lint`** (#755, ADR-0755): a deterministic, LLM-free, read-only notebook health report

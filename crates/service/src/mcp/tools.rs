@@ -698,7 +698,12 @@ pub fn registry() -> Vec<ToolSpec> {
                            asserted. Nothing is deleted and `valid_at`/`invalid_at` are never \
                            written — read the old facts with `as_of`, or hide them with \
                            `believed_only`, on the relationship reads. The result lists the \
-                           `superseded_episode_uuids`. To submit one chunk as several calls, send \
+                           `superseded_episode_uuids`. Only episodes this tool itself wrote (or \
+                           that predate the `write_path` marker) are superseded (issue #292): a \
+                           same-named episode written by `knowledge_add_episode` is left alone, \
+                           the call still succeeds as a fresh ingest, and its UUIDs are listed in \
+                           `left_alone_episode_uuids` (present only when non-empty). To submit \
+                           one chunk as several calls, send \
                            `supersede: false` on every unit but the last, and pass the earlier \
                            units' `episode_uuid`s as `same_revision_episode_uuids` on the last. \
                            Commit your own record of a chunk as ingested only after this call \

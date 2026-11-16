@@ -490,6 +490,20 @@ new ingest has fully succeeded. A failed re-ingest leaves the old episode live. 
 `superseded_episode_uuids`. Nothing is deleted. The same `chunk_id` in another group is never touched.
 `knowledge_add_episode` never supersedes (its `name` is free-form).
 
+A revision supersedes only episodes `knowledge_process_chunk` can attribute to itself (issue #292,
+[ADR-0292](adr/0292-chunk-ingest-never-supersedes-unattributed-episodes.md)). Every episode records
+which write path produced it (`Episodic.write_path`: `chunk` for `knowledge_process_chunk`, `episode`
+for `knowledge_add_episode` and every other path; not returned by episode reads). A live same-named
+episode written by another path — for example a `knowledge_add_episode` whose `name` equals a
+`chunk_id` and whose `source_description` mirrors `"{source_file}:{chunk_id}"` — is **left alone**:
+it stays live, the call still succeeds as a normal ingest, a `WARN` naming its UUID and
+`source_description` is logged, and the result gains `left_alone_episode_uuids` (present only when
+non-empty). **Legacy exposure:** episodes written before the marker existed (NULL `write_path`) are
+still treated as the chunk's own, so a pre-upgrade `knowledge_add_episode` row whose `name` equals a
+`chunk_id` can still be superseded; so can rows written by raw Cypher or other writers that leave the
+column NULL. The explicit by-name operations (`knowledge_mark_chunk_removed`,
+`knowledge_delete_chunk_episode`) are unchanged and still act on every same-named episode.
+
 To submit one chunk as several calls under one `chunk_id`, send `supersede: false` on every unit but
 the last, and pass the earlier units' `episode_uuid`s as `same_revision_episode_uuids` on the last:
 they stay live, the older episodes are superseded. **Record a chunk as ingested only after the call
