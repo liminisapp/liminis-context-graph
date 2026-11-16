@@ -16,5 +16,6 @@ pub mod metrics;
 pub mod pairwise;
 pub mod plan;
 pub mod report;
+pub mod retrieval;
 pub mod runner;
 pub mod scoring;

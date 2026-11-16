@@ -276,6 +276,31 @@ else
   ok "freeform LIVE run reaches the binary (skipped: no model server on this host)"
 fi
 
+echo "== 07-retrieval-eval.sh: guards =="
+REPO_R7="$WORKROOT/retr7"
+mkdir -p "$REPO_R7/target/release"
+cat > "$REPO_R7/target/release/lcg-eval" <<'STUB'
+#!/bin/sh
+echo "STUB-INVOKED $*" >> "$(dirname "$0")/../../retr-argv.log"
+exit 0
+STUB
+chmod +x "$REPO_R7/target/release/lcg-eval"
+
+out="$(env LCG_EVAL_REPO="$REPO_R7" "$HERE/07-retrieval-eval.sh" 2>&1)"; rc=$?
+assert_rc 1 "$rc" "07 refuses without a real embedder"
+assert_contains "LCG_EVAL_EMBEDDER_HTTP" "$out" "07 names the missing embedder variable"
+assert_not_contains "STUB-INVOKED" "$(cat "$REPO_R7/retr-argv.log" 2>/dev/null)" "07 does not reach the binary without an embedder"
+
+out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" 2>&1)"; rc=$?
+assert_rc 0 "$rc" "07 DRY_RUN needs no embedder"
+argv="$(cat "$REPO_R7/retr-argv.log" 2>/dev/null)"
+assert_contains "retrieval" "$argv" "07 DRY_RUN reaches the retrieval subcommand"
+assert_contains "--dry-run" "$argv" "07 DRY_RUN passes --dry-run"
+assert_not_contains "--embedder-http" "$argv" "07 DRY_RUN never starts anything needing an embedder"
+
+out="$(env LCG_EVAL_REPO="$WORKROOT/nobin" "$HERE/07-retrieval-eval.sh" 2>&1)"; rc=$?
+assert_rc 1 "$rc" "07 refuses when the lcg-eval binary is absent"
+
 # The identity/duplicate-key-under-LIMIT guard cases formerly tested here, and the
 # validate_report.py report-accounting cases, both moved to lcg-eval itself (#279
 # FR-002..FR-006) — see crates/eval/src/plan.rs's and crates/eval/src/report.rs's test

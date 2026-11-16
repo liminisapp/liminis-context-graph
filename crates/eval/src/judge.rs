@@ -413,6 +413,10 @@ const JUDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const ERROR_BODY_FALLBACK_BYTES: usize = 500;
 
 impl AnthropicJudgeClient {
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
     pub fn new(api_key: String, model: String) -> Self {
         Self {
             api_key,
@@ -430,7 +434,11 @@ impl AnthropicJudgeClient {
     /// Shared request/retry/text-extraction path for both `judge()` and `judge_pairwise()`
     /// — the only difference between the two is the prompt text and the response shape
     /// parsed out of the returned text, so the HTTP + backoff scaffolding lives here once.
-    async fn request_judge_text(&self, prompt: String, schema: Value) -> Result<String, String> {
+    pub(crate) async fn request_judge_text(
+        &self,
+        prompt: String,
+        schema: Value,
+    ) -> Result<String, String> {
         self.breaker.check()?;
         let result = self.request_judge_text_inner(prompt, Some(schema)).await;
         self.breaker.record(&result);

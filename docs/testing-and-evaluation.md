@@ -114,6 +114,10 @@ research findings this harness re-baselines, and
 [eval-full-corpus-runbook.md](eval-full-corpus-runbook.md) for the maintainer-run full-corpus model
 comparison (hosted Anthropic vs. local qwen3.6-27b) built on top of it, with the exact commands.
 
+This harness measures **extraction** only. For **retrieval** quality — whether the read side
+returns the right notes and evidence, compared with qmd — see
+[retrieval-quality-evaluation.md](retrieval-quality-evaluation.md) (`lcg-eval retrieval`).
+
 ### Running the harness
 
 ```bash
