@@ -595,7 +595,13 @@ precedence (highest first):
    Anthropic Messages API (hosted, or a gateway — see
    [Anthropic-compatible gateways](#anthropic-compatible-gateways-bedrock-openrouter-litellm)),
    unchanged from prior versions when no gateway setting is present. A reachable local sidecar
-   never silently redirects this traffic.
+   never silently redirects this traffic. One guard applies to `ANTHROPIC_AUTH_TOKEN` alone: if it
+   is the only Anthropic signal (no `ANTHROPIC_API_KEY`, no `ANTHROPIC_BASE_URL` /
+   `LCG_ANTHROPIC_ENDPOINT` / `--anthropic-*` flag) **and** `LCG_EXTRACTION_URL` is set, the local
+   extractor stays selected and a startup warning says the token was not used — the token is
+   commonly exported for other Anthropic tooling and must not silently reroute a configured local
+   extractor to `api.anthropic.com`. Add a gateway URL setting (or unset `LCG_EXTRACTION_URL`) to
+   use the token.
 3. **Neither of the above** — `LCG_EXTRACTION_URL` (HTTP), if set, else no extraction provider is
    configured: the binary still starts, and extraction-dependent calls fail with a clear error
    identifying the missing configuration when actually invoked (see above).

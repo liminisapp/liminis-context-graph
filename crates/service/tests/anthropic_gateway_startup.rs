@@ -150,6 +150,55 @@ fn bearer_token_alone_selects_the_anthropic_provider() {
 }
 
 #[test]
+fn bearer_token_does_not_displace_a_configured_local_extractor() {
+    // ANTHROPIC_AUTH_TOKEN is commonly exported for other Anthropic tooling; with
+    // LCG_EXTRACTION_URL configured and no gateway URL setting it must not silently reroute
+    // extraction (and the token) to api.anthropic.com.
+    let dir = TempDir::new().unwrap();
+    let mut cmd = base_cmd(&dir, spawn_stub_embedder());
+    cmd.env("ANTHROPIC_AUTH_TOKEN", "TOKEN-DEFER-SECRET").env(
+        "LCG_EXTRACTION_URL",
+        "http://127.0.0.1:9/v1/chat/completions",
+    );
+    let stderr = run_and_capture_stderr(cmd);
+    assert!(stderr.contains("provider=local"), "{stderr}");
+    assert!(!stderr.contains("provider=anthropic"), "{stderr}");
+    assert!(
+        stderr.contains("ANTHROPIC_AUTH_TOKEN is set but LCG_EXTRACTION_URL selects"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("TOKEN-DEFER-SECRET"), "{stderr}");
+}
+
+#[test]
+fn bearer_token_with_gateway_url_wins_over_local_extraction_url() {
+    let dir = TempDir::new().unwrap();
+    let mut cmd = base_cmd(&dir, spawn_stub_embedder());
+    cmd.env("ANTHROPIC_AUTH_TOKEN", "TOKEN-GW-SECRET")
+        .env("ANTHROPIC_BASE_URL", "http://127.0.0.1:9/")
+        .env(
+            "LCG_EXTRACTION_URL",
+            "http://127.0.0.1:9/v1/chat/completions",
+        );
+    let stderr = run_and_capture_stderr(cmd);
+    assert!(stderr.contains("provider=anthropic"), "{stderr}");
+    assert!(!stderr.contains("TOKEN-GW-SECRET"), "{stderr}");
+}
+
+#[test]
+fn bearer_token_to_stock_endpoint_does_not_claim_operator_chosen_endpoint() {
+    let dir = TempDir::new().unwrap();
+    let mut cmd = base_cmd(&dir, spawn_stub_embedder());
+    cmd.env("ANTHROPIC_AUTH_TOKEN", "TOKEN-STOCK-SECRET");
+    let stderr = run_and_capture_stderr(cmd);
+    assert!(
+        stderr.contains("endpoint=https://api.anthropic.com/v1/messages, auth=bearer"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("operator-chosen"), "{stderr}");
+}
+
+#[test]
 fn base_url_alone_does_not_select_anthropic() {
     let dir = TempDir::new().unwrap();
     let mut cmd = base_cmd(&dir, spawn_stub_embedder());

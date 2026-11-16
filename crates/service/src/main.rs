@@ -13,7 +13,10 @@ use std::time::Duration;
 
 use cli::{CliMode, EmbedderFlag, ExtractorFlag};
 use lcg_core::{
-    anthropic_config::{present_gateway_settings, AnthropicCliArgs, AnthropicEndpointConfig},
+    anthropic_config::{
+        present_gateway_settings, token_defers_to_local_extractor, AnthropicCliArgs,
+        AnthropicEndpointConfig, DEFAULT_ANTHROPIC_URL,
+    },
     app_state::AppState,
     cassette::{CassetteWriter, RecordingExtractor, ReplayingExtractor},
     db::Db,
@@ -655,7 +658,8 @@ async fn bootstrap_app_state(
             }
             ResolvedExtractor::Http(http_url)
         } else if std::env::var("ANTHROPIC_API_KEY").is_ok()
-            || std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok()
+            || (std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok()
+                && !token_defers_to_local_extractor(&|k| std::env::var(k).ok(), &anthropic_args))
         {
             // FR-007: an already-configured ANTHROPIC_API_KEY is never silently overridden by a
             // reachable local sidecar when no explicit local-endpoint flag was given. #346
@@ -663,6 +667,15 @@ async fn bootstrap_app_state(
             // gateway deployment needs no dummy API key. `ANTHROPIC_BASE_URL` alone does not.
             ResolvedExtractor::Anthropic
         } else if let Ok(url) = std::env::var("LCG_EXTRACTION_URL") {
+            if token_defers_to_local_extractor(&|k| std::env::var(k).ok(), &anthropic_args) {
+                eprintln!(
+                    "extractor: ANTHROPIC_AUTH_TOKEN is set but LCG_EXTRACTION_URL selects the \
+                     local extractor: the token is NOT used and nothing is sent to Anthropic. To \
+                     use a Bearer-authenticated Anthropic gateway instead, also set \
+                     ANTHROPIC_BASE_URL or LCG_ANTHROPIC_ENDPOINT (or the matching flag), or \
+                     unset LCG_EXTRACTION_URL."
+                );
+            }
             ResolvedExtractor::Http(url)
         } else {
             // #331 FR-001: a missing extraction provider no longer prevents startup — it only
@@ -703,7 +716,7 @@ async fn bootstrap_app_state(
                 for note in &endpoint_cfg.notes {
                     eprintln!("extractor: {note}");
                 }
-                if !endpoint_cfg.is_default() {
+                if endpoint_cfg.url != DEFAULT_ANTHROPIC_URL {
                     eprintln!(
                         "extractor: Anthropic credentials ({}) are sent to the operator-chosen \
                          endpoint above, not to api.anthropic.com",

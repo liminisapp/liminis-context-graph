@@ -97,7 +97,13 @@ reject. `is_sonnet()` still reads the configured model, so model-specific behavi
 - `reqwest::Error`'s `Display` embeds the request URL, which may carry query secrets; all five
   send sites convert errors with `.without_url()`.
 - Invalid-URL errors name the setting and the *redacted* value.
-- A non-default endpoint logs a notice that the credential is sent to an operator-chosen URL. This
+- `ANTHROPIC_AUTH_TOKEN` alone does not displace a configured `LCG_EXTRACTION_URL`: with no
+  `ANTHROPIC_API_KEY` and no gateway URL setting, the local extractor stays selected and a warning
+  is logged. The token is often exported for unrelated Anthropic tooling and MCP stdio servers
+  inherit it, so honouring it would silently send it to `api.anthropic.com` after an upgrade.
+  (`ANTHROPIC_API_KEY` keeps its pre-existing precedence over `LCG_EXTRACTION_URL`.)
+- A non-default endpoint (URL other than the stock one) logs a notice that the credential is sent
+  to an operator-chosen URL. This
   reverses ADR-0497's premise that `ANTHROPIC_API_KEY` "only ever talks to a fixed Anthropic
   endpoint": it no longer does, so the same visible-notice reasoning now applies.
 

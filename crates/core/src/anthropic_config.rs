@@ -405,6 +405,26 @@ pub fn present_gateway_settings(
     out
 }
 
+/// True when `ANTHROPIC_AUTH_TOKEN` is the *only* Anthropic signal and a local OpenAI-compatible
+/// extractor is configured through `LCG_EXTRACTION_URL`: no `ANTHROPIC_API_KEY`, and no gateway
+/// URL setting (flag or env) that would show the operator meant the token for a gateway.
+///
+/// `ANTHROPIC_AUTH_TOKEN` is commonly exported for other Anthropic tooling, and a stdio MCP
+/// server inherits its parent's environment. Letting it silently displace a configured
+/// `LCG_EXTRACTION_URL` would send the token to `api.anthropic.com` after an upgrade, so in this
+/// case the local extractor stays selected (the caller logs a warning).
+pub fn token_defers_to_local_extractor(
+    env: &dyn Fn(&str) -> Option<String>,
+    cli: &AnthropicCliArgs,
+) -> bool {
+    env(ENV_AUTH_TOKEN).is_some()
+        && env(ENV_API_KEY).is_none()
+        && env("LCG_EXTRACTION_URL").is_some()
+        && cli.is_empty()
+        && env(ENV_BASE_URL).is_none()
+        && env(ENV_ENDPOINT).is_none()
+}
+
 /// Redacts a URL for logs: strips userinfo, replaces any query with `?<redacted>` and drops the
 /// fragment. An unparseable value is replaced wholesale (it could be anything, secrets included).
 pub fn redact_url_for_log(url: &str) -> String {
@@ -442,6 +462,36 @@ mod tests {
     ) -> Result<AnthropicEndpointConfig, String> {
         let e = env_of(pairs);
         AnthropicEndpointConfig::resolve(&e, &cli)
+    }
+
+    #[test]
+    fn token_defers_to_local_extractor_only_when_it_is_the_sole_anthropic_signal() {
+        let cli = AnthropicCliArgs::default();
+        let d = |pairs: &[(&str, &str)], cli: &AnthropicCliArgs| {
+            token_defers_to_local_extractor(&env_of(pairs), cli)
+        };
+        let base = [
+            ("ANTHROPIC_AUTH_TOKEN", "t"),
+            ("LCG_EXTRACTION_URL", "http://l"),
+        ];
+        assert!(d(&base, &cli));
+        // No local extractor configured: the token alone selects Anthropic.
+        assert!(!d(&[("ANTHROPIC_AUTH_TOKEN", "t")], &cli));
+        // An API key or any explicit gateway URL setting shows Anthropic was intended.
+        for extra in [
+            ("ANTHROPIC_API_KEY", "k"),
+            ("ANTHROPIC_BASE_URL", "https://gw"),
+            ("LCG_ANTHROPIC_ENDPOINT", "https://gw/v1/invoke"),
+        ] {
+            let mut p = base.to_vec();
+            p.push(extra);
+            assert!(!d(&p, &cli), "{extra:?}");
+        }
+        let flag = AnthropicCliArgs {
+            base_url: Some("https://gw".into()),
+            endpoint: None,
+        };
+        assert!(!d(&base, &flag));
     }
 
     #[test]
