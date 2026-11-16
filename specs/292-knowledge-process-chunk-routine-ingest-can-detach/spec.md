@@ -2,7 +2,7 @@
 
 **Feature Branch**: `fabrik/issue-292`
 **Created**: 2026-11-15
-**Status**: Draft
+**Status**: Specified
 **Input**: User description: "
 
 ## Background
@@ -71,23 +71,23 @@ Related follow-ups already filed off #284: #288 (per-`(group_id, chunk_id)` lock
 
 ### User Story 1 - A foreign episode survives a routine chunk ingest (Priority: P1)
 
-An integrator has written an episode with `knowledge_add_episode`, choosing `name = "<chunk_id>"` and `source_description = "notes:<chunk_id>"` (imitating this handler's convention). Later a `knowledge_process_chunk` call arrives for that same `chunk_id` in the same group with different `chunk_text`. The integrator's episode must be neither deleted nor have its belief ended.
+An integrator has written an episode with `knowledge_add_episode`, choosing `name = "<chunk_id>"` and `source_description = "notes:<chunk_id>"` (imitating this handler's convention). Later a `knowledge_process_chunk` call arrives for that same `chunk_id` in the same group with different `chunk_text`. The integrator's episode must be neither deleted nor have its belief ended, and the caller gets a normal, successful ingest.
 
 **Why this priority**: This is the data-loss/belief-loss bug itself and the issue's primary acceptance case.
 
-**Independent Test**: Write the foreign episode via `knowledge_add_episode`, call `knowledge_process_chunk` for the same `chunk_id` and group with different text, then read the foreign episode back: it still exists and is still live (not superseded).
+**Independent Test**: Write the foreign episode via `knowledge_add_episode`, call `knowledge_process_chunk` for the same `chunk_id` and group with different text, then read the foreign episode back: it still exists and is still live (not superseded), and the call succeeded.
 
 **Acceptance Scenarios**:
 
-1. **Given** a `knowledge_add_episode` row with `name = X` and `source_description = "notes:X"`, **When** `knowledge_process_chunk` is called for chunk `X` in the same group with different text, **Then** the foreign row still exists, is not superseded, and the call's outcome is a fresh ingest or a named error — never a silent delete or supersession.
-2. **Given** a `knowledge_add_episode` row with `name = X` and a `source_description` that does *not* mirror the convention (e.g. `"manual note"`), **When** `knowledge_process_chunk` is called for chunk `X`, **Then** the same protection holds.
-3. **Given** the guarded outcome is a fresh ingest, **When** the call returns, **Then** the response tells the caller that prior same-named episodes were left alone, naming their UUIDs, so the skipped replacement is visible rather than silent.
+1. **Given** a `knowledge_add_episode` row with `name = X` and `source_description = "notes:X"` written after this change, **When** `knowledge_process_chunk` is called for chunk `X` in the same group with different text, **Then** the call succeeds as a normal ingest, and the foreign row still exists and is not superseded.
+2. **Given** a `knowledge_add_episode` row with `name = X` and a `source_description` that does *not* mirror the convention (e.g. `"manual note"`), written after this change, **When** `knowledge_process_chunk` is called for chunk `X`, **Then** the same protection holds.
+3. **Given** a same-named episode was left alone, **When** the call returns, **Then** the ambiguity is not silent: it is logged at `warn` naming the left-alone episode UUID(s) and, if it fits the existing response shape, also reported in the response.
 
 ---
 
 ### User Story 2 - Legitimate resubmission keeps working (Priority: P1)
 
-An ingest pipeline resubmits a changed chunk it previously ingested via `knowledge_process_chunk`, including as a multi-unit revision (`supersede: false` on non-final units, `same_revision_episode_uuids` on the final one). The earlier episodes it wrote are superseded exactly as today.
+An ingest pipeline resubmits a changed chunk it previously ingested via `knowledge_process_chunk` (after this change), including as a multi-unit revision (`supersede: false` on non-final units, `same_revision_episode_uuids` on the final one). The earlier episodes it wrote are superseded exactly as today.
 
 **Why this priority**: The fail-safe must not regress the revision semantics of #705, which Liminis Notes depends on for whole-notebook re-indexing.
 
@@ -102,39 +102,55 @@ An ingest pipeline resubmits a changed chunk it previously ingested via `knowled
 
 ### User Story 3 - Mixed lineage degrades safely (Priority: P2)
 
-A `chunk_id` has both its own earlier episodes and a foreign same-named episode in the group. A resubmission must not touch the foreign one, and must not let its presence turn the whole call destructive.
+A `chunk_id` has both its own earlier episodes and a foreign same-named episode in the group. A resubmission supersedes only the episodes it can attribute to itself and leaves the foreign one untouched.
 
 **Why this priority**: A fail-safe that handles only the pure-collision case but mishandles a mixed lineage would leave a hole.
 
-**Independent Test**: Create own episode for `X` via `knowledge_process_chunk` and a foreign same-named episode via `knowledge_add_episode`, resubmit `X`; confirm the foreign row is untouched.
+**Independent Test**: Create an own episode for `X` via `knowledge_process_chunk` and a foreign same-named episode via `knowledge_add_episode`, resubmit `X`; confirm the own episode is superseded and the foreign row is untouched.
 
 **Acceptance Scenarios**:
 
-1. **Given** a lineage containing at least one row not attributable to this handler's own prior writes, **When** a resubmission arrives, **Then** that row is untouched and the outcome follows the single fail-safe rule chosen for the ambiguous case (see FR-002).
+1. **Given** a lineage containing both own episodes and at least one episode written by another path, **When** a resubmission arrives, **Then** the own episodes are superseded as today, the other episode is untouched and still live, and the left-alone episode is logged at `warn`.
 
 ---
 
-### User Story 4 - The decision is documented (Priority: P2)
+### User Story 4 - Existing (legacy) corpora keep their behaviour (Priority: P2)
 
-A maintainer reading the ADRs learns that routine chunk ingest never alters episodes it cannot attribute to itself, and what the remaining limits are.
+A corpus ingested before this change (episodes with no provenance marker) is re-ingested after upgrading, as Liminis Notes does for whole notebooks. Resubmitted chunks supersede their earlier episodes exactly as today, so the upgrade creates no duplicates.
 
-**Why this priority**: The issue's second acceptance criterion; it also prevents the stale, abandoned-branch ADR reference from persisting.
+**Why this priority**: Without this, every existing client would see duplicate lineages after upgrading.
 
-**Independent Test**: Read the ADR; the fail-safe behaviour (or any retained residual risk) is a top-level statement, not a qualification buried elsewhere.
+**Independent Test**: Create an episode with a NULL provenance marker (as any pre-upgrade row has) named `X`, call `knowledge_process_chunk` for `X`; confirm it is superseded as today.
 
 **Acceptance Scenarios**:
 
-1. **Given** the change is merged, **When** a maintainer reads the supersession ADR trail, **Then** the fail-safe behaviour, its outcome choice and any residual limit are recorded as a top-level Consequence.
+1. **Given** a live episode named `X` with a NULL marker, **When** `knowledge_process_chunk` is called for `X`, **Then** that episode is superseded as it is today.
+2. **Given** a legacy foreign episode (NULL marker, name `X`, written by `knowledge_add_episode` before the upgrade), **When** `knowledge_process_chunk` is called for `X`, **Then** it is superseded — the known, documented residual exposure for legacy rows — and a test pins this behaviour so a later change cannot alter it silently.
+
+---
+
+### User Story 5 - The decision is documented (Priority: P2)
+
+A maintainer reading the ADRs learns that routine chunk ingest never alters episodes it can positively tell another path wrote, how provenance is recorded, and what the remaining limits are.
+
+**Why this priority**: The issue's second acceptance criterion; it also prevents the stale, abandoned-branch ADR reference from persisting.
+
+**Independent Test**: Read the ADR; the fail-safe behaviour and the legacy-row residual exposure are top-level statements, not qualifications buried elsewhere.
+
+**Acceptance Scenarios**:
+
+1. **Given** the change is merged, **When** a maintainer reads the supersession ADR trail, **Then** the fail-safe behaviour, the provenance marker, the fresh-ingest outcome and the legacy-row exposure are recorded as a top-level Consequence.
 
 ---
 
 ### Edge Cases
 
-- **Own and foreign rows share name, group and `source_description` byte-for-byte** (the `notes:chunk-42` case): must be resolved by whatever attribution rule the open questions settle; it must not default to "treat as own".
-- **Rows written before this change** (legacy episodes with no way of proving who wrote them): behaviour must be stated, since Liminis Notes re-indexes existing corpora and must not be silently stuck with duplicate-forever lineages.
+- **Own and foreign rows share name, group and `source_description` byte-for-byte** (the `notes:chunk-42` case): distinguished by the provenance marker, never by name or `source_description`; a row not marked as chunk-written after this change is never treated as own.
+- **Legacy rows (NULL marker)**: keep today's name-based supersede behaviour so existing clients see no duplicates after upgrading. They remain exposed to the name collision; this is documented and pinned by a test. No backfill.
 - **Foreign row in a different group**: never touched; supersession is already group-scoped and that must hold.
 - **Foreign row already superseded**: nothing to protect; it is already excluded from "live" lineage.
 - **Failed ingest**: unchanged — nothing is superseded when any step fails.
+- **WAL rebuild**: after `knowledge_rebuild_from_wal`, the marker on every episode is the same as before the rebuild, so the protection survives a rebuild.
 - **Concurrent resubmissions** (#288) and **unindexed `name` scan** (#291, resolved by native indexes): unrelated and not revisited.
 - **Foreign row with a `doc_id` or non-primary origin**: existing origin/doc guards (#707, #752) continue to apply independently.
 
@@ -143,38 +159,46 @@ A maintainer reading the ADRs learns that routine chunk ingest never alters epis
 ### Functional Requirements
 
 - **FR-001**: A `knowledge_process_chunk` call MUST NOT delete, supersede, or otherwise alter any `Episodic` row it cannot positively attribute to its own prior writes.
-- **FR-002**: When the chunk's same-named lineage contains one or more rows that cannot be positively attributed to this handler's own prior writes, the call MUST resolve the ambiguity in a single, defined, non-destructive way (a fresh ingest that leaves those rows alone, or a named error — see Open Question 1), and MUST NOT apply it destructively to the unambiguous rows without that being a deliberate, documented behaviour.
-- **FR-003**: If the outcome is a fresh ingest, the response MUST report which same-named episodes were deliberately left alone (UUIDs and their `source_description`), so the skipped replacement is observable.
-- **FR-004**: If the outcome is an error, it MUST name the colliding episode UUID(s) and `source_description`, MUST be returned before anything is written, and MUST tell the caller how to resolve the collision (e.g. rename).
+- **FR-002**: When a chunk's same-named live lineage contains rows that cannot be attributed to this handler's own prior writes, the call MUST proceed as a normal, successful fresh ingest: those rows are left untouched, attributable rows are still superseded per FR-005, and the call MUST NOT return an error because of them.
+- **FR-003**: Each ambiguity (a same-named live row left alone) MUST be logged at `warn` level naming the episode UUID and its `source_description`. The response MAY additionally report the left-alone UUIDs as an additive field if that fits the existing response shape.
 - **FR-005**: A resubmission whose lineage consists solely of episodes this handler wrote MUST behave exactly as today (earlier live episodes superseded after a fully successful ingest; `supersede: false` and `same_revision_episode_uuids` honoured).
 - **FR-006**: The protection MUST hold both when the foreign row's `source_description` mirrors the `"{source_file}:{chunk_id}"` convention and when it does not.
 - **FR-007**: The protection MUST hold when the incoming `chunk_text` is identical to, or different from, the foreign row's content.
 - **FR-008**: Explicit by-name operations (`knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`) MUST keep their current contracts.
-- **FR-009**: The behaviour for rows written before this change MUST be defined and documented (see Open Question 2).
+- **FR-009**: Legacy rows (NULL provenance marker, i.e. written before this change) MUST keep today's name-based supersede behaviour. This residual exposure to the name collision MUST be documented, and a test MUST pin it.
 - **FR-010**: The change MUST NOT alter the response shape for the unambiguous case beyond fields explicitly added by this spec, so existing clients (Liminis Notes, MCP callers) are unaffected.
-- **FR-011**: An ADR named `docs/adr/0292-<slug>.md` (per the repository's issue-numbered ADR convention) MUST record the fail-safe rule, the outcome chosen, how "own writes" are recognised, and any residual limit as a top-level Consequence.
-- **FR-012**: Tests MUST cover: the issue's `notes:<chunk_id>` collision; a non-mirrored `source_description` collision; a mixed own+foreign lineage; the unchanged own-only resubmission; the multi-unit revision; and a legacy-row case.
+- **FR-011**: An ADR named `docs/adr/0292-<slug>.md` (per the repository's issue-numbered ADR convention) MUST record the fail-safe rule, the fresh-ingest outcome, the provenance marker, how "own writes" are recognised, and the legacy-row exposure as a top-level Consequence.
+- **FR-012**: Tests MUST cover: the issue's `notes:<chunk_id>` collision; a non-mirrored `source_description` collision; a mixed own+foreign lineage; the unchanged own-only resubmission; the multi-unit revision; the legacy-row exposure (FR-009); and marker survival across `knowledge_rebuild_from_wal` (FR-015).
+- **FR-013**: `Episodic` MUST gain a nullable provenance column recording which write path produced the episode, added by the existing additive `ALTER TABLE ... ADD` migration pattern, with no backfill of existing rows. It MUST be a distinct column from `origin`, which records what kind of content an episode is, not which tool wrote it.
+- **FR-014**: `knowledge_process_chunk` MUST stamp its marker on every episode it writes. Only episodes carrying that marker (new rows) or a NULL marker (legacy rows, per FR-009) are eligible as a chunk's prior lineage to supersede.
+- **FR-015**: The marker MUST be carried in the WAL so that `knowledge_rebuild_from_wal` (and tail replay) reproduces it on every episode.
+- **FR-016**: Every episode written after this change by a path other than `knowledge_process_chunk` (notably `knowledge_add_episode`) MUST carry a marker value that identifies it as not chunk-written, so that a post-upgrade foreign row is distinguishable from a legacy NULL row and is ineligible for supersession by a chunk ingest.
 
 ### Key Entities
 
-- **Episodic row**: `name` (the `chunk_id` for chunk ingests, free-form for `knowledge_add_episode`), `source_description`, group, supersession state, origin, optional `doc_id`.
-- **Chunk lineage**: the set of live episodes in a group sharing a `name` equal to a `chunk_id`; the set a revision supersedes today.
-- **Own write**: an episode that this handler can positively show it wrote; the definition of "positively" is the subject of Open Question 2.
+- **Episodic row**: `name` (the `chunk_id` for chunk ingests, free-form for `knowledge_add_episode`), `source_description`, group, supersession state, origin, optional `doc_id`, and (new) a nullable provenance marker.
+- **Provenance marker**: a nullable `Episodic` column recording the write path that produced the row. NULL means written before the marker existed.
+- **Chunk lineage**: the set of live episodes in a group sharing a `name` equal to a `chunk_id`; the set a revision supersedes today, narrowed by the marker rule.
+- **Own write**: an episode carrying the `knowledge_process_chunk` marker; legacy NULL-marker rows are treated as own for backward compatibility (FR-009).
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
-- **SC-001**: In the issue's collision scenario, 100% of foreign episodes remain present and live (not superseded) after any number of `knowledge_process_chunk` calls for the colliding `chunk_id`.
-- **SC-002**: Zero silent outcomes: every ambiguous-lineage call either fails with a message naming the colliding episode(s) or reports the left-alone episodes in its response.
+- **SC-001**: In the issue's collision scenario (foreign row written after this change), 100% of foreign episodes remain present and live (not superseded) after any number of `knowledge_process_chunk` calls for the colliding `chunk_id`.
+- **SC-002**: Zero silent outcomes: every call that leaves a same-named live episode alone emits a `warn` log naming it.
 - **SC-003**: Own-only resubmission behaviour is unchanged: the existing revision and supersession test suites pass without modification of their expectations.
-- **SC-004**: A re-index of an existing corpus does not leave chunks permanently un-superseded solely because their earlier episodes predate this change (subject to the answer to Open Question 2).
+- **SC-004**: Re-ingesting a pre-upgrade corpus after upgrading produces no new duplicate lineages: every chunk whose earlier episodes have a NULL marker supersedes them exactly as before the upgrade.
+- **SC-005**: After `knowledge_rebuild_from_wal`, 100% of episodes carry the same marker value as before the rebuild.
 
 ## Assumptions
 
 - The repository's `main` behaviour (#705 supersession keyed on `name` within the group) is the baseline; the closed #284 mechanism is not being resurrected, and the issue's "do not revisit idempotency, splitting or delete-after-success" scope note is read as "do not revisit #705's supersession, split-unit protocol or supersede-last ordering".
 - "Fail safe" is a stricter requirement than the issue's original framing in one respect: it also covers un-anchored same-name collisions, because `main` has no anchor.
-- A fresh ingest accompanied by an explicit report in the response is preferred over a hard error, because Liminis Notes' bulk re-indexing would otherwise stall on a single colliding chunk; challengeable via Open Question 1.
+- Decided: an ambiguous lineage results in a normal fresh ingest (not an error), with a `warn` log and optionally a response field, so Liminis Notes' bulk re-indexing never stalls on a collision.
+- Decided: a small schema change (nullable provenance column on `Episodic`) is acceptable; 0.19.0 is already a minor release with a schema change (#752's `origin`).
+- Ambiguity is judged per row: attributable rows are superseded as today and unattributable rows are left alone, rather than one foreign row suppressing the whole supersession.
+- To make the issue's acceptance case achievable, `knowledge_add_episode` (and any other non-chunk write path) stamps a distinguishing marker value too (FR-016). Otherwise a post-upgrade foreign row would be NULL and indistinguishable from a legacy row. NULL therefore means strictly "written before the marker existed". Which paths exist and what values they use is left to Plan.
 - The ADR number is `0292` per the repository's issue-numbered-ADR rule; the issue's "update ADR-0052" refers to an ADR that no longer exists under that name, and the relevant standing ADR is ADR-0705.
 - Group scoping of supersession (ADR-0368/0371) is unchanged.
 
@@ -183,7 +207,9 @@ A maintainer reading the ADRs learns that routine chunk ingest never alters epis
 - Per-`(group_id, chunk_id)` locking for concurrent resubmission (#288).
 - Episodic `name` lookup performance (#291).
 - Changing explicit by-name operations (`knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`).
-- Namespacing or renaming `knowledge_add_episode` names, or migrating existing data.
+- Backfilling the marker on existing rows, or protecting legacy rows from the name collision.
+- A hard-error outcome for ambiguous lineages.
+- Namespacing or renaming `knowledge_add_episode` names.
 - Redesigning chunk splitting or revision semantics.
 
 ## Source References *(optional)*
