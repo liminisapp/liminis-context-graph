@@ -456,8 +456,10 @@ impl AppState {
     /// with the group's recorded stamp. Returns `(refusal, unchecked)`.
     ///
     /// - Sets equal → nothing happens (no file is written for a flagless workspace).
-    /// - Sets differ → each changed label is counted with one group-scoped `labels` query. Any
-    ///   carrier refuses (the stamp is left untouched); otherwise the stamp is rewritten.
+    /// - Sets differ → each changed label is counted with one group-scoped, kind-aware query
+    ///   (#776): only entities whose `kind` would change under the new set are carriers. Any
+    ///   carrier refuses (the stamp is left untouched); otherwise the stamp is rewritten. A
+    ///   missing stamp (a WAL-only rebuild) therefore self-heals when the data is consistent.
     /// - Sets differ but the DB or stamp cannot be read → `unchecked`, so the caller does not
     ///   cache the entry and the check re-runs rather than silently accepting a flip.
     ///
@@ -485,8 +487,17 @@ impl AppState {
             Some(Err(e)) => return (None, Some(format!("cannot open DB connection: {e}"))),
             None => return (None, Some("DB unavailable".to_string())),
         };
-        match identity_stamp::check_identity_change(&changed, |label| {
-            conn.count_entities_carrying_label(group_id, label)
+        match identity_stamp::check_identity_change(&changed, |label, adding| {
+            let descendants = match resolved {
+                Some(o) => o.descendants_of(label),
+                None => Vec::new(),
+            };
+            // An `extract: false` identity type never receives an extracted kind (ADR-0637), so
+            // adding the flag cannot reinterpret any entity.
+            if adding && resolved.is_none_or(|o| o.identity_kind(label).is_none()) {
+                return Ok(0);
+            }
+            conn.count_identity_carriers(group_id, label, adding, &descendants)
                 .map(|n| n as usize)
         }) {
             Err(e) => (None, Some(format!("cannot count entities: {e}"))),

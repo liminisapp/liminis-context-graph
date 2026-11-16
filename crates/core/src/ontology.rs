@@ -189,6 +189,21 @@ impl Ontology {
             .collect()
     }
 
+    /// Every declared type whose ancestor list contains `label` (#776): its strict descendants
+    /// in the type hierarchy, sorted. Empty for a leaf or an unknown label.
+    pub fn descendants_of(&self, label: &str) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .ancestor_map
+            .iter()
+            .filter(|(name, ancestors)| {
+                name.as_str() != label && ancestors.iter().any(|a| a == label)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Returns the kind an extracted entity of primary type `entity_type` receives, if that
     /// type is identity-bearing (#616, FR-002/FR-003). The lookup is by the normalized
     /// (PascalCase) name of the primary type only: parents never confer identity and no label
@@ -1263,6 +1278,21 @@ relation_types:
             Some(&vec!["Document".to_string()])
         );
         assert_eq!(o.ancestor_map.get("Document"), Some(&vec![]));
+    }
+
+    #[test]
+    fn descendants_of_covers_multi_level_and_unknown_labels() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Document\n  - name: Rfc\n    parent: Document\n  - name: SubDoc\n    parent: Rfc\n  - name: Person\n",
+        );
+        let o = load_ontology(Some(dir.path())).expect("should load");
+        assert_eq!(o.descendants_of("Document"), vec!["Rfc", "SubDoc"]);
+        assert_eq!(o.descendants_of("Rfc"), vec!["SubDoc"]);
+        assert!(o.descendants_of("SubDoc").is_empty());
+        assert!(o.descendants_of("Person").is_empty());
+        assert!(o.descendants_of("Nope").is_empty());
     }
 
     #[test]

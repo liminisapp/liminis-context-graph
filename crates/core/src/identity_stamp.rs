@@ -9,9 +9,13 @@
 //!
 //! The stamp is a per-group sidecar file, `.lcg/identity-set/<encoded group>.json`, deliberately
 //! outside the WAL and outside the lbug DB: it survives `knowledge_clear_all`, a DB reset and a
-//! rebuild-from-WAL into a fresh directory, none of which a `WalPosition` column would (an
-//! absent record reads as the empty set, which would wrongly accept a flag flip on a group
-//! whose entities already carry extracted identity kinds). See ADR-0616.
+//! rebuild-from-WAL **into the same workspace root**, none of which a `WalPosition` column
+//! would. It does *not* travel with the WAL: a host that keeps only the WAL (an ephemeral
+//! container, a fresh clone) starts with no stamp, which reads as the empty set. Two things
+//! cover that (#776, ADR-0776): the D1 carrier count is kind-aware, so a replayed group whose
+//! entities already carry the identity kinds is not refused; and the WAL ontology sidecar
+//! records the identity-bearing set, which [`restore_stamp_if_absent`] writes back as the stamp
+//! after a rebuild. See ADR-0616 and ADR-0776.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -139,15 +143,48 @@ pub fn changed_labels(
     v
 }
 
-/// Pure D1 decision. `changed` is [`changed_labels`]; `count` returns how many existing entities
-/// in the group carry a label. The first changed label with any carrier refuses; otherwise the
-/// change is accepted (`Ok`) and the caller records `current`.
+/// Restores a missing stamp from the group's WAL ontology sidecar after a rebuild-from-WAL
+/// (#776). Never overwrites: any existing stamp file — even an unparseable one — is left
+/// untouched. Restores nothing (and raises nothing) when the sidecar is missing, predates the
+/// `identity_types` field, or records an empty set (a flagless group has no stamp file).
+/// Returns `true` only when a stamp was written.
+pub fn restore_stamp_if_absent(workspace_root: &Path, wal_dir: &Path, group_id: &str) -> bool {
+    let Ok(path) = stamp_path(workspace_root, group_id) else {
+        return false;
+    };
+    if path.exists() {
+        return false;
+    }
+    let Some(types) =
+        crate::ontology_sidecar::read_wal_ontology_sidecar(wal_dir).and_then(|s| s.identity_types)
+    else {
+        return false;
+    };
+    if types.is_empty() {
+        return false;
+    }
+    let set: BTreeSet<String> = types.into_iter().collect();
+    match write_stamp(workspace_root, group_id, &set) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!(
+                "liminis-context-graph: identity-stamp: cannot restore stamp for group {group_id:?}: {e}"
+            );
+            false
+        }
+    }
+}
+
+/// Pure D1 decision. `changed` is [`changed_labels`]; `count(label, adding)` returns how many
+/// existing entities in the group would be reinterpreted by that label's change (kind-aware,
+/// #776). The first changed label with any carrier refuses; otherwise the change is accepted
+/// (`Ok`) and the caller records `current`.
 pub fn check_identity_change<E>(
     changed: &[(String, bool)],
-    mut count: impl FnMut(&str) -> Result<usize, E>,
+    mut count: impl FnMut(&str, bool) -> Result<usize, E>,
 ) -> Result<Option<IdentityRefusal>, E> {
     for (label, adding) in changed {
-        let n = count(label)?;
+        let n = count(label, *adding)?;
         if n > 0 {
             return Ok(Some(IdentityRefusal {
                 label: label.clone(),
@@ -200,20 +237,20 @@ mod tests {
     #[test]
     fn uncarried_change_is_accepted() {
         let ch = changed_labels(&set(&[]), &set(&["Organization"]));
-        let r = check_identity_change::<()>(&ch, |_| Ok(0)).unwrap();
+        let r = check_identity_change::<()>(&ch, |_, _| Ok(0)).unwrap();
         assert!(r.is_none());
     }
 
     #[test]
     fn carried_add_and_remove_are_refused() {
         let add = changed_labels(&set(&[]), &set(&["Person"]));
-        let r = check_identity_change::<()>(&add, |_| Ok(3))
+        let r = check_identity_change::<()>(&add, |_, _| Ok(3))
             .unwrap()
             .unwrap();
         assert_eq!((r.label.as_str(), r.count, r.adding), ("Person", 3, true));
 
         let rem = changed_labels(&set(&["Person"]), &set(&[]));
-        let r = check_identity_change::<()>(&rem, |_| Ok(1))
+        let r = check_identity_change::<()>(&rem, |_, _| Ok(1))
             .unwrap()
             .unwrap();
         assert!(!r.adding);
@@ -224,8 +261,92 @@ mod tests {
     }
 
     #[test]
+    fn count_receives_direction() {
+        let ch = changed_labels(&set(&["Old"]), &set(&["New"]));
+        let mut seen = vec![];
+        let r = check_identity_change::<()>(&ch, |l, adding| {
+            seen.push((l.to_string(), adding));
+            Ok(0)
+        })
+        .unwrap();
+        assert!(r.is_none());
+        assert_eq!(
+            seen,
+            vec![("New".to_string(), true), ("Old".to_string(), false)]
+        );
+    }
+
+    fn write_wal_sidecar(wal: &Path, identity: Option<Vec<&str>>) {
+        let json = match identity {
+            Some(v) => {
+                serde_json::json!({"hash":"h","mode":null,"entity_types":[],"relation_types":[],"identity_types":v})
+            }
+            None => {
+                serde_json::json!({"hash":"h","mode":null,"entity_types":[],"relation_types":[]})
+            }
+        };
+        std::fs::create_dir_all(wal).unwrap();
+        std::fs::write(
+            crate::ontology_sidecar::wal_ontology_path(wal),
+            json.to_string(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn restore_writes_absent_stamp_from_sidecar() {
+        let root = TempDir::new().unwrap();
+        let wal = TempDir::new().unwrap();
+        write_wal_sidecar(wal.path(), Some(vec!["Person", "Organization"]));
+        assert!(restore_stamp_if_absent(root.path(), wal.path(), "g"));
+        assert_eq!(
+            read_stamp(root.path(), "g").unwrap(),
+            set(&["Organization", "Person"])
+        );
+    }
+
+    #[test]
+    fn restore_never_overwrites_existing_stamp() {
+        let root = TempDir::new().unwrap();
+        let wal = TempDir::new().unwrap();
+        write_wal_sidecar(wal.path(), Some(vec!["Person"]));
+        write_stamp(root.path(), "g", &set(&["Other"])).unwrap();
+        let p = stamp_path(root.path(), "g").unwrap();
+        let before = std::fs::read(&p).unwrap();
+        assert!(!restore_stamp_if_absent(root.path(), wal.path(), "g"));
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+    }
+
+    #[test]
+    fn restore_leaves_corrupt_stamp_untouched() {
+        let root = TempDir::new().unwrap();
+        let wal = TempDir::new().unwrap();
+        write_wal_sidecar(wal.path(), Some(vec!["Person"]));
+        let p = stamp_path(root.path(), "g").unwrap();
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, "not json").unwrap();
+        assert!(!restore_stamp_if_absent(root.path(), wal.path(), "g"));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "not json");
+    }
+
+    #[test]
+    fn restore_is_noop_for_old_sidecar_missing_sidecar_and_empty_set() {
+        let root = TempDir::new().unwrap();
+        let wal = TempDir::new().unwrap();
+        // No sidecar at all.
+        assert!(!restore_stamp_if_absent(root.path(), wal.path(), "g"));
+        // Older sidecar without the field.
+        write_wal_sidecar(wal.path(), None);
+        assert!(!restore_stamp_if_absent(root.path(), wal.path(), "g"));
+        // Empty recorded set: no stamp file for a flagless group.
+        write_wal_sidecar(wal.path(), Some(vec![]));
+        assert!(!restore_stamp_if_absent(root.path(), wal.path(), "g"));
+        assert!(!stamp_path(root.path(), "g").unwrap().exists());
+    }
+
+    #[test]
     fn count_error_propagates() {
         let ch = changed_labels(&set(&[]), &set(&["Person"]));
-        assert!(check_identity_change(&ch, |_| Err("db down")).is_err());
+        assert!(check_identity_change(&ch, |_, _| Err("db down")).is_err());
     }
 }

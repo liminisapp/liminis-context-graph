@@ -2552,16 +2552,43 @@ impl<'db> Conn<'db> {
         self.count_by_group_ids("RelatesToNode_", "rn", group_ids)
     }
 
-    /// Counts `Entity` nodes in `group_id` whose full `labels` list carries `label` (issue #616,
-    /// D1). Deliberately the full list — ancestor labels and the kind label included — because
-    /// D1 asks whether any existing node would be reinterpreted. A group-scoped scan, not an
-    /// indexed lookup; callers run it only when a group's identity-bearing set actually differs
-    /// from its recorded one.
-    pub fn count_entities_carrying_label(&self, group_id: &str, label: &str) -> Result<u64, Error> {
-        let rows = self.query_params(
-            "MATCH (e:Entity) WHERE e.group_id = $gid AND $label IN e.labels RETURN count(*)",
-            serde_json::json!({ "gid": group_id, "label": label }),
-        )?;
+    /// Counts the `Entity` nodes in `group_id` whose interpretation (`kind`) would change if
+    /// `label` were added to (`adding`) or removed from the group's identity-bearing set
+    /// (issues #616 D1 and #776). Kind-aware: a node whose stored `kind` already matches what
+    /// extraction under the new set would assign is not a carrier.
+    ///
+    /// - **Removing** `label`: carriers are nodes with `kind = label`. Ancestry plays no part —
+    ///   kind is never inherited.
+    /// - **Adding** `label`: carriers are nodes that carry `label`, whose `kind` is not already
+    ///   `label` (NULL and empty count as "not `label`"), and which carry none of
+    ///   `descendants` (the label's strict descendants in the new ontology). Kind comes from
+    ///   the primary (leaf) type alone, so a node of a subtype would not change; carrying no
+    ///   descendant label is the proxy for "`label` is this node's leaf type".
+    ///
+    /// A group-scoped scan, one query per call, not an indexed lookup; callers run it only when
+    /// a group's identity-bearing set actually differs from its recorded one.
+    pub fn count_identity_carriers(
+        &self,
+        group_id: &str,
+        label: &str,
+        adding: bool,
+        descendants: &[String],
+    ) -> Result<u64, Error> {
+        let mut params = serde_json::json!({ "gid": group_id, "label": label });
+        let mut cypher = String::from("MATCH (e:Entity) WHERE e.group_id = $gid AND ");
+        if adding {
+            cypher.push_str(
+                "$label IN e.labels AND (e.kind IS NULL OR e.kind = '' OR e.kind <> $label)",
+            );
+            for (i, d) in descendants.iter().enumerate() {
+                cypher.push_str(&format!(" AND NOT ($d{i} IN e.labels)"));
+                params[format!("d{i}")] = serde_json::Value::String(d.clone());
+            }
+        } else {
+            cypher.push_str("e.kind = $label");
+        }
+        cypher.push_str(" RETURN count(*)");
+        let rows = self.query_params(&cypher, params)?;
         for row in rows {
             match &row[0] {
                 lbug::Value::Int64(n) => return Ok(*n as u64),
