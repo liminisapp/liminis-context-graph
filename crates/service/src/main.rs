@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use cli::{CliMode, EmbedderFlag, ExtractorFlag};
 use lcg_core::{
+    anthropic_config::{present_gateway_settings, AnthropicCliArgs, AnthropicEndpointConfig},
     app_state::AppState,
     cassette::{CassetteWriter, RecordingExtractor, ReplayingExtractor},
     db::Db,
@@ -25,7 +26,7 @@ use lcg_core::{
     extraction_failures::{
         ExtractionFailureSink, ExtractionFailureWriter, DEFAULT_MAX_BYTES_PER_FILE,
     },
-    extractor::{Extractor, OaiExtractor, UnconfiguredExtractor, ANTHROPIC_API_URL},
+    extractor::{Extractor, OaiExtractor, UnconfiguredExtractor},
     handlers,
     ipc::IpcRequest,
     llm_router::LlmRouter,
@@ -422,6 +423,7 @@ async fn bootstrap_app_state(
     db_path: String,
     embedder_flag: Option<EmbedderFlag>,
     extractor_flag: Option<ExtractorFlag>,
+    anthropic_args: AnthropicCliArgs,
     allow_embedder_degrade: bool,
 ) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
     let (cli_uds, cli_http) = match embedder_flag {
@@ -652,9 +654,13 @@ async fn bootstrap_app_state(
                 .into());
             }
             ResolvedExtractor::Http(http_url)
-        } else if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        } else if std::env::var("ANTHROPIC_API_KEY").is_ok()
+            || std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok()
+        {
             // FR-007: an already-configured ANTHROPIC_API_KEY is never silently overridden by a
-            // reachable local sidecar when no explicit local-endpoint flag was given.
+            // reachable local sidecar when no explicit local-endpoint flag was given. #346
+            // FR-006: a Bearer credential (ANTHROPIC_AUTH_TOKEN) selects Anthropic too, so a
+            // gateway deployment needs no dummy API key. `ANTHROPIC_BASE_URL` alone does not.
             ResolvedExtractor::Anthropic
         } else if let Ok(url) = std::env::var("LCG_EXTRACTION_URL") {
             ResolvedExtractor::Http(url)
@@ -669,18 +675,49 @@ async fn bootstrap_app_state(
         // LlmRouter leaf individually (via `from_env_with`) so a primary→fallback failover
         // still produces two distinguishable, correctly-attributed cassette entries (#232 User
         // Story 4); the local (Http/Uds) arms wrap the single bare `OaiExtractor` directly.
+        let env_lookup = |k: &str| std::env::var(k).ok();
+        // #346: gateway settings only matter on the Anthropic arm. Say so when they were set but
+        // a different provider won, naming the settings (never their values).
+        if !matches!(resolved_extractor, ResolvedExtractor::Anthropic) {
+            let ignored = present_gateway_settings(&env_lookup, &anthropic_args);
+            if !ignored.is_empty() {
+                eprintln!(
+                    "extractor: Anthropic gateway settings ignored (the Anthropic provider is not \
+                     selected): {}",
+                    ignored.join(", ")
+                );
+            }
+        }
+
         match resolved_extractor {
             ResolvedExtractor::Anthropic => {
+                // Validated lazily (ADR-0331): invalid gateway config fails startup only here,
+                // when Anthropic is actually the selected provider (#346 FR-012).
+                let endpoint_cfg =
+                    AnthropicEndpointConfig::resolve(&env_lookup, &anthropic_args)
+                        .map_err(|e| format!("Invalid Anthropic gateway configuration: {e}"))?;
                 eprintln!(
-                    "extractor: provider=anthropic, transport=http, endpoint={ANTHROPIC_API_URL}"
+                    "extractor: provider=anthropic, transport=http, {}",
+                    endpoint_cfg.startup_summary()
                 );
+                for note in &endpoint_cfg.notes {
+                    eprintln!("extractor: {note}");
+                }
+                if !endpoint_cfg.is_default() {
+                    eprintln!(
+                        "extractor: Anthropic credentials ({}) are sent to the operator-chosen \
+                         endpoint above, not to api.anthropic.com",
+                        endpoint_cfg.auth_scheme()
+                    );
+                }
                 match &record_llm_path {
                     Some(path) => {
                         let writer = Arc::new(CassetteWriter::open(path)?);
                         let leaf_sink = recording_sink(&telemetry_sink, path)?;
                         eprintln!("extractor: recording cassette to {path}");
-                        Arc::new(LlmRouter::from_env_with(
+                        Arc::new(LlmRouter::from_config_with(
                             leaf_sink,
+                            endpoint_cfg,
                             move |inner, model_name| {
                                 Arc::new(RecordingExtractor::new(
                                     inner,
@@ -691,7 +728,11 @@ async fn bootstrap_app_state(
                             },
                         ))
                     }
-                    None => Arc::new(LlmRouter::from_env(Arc::clone(&telemetry_sink))),
+                    None => Arc::new(LlmRouter::from_config_with(
+                        Arc::clone(&telemetry_sink),
+                        endpoint_cfg,
+                        |inner, _model_name| inner,
+                    )),
                 }
             }
             ResolvedExtractor::Http(url) => match &record_llm_path {
@@ -1007,6 +1048,7 @@ async fn bootstrap_or_exit_on_signal(
     db_path: String,
     embedder_flag: Option<EmbedderFlag>,
     extractor_flag: Option<ExtractorFlag>,
+    anthropic_args: AnthropicCliArgs,
     allow_embedder_degrade: bool,
 ) -> Result<Option<Arc<AppState>>, Box<dyn std::error::Error>> {
     tokio::select! {
@@ -1018,6 +1060,7 @@ async fn bootstrap_or_exit_on_signal(
             db_path,
             embedder_flag,
             extractor_flag,
+            anthropic_args,
             allow_embedder_degrade,
         ) => result.map(Some),
     }
@@ -1525,6 +1568,7 @@ async fn async_main(
         CliMode::Socket {
             embedder,
             extractor,
+            anthropic,
             ..
         } => {
             // Bind socket FIRST — this allows health_check and recovery IPC to work even
@@ -1547,6 +1591,7 @@ async fn async_main(
                 db_path,
                 embedder,
                 extractor,
+                anthropic,
                 false,
             )
             .await?
@@ -1572,6 +1617,7 @@ async fn async_main(
         CliMode::Mcp {
             embedder,
             extractor,
+            anthropic,
             connect: None,
             scopes,
             allow_remote_close,
@@ -1588,6 +1634,7 @@ async fn async_main(
                 db_path,
                 embedder,
                 extractor,
+                anthropic,
                 true,
             )
             .await?

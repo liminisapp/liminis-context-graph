@@ -374,6 +374,37 @@ fn join_base(setting: &str, value: &str) -> Result<String, String> {
     Ok(parsed.to_string())
 }
 
+/// Names (never values) of the gateway settings that are present — used to tell the operator
+/// they were ignored when a non-Anthropic provider was selected (explicit `--extractor-*`,
+/// `LCG_EXTRACTION_URL`, or nothing configured). `ANTHROPIC_API_KEY` is deliberately excluded: it
+/// is not a gateway setting.
+pub fn present_gateway_settings(
+    env: &dyn Fn(&str) -> Option<String>,
+    cli: &AnthropicCliArgs,
+) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    if cli.base_url.is_some() {
+        out.push(FLAG_BASE_URL);
+    }
+    if cli.endpoint.is_some() {
+        out.push(FLAG_ENDPOINT);
+    }
+    for var in [
+        ENV_BASE_URL,
+        ENV_ENDPOINT,
+        ENV_AUTH_TOKEN,
+        ENV_OMIT_MODEL,
+        ENV_VERSION,
+        ENV_VERSION_IN,
+        ENV_PROMPT_CACHING,
+    ] {
+        if env(var).is_some() {
+            out.push(var);
+        }
+    }
+    out
+}
+
 /// Redacts a URL for logs: strips userinfo, replaces any query with `?<redacted>` and drops the
 /// fragment. An unparseable value is replaced wholesale (it could be anything, secrets included).
 pub fn redact_url_for_log(url: &str) -> String {
@@ -715,6 +746,29 @@ mod tests {
         let k = AnthropicEndpointConfig::default_with_key("SECRET-KEY".into());
         assert!(!format!("{k:?}").contains("SECRET"));
         assert!(!k.startup_summary().contains("SECRET"));
+    }
+
+    #[test]
+    fn present_gateway_settings_lists_names_only() {
+        let e = env_of(&[
+            ("ANTHROPIC_BASE_URL", "https://x"),
+            ("ANTHROPIC_AUTH_TOKEN", "SECRET"),
+            ("ANTHROPIC_API_KEY", "k"),
+        ]);
+        let cli = AnthropicCliArgs {
+            base_url: None,
+            endpoint: Some("https://y".into()),
+        };
+        let v = present_gateway_settings(&e, &cli);
+        assert_eq!(
+            v,
+            vec![
+                "--anthropic-endpoint",
+                "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_AUTH_TOKEN"
+            ]
+        );
+        assert!(present_gateway_settings(&env_of(&[]), &AnthropicCliArgs::default()).is_empty());
     }
 
     #[test]
