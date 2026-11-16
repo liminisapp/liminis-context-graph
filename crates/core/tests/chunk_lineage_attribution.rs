@@ -219,7 +219,7 @@ async fn unmirrored_foreign_episode_and_identical_text_survive() {
     let foreign = add_episode(&state, G, "chunk-7", "manual note").await;
     let r = chunk(&state, "chunk-7", "a caller's own episode").await; // identical body text
     assert_eq!(r["left_alone_episode_uuids"], json!([foreign.clone()]));
-    assert_eq!(state_of(&db, &foreign).0, false);
+    assert!(!state_of(&db, &foreign).0);
 }
 
 /// US3: a mixed lineage supersedes only the attributable (own) episodes.
@@ -444,7 +444,7 @@ async fn pre_feature_wal_replays_as_legacy() {
     let got = db2
         .connect()
         .unwrap()
-        .get_episode_write_paths(&[own.clone()])
+        .get_episode_write_paths(std::slice::from_ref(&own))
         .unwrap();
     assert_eq!(got[&own], None);
 }
