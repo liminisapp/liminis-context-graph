@@ -90,6 +90,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0331](0331-lazy-extraction-provider-validation.md) | Validate the Extraction Provider on First Use, Not at Startup | 2026-08-03 |
 | [0341](0341-build-release-artifacts-once.md) | Build Release Artifacts Once and Share Across the Test and E2E Jobs | 2026-08-04 |
 | [0342](0342-salvage-malformed-extraction-items.md) | Per-Item Salvage of Malformed Extraction Items | 2026-08-04 |
+| [0346](0346-anthropic-gateway-endpoint-and-auth.md) | Configurable Endpoint and Auth for the Anthropic Extraction Provider | 2026-11-15 |
 | [0347](0347-reject-semantically-empty-required-fields-during-salvage.md) | Reject Semantically-Empty Required Fields During Item Salvage | 2026-08-13 |
 | [0353](0353-persist-and-expose-applied-wal-seq.md) | Persist and Expose an Applied WAL Sequence in `knowledge_status` | 2026-08-05 |
 | [0361](0361-group-scoped-purge.md) | Group-Scoped Complete Purge | 2026-08-12 |

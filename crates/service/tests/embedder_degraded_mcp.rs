@@ -133,6 +133,8 @@ fn base_cmd(dir: &TempDir, embedder_url: &str, mcp_stdio: bool) -> Command {
         .env_remove("OPENAI_API_KEY")
         .env_remove("LCG_EMBEDDING_DIM")
         .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("LCG_EXTRACTION_URL");
     if mcp_stdio {
         cmd.args(["--mcp-stdio", "--embedder-http", embedder_url]);

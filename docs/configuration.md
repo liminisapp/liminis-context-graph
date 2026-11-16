@@ -13,6 +13,8 @@ title: Configuration
 | `--embedder-http <url>` | HTTP URL for an OpenAI-compatible embedding endpoint. Mutually exclusive with `--embedder-uds`. |
 | `--extractor-uds <path>` | Unix domain socket for a local OpenAI-compatible extraction endpoint. |
 | `--extractor-http <url>` | HTTP URL for a local OpenAI-compatible extraction endpoint. Mutually exclusive with `--extractor-uds`. |
+| `--anthropic-base-url <url>` | Base URL of an Anthropic-compatible gateway (OpenRouter, LiteLLM, a corporate proxy); `/v1/messages` is appended. Same meaning as `ANTHROPIC_BASE_URL`; the flag wins. Not valid with `--connect`. See [Anthropic-compatible gateways](#anthropic-compatible-gateways-bedrock-openrouter-litellm). |
+| `--anthropic-endpoint <url>` | Full Anthropic endpoint URL, used verbatim as the POST target (e.g. a Bedrock gateway's `<base>/<deployment>/v1/invoke`). Same meaning as `LCG_ANTHROPIC_ENDPOINT`; wins over the base URL. Not valid with `--connect`. |
 | `--mcp-stdio` | Starts a native [Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout instead of binding the Unix socket. See [MCP-over-stdio transport](ipc-mcp-reference.md#mcp-over-stdio-transport). |
 | `--scope=<list>` | MCP-stdio only. Comma-separated list of scopes to advertise in `tools/list` (default `all`): `read`, `write`, `cypher`, `admin`. |
 | `--connect <path>` | MCP-stdio only. Attached mode: forward every `tools/call` as JSON-RPC over the given Unix socket to an already-running service, instead of opening the database directly. |
@@ -51,7 +53,14 @@ title: Configuration
 | `LCG_WAL_MAX_BYTES_PER_FILE` | No | Per-file byte-size rotation threshold for the WAL (default `5242880` = 5 MB); set to `0` to disable byte-size rotation and rely on event count only |
 | `LCG_WAL_MAX_EVENTS_PER_FILE` | No | Per-file event-count rotation threshold for the WAL (default `10000`); rotation fires when either this threshold or `LCG_WAL_MAX_BYTES_PER_FILE` is reached |
 | `LCG_REPLAY_LOG_INTERVAL_SECS` | No | Throttle interval in seconds between `[WAL PROGRESS]` log lines written to stderr during WAL replay (default `30`). Set to `0` to emit a line on every progress event. |
-| `ANTHROPIC_API_KEY` | No | API key for Anthropic entity/relationship extraction. When set (and no explicit `--extractor-uds`/`--extractor-http` flag is passed), extraction uses the hosted Anthropic API for ingestion (`knowledge_process_chunk` / `knowledge_add_episode`) and entity/relation re-classification (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`). When unset, extraction requires an explicit `--extractor-uds`/`--extractor-http` flag or `LCG_EXTRACTION_URL` pointing at a local OpenAI-compatible endpoint — it is not auto-detected — see [Extractor: local or hosted](#extractor-local-or-hosted) below. Not needed for read-only, embedding-only, or non-LLM tools. |
+| `ANTHROPIC_API_KEY` | No | API key for Anthropic entity/relationship extraction, sent as the `x-api-key` header. When set (and no explicit `--extractor-uds`/`--extractor-http` flag is passed), extraction uses the Anthropic Messages API — `https://api.anthropic.com/v1/messages` unless a gateway is configured (see the rows below and [Anthropic-compatible gateways](#anthropic-compatible-gateways-bedrock-openrouter-litellm)) — for ingestion (`knowledge_process_chunk` / `knowledge_add_episode`), entity/relation re-classification (`knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types`), summary consolidation and LLM dedup judgement. When unset (and `ANTHROPIC_AUTH_TOKEN` is unset too), extraction requires an explicit `--extractor-uds`/`--extractor-http` flag or `LCG_EXTRACTION_URL` pointing at a local OpenAI-compatible endpoint — it is not auto-detected — see [Extractor: local or hosted](#extractor-local-or-hosted) below. Not needed for read-only, embedding-only, or non-LLM tools. |
+| `ANTHROPIC_AUTH_TOKEN` | No | Bearer credential for an Anthropic-compatible gateway, sent as `Authorization: Bearer <token>` **instead of** `x-api-key` (the SDK-conventional name). Setting it selects the Anthropic provider on its own — no dummy `ANTHROPIC_API_KEY` needed — and wins over `ANTHROPIC_API_KEY` if both are set **and a gateway URL is configured** (the startup log says so). On the stock `https://api.anthropic.com` endpoint with `ANTHROPIC_API_KEY` also set, the API key is kept (unchanged behaviour) and the token is ignored with a startup note, so a token exported for other Anthropic tooling cannot displace a working key. lcg reads it once at startup and never refreshes it; supply a long-lived token, or have an external refresher restart the process (see [token expiry](#token-expiry-and-the-fallback-model)). Environment only — there is deliberately no flag, since argv is visible in process listings. An empty or blank value is treated as unset (SDK convention), so a templated `ANTHROPIC_AUTH_TOKEN=` cannot break a working setup. |
+| `ANTHROPIC_BASE_URL` | No | Base URL of an Anthropic-compatible gateway (the official Anthropic SDK convention): `/v1/messages` is appended. `https://gw.example.com` and `https://gw.example.com/` both become `https://gw.example.com/v1/messages`; a base ending in `/v1` is not doubled; a path prefix (`https://gw.example.com/anthropic`) is kept. A base already ending in `/v1/messages`, or carrying a query/fragment, is a startup error pointing you at `LCG_ANTHROPIC_ENDPOINT`. The `--anthropic-base-url` flag wins over this variable. On its own it does not select the Anthropic provider — you still need `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. An `ANTHROPIC_BASE_URL` already exported for other Anthropic tooling will redirect lcg too; the startup log names the effective endpoint. Ignored by the OpenAI-compatible extractor and by `lcg-eval`. |
+| `LCG_ANTHROPIC_ENDPOINT` | No | Full Anthropic endpoint URL, used **verbatim** as the POST target (no path appended) — e.g. a Bedrock gateway's `https://gw.example.com/<deployment>/v1/invoke`. May carry a query string. Wins over `ANTHROPIC_BASE_URL`/`--anthropic-base-url` when both are set; `--anthropic-endpoint` overrides this variable. Distinct from `LCG_EXTRACTION_URL`, which belongs to the OpenAI-compatible provider and is never reinterpreted. |
+| `LCG_ANTHROPIC_OMIT_MODEL` | No | `true`/`1` omits the top-level `model` field from every request body, for gateways that select the model by URL path. Default `false`. `LCG_EXTRACTION_LLM` still names the model for cost telemetry and Sonnet-specific behaviour. Anything other than `true`/`false`/`1`/`0` fails startup. |
+| `LCG_ANTHROPIC_VERSION` | No | `anthropic_version` value (default `2023-06-01`). Required when `LCG_ANTHROPIC_VERSION_IN=body` (e.g. `bedrock-2023-05-31`). |
+| `LCG_ANTHROPIC_VERSION_IN` | No | Where `anthropic_version` travels: `header` (default — the `anthropic-version` request header) or `body` (an `anthropic_version` field in the JSON body, no header — the Bedrock shape). Exactly one placement is used per request. `body` without an explicit `LCG_ANTHROPIC_VERSION` fails startup rather than silently sending the Anthropic-direct version to a Bedrock gateway. |
+| `LCG_ANTHROPIC_PROMPT_CACHING` | No | `on` (default) or `off`. Prompt caching applies only to Sonnet-class models (model name contains `sonnet`): lcg sends `anthropic-beta: prompt-caching-2024-07-31` and marks the system prompt with `cache_control`. `off` suppresses **both**, for strict gateways that reject unknown headers or fields. Haiku models (the default) never send either. |
 | `LIMINIS_WORKSPACE_ROOT` | No* | Absolute path to the workspace root. **Required** for the three corrections IPC methods (`knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types`). If unset, those methods return a `-32000` error. The corrections file is read from `{LIMINIS_WORKSPACE_ROOT}/.liminis/knowledge-corrections.yaml`. |
 | `LCG_REPLAY_BATCH_SIZE` | No | Rows per batch during WAL replay (default `64`, valid range `1`–`256`). Lower values reduce peak memory on a large rebuild; higher values replay faster. |
 | `LCG_BUFFER_POOL_BYTES` | No | Upper bound on lbug's buffer pool (its page cache). A positive integer byte count (`2147483648`) or an integer with a binary suffix `KiB`, `MiB` or `GiB`, case-insensitive (`2GiB`, `512 mib`). Fractions (`2.5GiB`), decimal suffixes (`2GB`), `0`, an empty value and overflow are rejected. Unset = lbug's own default (roughly 80% of system memory). **An invalid value fails startup** with an error naming the variable and the value — it never silently falls back to the default. Applies to every database open (startup, recovery, rebuild, migration validation). lbug enforces its own minimum pool size; the service imposes no floor. The effective value is logged once at startup: `liminis-context-graph: lbug buffer pool: 2.0 GiB (2147483648 bytes) (LCG_BUFFER_POOL_BYTES); max threads: default (lbug auto: one per CPU)`. See [Memory sizing in containers](operations.md#memory-sizing-in-containers) and [ADR-0737](adr/0737-configurable-lbug-tuning-strict-env.md). |
@@ -368,8 +377,17 @@ precedence (highest first):
    ```
 
    (`--extractor-uds` and `--extractor-http` are mutually exclusive.)
-2. **`ANTHROPIC_API_KEY` set, no explicit flag** — extraction uses the hosted Anthropic API,
-   unchanged from prior versions. A reachable local sidecar never silently redirects this traffic.
+2. **`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN` set, no explicit flag** — extraction uses the
+   Anthropic Messages API (hosted, or a gateway — see
+   [Anthropic-compatible gateways](#anthropic-compatible-gateways-bedrock-openrouter-litellm)),
+   unchanged from prior versions when no gateway setting is present. A reachable local sidecar
+   never silently redirects this traffic. One guard applies to `ANTHROPIC_AUTH_TOKEN` alone: if it
+   is the only Anthropic signal (no `ANTHROPIC_API_KEY`, no `ANTHROPIC_BASE_URL` /
+   `LCG_ANTHROPIC_ENDPOINT` / `--anthropic-*` flag) **and** `LCG_EXTRACTION_URL` is set, the local
+   extractor stays selected and a startup warning says the token was not used — the token is
+   commonly exported for other Anthropic tooling and must not silently reroute a configured local
+   extractor to `api.anthropic.com`. Add a gateway URL setting (or unset `LCG_EXTRACTION_URL`) to
+   use the token.
 3. **Neither of the above** — `LCG_EXTRACTION_URL` (HTTP), if set, else no extraction provider is
    configured: the binary still starts, and extraction-dependent calls fail with a clear error
    identifying the missing configuration when actually invoked (see above).
@@ -395,9 +413,79 @@ before it will use a local endpoint at all.
 
 The resolved choice is reported in a startup log line: `extractor: provider=...,
 transport=..., endpoint=...` — `provider` is `anthropic` or `local` depending on which path was
-selected. Unlike the embedder, extraction performs no live reachability probe at startup —
+selected. On the Anthropic path the line also names the auth scheme and any non-default request
+shape, e.g. `extractor: provider=anthropic, transport=http, endpoint=https://gw.example.com/dep/v1/invoke, auth=bearer, model_in_body=false, anthropic_version_in=body`
+(`auth` is `x-api-key` or `bearer`, never the value; userinfo is stripped from the URL and a
+query string is shown as `?<redacted>`). Unlike the embedder, extraction performs no live reachability probe at startup —
 Foundation Models' on-device warm-up can be slow, and there is no response shape to auto-detect —
 so an unreachable local endpoint surfaces as an error on the first extraction call rather than at
 startup. See [ADR 0041](adr/0041-local-openai-compatible-extraction-adapter.md) for the full
 design, including why the local adapter uses `response_format: json_object` rather than
 function-calling (the bundled sidecar has no `tools`/`tool_choice` support).
+
+### Anthropic-compatible gateways (Bedrock, OpenRouter, LiteLLM)
+
+The Anthropic provider can be pointed at any gateway that speaks the Anthropic **Messages**
+request/response shape — for deployments that cannot reach `api.anthropic.com` directly (for
+example, AWS ECS reaching Claude only through Bedrock) or that centralize LLM access, billing and
+routing in a proxy. Every Anthropic-backed call (extraction, entity/relation reclassification,
+summary consolidation, LLM dedup judgement) uses the same configured URL, auth and body shape.
+With no gateway setting present, requests are byte-for-byte what they have always been.
+
+The separate OpenAI-shaped path (`--extractor-http`, `LCG_EXTRACTION_URL`) is unaffected by these
+settings; for gateways that only speak `/v1/chat/completions`, keep using it.
+
+**Plain proxy** (OpenRouter's Anthropic-compatible endpoint, LiteLLM in `anthropic` mode, a
+corporate gateway that forwards `x-api-key`):
+
+```bash
+export ANTHROPIC_BASE_URL=https://litellm.internal.example.com   # POST …/v1/messages
+export ANTHROPIC_API_KEY=sk-gateway-key                           # sent as x-api-key
+liminis-context-graph --mcp-stdio
+# or: liminis-context-graph --mcp-stdio --anthropic-base-url https://litellm.internal.example.com
+```
+
+**Bedrock-style gateway** (full per-deployment invoke URL, OAuth2-minted Bearer token, model
+chosen by the URL, `anthropic_version` in the body):
+
+```bash
+export LCG_ANTHROPIC_ENDPOINT=https://gw.example.com/claude-haiku-deployment/v1/invoke  # used verbatim
+export ANTHROPIC_AUTH_TOKEN="$(fetch-oauth2-token)"       # Authorization: Bearer …, no x-api-key
+export LCG_ANTHROPIC_OMIT_MODEL=true                       # no top-level "model" in the body
+export LCG_ANTHROPIC_VERSION=bedrock-2023-05-31
+export LCG_ANTHROPIC_VERSION_IN=body                       # "anthropic_version" in the body, no header
+liminis-context-graph --mcp-stdio
+```
+
+The response is parsed as the standard Anthropic Messages shape (`content[…]` blocks, including
+`tool_use`), so no response-side setting exists. lcg does not mint OAuth2 tokens itself; an
+external step (a wrapper script, an ECS sidecar) supplies `ANTHROPIC_AUTH_TOKEN`.
+
+**Precedence.** URL: `--anthropic-endpoint` > `LCG_ANTHROPIC_ENDPOINT` (both verbatim) >
+`--anthropic-base-url` > `ANTHROPIC_BASE_URL` (both bases) > the stock endpoint. Auth:
+`ANTHROPIC_AUTH_TOKEN` (Bearer) > `ANTHROPIC_API_KEY` (`x-api-key`) when a gateway URL is configured; on the stock endpoint with an API key set, the API key is kept and the token is ignored (logged). Exactly one scheme is ever
+sent.
+
+**Validation is lazy.** Gateway settings are checked only when the Anthropic provider is actually
+selected. An unparseable URL, a non-`http`/`https` scheme, a set-but-empty value or an
+unsupported placement value then fails startup with an error naming the offending setting — it
+never silently falls back to the default endpoint. If an explicit `--extractor-http`/`--extractor-uds`
+(or `LCG_EXTRACTION_URL`) wins instead, gateway settings are not validated, and one log line names
+which were present and ignored (names only, never values). The flags are rejected with `--connect`
+(attached MCP mode): set them on the daemon.
+
+**Your credential goes to the endpoint you choose.** With a non-default endpoint the startup log
+says so. Credential values, URL userinfo and query strings never appear in logs, error messages
+or telemetry.
+
+#### Token expiry and the fallback model
+
+lcg reads `ANTHROPIC_AUTH_TOKEN` once, at startup. A short-lived token that expires mid-run
+surfaces as authentication failures (the gateway's response body is captured in the extraction
+failure sidecar as for any non-2xx). If `LCG_EXTRACTION_LLM` names a `primary:fallback` pair, the
+router treats such a failure as a primary failure and permanently switches to the fallback for the
+rest of the process — but the fallback uses the same expired token, so it fails too. Use a
+long-lived token, or an external refresher that restarts the process before expiry.
+
+`lcg-eval` (the developer evaluation tool) does not honor these settings; its judge uses its own
+fixed endpoint.
