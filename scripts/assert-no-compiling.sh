@@ -38,6 +38,11 @@ if hits=$(printf '%s\n' "$stripped" | grep -E '^[[:space:]]*Compiling([[:space:]
   printf '%s\n' "$hits" | head -n 50
   count=$(printf '%s\n' "$hits" | wc -l | tr -d ' ')
   echo "($count Compiling line(s) in total)"
+  # If the step ran with CARGO_LOG=cargo::core::compiler::fingerprint=info, cargo said why.
+  if reasons=$(printf '%s\n' "$stripped" | grep -E 'cargo::core::compiler::fingerprint'); then
+    echo "Cargo's fingerprint reasons (first 60 lines):"
+    printf '%s\n' "$reasons" | head -n 60
+  fi
   exit 1
 fi
 echo "OK: no 'Compiling' lines in $log"
