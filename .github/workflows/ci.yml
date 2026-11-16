@@ -152,6 +152,10 @@ jobs:
       - name: fetch-lbug-prebuilt self-test
         run: scripts/test-fetch-lbug-prebuilt.sh
 
+      # #725: release.yml's `verify-plan` guard (empty / matrix-less plan output on a tag run).
+      - name: plan-output guard self-test
+        run: scripts/test-assert-plan-output.sh
+
       - name: check no ML runtime deps
         run: |
           # Capture `cargo tree` on its own (stderr kept) so a registry/network failure fails
