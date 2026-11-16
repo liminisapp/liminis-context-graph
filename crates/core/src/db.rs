@@ -2001,6 +2001,25 @@ impl<'db> Conn<'db> {
         Ok(info.values().map(|i| i.origin).collect())
     }
 
+    /// `write_path` of each given episode (issue #292); `None` for a NULL (pre-marker) column.
+    /// Not part of any episode read: it exists for administration and tests.
+    pub fn get_episode_write_paths(
+        &self,
+        uuids: &[String],
+    ) -> Result<HashMap<String, Option<String>>, Error> {
+        if uuids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids RETURN ep.uuid, ep.write_path",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (value_as_string(&r[0]), value_as_optional_string(&r[1])))
+            .collect())
+    }
+
     /// Origins of the live episodes a chunk revise could supersede: like
     /// [`Self::live_origins_for_chunk`] but restricted to the chunk-eligible rows (issue #292), so
     /// a foreign same-named episode never makes a revise refuse.
