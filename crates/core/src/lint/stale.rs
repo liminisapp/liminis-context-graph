@@ -76,6 +76,15 @@ pub fn analyse(ctx: &Ctx<'_>) -> CategoryResult {
     // corroborating support and none of it is live any more.
     let mut lost: HashMap<&ClassKey, Vec<&LintEpisode>> = HashMap::new();
     for (key, idxs) in &ctx.classes {
+        // A believed edge with no producing episode (asserted, cross-group warrant, legacy) is
+        // `primary` under ADR-0752 and still backs the fact, so the class has not lost support
+        // (same guard as `weak.rs`).
+        if idxs
+            .iter()
+            .any(|&i| ctx.believed[i] && ctx.edge(i).belief.episodes.is_empty())
+        {
+            continue;
+        }
         let mut corroborating: Vec<&LintEpisode> = Vec::new();
         for &i in idxs {
             for u in &ctx.edge(i).belief.episodes {

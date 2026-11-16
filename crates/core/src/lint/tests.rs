@@ -164,6 +164,24 @@ fn stale_page_not_reported_while_primary_support_is_live() {
 }
 
 #[test]
+fn stale_page_not_reported_when_an_asserted_sibling_still_backs_the_fact() {
+    // Same-fact class (a, b, uses): superseded primary p1, derived restatement d1, and an
+    // asserted edge with no producing episode (primary under ADR-0752) that is still believed.
+    let mut snap = stale_snapshot(superseded(
+        ep("p1", Some("note"), Origin::Primary),
+        "revision",
+        None,
+    ));
+    snap.edges.push(edge("ra", "a", "b", "uses", &[]));
+    assert!(
+        run(&snap, &req(&[Category::StaleDerivedPage]))
+            .page
+            .is_empty(),
+        "an episode-less believed edge keeps the fact corroborated"
+    );
+}
+
+#[test]
 fn stale_page_cause_mapping() {
     for (reason, kind, want) in [
         ("revision", None, "corrected"),

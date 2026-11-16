@@ -72,7 +72,9 @@ cursor keeps decoding. Unlike the older reads, `next_cursor` is always present (
   one is live, restating a same-fact class that had corroborating (primary/external) support, none of it
   live now. Cause from the superseded episode: document supersession, `revision` → `corrected`,
   `chunk_removed` → `removed`. A class that never had corroboration is `weak_support`, not stale. A
-  hard-deleted corroborating episode has no readable origin and is ignored. LCG records no "derived from"
+  hard-deleted corroborating episode has no readable origin and is ignored. A class holding a believed
+  edge with no producing episode (asserted, cross-group warrant, legacy — `primary` under ADR-0752) is
+  never stale, the same guard `weak_support` uses. LCG records no "derived from"
   link, so the relation is inferred through shared facts (ADR-0752's key). Detection is read-time, so a
   correction or supersession is reflected immediately with no re-ingest of the page.
 - **Weak support**: a believed class with corroboration (distinct primary + external documents) 0
