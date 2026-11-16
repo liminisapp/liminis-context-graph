@@ -14,8 +14,15 @@ use std::time::{Duration, Instant};
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
+
+/// The LCG service is driven over its Unix socket. On Windows the service listens on a named pipe
+/// instead, which this driver does not speak yet, so `connect` refuses there. The placeholder type
+/// keeps the rest of the driver (and its transport-agnostic tests) compiling on every platform.
+#[cfg(not(unix))]
+type UnixStream = tokio::io::DuplexStream;
 
 use super::fixture::Fixture;
 use super::mapping::{
@@ -44,6 +51,16 @@ pub struct UdsClient {
 pub const RPC_TIMEOUT: Duration = Duration::from_secs(900);
 
 impl UdsClient {
+    #[cfg(not(unix))]
+    pub async fn connect(path: &Path) -> Result<Self, String> {
+        Err(format!(
+            "lcg-eval retrieval drives the service over a Unix socket, which is not supported on \
+             this platform (cannot connect to {})",
+            path.display()
+        ))
+    }
+
+    #[cfg(unix)]
     pub async fn connect(path: &Path) -> Result<Self, String> {
         let s = UnixStream::connect(path)
             .await
@@ -707,6 +724,7 @@ mod tests {
         f
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_silent_service_times_out_instead_of_hanging() {
         let dir = tempfile::tempdir().unwrap();
@@ -819,6 +837,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn uds_client_round_trips_and_skips_progress_lines() {
         let d = tempfile::tempdir().unwrap();
