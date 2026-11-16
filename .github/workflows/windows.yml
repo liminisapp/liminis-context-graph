@@ -124,8 +124,10 @@ jobs:
       - name: Point Db::open at the staged extensions
         run: echo "LCG_LBUG_HOME=$(cygpath -w "$PWD/lbug-extension-bundle")" >> "$GITHUB_ENV"
 
-      - name: Clippy (lcg-core, lcg-service; all targets)
-        run: cargo clippy -p lcg-core -p lcg-service --all-targets -- -D warnings
+      # lcg-eval is included because the release builds it for Windows too: #760 was an unguarded
+      # `tokio::net::UnixStream` there that only the tag-time release build caught.
+      - name: Clippy (lcg-core, lcg-service, lcg-eval; all targets)
+        run: cargo clippy -p lcg-core -p lcg-service -p lcg-eval --all-targets -- -D warnings
 
       - name: lcg-service unit tests (incl. named-pipe transport)
         run: cargo test -p lcg-service --bin liminis-context-graph
