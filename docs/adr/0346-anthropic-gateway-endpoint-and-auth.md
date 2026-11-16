@@ -64,7 +64,9 @@ setting. A full endpoint may carry a query (some gateways need `?api-version=`).
 ### Auth
 
 `ANTHROPIC_AUTH_TOKEN` is sent as `Authorization: Bearer` with no `x-api-key`, and wins over
-`ANTHROPIC_API_KEY`; exactly one scheme is sent. Either selects the Anthropic provider
+`ANTHROPIC_API_KEY` when a gateway URL is configured; on the stock endpoint with an API key set the
+key is kept (FR-003: unchanged behaviour) and the token is ignored with a startup note, because the
+token is often exported for other Anthropic tooling. Exactly one scheme is sent. Either selects the Anthropic provider
 (FR-006) — `ANTHROPIC_BASE_URL` alone does not. `ANTHROPIC_API_KEY` keeps its historical
 "set, even if empty, selects Anthropic" semantics.
 

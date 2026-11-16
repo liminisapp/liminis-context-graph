@@ -217,8 +217,21 @@ impl AnthropicEndpointConfig {
         // ── Auth ──
         let token = env_non_empty(env, ENV_AUTH_TOKEN)?;
         let api_key = env(ENV_API_KEY);
-        let auth = match token {
-            Some(t) => {
+        // The token wins over the API key only when a gateway URL is configured. On the stock
+        // endpoint with an API key set, behaviour must stay byte-for-byte what it was before
+        // (FR-003): `ANTHROPIC_AUTH_TOKEN` is commonly exported for other Anthropic tooling, and
+        // letting it silently displace a working `ANTHROPIC_API_KEY` would send an unrelated
+        // credential to api.anthropic.com and turn a working setup into a 401.
+        let stock_url = url == DEFAULT_ANTHROPIC_URL;
+        let auth = match (token, api_key) {
+            (Some(_), Some(k)) if stock_url => {
+                notes.push(format!(
+                    "{ENV_AUTH_TOKEN} ignored: {ENV_API_KEY} is used on the stock Anthropic \
+                     endpoint (set {ENV_BASE_URL} or {ENV_ENDPOINT} to use the bearer token)"
+                ));
+                AnthropicAuth::ApiKey(k)
+            }
+            (Some(t), api_key) => {
                 if api_key.is_some() {
                     notes.push(format!(
                         "{ENV_API_KEY} ignored: {ENV_AUTH_TOKEN} (bearer) takes precedence"
@@ -226,7 +239,7 @@ impl AnthropicEndpointConfig {
                 }
                 AnthropicAuth::Bearer(t)
             }
-            None => AnthropicAuth::ApiKey(api_key.unwrap_or_default()),
+            (None, api_key) => AnthropicAuth::ApiKey(api_key.unwrap_or_default()),
         };
 
         // ── Request shape ──
@@ -681,11 +694,31 @@ mod tests {
     }
 
     #[test]
+    fn api_key_kept_over_token_on_stock_endpoint() {
+        let c = resolve(
+            &[
+                ("ANTHROPIC_AUTH_TOKEN", "tok"),
+                ("ANTHROPIC_API_KEY", "key"),
+            ],
+            AnthropicCliArgs::default(),
+        )
+        .unwrap();
+        assert_eq!(c.auth, AnthropicAuth::ApiKey("key".into()));
+        assert_eq!(c.auth_scheme(), "x-api-key");
+        assert!(c
+            .notes
+            .iter()
+            .any(|n| n.contains("ANTHROPIC_AUTH_TOKEN ignored")));
+        assert!(!format!("{:?} {:?}", c, c.notes).contains("tok\""));
+    }
+
+    #[test]
     fn bearer_beats_api_key() {
         let c = resolve(
             &[
                 ("ANTHROPIC_AUTH_TOKEN", "tok"),
                 ("ANTHROPIC_API_KEY", "key"),
+                ("ANTHROPIC_BASE_URL", "https://gw.example.com"),
             ],
             AnthropicCliArgs::default(),
         )
