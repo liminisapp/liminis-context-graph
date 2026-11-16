@@ -79,7 +79,7 @@ An operator whose gateway authenticates with `Authorization: Bearer <token>` (no
 
 1. **Given** a bearer credential is configured, **When** a request is sent, **Then** it carries `Authorization: Bearer <credential>` and does not carry `x-api-key`.
 2. **Given** only a bearer credential is configured (no `ANTHROPIC_API_KEY`), **When** the service starts, **Then** the Anthropic provider is selected (not "no extraction provider configured") and extraction works.
-3. **Given** both a bearer credential and `ANTHROPIC_API_KEY` are set, **When** a request is sent, **Then** the bearer credential takes precedence and exactly one auth scheme is sent.
+3. **Given** both a bearer credential and `ANTHROPIC_API_KEY` are set and a gateway URL (base or full endpoint) is configured, **When** a request is sent, **Then** the bearer credential takes precedence and exactly one auth scheme is sent. **Given** the same two credentials but no gateway URL (the stock endpoint), **Then** `ANTHROPIC_API_KEY` is kept (`x-api-key`) and the bearer credential is ignored with a startup note, so a token exported for other Anthropic tooling cannot displace a working key (FR-003).
 4. **Given** the credential value, **When** the service logs its startup configuration or any error, **Then** the value never appears in any log or telemetry output.
 
 ---
@@ -120,7 +120,7 @@ An operator can confirm from the startup log which endpoint and auth scheme the 
 ### Edge Cases
 
 - Base URL that already ends in `/v1` or `/v1/messages`: documented behavior is deterministic (see Assumptions) and never silently produces a doubled path.
-- Empty-string values for any new variable are treated as a configuration error or as unset consistently with the project's other strictly-parsed variables, never as a valid value.
+- Empty-string values for any new variable are never a valid value: they are a configuration error for the URL settings and the `LCG_ANTHROPIC_*` variables, and treated as unset for `ANTHROPIC_AUTH_TOKEN` (SDK convention; it is commonly templated for other tooling and must not break a stock-endpoint setup).
 - Gateway returns 429/529: existing retry/backoff behavior is unchanged against a gateway.
 - Gateway returns a non-2xx with a non-Anthropic error body: the raw body is still captured in extraction-failure telemetry as today.
 - Short-lived bearer tokens expire during a long run: since lcg does not refresh tokens, expiry surfaces as an auth failure (with the gateway's response body captured as in any other non-2xx); the supported patterns are long-lived tokens or an external refresher that restarts the process (see Assumptions).
@@ -137,14 +137,14 @@ An operator can confirm from the startup log which endpoint and auth scheme the 
 - **FR-002**: The service MUST accept an `--anthropic-base-url <URL>` command-line flag with the same meaning as `ANTHROPIC_BASE_URL`; when both are set the flag wins.
 - **FR-003**: When no base URL, full endpoint URL, or related setting is configured, the provider's behavior (URL, headers, body) MUST be byte-for-byte equivalent to current behavior.
 - **FR-004**: The provider MUST support a full endpoint URL setting (env var and flag) that is used verbatim as the POST target with no path appended, taking precedence over the base URL when both are set.
-- **FR-005**: The provider MUST support a Bearer credential setting (env var) that, when set, causes requests to carry `Authorization: Bearer <credential>` and omit `x-api-key`; it takes precedence over `ANTHROPIC_API_KEY`.
-- **FR-006**: The Anthropic provider MUST be selected for extraction when either `ANTHROPIC_API_KEY` or the Bearer credential is set (subject to the existing explicit-flag precedence), so a gateway deployment needs no dummy `ANTHROPIC_API_KEY`.
+- **FR-005**: The provider MUST support a Bearer credential setting (env var) that, when set, causes requests to carry `Authorization: Bearer <credential>` and omit `x-api-key`; it takes precedence over `ANTHROPIC_API_KEY` when a gateway URL (base or full endpoint) is configured. On the stock endpoint with `ANTHROPIC_API_KEY` set, the API key is kept and the Bearer credential is ignored with a startup note (FR-003). An empty or blank Bearer credential is treated as unset, as in the Anthropic SDKs.
+- **FR-006**: The Anthropic provider MUST be selected for extraction when either `ANTHROPIC_API_KEY` or the Bearer credential is set (subject to the existing explicit-flag precedence), so a gateway deployment needs no dummy `ANTHROPIC_API_KEY`. Exception: when the Bearer credential is the only Anthropic signal (no `ANTHROPIC_API_KEY`, no gateway URL setting) and `LCG_EXTRACTION_URL` selects a local extractor, the local extractor stays selected and a warning is logged, so a token exported for other tooling cannot silently reroute extraction to `api.anthropic.com`.
 - **FR-007**: The provider MUST support omitting the top-level `model` field from the request body via a configuration setting; when not set, `model` is sent as today.
 - **FR-008**: The provider MUST support configuring the `anthropic_version` value and whether it is sent as the `anthropic-version` header (default, `2023-06-01`) or as an `anthropic_version` field in the request body; exactly one placement is used per request.
 - **FR-009**: Every Anthropic-backed call path (entity/edge extraction, entity and relation reclassification, summary consolidation, LLM dedup judgement) MUST use the same configured URL, auth and request-shape settings.
 - **FR-010**: Credential values (API key, Bearer token) MUST never be written to logs, error messages or telemetry; URLs logged at startup MUST have any userinfo and query-string secrets redacted.
 - **FR-011**: The startup log MUST report the effective Anthropic endpoint and the auth scheme in use (`x-api-key` or `bearer`, never the value).
-- **FR-012**: Invalid configuration (unparseable URL, non-`http`/`https` scheme, empty-but-set value, unsupported `anthropic_version` placement value) MUST fail startup with an error naming the setting; it MUST NOT silently fall back to the default endpoint.
+- **FR-012**: Invalid configuration (unparseable URL, non-`http`/`https` scheme, empty-but-set value (except `ANTHROPIC_AUTH_TOKEN`, which is treated as unset), unsupported `anthropic_version` placement value) MUST fail startup with an error naming the setting; it MUST NOT silently fall back to the default endpoint.
 - **FR-013**: The existing request/response handling — Messages response parsing, retry/backoff on 429/529, failure telemetry, timeouts, cassette record/replay — MUST work unchanged against a configured gateway.
 - **FR-014**: The `anthropic-beta` prompt-caching header MUST be suppressible by configuration, or the documentation MUST state precisely when it is sent, so gateways that reject it can be used.
 - **FR-015**: The new flags and environment variables MUST be documented in the configuration reference and CLI help, including a worked example for a Bedrock-style gateway (full URL, Bearer auth, no `model`, `anthropic_version` in body) and one for a plain proxy (OpenRouter/LiteLLM).
