@@ -4,6 +4,8 @@
 //! pattern in `main.rs`) rather than adopting `clap`: a handful of flags doesn't clear the bar
 //! for a new dependency, and a pure `parse_args` function is just as testable.
 
+use lcg_core::anthropic_config::AnthropicCliArgs;
+
 use crate::mcp::scope::Scope;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -24,6 +26,9 @@ pub enum CliMode {
     Socket {
         embedder: Option<EmbedderFlag>,
         extractor: Option<ExtractorFlag>,
+        /// `--anthropic-base-url` / `--anthropic-endpoint` (#346). Validated lazily, only when
+        /// the Anthropic provider is the one selected.
+        anthropic: AnthropicCliArgs,
         /// Raw `--writable-groups` value (issue #742). Validated at startup, together with
         /// `LCG_WRITABLE_GROUPS`, by `lcg_core::write_policy::WritableGroups::resolve`.
         writable_groups: Option<String>,
@@ -32,6 +37,9 @@ pub enum CliMode {
     Mcp {
         embedder: Option<EmbedderFlag>,
         extractor: Option<ExtractorFlag>,
+        /// `--anthropic-base-url` / `--anthropic-endpoint` (#346). Rejected with `--connect`
+        /// (the daemon does the extracting), so non-empty only in standalone mode.
+        anthropic: AnthropicCliArgs,
         /// `--connect <path>`: attached mode — forward calls to a running service instead
         /// of opening the DB directly (FR-006).
         connect: Option<String>,
@@ -95,6 +103,18 @@ OPTIONS:
     --extractor-http <URL>    Reach a local OpenAI-compatible extraction endpoint over this
                                HTTP URL.
                                (--extractor-uds and --extractor-http are mutually exclusive.)
+    --anthropic-base-url <URL> Base URL of an Anthropic-compatible gateway (OpenRouter, LiteLLM,
+                               a corporate proxy); `/v1/messages` is appended. Also settable via
+                               ANTHROPIC_BASE_URL; the flag wins. Only used when the Anthropic
+                               provider is selected (ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN).
+    --anthropic-endpoint <URL> Full Anthropic endpoint URL, used verbatim as the POST target
+                               (e.g. a Bedrock gateway's <base>/<deployment>/v1/invoke). Also
+                               settable via LCG_ANTHROPIC_ENDPOINT; wins over the base URL.
+                               Auth, body shape and the other gateway settings are environment
+                               variables (ANTHROPIC_AUTH_TOKEN, LCG_ANTHROPIC_OMIT_MODEL,
+                               LCG_ANTHROPIC_VERSION, LCG_ANTHROPIC_VERSION_IN,
+                               LCG_ANTHROPIC_PROMPT_CACHING) — see docs/configuration.md.
+                               Neither flag is valid with --connect: set them on the daemon.
     -h, --help                 Print this help and exit.
     -V, --version              Print version and exit.
 
@@ -114,6 +134,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     let mut cli_http: Option<String> = None;
     let mut extractor_cli_uds: Option<String> = None;
     let mut extractor_cli_http: Option<String> = None;
+    let mut anthropic = AnthropicCliArgs::default();
     let mut want_help = false;
     let mut want_version = false;
 
@@ -163,6 +184,22 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
                     args.get(i)
                         .cloned()
                         .ok_or("--extractor-http requires a URL argument")?,
+                );
+            }
+            "--anthropic-base-url" => {
+                i += 1;
+                anthropic.base_url = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or("--anthropic-base-url requires a URL argument")?,
+                );
+            }
+            "--anthropic-endpoint" => {
+                i += 1;
+                anthropic.endpoint = Some(
+                    args.get(i)
+                        .cloned()
+                        .ok_or("--anthropic-endpoint requires a URL argument")?,
                 );
             }
             "--scope" => {
@@ -235,6 +272,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         return Ok(CliMode::Socket {
             embedder,
             extractor,
+            anthropic,
             writable_groups,
         });
     }
@@ -244,6 +282,15 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
             "--writable-groups cannot be combined with --connect: the allow-list is \
              enforced by the daemon, so set --writable-groups (or LCG_WRITABLE_GROUPS) on the \
              daemon, not on the attached MCP process"
+                .to_string(),
+        );
+    }
+
+    if connect.is_some() && !anthropic.is_empty() {
+        return Err(
+            "--anthropic-base-url/--anthropic-endpoint cannot be combined with --connect: the \
+             daemon does the extracting, so set them (or ANTHROPIC_BASE_URL / \
+             LCG_ANTHROPIC_ENDPOINT) on the daemon, not on the attached MCP process"
                 .to_string(),
         );
     }
@@ -266,6 +313,7 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     Ok(CliMode::Mcp {
         embedder,
         extractor,
+        anthropic,
         connect,
         scopes,
         allow_remote_close,
@@ -289,6 +337,7 @@ mod tests {
             CliMode::Socket {
                 embedder: None,
                 extractor: None,
+                anthropic: AnthropicCliArgs::default(),
                 writable_groups: None
             }
         );
@@ -301,6 +350,7 @@ mod tests {
             CliMode::Socket {
                 embedder: Some(EmbedderFlag::Uds("/tmp/x.sock".to_string())),
                 extractor: None,
+                anthropic: AnthropicCliArgs::default(),
                 writable_groups: None
             }
         );
@@ -325,6 +375,7 @@ mod tests {
             CliMode::Socket {
                 embedder: None,
                 extractor: Some(ExtractorFlag::Uds("/tmp/x.sock".to_string())),
+                anthropic: AnthropicCliArgs::default(),
                 writable_groups: None
             }
         );
@@ -337,6 +388,7 @@ mod tests {
             CliMode::Socket {
                 embedder: None,
                 extractor: Some(ExtractorFlag::Http("http://x".to_string())),
+                anthropic: AnthropicCliArgs::default(),
                 writable_groups: None
             }
         );
@@ -367,6 +419,7 @@ mod tests {
             CliMode::Socket {
                 embedder: Some(EmbedderFlag::Uds("/tmp/e.sock".to_string())),
                 extractor: Some(ExtractorFlag::Http("http://x".to_string())),
+                anthropic: AnthropicCliArgs::default(),
                 writable_groups: None
             }
         );
@@ -382,8 +435,10 @@ mod tests {
                 connect_eager,
                 embedder,
                 extractor,
+                anthropic,
                 writable_groups: _,
             } => {
+                assert_eq!(anthropic, AnthropicCliArgs::default());
                 assert_eq!(connect, None);
                 assert_eq!(scopes, Scope::ALL.to_vec());
                 assert!(!allow_remote_close);
@@ -393,6 +448,101 @@ mod tests {
             }
             other => panic!("expected Mcp mode, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn anthropic_flags_parse_in_socket_mode() {
+        match parse_args(&args(&[
+            "--anthropic-base-url",
+            "https://gw.example.com",
+            "--anthropic-endpoint",
+            "https://gw.example.com/dep/v1/invoke",
+        ]))
+        .unwrap()
+        {
+            CliMode::Socket { anthropic, .. } => {
+                assert_eq!(
+                    anthropic.base_url.as_deref(),
+                    Some("https://gw.example.com")
+                );
+                assert_eq!(
+                    anthropic.endpoint.as_deref(),
+                    Some("https://gw.example.com/dep/v1/invoke")
+                );
+            }
+            other => panic!("expected Socket mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anthropic_flags_parse_in_standalone_mcp_mode() {
+        match parse_args(&args(&[
+            "--mcp-stdio",
+            "--anthropic-base-url",
+            "https://gw",
+        ]))
+        .unwrap()
+        {
+            CliMode::Mcp { anthropic, .. } => {
+                assert_eq!(anthropic.base_url.as_deref(), Some("https://gw"));
+                assert_eq!(anthropic.endpoint, None);
+            }
+            other => panic!("expected Mcp mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anthropic_flags_require_a_value() {
+        let e = parse_args(&args(&["--anthropic-base-url"])).unwrap_err();
+        assert!(e.contains("--anthropic-base-url requires a URL"), "{e}");
+        let e = parse_args(&args(&["--anthropic-endpoint"])).unwrap_err();
+        assert!(e.contains("--anthropic-endpoint requires a URL"), "{e}");
+    }
+
+    #[test]
+    fn anthropic_flags_rejected_with_connect() {
+        for flag in ["--anthropic-base-url", "--anthropic-endpoint"] {
+            let e = parse_args(&args(&[
+                "--mcp-stdio",
+                "--connect",
+                "/tmp/s.sock",
+                flag,
+                "https://gw",
+            ]))
+            .unwrap_err();
+            assert!(e.contains("--connect"), "{e}");
+        }
+    }
+
+    #[test]
+    fn anthropic_flags_do_not_affect_extractor_flag() {
+        match parse_args(&args(&[
+            "--extractor-http",
+            "http://localhost:1/v1",
+            "--anthropic-base-url",
+            "https://gw",
+        ]))
+        .unwrap()
+        {
+            CliMode::Socket {
+                extractor,
+                anthropic,
+                ..
+            } => {
+                assert_eq!(
+                    extractor,
+                    Some(ExtractorFlag::Http("http://localhost:1/v1".to_string()))
+                );
+                assert!(anthropic.base_url.is_some());
+            }
+            other => panic!("expected Socket mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn usage_documents_anthropic_flags() {
+        assert!(usage().contains("--anthropic-base-url"));
+        assert!(usage().contains("--anthropic-endpoint"));
     }
 
     #[test]
@@ -533,6 +683,7 @@ mod tests {
             CliMode::Socket {
                 embedder: Some(EmbedderFlag::Uds("/tmp/x.sock".to_string())),
                 extractor: None,
+                anthropic: AnthropicCliArgs::default(),
                 writable_groups: None
             }
         );

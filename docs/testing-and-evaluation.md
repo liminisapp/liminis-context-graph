@@ -122,6 +122,8 @@ returns the right notes and evidence, compared with qmd — see
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...   # hosted baseline + LLM-as-judge scoring
+# (lcg-eval always targets api.anthropic.com: it does not honor the service's
+#  ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / LCG_ANTHROPIC_* gateway settings)
 cargo run --release -p lcg-eval -- \
   --backend baseline=anthropic \
   --backend local=oai-http:url=http://127.0.0.1:8765/v1/chat/completions,model=local \

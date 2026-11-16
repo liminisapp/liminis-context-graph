@@ -29,6 +29,8 @@ fn spawn_unconfigured(dir: &TempDir, embedder_url: &str, extra_args: &[&str]) ->
             dir.path().join("unused.sock").to_str().unwrap(),
         )
         .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_BASE_URL")
         .env_remove("LCG_EXTRACTION_URL")
         .args(["--mcp-stdio", "--embedder-http", embedder_url])
         .args(extra_args);
@@ -167,6 +169,7 @@ fn extraction_call_fails_cleanly_and_process_keeps_serving_reads() {
     assert!(
         message.contains("No extraction provider configured")
             && message.contains("ANTHROPIC_API_KEY")
+            && message.contains("ANTHROPIC_AUTH_TOKEN")
             && message.contains("LCG_EXTRACTION_URL"),
         "error should name what to configure (the FR-002 guidance): {message:?}"
     );

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 
 use crate::{
+    anthropic_config::AnthropicEndpointConfig,
     dedup_judge::{DedupVerdict, DuplicatePair},
     env::lcg_env_var,
     error::Error,
@@ -72,6 +73,22 @@ impl LlmRouter {
         wrap: impl Fn(Arc<dyn Extractor>, &str) -> Arc<dyn Extractor>,
     ) -> Self {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+        Self::from_config_with(
+            sink,
+            AnthropicEndpointConfig::default_with_key(api_key),
+            wrap,
+        )
+    }
+
+    /// Like [`Self::from_env_with`], but builds the primary and fallback leaves from one shared,
+    /// already-resolved [`AnthropicEndpointConfig`] (#346): gateway URL, auth scheme and request
+    /// shape are process-wide and identical for both leaves. `from_env_with` delegates here with
+    /// the stock endpoint around `ANTHROPIC_API_KEY`, so its behavior is unchanged.
+    pub fn from_config_with(
+        sink: Arc<dyn TelemetrySink>,
+        endpoint: AnthropicEndpointConfig,
+        wrap: impl Fn(Arc<dyn Extractor>, &str) -> Arc<dyn Extractor>,
+    ) -> Self {
         // deprecated: remove in Phase B (see #59)
         let spec = lcg_env_var("LCG_EXTRACTION_LLM", "GRAPHITI_EXTRACTION_LLM")
             .unwrap_or_else(|_| "claude-haiku-4-5-20251001".to_string());
@@ -84,21 +101,23 @@ impl LlmRouter {
         let fallback_model = parts.next().map(str::to_string);
 
         let primary: Arc<dyn Extractor> = wrap(
-            Arc::new(AnthropicExtractor::with_model(
-                primary_model.clone(),
-                api_key.clone(),
-                Arc::clone(&sink),
-            )),
+            Arc::new(
+                AnthropicExtractor::with_model(
+                    primary_model.clone(),
+                    String::new(),
+                    Arc::clone(&sink),
+                )
+                .with_endpoint_config(endpoint.clone()),
+            ),
             &primary_model,
         );
         let fallback_model_name = fallback_model.clone().unwrap_or_default();
         let fallback: Option<Arc<dyn Extractor>> = fallback_model.map(|m| {
             wrap(
-                Arc::new(AnthropicExtractor::with_model(
-                    m.clone(),
-                    api_key,
-                    Arc::clone(&sink),
-                )),
+                Arc::new(
+                    AnthropicExtractor::with_model(m.clone(), String::new(), Arc::clone(&sink))
+                        .with_endpoint_config(endpoint.clone()),
+                ),
                 &m,
             )
         });
