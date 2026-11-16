@@ -255,13 +255,24 @@ async fn handle(
     }
 }
 
+/// `knowledge_add_episode`'s `reference_time` is optional. When it is missing or blank it means
+/// "now", as it already does for `knowledge_process_chunk`. Before this, a missing value reached
+/// the TIMESTAMP column as `""` and the call failed with a conversion error. A supplied value is
+/// passed through unchanged; validating it is lbug's job, as before.
+fn reference_time_or_now(p: &Value) -> String {
+    match p["reference_time"].as_str() {
+        Some(s) if !s.trim().is_empty() => s.to_string(),
+        _ => chrono::Utc::now().to_rfc3339(),
+    }
+}
+
 async fn handle_add_episode(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let name = p["name"].as_str().unwrap_or("").to_string();
     let body = p["episode_body"].as_str().unwrap_or("").to_string();
     let source = p["source"].as_str().unwrap_or("text").to_string();
     let source_desc = p["source_description"].as_str().unwrap_or("").to_string();
-    let ref_time = p["reference_time"].as_str().unwrap_or("").to_string();
+    let ref_time = reference_time_or_now(p);
     let group_id = p["group_id"]
         .as_str()
         .unwrap_or(DEFAULT_GROUP_ID)

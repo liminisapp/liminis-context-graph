@@ -7850,3 +7850,55 @@ async fn origin_is_additive_for_clients_that_never_send_it_752() {
         "dry run wrote: {v}"
     );
 }
+
+/// `reference_time` is optional in `knowledge_add_episode`'s schema. Omitting it, or sending an
+/// empty string, used to fail with "Conversion exception: Error occurred during parsing TIMESTAMP.
+/// Given: \"\"". It now defaults to the current time, as `knowledge_process_chunk` does.
+#[tokio::test]
+async fn test_knowledge_add_episode_without_reference_time_defaults_to_now() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let before = chrono::Utc::now() - chrono::Duration::seconds(5);
+    for (id, extra) in [(40, json!({})), (41, json!({"reference_time": ""}))] {
+        let mut params = json!({
+            "name": format!("ep-no-ref-time-{id}"),
+            "episode_body": "Alice works at Acme Corp.",
+        });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let v = dispatch_val(id, "knowledge_add_episode", params, Arc::clone(&state)).await;
+        assert_ok_resp(&v, id);
+        let uuid = v["result"]["episode_uuid"].as_str().unwrap().to_string();
+
+        let eps = dispatch_val(
+            id + 100,
+            "knowledge_get_episodes",
+            json!({"last_n": 10}),
+            Arc::clone(&state),
+        )
+        .await;
+        assert_ok_resp(&eps, id + 100);
+        let ep = eps["result"]["episodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["uuid"] == uuid)
+            .expect("episode written without reference_time must be readable")
+            .clone();
+        let stamp = ["valid_at", "created_at"]
+            .iter()
+            .find_map(|k| ep[*k].as_str().filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| panic!("episode has no timestamp: {ep}"));
+        // lbug returns TIMESTAMPs as naive UTC, e.g. "2026-11-16 14:01:36[.ffffff]".
+        let parsed = chrono::NaiveDateTime::parse_from_str(stamp, "%Y-%m-%d %H:%M:%S%.f")
+            .map(|n| n.and_utc())
+            .or_else(|_| chrono::DateTime::parse_from_rfc3339(stamp).map(|d| d.to_utc()))
+            .unwrap_or_else(|e| panic!("unparsable timestamp {stamp}: {e}"));
+        assert!(
+            parsed >= before - chrono::Duration::seconds(1),
+            "defaulted timestamp {stamp} should be ~now"
+        );
+    }
+}
