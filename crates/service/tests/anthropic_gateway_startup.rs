@@ -267,7 +267,6 @@ fn invalid_gateway_config_fails_startup_naming_the_setting() {
             &[],
             "LCG_ANTHROPIC_ENDPOINT",
         ),
-        (&[("ANTHROPIC_AUTH_TOKEN", "")], &[], "ANTHROPIC_AUTH_TOKEN"),
         (&[("ANTHROPIC_BASE_URL", "")], &[], "ANTHROPIC_BASE_URL"),
         (
             &[("LCG_ANTHROPIC_VERSION_IN", "body")],
@@ -310,6 +309,25 @@ fn invalid_gateway_config_fails_startup_naming_the_setting() {
             "{env:?} {args:?}: error should name `{needle}`: {stderr}"
         );
     }
+}
+
+/// An empty `ANTHROPIC_AUTH_TOKEN` (e.g. a templated `ANTHROPIC_AUTH_TOKEN=${X:-}`) is treated as
+/// unset: a stock-endpoint `ANTHROPIC_API_KEY` setup keeps starting and keeps using `x-api-key`.
+#[test]
+fn empty_auth_token_is_treated_as_unset_and_does_not_fail_startup() {
+    let dir = TempDir::new().unwrap();
+    let mut cmd = base_cmd(&dir, spawn_stub_embedder());
+    cmd.env("ANTHROPIC_API_KEY", "KEY-EMPTYTOK-SECRET")
+        .env("ANTHROPIC_AUTH_TOKEN", "");
+    let stderr = run_and_capture_stderr(cmd);
+    assert!(
+        stderr.contains(
+            "provider=anthropic, transport=http, \
+             endpoint=https://api.anthropic.com/v1/messages, auth=x-api-key"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("KEY-EMPTYTOK-SECRET"), "{stderr}");
 }
 
 #[test]
