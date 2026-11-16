@@ -123,7 +123,7 @@ An operator can confirm from the startup log which endpoint and auth scheme the 
 - Empty-string values for any new variable are treated as a configuration error or as unset consistently with the project's other strictly-parsed variables, never as a valid value.
 - Gateway returns 429/529: existing retry/backoff behavior is unchanged against a gateway.
 - Gateway returns a non-2xx with a non-Anthropic error body: the raw body is still captured in extraction-failure telemetry as today.
-- Short-lived bearer tokens expire during a long run: since lcg does not refresh tokens, expiry surfaces as an auth failure; the token is re-read on each request so an external refresher that updates the process environment/file source is honored if the supported source allows it (see Assumptions).
+- Short-lived bearer tokens expire during a long run: since lcg does not refresh tokens, expiry surfaces as an auth failure (with the gateway's response body captured as in any other non-2xx); the supported patterns are long-lived tokens or an external refresher that restarts the process (see Assumptions).
 - `prompt-caching` beta header (`anthropic-beta`) is sent today for Sonnet models; against a gateway that rejects unknown headers this must be suppressible or documented.
 - `LCG_EXTRACTION_URL` is a different provider's URL (OpenAI-shaped) and must not be reinterpreted as the Anthropic endpoint.
 - Record/replay cassettes (`LCG_RECORD_LLM` / `LCG_REPLAY_LLM`) keep working: recording against a gateway works, replay needs no gateway or credentials.
