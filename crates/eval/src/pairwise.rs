@@ -531,14 +531,20 @@ mod tests {
             _slot_a: &'a Value,
             _slot_b: &'a Value,
         ) -> BoxFuture<'a, Result<PairwiseVerdict, String>> {
-            let remaining = self
+            // Saturating decrement returning the prior value. A compare-exchange loop rather than
+            // `fetch_update`, which newer toolchains deprecate (renamed `try_update`) and older
+            // ones lack the replacement for.
+            let mut remaining = self
                 .succeed_first
-                .fetch_update(
-                    std::sync::atomic::Ordering::Relaxed,
-                    std::sync::atomic::Ordering::Relaxed,
-                    |n| Some(n.saturating_sub(1)),
-                )
-                .unwrap();
+                .load(std::sync::atomic::Ordering::Relaxed);
+            while let Err(actual) = self.succeed_first.compare_exchange_weak(
+                remaining,
+                remaining.saturating_sub(1),
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                remaining = actual;
+            }
             Box::pin(async move {
                 if remaining == 0 {
                     Err("judge request failed after retries: connection reset".to_string())
