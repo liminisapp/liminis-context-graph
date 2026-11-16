@@ -9,27 +9,87 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
-### Fixed
+## [0.19.0] - 2026-11-16
 
-- **`knowledge_process_chunk` no longer ends belief in an episode it did not write** (#292,
-  ADR-0292). A chunk resubmission superseded every live same-named episode in the group, including
-  a `knowledge_add_episode` row whose free-form `name` happened to equal the `chunk_id`. Episodes now
-  carry a nullable `Episodic.write_path` provenance marker (`chunk` / `episode`); a revision
-  supersedes only `chunk`-marked rows and legacy NULL rows, leaves any other same-named row alone,
-  logs a `WARN`, and reports its UUID in a new `left_alone_episode_uuids` result field (present only
-  when non-empty). The column is added on first start by `ALTER TABLE ... ADD` with **no backfill**
-  and no storage-version change; the WAL and `knowledge_dump_wal` carry it. **Caveat:** rows written
-  before this change are NULL and keep today's name-based behaviour, so a pre-upgrade foreign row
-  remains exposed to the collision.
+### Upgrading
+
+- **Schema additions on first start, no migration step and no storage-version change.** lbug stays
+  0.21.2 and storage stays 47, so the database stays readable by 0.18.x.
+  - Two nullable columns are added with `ALTER TABLE ... ADD`: `Episodic.origin` (#752) and
+    `Episodic.write_path` (#292). There's no backfill, and NULL reads as before: origin `primary`,
+    and today's name-based chunk supersede.
+  - Two ART indexes, on `Episodic.name` and `Episodic.doc_id` (#291), are built over existing
+    episodes on first open. It's a one-shot blocking step, and its duration on large graphs hasn't
+    been measured.
+- **Downgrade is possible.** 0.18.1 opens a database 0.19.0 has upgraded and written to, and
+  rebuilds from 0.19.0's WAL with `knowledge_rebuild_from_wal`; it ignores the new fields.
+- The MCP registry grows from 50 to 52 tools (`knowledge_lint`, admin `knowledge_stamp_origin`).
 
 ### Added
 
-- **`knowledge_lint`** (#755, ADR-0755): a deterministic, LLM-free, read-only notebook health report
-  (`read` scope). Paged, with per-category counts and stable finding ids, it reports live
-  contradictions on relations you declare single-valued, stale derived pages whose primary evidence
-  was corrected or superseded, weakly supported facts, orphan and near-duplicate entities, and
-  unlinked mentions. Each finding cites the episodes, documents, entities and facts involved. No
-  schema or storage change; no model call; nothing is modified. The MCP registry grows to 52 tools.
+- **Episode origin** (#752, ADR-0752). Episodes carry a validated `origin`: `primary` (default),
+  `external`, `derived` or `answer`. That stops an agent's own derived pages from corroborating
+  themselves.
+  - `knowledge_process_chunk` and `knowledge_add_episode` accept `origin`.
+  - `knowledge_find_relationships` and `knowledge_find_entities` return additive `support` and
+    `corroboration`.
+  - `origins` filters `knowledge_find_relationships`, `knowledge_find_entities` and
+    `knowledge_search_passages`.
+  - A `derived` or `answer` write can't rewrite, revise or supersede primary or external content.
+    It's refused with `origin_conflict:` before anything is written.
+  - New admin method `knowledge_stamp_origin` labels existing episodes by path prefix or attribute
+    kind. It supports `dry_run` and is idempotent.
+  - Clients that never send `origin` see no change.
+- **`knowledge_lint`** (#755, ADR-0755). A deterministic, read-only notebook health report that
+  makes no LLM call. It's paged, with per-category counts and stable finding ids, and reports:
+  - live contradictions on relations you declare single-valued;
+  - stale derived pages whose primary evidence was corrected or superseded;
+  - weakly supported facts;
+  - orphan and near-duplicate entities;
+  - unlinked mentions.
+
+  Every finding cites its evidence.
+- **Anthropic-compatible gateways** (#346, ADR-0346). The Anthropic extraction provider can target
+  a proxy (OpenRouter, LiteLLM) or a Bedrock-style gateway: full invoke URL, Bearer auth,
+  `anthropic_version` in the body.
+  - Configure it with `--anthropic-base-url` / `--anthropic-endpoint`, `ANTHROPIC_BASE_URL`,
+    `ANTHROPIC_AUTH_TOKEN` and `LCG_ANTHROPIC_VERSION[_IN]`.
+  - With none of these set, requests are byte-for-byte unchanged.
+  - The startup log shows the endpoint (redacted) and the auth scheme, never credentials.
+- **`lcg-eval retrieval`** (#754, ADR-0754). A retrieval-quality eval mode with qmd as an external
+  baseline. It's a developer tool and changes nothing in the service. On Windows it reports that it
+  isn't supported (#760).
+
+### Fixed
+
+- **`knowledge_process_chunk` no longer ends belief in an episode it didn't write** (#292,
+  ADR-0292).
+  - A chunk resubmission used to supersede every live episode in the group with the same name. That
+    included a `knowledge_add_episode` row whose `name` happened to equal the `chunk_id`.
+  - A revision now supersedes only `chunk`-marked rows and legacy NULL rows. It leaves any other
+    same-named row alone, logs a `WARN`, and reports it in `left_alone_episode_uuids`.
+  - **Caveat:** rows written before 0.19.0 are NULL and keep the old name-based behaviour.
+
+- **`knowledge_add_episode` without `reference_time`** (#771). It's optional, and documented to
+  default to now, but leaving it out failed with a TIMESTAMP conversion error, as it did in 0.18.x.
+  A missing or blank value now means the current time, as for `knowledge_process_chunk`.
+
+### Changed
+
+- **Faster chunk and document lookups** (#291, ADR-0291). `knowledge_process_chunk`'s `chunk_id`
+  lookup and the `doc_id` lookups use native ART indexes instead of scanning the group's episodes.
+- **Release safety** (#725, ADR-0725). A tag run whose plan output is lost now fails instead of
+  publishing an empty release, and `host` requires both build jobs to succeed.
+- **CI**:
+  - fixed an intermittent full rebuild of the lcg crates in the `test` job (build scripts now
+    declare `rerun-if-changed`);
+  - the FR-006 guard prints cargo's rebuild reasons (#764, #768);
+  - Windows CI now lints `lcg-eval` (#760).
+
+### Known issues
+
+- **Windows:** unchanged from 0.18.x. lbug's CHECKPOINT can silently corrupt some STRING and
+  INT8/UINT8 data (#719, upstream LadybugDB/ladybug#1447, microsoft/STL#6520).
 
 ## [0.18.1] - 2026-11-13
 
