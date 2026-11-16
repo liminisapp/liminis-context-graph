@@ -50,7 +50,7 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
   Every finding cites its evidence.
 - **Anthropic-compatible gateways** (#346, ADR-0346). The Anthropic extraction provider can target
-  a proxy (OpenRouter, LiteLLM) or a Bedrock-style gateway: full invoke URL, Bearer auth,
+  a proxy (OpenRouter, LiteLLM) or a Bedrock-style gateway: full invoke URL, token auth,
   `anthropic_version` in the body.
   - Configure it with `--anthropic-base-url` / `--anthropic-endpoint`, `ANTHROPIC_BASE_URL`,
     `ANTHROPIC_AUTH_TOKEN` and `LCG_ANTHROPIC_VERSION[_IN]`.
