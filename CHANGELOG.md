@@ -70,6 +70,10 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
     same-named row alone, logs a `WARN`, and reports it in `left_alone_episode_uuids`.
   - **Caveat:** rows written before 0.19.0 are NULL and keep the old name-based behaviour.
 
+- **`knowledge_add_episode` without `reference_time`** (#771). It's optional, and documented to
+  default to now, but leaving it out failed with a TIMESTAMP conversion error, as it did in 0.18.x.
+  A missing or blank value now means the current time, as for `knowledge_process_chunk`.
+
 ### Changed
 
 - **Faster chunk and document lookups** (#291, ADR-0291). `knowledge_process_chunk`'s `chunk_id`
