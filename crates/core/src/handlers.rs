@@ -4027,6 +4027,15 @@ async fn handle_rebuild_from_wal(
                 // `resolve_ontology` would compute+warn drift against the pre-remediation
                 // sidecar as a side effect of merely fetching this value, immediately followed
                 // by this same call's own clear — a misleading false alarm.
+                // Restore a missing identity-set stamp from the WAL ontology sidecar (#776,
+                // ADR-0776) — before `clear_group_drift`, which on a `Resolving` slot runs the
+                // D1 check and must see the restored baseline. Never overwrites a stamp.
+                if crate::identity_stamp::restore_stamp_if_absent(root, &wal_dir, &group_id) {
+                    eprintln!(
+                        "liminis-context-graph: identity-stamp: restored stamp for group {:?} from the WAL ontology sidecar",
+                        group_id
+                    );
+                }
                 let group_ontology = state.peek_or_load_ontology(&group_id);
                 if let Err(e) = ontology_sidecar::write_group_sidecar(
                     root,
@@ -4232,6 +4241,7 @@ async fn handle_rebuild_from_wal(
     let job_id_task = job_id.clone();
     let job_id_handle_store = job_id.clone();
     let wal_dir_c = wal_dir.clone();
+    let bg_wal_dir_for_result = wal_dir.clone();
     let bg_workspace_root = state.workspace_root.clone();
     let bg_ontology = state.ontology.clone();
     let bg_ontology_drift = Arc::clone(&state.ontology_drift);
@@ -4522,6 +4532,18 @@ async fn handle_rebuild_from_wal(
                                 // streaming path above. Uses `peek_or_load_ontology`, not
                                 // `resolve_ontology`, for the same false-alarm-avoidance reason
                                 // documented at the streaming path's call site.
+                                // Restore a missing identity-set stamp (#776) — before the
+                                // drift clear below, mirroring the streaming path.
+                                if crate::identity_stamp::restore_stamp_if_absent(
+                                    root,
+                                    &bg_wal_dir_for_result,
+                                    &bg_gid_for_result,
+                                ) {
+                                    eprintln!(
+                                        "liminis-context-graph: identity-stamp: restored stamp for group {:?} from the WAL ontology sidecar",
+                                        bg_gid_for_result
+                                    );
+                                }
                                 let group_ontology =
                                     bg_state_for_result.peek_or_load_ontology(&bg_gid_for_result);
                                 if let Err(e) = ontology_sidecar::write_group_sidecar(

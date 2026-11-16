@@ -12,6 +12,11 @@ pub struct OntologySidecar {
     pub mode: Option<String>,
     pub entity_types: Vec<String>,
     pub relation_types: Vec<String>,
+    /// Sorted identity-bearing entity types in force when the WAL sidecar was written (#776).
+    /// Only [`write_wal_ontology_sidecar`] populates it; the drift sidecars leave it `None`.
+    /// Absent in sidecars written before #776 — a reader then has nothing to restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_types: Option<Vec<String>>,
 }
 
 pub fn sidecar_path(workspace_root: &Path) -> PathBuf {
@@ -105,6 +110,7 @@ pub fn write_group_sidecar(
         mode,
         entity_types,
         relation_types,
+        identity_types: None,
     };
 
     let json = serde_json::to_string_pretty(&sidecar).map_err(std::io::Error::other)?;
@@ -140,6 +146,7 @@ pub fn write_sidecar(workspace_root: &Path, ontology: Option<&Ontology>) -> std:
         mode,
         entity_types,
         relation_types,
+        identity_types: None,
     };
 
     let json = serde_json::to_string_pretty(&sidecar).map_err(std::io::Error::other)?;
@@ -167,13 +174,14 @@ pub fn wal_ontology_path(wal_dir: &Path) -> PathBuf {
     wal_dir.join(WAL_ONTOLOGY_FILE)
 }
 
-/// Writes the published-ontology informational sidecar into a group's WAL directory (FR-007).
+/// Writes the published-ontology sidecar into a group's WAL directory (FR-007).
 ///
-/// This file is **documentation only** (FR-008, FR-009): nothing in this codebase ever reads it
-/// back, on either the producer or consumer side — there is no hydrate/replay code path that
-/// consults it, so it can never drive a consumer's extraction, `mode: strict` validation,
-/// canonicalization, or reprocessing. Its absence never blocks replay or affects correctness; it
-/// only means a consumer inspecting the stream has no record of the vocabulary that produced it.
+/// The vocabulary fields are **documentation only** (FR-008, FR-009): they never drive a
+/// consumer's extraction, `mode: strict` validation, canonicalization, or reprocessing. The one
+/// field a rebuild consumes is `identity_types` (#776): after a rebuild-from-WAL,
+/// `identity_stamp::restore_stamp_if_absent` uses it to restore a missing identity-set stamp.
+/// Its absence never blocks replay or affects correctness — the kind-aware D1 check covers a
+/// group with no restorable stamp.
 ///
 /// Reuses [`OntologySidecar`]'s existing shape rather than a second schema, since the two sidecars
 /// (`.lcg/ontology-hash.json` for drift, `.wal-ontology.json` for publish provenance) record the
@@ -199,6 +207,11 @@ pub fn write_wal_ontology_sidecar(
         mode,
         entity_types,
         relation_types,
+        identity_types: Some(
+            ontology
+                .map(|o| o.identity_set().into_iter().collect())
+                .unwrap_or_default(),
+        ),
     };
 
     let json = serde_json::to_string_pretty(&sidecar).map_err(std::io::Error::other)?;
@@ -218,9 +231,9 @@ pub fn write_wal_ontology_sidecar(
     Ok(())
 }
 
-/// Reads the published-ontology informational sidecar from a group's WAL directory, if present.
-/// Documentation-only per [`write_wal_ontology_sidecar`] — provided for external tooling/tests
-/// that want to inspect it, not consulted by any lcg extraction/validation/reprocessing path.
+/// Reads the published-ontology sidecar from a group's WAL directory, if present. Besides
+/// external tooling and tests, its only in-tree consumer is the stamp restore after a
+/// rebuild-from-WAL (#776); no extraction/validation/reprocessing path consults it.
 pub fn read_wal_ontology_sidecar(wal_dir: &Path) -> Option<OntologySidecar> {
     let path = wal_ontology_path(wal_dir);
     let text = std::fs::read_to_string(&path).ok()?;

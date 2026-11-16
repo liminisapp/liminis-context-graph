@@ -5,6 +5,7 @@
 **Issue**: #616 (second phase of community report #614; follows #615)
 **Amends**: ADR-0615 (its "Extraction stays in the `Entity` namespace" section)
 **Amended by**: ADR-0627 (a refusal now holds until the group is reloaded with the identity-bearing set restored via `knowledge_reload_ontology`, or the process restarts — not only for the life of the process)
+**Amended by**: ADR-0776 (D1's carrier count is kind-aware — see D1 and the ancestor-flip consequence below; D2's "survives a rebuild-from-WAL into a fresh directory" holds only while the workspace root persists)
 
 ## Context
 
@@ -49,8 +50,8 @@ self-referential by the existing name-only self-loop filter.
 
 **D1 — refuse a reinterpreting change.** On a group's first ontology resolution in a process, its
 resolved identity-bearing set is compared with the recorded one. Any label in the symmetric
-difference carried by at least one existing entity (full `labels`, so ancestor labels, the kind
-label and asserted entities all count) refuses, naming the label and the entity count; a difference
+difference carried by at least one existing entity refuses (*amended by ADR-0776: "carried" means the
+entity's `kind` would change — not merely that its `labels` mention the type*), naming the label and the entity count; a difference
 touching only uncarried labels is accepted and the record updated. A refusal modifies nothing,
 affects only that group, is cached on the group's ontology entry, and is enforced at
 `add_episode` (`Error::IdentitySetChangeRefused`, JSON-RPC `-32003`) and reported in
@@ -62,7 +63,7 @@ check re-runs rather than silently accepting.
 **D2 — the stamp is a sidecar, not a `WalPosition` column.** `.lcg/identity-set/<group>.json`
 (`{"identity_types": [...]}`), written atomically, only when the set differs from the record — a
 flagless workspace never creates one. A `WalPosition` column would be lost on `knowledge_clear_all`,
-a DB reset, or a rebuild-from-WAL into a fresh directory, and an absent record reads as the empty
+a DB reset, or a rebuild-from-WAL into the same workspace root (*ADR-0776: not a rebuild into a fresh root — the stamp lives outside the WAL; see ADR-0776 for the sidecar restore*), and an absent record reads as the empty
 set — wrongly accepting a flip on a group whose entities already carry extracted identity kinds. A
 sidecar survives all three, needs no schema migration and no `set_wal_position` signature change
 (~90 call sites). `knowledge_clear_all` removes the stamps only when the WAL is deleted too
@@ -81,8 +82,9 @@ additionally reports `kind_disagreements` — report-only; merge-or-split is a h
 - Flagless ontologies and workspaces behave byte-for-byte as before, including WAL replay.
 - The D1 check costs one group-scoped `labels` scan per changed label, only on first resolution
   when the sets differ.
-- Flipping a flag on an ancestor type (e.g. `Document`) is refused while any descendant carries
-  its label — conservative by design; the error names the label.
+- ~~Flipping a flag on an ancestor type (e.g. `Document`) is refused while any descendant carries
+  its label.~~ *Superseded by ADR-0776:* only entities whose leaf type is the flagged type and whose
+  `kind` would change are carriers; descendants' entities are not (kind never comes from ancestors).
 - Adding a flag changes the ontology content hash, so the ordinary #451 drift warning also fires;
   it is separate from, and weaker than, the D1 refusal.
 - The remedy for a wanted change is re-ingesting the group from source; tooling for that and for

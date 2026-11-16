@@ -9,6 +9,29 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A group rebuilt from its WAL into a fresh workspace root is no longer refused by the D1
+  identity-set guard (#775, #776).** The guard's carrier count now asks whether an entity's `kind`
+  would actually change under the new identity-bearing set, instead of counting every entity whose
+  labels mention the type. Replayed entities already carry the identity kinds, so a group with no
+  `.lcg/identity-set` stamp (WAL-only hosts, fresh clones) accepts `add_episode` and
+  `knowledge_reload_ontology` and self-heals its stamp; a genuine flip — adding identity to a type
+  whose entities have a different kind, or removing it from a type that is some entity's kind — is
+  still refused with `-32003`, with or without the stamp. A group refused under the old logic is
+  accepted on its next start or reload if its data is consistent.
+
+### Changed
+
+- **Identity flags on an ancestor type no longer refuse because a descendant carries its label
+  (#776, ADR-0776).** Kind is never inherited, so only entities whose leaf type is the flagged type
+  count. ADR-0616's "flipping a flag on an ancestor is refused while any descendant carries its
+  label" consequence is superseded.
+- **The WAL ontology sidecar (`.wal-ontology.json`) gains an optional `identity_types` field and is
+  now read on rebuild (#776).** `knowledge_rebuild_from_wal` restores a missing identity-set stamp
+  from it (never overwriting an existing one). Older sidecars without the field remain valid and
+  restore nothing. No storage-version, lbug or IPC change.
+
 ## [0.19.0] - 2026-11-16
 
 ### Upgrading

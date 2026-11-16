@@ -940,63 +940,236 @@ async fn removing_flag_on_carried_label_is_refused() {
     assert_eq!(identity_stamp::read_stamp(root.path(), G).unwrap().len(), 1);
 }
 
+/// Inserts a bare `Entity` row with explicit `labels`/`kind` (as a replay or an earlier
+/// extraction would have left it).
+fn seed_entity(db: &Arc<Db>, uuid: &str, labels: &[&str], kind: &str) {
+    let conn = db.connect().unwrap();
+    conn.insert_entity(&EntityRow {
+        uuid: uuid.into(),
+        name: uuid.into(),
+        group_id: G.into(),
+        labels: labels.iter().map(|l| l.to_string()).collect(),
+        kind: kind.into(),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        name_embedding: vec![0.0; DIM],
+        summary: String::new(),
+        attributes: "{}".into(),
+        ..Default::default()
+    })
+    .unwrap();
+}
+
+/// Hierarchy `Document` ⊃ `Rfc`, each with its own identity flag.
+fn doc_hier(doc: bool, rfc: bool) -> Ontology {
+    ontology(
+        OntologyMode::Open,
+        &[("Document", doc, None), ("Rfc", rfc, Some("Document"))],
+    )
+}
+
+/// Resolves `onto` over `db` with no stamp present and reports the ingest outcome.
+async fn ingest_with_no_stamp(
+    db: &Arc<Db>,
+    onto: Ontology,
+) -> (Result<AddEpisodeResult, Error>, TempDir) {
+    let root = TempDir::new().unwrap();
+    let s = make_state(Arc::clone(db), Some(root.path()), Some(onto), vec![]);
+    (ingest(&s, G, 1).await, root)
+}
+
 #[tokio::test]
-async fn asserted_entity_and_ancestor_label_count_as_carried() {
-    // Asserted Person entity: kind Person carries the Person label.
+async fn consistent_identity_kind_entity_is_not_a_carrier_when_stamp_is_absent() {
+    // The #775 shape: replayed Person entity whose kind already equals the type, no stamp.
+    let (db, _d) = make_db();
+    seed_entity(&db, "u1", &["Entity", "Person"], "Person");
+    let (r, root) =
+        ingest_with_no_stamp(&db, ontology(OntologyMode::Open, &[("Person", true, None)])).await;
+    r.expect("consistent group must be accepted");
+    // The stamp self-heals.
+    assert_eq!(identity_stamp::read_stamp(root.path(), G).unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn adding_identity_is_refused_for_default_and_null_kind_carriers() {
+    for kind in ["Entity", ""] {
+        let (db, _d) = make_db();
+        seed_entity(&db, "u1", &["Entity", "Person"], kind);
+        let (r, root) =
+            ingest_with_no_stamp(&db, ontology(OntologyMode::Open, &[("Person", true, None)]))
+                .await;
+        let (_, label, count) = refused(r);
+        assert_eq!((label.as_str(), count), ("Person", 1), "kind {kind:?}");
+        // A refusal writes no stamp.
+        assert!(identity_stamp::read_stamp(root.path(), G)
+            .unwrap()
+            .is_empty());
+    }
+}
+
+#[tokio::test]
+async fn adding_identity_to_ancestor_counts_only_leaf_entities() {
+    // Rfc entity (leaf Rfc, kind Entity): kind would not change when Document gains identity.
+    let (db, _d) = make_db();
+    seed_entity(&db, "rfc", &["Entity", "Rfc", "Document"], "Entity");
+    let (r, _root) = ingest_with_no_stamp(&db, doc_hier(true, false)).await;
+    r.expect("subtype entity is not reinterpreted by an ancestor flag");
+
+    // A direct Document-leaf entity with the default kind is a carrier.
+    let (db, _d) = make_db();
+    seed_entity(&db, "rfc", &["Entity", "Rfc", "Document"], "Entity");
+    seed_entity(&db, "doc", &["Entity", "Document"], "Entity");
+    let (r, _root) = ingest_with_no_stamp(&db, doc_hier(true, false)).await;
+    let (_, label, count) = refused(r);
+    assert_eq!((label.as_str(), count), ("Document", 1));
+}
+
+#[tokio::test]
+async fn both_types_identity_bearing_consistent_group_is_accepted() {
+    // T and S both identity-bearing; entities carry kinds matching what extraction assigns.
+    let (db, _d) = make_db();
+    seed_entity(&db, "rfc", &["Entity", "Rfc", "Document", "Rfc"], "Rfc");
+    seed_entity(&db, "doc", &["Entity", "Document"], "Document");
+    let (r, root) = ingest_with_no_stamp(&db, doc_hier(true, true)).await;
+    r.expect("consistent kinds under both flags");
+    assert_eq!(identity_stamp::read_stamp(root.path(), G).unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn identity_added_to_ancestor_while_subtype_already_has_it() {
+    // Stamp records {Rfc}; Document is newly added. Rfc entities (kind Rfc) are untouched;
+    // a Document-leaf entity with the default kind is the only carrier.
     let (db, _d) = make_db();
     let root = TempDir::new().unwrap();
-    {
-        let conn = db.connect().unwrap();
-        conn.insert_entity(&EntityRow {
-            uuid: "u1".into(),
-            name: "Ada".into(),
-            group_id: G.into(),
-            labels: vec!["Entity".into(), "Person".into()],
-            kind: "Person".into(),
-            created_at: "2026-01-01T00:00:00Z".into(),
-            name_embedding: vec![0.0; DIM],
-            summary: String::new(),
-            attributes: "{}".into(),
-            ..Default::default()
-        })
+    identity_stamp::write_stamp(root.path(), G, &["Rfc".to_string()].into_iter().collect())
         .unwrap();
-    }
+    seed_entity(&db, "rfc", &["Entity", "Rfc", "Document", "Rfc"], "Rfc");
     let s = make_state(
         Arc::clone(&db),
         Some(root.path()),
-        Some(ontology(OntologyMode::Open, &[("Person", true, None)])),
+        Some(doc_hier(true, true)),
         vec![],
     );
-    let (_, label, _) = refused(ingest(&s, G, 1).await);
-    assert_eq!(label, "Person");
+    ingest(&s, G, 1)
+        .await
+        .expect("Rfc entities are not reinterpreted");
 
-    // Ancestor label: an Rfc entity carries Document.
-    let (db2, _d2) = make_db();
-    let root2 = TempDir::new().unwrap();
-    let hier = |doc_identity| {
+    let (db, _d) = make_db();
+    let root = TempDir::new().unwrap();
+    identity_stamp::write_stamp(root.path(), G, &["Rfc".to_string()].into_iter().collect())
+        .unwrap();
+    seed_entity(&db, "rfc", &["Entity", "Rfc", "Document", "Rfc"], "Rfc");
+    seed_entity(&db, "doc", &["Entity", "Document"], "Entity");
+    let s = make_state(
+        Arc::clone(&db),
+        Some(root.path()),
+        Some(doc_hier(true, true)),
+        vec![],
+    );
+    let (_, label, count) = refused(ingest(&s, G, 1).await);
+    assert_eq!((label.as_str(), count), ("Document", 1));
+}
+
+#[tokio::test]
+async fn removing_identity_is_refused_by_kind_with_stamp_present_or_deleted() {
+    for stamp_present in [true, false] {
+        let (db, _d) = make_db();
+        let root = TempDir::new().unwrap();
+        seed_entity(&db, "u1", &["Entity", "Person"], "Person");
+        // Establish the stamp {Person} via an accepted ingest under the flag.
+        let s1 = make_state(
+            Arc::clone(&db),
+            Some(root.path()),
+            Some(ontology(OntologyMode::Open, &[("Person", true, None)])),
+            vec![],
+        );
+        ingest(&s1, G, 1).await.unwrap();
+        if !stamp_present {
+            identity_stamp::remove_stamp(root.path(), G);
+        }
+        // Now drop the flag: with the stamp present this is a removal (kind = Person → refused);
+        // with it deleted the sets are equal (∅ = ∅), so there is no change to refuse.
+        let s2 = make_state(
+            Arc::clone(&db),
+            Some(root.path()),
+            Some(ontology(OntologyMode::Open, &[("Person", false, None)])),
+            vec![],
+        );
+        let r = ingest(&s2, G, 2).await;
+        if stamp_present {
+            let (_, label, count) = refused(r);
+            assert_eq!((label.as_str(), count), ("Person", 1));
+        } else {
+            r.expect("no recorded set, no flag: nothing changed");
+        }
+    }
+}
+
+#[tokio::test]
+async fn removing_identity_ignores_default_kind_and_subtype_kind_entities() {
+    // Stamp {Document}; flag removed. Entities: Document leaf with kind Entity (not a carrier),
+    // Rfc with kind Rfc (kind is not Document → not a carrier of Document's removal).
+    let (db, _d) = make_db();
+    let root = TempDir::new().unwrap();
+    identity_stamp::write_stamp(
+        root.path(),
+        G,
+        &["Document".to_string()].into_iter().collect(),
+    )
+    .unwrap();
+    seed_entity(&db, "doc", &["Entity", "Document"], "Entity");
+    seed_entity(&db, "rfc", &["Entity", "Rfc", "Document", "Rfc"], "Rfc");
+    let s = make_state(
+        Arc::clone(&db),
+        Some(root.path()),
+        Some(doc_hier(false, false)),
+        vec![],
+    );
+    ingest(&s, G, 1).await.expect("no entity has kind Document");
+
+    // One entity with kind Document → refused.
+    identity_stamp::write_stamp(
+        root.path(),
+        G,
+        &["Document".to_string()].into_iter().collect(),
+    )
+    .unwrap();
+    seed_entity(&db, "doc2", &["Entity", "Document"], "Document");
+    let s = make_state(
+        Arc::clone(&db),
+        Some(root.path()),
+        Some(doc_hier(false, false)),
+        vec![],
+    );
+    let (_, label, count) = refused(ingest(&s, G, 2).await);
+    assert_eq!((label.as_str(), count), ("Document", 1));
+}
+
+#[tokio::test]
+async fn mixed_group_names_only_the_carried_label() {
+    let (db, _d) = make_db();
+    seed_entity(&db, "p", &["Entity", "Person"], "Person"); // consistent
+    seed_entity(&db, "o", &["Entity", "Organization"], "Entity"); // would change
+    let (r, _root) = ingest_with_no_stamp(
+        &db,
         ontology(
             OntologyMode::Open,
-            &[
-                ("Document", doc_identity, None),
-                ("Rfc", false, Some("Document")),
-            ],
-        )
-    };
-    let s1 = make_state(
-        Arc::clone(&db2),
-        Some(root2.path()),
-        Some(hier(false)),
-        vec![extraction(vec![ent("RFC 1", "Rfc")], vec![])],
-    );
-    ingest(&s1, G, 1).await.unwrap();
-    let s2 = make_state(
-        Arc::clone(&db2),
-        Some(root2.path()),
-        Some(hier(true)),
-        vec![],
-    );
-    let (_, label, count) = refused(ingest(&s2, G, 2).await);
-    assert_eq!((label.as_str(), count), ("Document", 1));
+            &[("Person", true, None), ("Organization", true, None)],
+        ),
+    )
+    .await;
+    let (_, label, count) = refused(r);
+    assert_eq!((label.as_str(), count), ("Organization", 1));
+}
+
+#[tokio::test]
+async fn extract_false_identity_type_is_never_a_carrier_on_add() {
+    // `extract: false` types never receive an extracted kind (ADR-0637).
+    let (db, _d) = make_db();
+    seed_entity(&db, "u1", &["Entity", "Person"], "Entity");
+    let mut onto = ontology(OntologyMode::Open, &[("Person", true, None)]);
+    onto.entity_types[0].extract = false;
+    let (r, _root) = ingest_with_no_stamp(&db, onto).await;
+    r.expect("extract:false identity add cannot reinterpret anything");
 }
 
 #[tokio::test]

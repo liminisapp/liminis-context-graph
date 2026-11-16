@@ -5,6 +5,7 @@
 **Issue**: #627 (implements community report #611)
 **Amends**: ADR-0446 (its "restart required" contract for per-group files), ADR-0616 (the identity
 refusal's "holds for the life of the process" lifetime)
+**Amended by**: ADR-0776 ("`check_identity_set` stays the only writer of the identity stamp" gains one exception: a restore-if-absent after rebuild-from-WAL that never overwrites)
 
 ## Context
 

@@ -2618,12 +2618,15 @@ ontology resolution has nothing to change there.
 
 **Published ontology is documentation, not policy.** When a group's stream is published (the
 existing whole-directory copy described in [Operations](operations.md)), the ontology that guided
-that group's extraction travels alongside it as `.wal-ontology.json` — informational only. A
+that group's extraction travels alongside it as `.wal-ontology.json` — informational, with one exception below. A
 consumer hydrating that stream can inspect it to see what vocabulary produced the graph, but it is
 never applied to the consumer's own extraction, `mode: strict` validation, canonicalization, or
 reprocessing for that group — the consumer's own local configuration (per-group file, workspace
 file, or neither) is always what governs. A stream published without this file still replays and
-behaves identically; only the documentation available to the consumer is degraded.
+behaves identically; only the documentation available to the consumer is degraded. The one field
+a rebuild reads back is `identity_types` — the group's identity-bearing set — which
+`knowledge_rebuild_from_wal` uses to restore a missing identity-set stamp (see below); it never
+overwrites an existing stamp, and a sidecar without the field restores nothing.
 
 ## Drift detection
 
@@ -2836,14 +2839,20 @@ two things wrongly merged.
 
 **Changing the flag is refused when it would reinterpret existing data.** lcg records, per group,
 which types were identity-bearing (`.lcg/identity-set/<group_id>.json`, outside the WAL and the
-DB, so it survives a clear or a rebuild-from-WAL). When a group's ontology first resolves in a
-process, its identity-bearing set is compared with the record:
+DB, so it survives a clear or a rebuild-from-WAL into the same workspace root — it does **not**
+travel with the WAL; after a rebuild into a fresh root it is restored from the WAL's
+`.wal-ontology.json`, and a group with no stamp still works because the check below is
+kind-aware). When a group's ontology first resolves in a process, its identity-bearing set is
+compared with the record:
 
 - A difference that touches only types no existing entity in the group carries **is accepted**;
   the record is updated and it takes effect for later extractions.
-- Adding or removing the flag for a type existing entities already carry (their full `labels`,
-  including ancestor labels and the kind label — so flagging `Document` is refused while any `Rfc`
-  entity carries the `Document` label) **is refused**. `knowledge_add_episode` for that group fails
+- Adding or removing the flag for a type whose existing entities **would change kind** **is
+  refused**: adding the flag to `T` is refused only if an entity whose leaf type is `T` has a
+  `kind` other than `T` (default `Entity`, NULL or empty); removing it is refused only if an entity
+  has `kind = T`. Entities of a subtype of `T` are not affected (kind is never inherited), and
+  entities whose kind already matches — e.g. replayed from a WAL with no stamp — are not
+  reinterpreted, so an unchanged ontology is never refused. `knowledge_add_episode` for that group fails
   with JSON-RPC error `-32003` (`error.data.reason = "identity_set_change_refused"`, plus
   `group_id`, `label`, `entity_count`), and the group appears in `knowledge_status`'s
   `group_identity_refusals`:
@@ -3065,14 +3074,15 @@ and know what each entry in the dot-namespace costs you if you omit it anyway:
 |---|---|---|
 | `.wal-generation.json` (issue #387) | **MUST travel** — load-bearing | reset detection can never run for this stream again; every consumer that already recorded a position for this group starts hard-failing `knowledge_rebuild_from_wal` (issue #414, below) until the stream is republished with its generation intact |
 | `.wal-bounds.json` (issue #375) | MAY be omitted | not wrong, just slow — a cache; the consumer regenerates it by rescanning every `*.jsonl` file on next read |
-| `.wal-ontology.json` (issue #446) | MAY be omitted — informational | not wrong, not slow either — replay and correctness are entirely unaffected; the consumer just loses the ability to see what vocabulary produced this group's graph. Never applied to the consumer's own extraction, validation, canonicalization, or reprocessing even when present (see [Ontology](ontology.md#per-group-ontologies)) — it is provenance, not policy |
+| `.wal-ontology.json` (issue #446) | MAY be omitted — provenance plus an identity-set baseline | not wrong, not slow either — replay and correctness are entirely unaffected; the consumer loses the ability to see what vocabulary produced this group's graph, and a rebuild can no longer restore the group's identity-set stamp from the file's `identity_types` (the kind-aware identity check still covers the group, so it stays writable; issue #776). The vocabulary is never applied to the consumer's own extraction, validation, canonicalization, or reprocessing even when present (see [Ontology](ontology.md#per-group-ontologies)) — it is provenance, not policy |
 | `.checkpoints/` (issue #365) | MAY be excluded | local-only recovery state — omitting it is a legitimate choice, but make it an explicit, stated decision rather than an accident of the same glob that drops generation |
 
 Only `.wal-generation.json` is load-bearing — every other entry is safe to omit deliberately, but
 never safe to omit *by accident* as a side effect of a glob pattern that was only ever meant to
 select `*.jsonl` files. `.wal-bounds.json` and `.checkpoints/` degrade performance or local
-recovery convenience if dropped; `.wal-ontology.json` degrades only documentation — a stream
-published with it present must never have it change the consumer's own behavior (issue #446).
+recovery convenience if dropped; `.wal-ontology.json` degrades only documentation and the identity-set
+stamp restore — a stream published with it present must never have its vocabulary change the
+consumer's own behavior (issue #446).
 
 **A published stream carries no embedding vectors (issue #526).** Every `*.jsonl` record's source
 text (`name`, `fact`, `content`, `summary`, ...) still travels; the vector each of those texts
@@ -5316,6 +5326,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0752](0752-episode-origin-and-corroboration.md) | Episode Origin — Derived Content Cites But Never Corroborates | 2026-11-15 |
 | [0754](0754-retrieval-eval-architecture.md) | Retrieval-Quality Eval Architecture — Service-Spawn Driver, qmd Baseline, Metric Definitions | 2026-11-15 |
 | [0755](0755-knowledge-lint-deterministic-health.md) | `knowledge_lint` — A Deterministic, LLM-Free Notebook Health Report | 2026-11-15 |
+| [0776](0776-kind-aware-identity-set-check.md) | Kind-Aware D1 Identity-Set Check and Stamp Restore from the WAL Sidecar | 2026-11-16 |
 
 ## Historical numbering
 

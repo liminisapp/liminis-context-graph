@@ -388,6 +388,8 @@ async fn add_episode_writes_published_ontology_sidecar_for_the_extracting_group(
         .expect("FR-007: .wal-ontology.json must be written into the group's own WAL directory");
     assert_eq!(sidecar.mode.as_deref(), Some("strict"));
     assert_eq!(sidecar.entity_types, vec!["Person".to_string()]);
+    // #776: the identity-bearing set is recorded (empty here — no `identity: true` type).
+    assert_eq!(sidecar.identity_types, Some(vec![]));
 
     // A co-resident group with no ontology gets its own sidecar recording "no ontology" — never
     // "catalog"'s (FR-007 must not leak across groups any more than extraction itself does).
@@ -956,4 +958,46 @@ async fn wal_rebuild_of_never_resolved_group_does_not_populate_drift_cache() {
         "the sidecar written by the rebuild must already be consistent with the resolved \
          ontology, so the group's genuine first resolution afterward reports no drift"
     );
+}
+
+// ── #776: the WAL sidecar records the identity-bearing set ────────────────────────
+
+#[test]
+fn wal_sidecar_records_sorted_identity_set_and_old_format_still_reads() {
+    let dir = TempDir::new().unwrap();
+    let ont = |name: &str, identity| EntityTypeDef {
+        name: name.to_string(),
+        description: None,
+        parent: None,
+        identity,
+        extract: true,
+    };
+    let o = Ontology {
+        mode: OntologyMode::Open,
+        entity_types: vec![ont("Person", true), ont("Doc", false), ont("Album", true)],
+        relation_types: vec![],
+        ancestor_map: HashMap::new(),
+    };
+    ontology_sidecar::write_wal_ontology_sidecar(dir.path(), Some(&o)).unwrap();
+    let s = read_wal_ontology_sidecar(dir.path()).unwrap();
+    assert_eq!(
+        s.identity_types,
+        Some(vec!["Album".to_string(), "Person".to_string()])
+    );
+
+    // A sidecar written before #776 has no `identity_types` key and still deserializes.
+    std::fs::write(
+        ontology_sidecar::wal_ontology_path(dir.path()),
+        r#"{"hash":"h","mode":"open","entity_types":["Person"],"relation_types":[]}"#,
+    )
+    .unwrap();
+    let old = read_wal_ontology_sidecar(dir.path()).unwrap();
+    assert_eq!(old.identity_types, None);
+
+    // Drift sidecars do not carry the field at all.
+    ontology_sidecar::write_group_sidecar(dir.path(), "g", Some(&o)).unwrap();
+    let raw =
+        std::fs::read_to_string(ontology_sidecar::group_sidecar_path(dir.path(), "g").unwrap())
+            .unwrap();
+    assert!(!raw.contains("identity_types"), "{raw}");
 }

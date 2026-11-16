@@ -1821,13 +1821,13 @@ pub async fn add_episode_with_opts(
     }
     drop(_write_guard);
 
-    // Publish the ontology that guided this episode's extraction as a documentation-only sidecar
-    // in the group's own WAL directory (FR-007) — travels automatically under the existing
-    // whole-directory publish contract (see docs/operations.md). No lcg code path ever reads this
-    // file back (FR-008): it can only ever inform a consumer inspecting the stream, never govern
-    // their own extraction, validation, canonicalization, or reprocessing. Best-effort like the
-    // workspace sidecar write above: a missed write only degrades documentation, never replay
-    // (FR-009).
+    // Publish the ontology that guided this episode's extraction as a sidecar in the group's own
+    // WAL directory (FR-007) — travels automatically under the existing whole-directory publish
+    // contract (see docs/operations.md). The vocabulary fields are documentation only (FR-008):
+    // they never govern a consumer's extraction, validation, canonicalization, or reprocessing.
+    // The one field a rebuild reads back is `identity_types` (#776), used to restore a missing
+    // identity-set stamp. Best-effort like the workspace sidecar write above: a missed write only
+    // loses that restore baseline (the kind-aware D1 check still covers it), never replay (FR-009).
     if let Some(root) = state.wal_root.as_deref() {
         match crate::wal_group::group_wal_dir(root, group_id) {
             Ok(gid_dir) => {
