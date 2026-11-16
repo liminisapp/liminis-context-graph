@@ -72,7 +72,11 @@ token is often exported for other Anthropic tooling. Exactly one scheme is sent.
 
 ### Strict, but lazy, validation
 
-Every new variable is strictly parsed: a set-but-empty value, unparseable URL, non-`http(s)`
+`ANTHROPIC_AUTH_TOKEN` is the exception to strict empty-value parsing: an empty or blank value is
+treated as unset (as the Anthropic SDKs do), because it is commonly templated for other tooling
+(`ANTHROPIC_AUTH_TOKEN=${X:-}`) and must not break a stock-endpoint setup that worked before.
+
+Every new `LCG_ANTHROPIC_*` variable and the URL settings are strictly parsed: a set-but-empty value, unparseable URL, non-`http(s)`
 scheme or unsupported placement value fails startup with an error naming the setting. But per
 ADR-0331 validation runs only when the Anthropic provider is actually selected: a stale
 `ANTHROPIC_BASE_URL` inherited from a shell must not break an explicit `--extractor-http` run. In

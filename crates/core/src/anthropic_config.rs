@@ -215,7 +215,15 @@ impl AnthropicEndpointConfig {
         };
 
         // ── Auth ──
-        let token = env_non_empty(env, ENV_AUTH_TOKEN)?;
+        // An empty/blank `ANTHROPIC_AUTH_TOKEN` is treated as unset (the Anthropic SDKs do the
+        // same): it is commonly templated as `ANTHROPIC_AUTH_TOKEN=${X:-}` for other tooling, and
+        // must not break a stock-endpoint setup that worked before this feature.
+        let token = auth_token_from_env(env);
+        if token.is_none() && env(ENV_AUTH_TOKEN).is_some() {
+            notes.push(format!(
+                "{ENV_AUTH_TOKEN} is empty and was treated as unset"
+            ));
+        }
         let api_key = env(ENV_API_KEY);
         // The token wins over the API key only when a gateway URL is configured. On the stock
         // endpoint with an API key set, behaviour must stay byte-for-byte what it was before
@@ -323,6 +331,13 @@ fn env_non_empty(
     }
 }
 
+/// `ANTHROPIC_AUTH_TOKEN`, trimmed; `None` when unset **or empty/blank** (SDK convention).
+pub fn auth_token_from_env(env: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    env(ENV_AUTH_TOKEN)
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
 fn parse_bool(var: &str, v: &str) -> Result<bool, String> {
     match v.to_ascii_lowercase().as_str() {
         "true" | "1" => Ok(true),
@@ -411,7 +426,12 @@ pub fn present_gateway_settings(
         ENV_VERSION_IN,
         ENV_PROMPT_CACHING,
     ] {
-        if env(var).is_some() {
+        let present = if var == ENV_AUTH_TOKEN {
+            auth_token_from_env(env).is_some()
+        } else {
+            env(var).is_some()
+        };
+        if present {
             out.push(var);
         }
     }
@@ -430,7 +450,7 @@ pub fn token_defers_to_local_extractor(
     env: &dyn Fn(&str) -> Option<String>,
     cli: &AnthropicCliArgs,
 ) -> bool {
-    env(ENV_AUTH_TOKEN).is_some()
+    auth_token_from_env(env).is_some()
         && env(ENV_API_KEY).is_none()
         && env("LCG_EXTRACTION_URL").is_some()
         && cli.is_empty()
@@ -662,7 +682,6 @@ mod tests {
         for var in [
             "ANTHROPIC_BASE_URL",
             "LCG_ANTHROPIC_ENDPOINT",
-            "ANTHROPIC_AUTH_TOKEN",
             "LCG_ANTHROPIC_OMIT_MODEL",
             "LCG_ANTHROPIC_VERSION",
             "LCG_ANTHROPIC_VERSION_IN",
@@ -691,6 +710,35 @@ mod tests {
     fn empty_api_key_keeps_historical_semantics() {
         let c = resolve(&[("ANTHROPIC_API_KEY", "")], AnthropicCliArgs::default()).unwrap();
         assert_eq!(c.auth, AnthropicAuth::ApiKey(String::new()));
+    }
+
+    #[test]
+    fn empty_token_is_unset_and_does_not_break_stock_setup() {
+        for blank in ["", "  "] {
+            let c = resolve(
+                &[
+                    ("ANTHROPIC_AUTH_TOKEN", blank),
+                    ("ANTHROPIC_API_KEY", "key"),
+                ],
+                AnthropicCliArgs::default(),
+            )
+            .unwrap();
+            assert_eq!(c.auth, AnthropicAuth::ApiKey("key".into()));
+            assert!(c.is_default());
+        }
+        let env = |k: &str| (k == "ANTHROPIC_AUTH_TOKEN").then(String::new);
+        assert!(auth_token_from_env(&env).is_none());
+        // With a gateway URL an empty token is also just unset.
+        let c = resolve(
+            &[
+                ("ANTHROPIC_AUTH_TOKEN", ""),
+                ("ANTHROPIC_API_KEY", "key"),
+                ("ANTHROPIC_BASE_URL", "https://gw.example.com"),
+            ],
+            AnthropicCliArgs::default(),
+        )
+        .unwrap();
+        assert_eq!(c.auth, AnthropicAuth::ApiKey("key".into()));
     }
 
     #[test]

@@ -658,7 +658,8 @@ async fn bootstrap_app_state(
             }
             ResolvedExtractor::Http(http_url)
         } else if std::env::var("ANTHROPIC_API_KEY").is_ok()
-            || (std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok()
+            || (lcg_core::anthropic_config::auth_token_from_env(&|k| std::env::var(k).ok())
+                .is_some()
                 && !token_defers_to_local_extractor(&|k| std::env::var(k).ok(), &anthropic_args))
         {
             // FR-007: an already-configured ANTHROPIC_API_KEY is never silently overridden by a
