@@ -104,6 +104,10 @@ pub struct AddEpisodeResult {
     /// UUIDs of earlier episodes of the same chunk this ingest superseded (issue #705, FR-003).
     /// Always empty under [`SupersedePolicy::None`].
     pub superseded_episode_uuids: Vec<String>,
+    /// Live same-named episodes of the chunk that a [`SupersedePolicy::ReviseChunk`] ingest left
+    /// alone because it cannot attribute them to its own prior writes (issue #292, ADR-0292).
+    /// Always empty under [`SupersedePolicy::None`].
+    pub left_alone_episode_uuids: Vec<String>,
 }
 
 /// Whether an ingest needs the origin guards at all: only a `doc_id` (FR-013) or a non-
@@ -135,7 +139,9 @@ fn check_origin_guards(
     }
     if chunk_guard && !origin.is_corroborating() {
         let now = crate::db::ingested_at_or_now("");
-        let live = conn.live_origins_for_chunk(name, group_id, &now)?;
+        // Only rows a revise would supersede count (issue #292): a foreign same-named episode is
+        // left alone by the revise, so it must not cause a refusal either.
+        let live = conn.live_revisable_origins_for_chunk(name, group_id, &now)?;
         if live.iter().any(|o| o.is_corroborating()) {
             return Err(crate::origin::conflict(format!(
                 "chunk {name:?} has a live primary or external episode; a {:?} submission would \
@@ -160,6 +166,26 @@ pub enum SupersedePolicy {
     ReviseChunk { keep: Vec<String> },
 }
 
+/// Which write path an ingest is, stamped on `Episodic.write_path` (issue #292, ADR-0292).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WritePath {
+    /// Every path except `knowledge_process_chunk`: `knowledge_add_episode`, the library
+    /// `add_episode`, the eval runner.
+    #[default]
+    Episode,
+    /// `knowledge_process_chunk`.
+    Chunk,
+}
+
+impl WritePath {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WritePath::Episode => crate::types::WRITE_PATH_EPISODE,
+            WritePath::Chunk => crate::types::WRITE_PATH_CHUNK,
+        }
+    }
+}
+
 /// Optional behaviours of [`add_episode_with_opts`]; `add_episode` uses the default.
 #[derive(Debug, Clone, Default)]
 pub struct EpisodeOpts {
@@ -173,17 +199,21 @@ pub struct EpisodeOpts {
     /// chunk has a live `primary`/`external` episode is refused whatever `supersede` says. Set by
     /// `knowledge_process_chunk`, whose `name` is a chunk id; `knowledge_add_episode`'s is free-form.
     pub guard_chunk_collision: bool,
+    /// Provenance stamp for the episode (issue #292). Defaults to [`WritePath::Episode`], so only
+    /// `knowledge_process_chunk` opts in to `Chunk`.
+    pub write_path: WritePath,
 }
 
 /// Phase C's result: `(edges_inserted, edges_dropped_unresolvable,
 /// edges_reclassified_unclassified, dropped_edges, edges_dropped_self_loop,
-/// superseded_episode_uuids)`.
+/// superseded_episode_uuids, left_alone_episode_uuids)`.
 type PhaseCOutcome = (
     usize,
     usize,
     usize,
     Vec<DroppedEdgeDetail>,
     usize,
+    Vec<String>,
     Vec<String>,
 );
 
@@ -1366,6 +1396,7 @@ pub async fn add_episode_with_opts(
     let supersede_policy = opts.supersede;
     let doc_id_owned = opts.doc_id;
     let chunk_guard = opts.guard_chunk_collision;
+    let write_path_stamp = opts.write_path.as_str();
     let chunk_name_for_supersede = name.to_string();
     // `attributes` is expected to already be a serialized JSON object (handlers.rs's
     // `attributes_param_to_string` guarantees this for the two IPC entry points), but
@@ -1422,6 +1453,7 @@ pub async fn add_episode_with_opts(
         dropped_edges,
         edges_dropped_self_loop,
         superseded_episode_uuids,
+        left_alone_episode_uuids,
     ) = tokio::task::spawn_blocking(
             move || -> Result<PhaseCOutcome, Error> {
         let conn = db_c.connect()?;
@@ -1645,6 +1677,7 @@ pub async fn add_episode_with_opts(
             attributes: attributes_owned.clone(),
             doc_id: doc_id_owned,
             origin: Some(origin.as_str().to_string()),
+            write_path: Some(write_path_stamp.to_string()),
             ..Default::default()
         })?;
 
@@ -1662,18 +1695,38 @@ pub async fn add_episode_with_opts(
         // earlier `?` returns before this point and the old episodes stay live (belief ends late,
         // never wrongly). The statements land in the same `wal_flush_chunk` as the new episode, so
         // the pair is atomic in the WAL. Scoped to this group; excludes the new episode itself.
+        //
+        // Only episodes this handler can attribute to its own prior writes are superseded
+        // (issue #292, ADR-0292): `write_path` NULL (legacy) or `chunk`. A same-named episode
+        // written by another path is left alone and logged; the new episode is still inserted, so
+        // the outcome is a normal fresh ingest, never an error.
         let mut superseded_episode_uuids: Vec<String> = Vec::new();
+        let mut left_alone_episode_uuids: Vec<String> = Vec::new();
         if let SupersedePolicy::ReviseChunk { keep } = &supersede_policy {
             let mut exclude = keep.clone();
             exclude.push(ep_uuid.clone());
-            let old = conn.live_episode_uuids_for_chunk(
+            let lineage = conn.live_chunk_lineage_for_chunk(
                 &chunk_name_for_supersede,
                 &gid_owned,
                 &exclude,
                 &commit_instant,
             )?;
-            conn.supersede_episodes_by_uuids(&old, &commit_instant, Some(&ep_uuid), "revision")?;
-            superseded_episode_uuids = old;
+            conn.supersede_episodes_by_uuids(
+                &lineage.eligible,
+                &commit_instant,
+                Some(&ep_uuid),
+                "revision",
+            )?;
+            superseded_episode_uuids = lineage.eligible;
+            for (uuid, source_description) in lineage.left_alone {
+                eprintln!(
+                    "liminis-context-graph: WARN chunk {chunk_name_for_supersede:?} (group \
+                     {gid_owned:?}): left same-named episode {uuid} alone (source_description \
+                     {source_description:?}) — not written by knowledge_process_chunk, so a chunk \
+                     ingest will not supersede it"
+                );
+                left_alone_episode_uuids.push(uuid);
+            }
         }
 
         let flushed = wal_exec::wal_flush_chunk(&state_c, &gid_wal, conn.drain_mutations());
@@ -1714,6 +1767,7 @@ pub async fn add_episode_with_opts(
             dropped_edges,
             edges_dropped_self_loop,
             superseded_episode_uuids,
+            left_alone_episode_uuids,
         ))
             },
         )
@@ -1806,6 +1860,7 @@ pub async fn add_episode_with_opts(
         edges_dropped_malformed,
         dedup_paths,
         superseded_episode_uuids,
+        left_alone_episode_uuids,
     })
 }
 

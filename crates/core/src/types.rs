@@ -192,6 +192,28 @@ pub struct EpisodicRow {
     /// `answer`. `None` (a NULL column) reads as `primary`; see `crate::origin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// Which write path produced this episode (issue #292, ADR-0292): `chunk` for
+    /// `knowledge_process_chunk`, `episode` for every other path. `None` (a NULL column) means the
+    /// row predates the marker. Deliberately not selected by episode reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_path: Option<String>,
+}
+
+/// `Episodic.write_path` value stamped by `knowledge_process_chunk` (issue #292, ADR-0292).
+pub const WRITE_PATH_CHUNK: &str = "chunk";
+/// `Episodic.write_path` value stamped by every other write path (`knowledge_add_episode`, the
+/// library `add_episode`, the eval runner).
+pub const WRITE_PATH_EPISODE: &str = "episode";
+
+/// Whether a chunk ingest may treat an episode with this `write_path` as its own prior lineage
+/// (issue #292, ADR-0292). An allow-list on purpose: NULL (a row written before the marker, kept
+/// for backward compatibility) and `chunk` are eligible; every other value, including any a future
+/// write path introduces, is left alone, so a new writer fails safe rather than destructive.
+pub fn write_path_is_chunk_eligible(write_path: Option<&str>) -> bool {
+    match write_path {
+        None | Some("") => true,
+        Some(w) => w == WRITE_PATH_CHUNK,
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

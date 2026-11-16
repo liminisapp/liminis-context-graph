@@ -41,7 +41,8 @@ const EPISODIC_CYPHER: &str = "\
     n.ingested_at = CASE WHEN $ingested_at IS NULL THEN NULL ELSE timestamp($ingested_at) END, \
     n.superseded_at = CASE WHEN $superseded_at IS NULL THEN NULL ELSE timestamp($superseded_at) END, \
     n.superseded_by = $superseded_by, n.superseded_by_kind = $superseded_by_kind, \
-    n.supersession_reason = $supersession_reason, n.doc_id = $doc_id, n.origin = $origin";
+    n.supersession_reason = $supersession_reason, n.doc_id = $doc_id, n.origin = $origin, \
+    n.write_path = $write_path";
 
 const DOC_SUPERSESSION_CYPHER: &str = "\
     MERGE (n:DocSupersession {key: $key}) \
@@ -236,7 +237,7 @@ fn dump_episodic_nodes(
                 for row in &rows {
                     // cols: [uuid, name, group_id, created_at, source, source_description,
                     //         content, content_embedding, valid_at, entity_edges, attributes, ingested_at,
-                    //         superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, origin]
+                    //         superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, origin, write_path]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -264,6 +265,12 @@ fn dump_episodic_nodes(
                         s if s.is_empty() => serde_json::Value::Null,
                         s => serde_json::Value::String(s),
                     };
+                    // Write-path provenance (issue #292), appended last. Same null mapping as
+                    // `origin`: a pre-marker (NULL) episode must round-trip as NULL, not "".
+                    let write_path = match value_as_string(&row[18]) {
+                        s if s.is_empty() => serde_json::Value::Null,
+                        s => serde_json::Value::String(s),
+                    };
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -283,6 +290,7 @@ fn dump_episodic_nodes(
                         "supersession_reason": supersession_reason,
                         "doc_id": doc_id,
                         "origin": origin,
+                        "write_path": write_path,
                     });
                     w.log_mutation(EPISODIC_CYPHER, params, "")?;
                 }

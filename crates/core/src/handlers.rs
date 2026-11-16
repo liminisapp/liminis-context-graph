@@ -1160,6 +1160,9 @@ async fn handle_knowledge_process_chunk(
         origin,
         // `chunk_id` is a chunk identity here: a derived/answer unit may not revise a primary one.
         guard_chunk_collision: true,
+        // Issue #292: only this handler stamps `chunk`, which is what makes its own prior
+        // writes recognisable to a later revise.
+        write_path: episode::WritePath::Chunk,
     };
     let result = episode::add_episode_with_opts(
         Arc::clone(&state),
@@ -1194,6 +1197,11 @@ async fn handle_knowledge_process_chunk(
         "dedup_paths": result.dedup_paths,
         "duration_seconds": start.elapsed().as_secs_f64(),
     });
+    // Issue #292: present only when a same-named episode written by another path was left alone,
+    // so an unambiguous call's response is unchanged.
+    if !result.left_alone_episode_uuids.is_empty() {
+        response["left_alone_episode_uuids"] = json!(result.left_alone_episode_uuids);
+    }
 
     if chunk_text_chars > threshold_chars {
         state.sink.emit(TelemetryEvent::ChunkTextOversized {

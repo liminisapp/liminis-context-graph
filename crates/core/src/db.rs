@@ -117,6 +117,15 @@ pub struct WalPositionRecord {
     pub embedding_dim: Option<i64>,
 }
 
+/// A chunk's live same-named episodes, partitioned by attribution (issue #292, ADR-0292).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChunkLineage {
+    /// UUIDs a chunk ingest may supersede: `write_path` is NULL (legacy) or `chunk`.
+    pub eligible: Vec<String>,
+    /// `(uuid, source_description)` of live same-named episodes written by another path; left alone.
+    pub left_alone: Vec<(String, String)>,
+}
+
 /// Outcome of a name-aware extraction-time dedup candidate selection (issue #650, ADR-0650).
 /// `vetoed` counts the above-threshold candidates discarded by the identifier-mismatch veto
 /// that ranked ahead of `candidate` (all of them when `candidate` is `None`).
@@ -834,7 +843,8 @@ impl<'db> Conn<'db> {
              entity_edges: $entity_edges, attributes: $attributes, ingested_at: $ingested_at, \
              superseded_at: $superseded_at, superseded_by: $superseded_by, \
              superseded_by_kind: $superseded_by_kind, \
-             supersession_reason: $supersession_reason, doc_id: $doc_id, origin: $origin})",
+             supersession_reason: $supersession_reason, doc_id: $doc_id, origin: $origin, \
+             write_path: $write_path})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -854,6 +864,7 @@ impl<'db> Conn<'db> {
                 "supersession_reason": row.supersession_reason,
                 "doc_id": row.doc_id,
                 "origin": row.origin,
+                "write_path": row.write_path,
             }),
         )
     }
@@ -1586,6 +1597,41 @@ impl<'db> Conn<'db> {
             .collect())
     }
 
+    /// The live episodes of `group_id` named `chunk_id` (same live predicate as
+    /// [`Self::live_episode_uuids_for_chunk`], `exclude` honoured), partitioned by whether a chunk
+    /// ingest may treat them as its own prior lineage (issue #292, ADR-0292). Used only by the
+    /// routine-ingest revise path; the by-name operations keep the unpartitioned lookup.
+    pub fn live_chunk_lineage_for_chunk(
+        &self,
+        chunk_id: &str,
+        group_id: &str,
+        exclude: &[String],
+        as_of: &str,
+    ) -> Result<ChunkLineage, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) \
+             WHERE ep.name = $name AND ep.group_id = $gid \
+             AND (ep.superseded_at IS NULL \
+                  OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+             RETURN ep.uuid, ep.source_description, ep.write_path",
+            serde_json::json!({ "name": chunk_id, "gid": group_id, "live_at": as_of }),
+        )?;
+        let mut lineage = ChunkLineage::default();
+        for r in rows {
+            let uuid = value_as_string(&r[0]);
+            if exclude.contains(&uuid) {
+                continue;
+            }
+            let wp = value_as_optional_string(&r[2]);
+            if crate::types::write_path_is_chunk_eligible(wp.as_deref()) {
+                lineage.eligible.push(uuid);
+            } else {
+                lineage.left_alone.push((uuid, value_as_string(&r[1])));
+            }
+        }
+        Ok(lineage)
+    }
+
     /// Marks the given episodes superseded. uuid-keyed, fixed-valued and guarded, so WAL tail
     /// replay over an overlapping seq range is idempotent (ADR-0026) and a second supersession can
     /// never overwrite the first's timestamp. The guard is `superseded_at IS NULL`, or a document
@@ -1952,6 +1998,20 @@ impl<'db> Conn<'db> {
     ) -> Result<Vec<crate::origin::Origin>, Error> {
         let uuids = self.live_episode_uuids_for_chunk(chunk_id, group_id, &[], as_of)?;
         let info = self.get_episode_origin_info(&uuids)?;
+        Ok(info.values().map(|i| i.origin).collect())
+    }
+
+    /// Origins of the live episodes a chunk revise could supersede: like
+    /// [`Self::live_origins_for_chunk`] but restricted to the chunk-eligible rows (issue #292), so
+    /// a foreign same-named episode never makes a revise refuse.
+    pub fn live_revisable_origins_for_chunk(
+        &self,
+        chunk_id: &str,
+        group_id: &str,
+        as_of: &str,
+    ) -> Result<Vec<crate::origin::Origin>, Error> {
+        let lineage = self.live_chunk_lineage_for_chunk(chunk_id, group_id, &[], as_of)?;
+        let info = self.get_episode_origin_info(&lineage.eligible)?;
         Ok(info.values().map(|i| i.origin).collect())
     }
 
@@ -4721,7 +4781,7 @@ impl<'db> Conn<'db> {
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
-                 n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin \
+                 n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin, n.write_path \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -4731,7 +4791,7 @@ impl<'db> Conn<'db> {
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
-                 n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin \
+                 n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin, n.write_path \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
