@@ -189,7 +189,6 @@ async fn full_run(
                         index_name: "idx".into(),
                         rerank,
                         id,
-                        notes: Arc::new(fx.notes.clone()),
                     })));
                 }
             }
@@ -425,7 +424,6 @@ async fn grounded_measure_is_skipped_not_zero_without_a_judge() {
 
 #[tokio::test]
 async fn qmd_reranker_toggle_is_a_separate_configuration() {
-    let fx = fixture::load(&fixture_dir()).unwrap();
     let runner = Arc::new(FakeQmd {
         notes: vec![],
         log: Mutex::new(vec![]),
@@ -435,7 +433,6 @@ async fn qmd_reranker_toggle_is_a_separate_configuration() {
         index_name: "idx".into(),
         rerank,
         id,
-        notes: Arc::new(fx.notes.clone()),
     };
     use lcg_eval::retrieval::Retriever;
     mk(false, "qmd")

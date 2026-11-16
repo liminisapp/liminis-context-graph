@@ -45,6 +45,9 @@ pub struct RankedResult {
     pub model_calls: Option<u64>,
     /// Non-model lookup RPCs made to resolve results (counted, never hidden).
     pub lookup_calls: u64,
+    /// Returned hits that carried no evidence text (qmd hits without a snippet). They stay in the
+    /// ranking as empty evidence, are judged unsupported, and are counted so the report can say so.
+    pub evidence_gaps: u64,
     pub latency: Duration,
 }
 
@@ -167,6 +170,7 @@ pub async fn score_config(
     let mut latencies = Vec::new();
     let mut calls: Vec<Option<u64>> = Vec::new();
     let mut lookup_calls = 0;
+    let mut evidence_gaps = 0;
     let mut errors = Vec::new();
     let mut judge_failure: Option<String> = None;
 
@@ -181,6 +185,7 @@ pub async fn score_config(
         latencies.push(res.latency.as_secs_f64() * 1000.0);
         calls.push(res.model_calls);
         lookup_calls += res.lookup_calls;
+        evidence_gaps += res.evidence_gaps;
 
         let mut ranks: Option<Vec<Option<usize>>> = None;
         if !q.evidence.is_empty() {
@@ -242,6 +247,7 @@ pub async fn score_config(
         latency_p95_ms: percentile(&latencies, 95.0),
         model_calls_per_query,
         lookup_calls,
+        evidence_gaps,
         query_errors: errors,
         grounded,
     }))
@@ -367,11 +373,10 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
     let mut ingest_cost = IngestCost::default();
     let mut lcg_slots: BTreeMap<String, Slot> = BTreeMap::new();
     let mut qmd_slots: BTreeMap<String, Slot> = BTreeMap::new();
-    let notes_arc = Arc::new(fx.notes.clone());
 
     // ── LCG ─────────────────────────────────────────────────────────────────
-    let _service_guard; // keeps the service alive until the report is written
-    if plan.needs_lcg {
+    // Keeps the service alive until the report is written.
+    let _service_guard = if plan.needs_lcg {
         let opts = lcg::ServiceOpts {
             bin: a.service_bin.clone().unwrap_or_else(default_service_bin),
             embedder_http: a.embedder_http.clone(),
@@ -429,10 +434,10 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             };
             lcg_slots.insert(id.clone(), Slot::Run(r));
         }
-        _service_guard = Some(guard);
+        Some(guard)
     } else {
-        _service_guard = None;
-    }
+        None
+    };
 
     // ── qmd ─────────────────────────────────────────────────────────────────
     if plan.needs_qmd {
@@ -486,7 +491,6 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                             } else {
                                 "qmd"
                             },
-                            notes: notes_arc.clone(),
                         })),
                     );
                 }
@@ -595,6 +599,7 @@ mod tests {
                     evidence: vec![],
                     model_calls: None,
                     lookup_calls: 0,
+                    evidence_gaps: 0,
                     latency: Duration::from_millis(1),
                 })
             })
@@ -643,6 +648,7 @@ mod tests {
                     evidence: self.evidence.clone(),
                     model_calls: Some(1),
                     lookup_calls: 0,
+                    evidence_gaps: 0,
                     latency: Duration::from_millis(5),
                 })
             };

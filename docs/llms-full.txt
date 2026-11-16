@@ -4532,6 +4532,10 @@ entity result can credit several notes before the list is cut to k notes.
   score floor at 0, a system normally returns results for any query, so this column is usually
   pinned at 1.0 for all of them; the report says so ("non-discriminating") rather than marking a
   winner. It only separates systems that return fewer than k results on their own (e.g. qmd).
+- **Hits without evidence text.** If a qmd hit carries no snippet there is no passage to judge. It
+  is counted as ungrounded (empty evidence; the judge is not called) and the report lists how many
+  hits had no snippet per configuration, so qmd's grounded figures are a lower bound rather than
+  quietly equal to its note-level recall. There is deliberately no fallback to the whole note.
 - **Latency** p50/p95 per query, **warm only**: indices are built explicitly and one unmeasured
   pass runs before the timed pass. qmd runs as one process per query, so its latency is
   per-process (it includes model load) and it gets a single warm-up query rather than a full pass.

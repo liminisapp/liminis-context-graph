@@ -403,6 +403,7 @@ impl Retriever for LcgPassages {
                 evidence,
                 model_calls: Some(1),
                 lookup_calls: 0,
+                evidence_gaps: 0,
                 latency,
             })
         })
@@ -515,6 +516,7 @@ impl Retriever for LcgEntitiesFacts {
                 evidence,
                 model_calls: Some(2),
                 lookup_calls,
+                evidence_gaps: 0,
                 latency,
             })
         })

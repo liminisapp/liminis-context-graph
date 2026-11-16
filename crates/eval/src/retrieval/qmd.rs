@@ -14,7 +14,6 @@
 //! reported as "n/a". A missing binary, failed indexing or unparsable output yields
 //! [`Skipped`] — never a zero score.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -281,8 +280,6 @@ pub struct QmdRetriever {
     pub index_name: String,
     pub rerank: bool,
     pub id: &'static str,
-    /// note id -> body; used as evidence when qmd returns no snippet.
-    pub notes: Arc<BTreeMap<String, String>>,
 }
 
 impl Retriever for QmdRetriever {
@@ -329,16 +326,17 @@ impl Retriever for QmdRetriever {
             let hits = parse_results(&out.stdout)?;
             let mut notes = Vec::new();
             let mut evidence = Vec::new();
+            let mut evidence_gaps = 0;
             for h in hits.into_iter().take(k) {
                 let note = note_of_path(&h.file);
-                evidence.push(if h.snippet.trim().is_empty() {
-                    note.as_ref()
-                        .and_then(|n| self.notes.get(n))
-                        .cloned()
-                        .unwrap_or_default()
-                } else {
-                    h.snippet
-                });
+                // A hit with no snippet has no passage to judge. Do NOT substitute the whole note:
+                // that would make any right-note hit count as grounded and hide the "right note,
+                // wrong passage" case. Keep an empty slot (rank positions stay aligned); the judge
+                // treats empty evidence as unsupported, and the gap is counted and reported.
+                if h.snippet.trim().is_empty() {
+                    evidence_gaps += 1;
+                }
+                evidence.push(h.snippet);
                 if let Some(n) = note {
                     notes.push(n);
                 }
@@ -348,6 +346,7 @@ impl Retriever for QmdRetriever {
                 evidence,
                 model_calls: None,
                 lookup_calls: 0,
+                evidence_gaps,
                 latency,
             })
         })
@@ -401,6 +400,28 @@ mod tests {
   {"docid":"#a1b2c3","score":0.91,"file":"qmd://nb/pricing-decision.md","title":"Pricing","snippet":"We chose usage-based pricing."},
   {"docid":"#d4e5f6","score":0.40,"file":"qmd://nb/Old Pricing Note.md"}
 ]"##;
+
+    #[tokio::test]
+    async fn snippetless_hit_is_empty_evidence_and_counted_not_the_whole_note() {
+        let runner = Arc::new(FakeRunner::new(|_| {
+            ok(r#"[{"file":"qmd://nb/a-note.md","score":0.9},
+                   {"file":"qmd://nb/b-note.md","score":0.8,"snippet":"the real passage"}]"#)
+        }));
+        let r = QmdRetriever {
+            runner,
+            index_name: "idx".into(),
+            rerank: false,
+            id: "qmd",
+        };
+        let res = r.retrieve("q", 10).await.unwrap();
+        assert_eq!(res.notes, vec!["a-note", "b-note"]);
+        assert_eq!(
+            res.evidence,
+            vec![String::new(), "the real passage".to_string()],
+            "no whole-note fallback; rank positions stay aligned"
+        );
+        assert_eq!(res.evidence_gaps, 1);
+    }
 
     #[test]
     fn parses_array_with_and_without_snippet() {
@@ -552,21 +573,20 @@ mod tests {
     #[tokio::test]
     async fn retriever_passes_k_and_rerank_flag_and_maps_notes() {
         let r = Arc::new(FakeRunner::new(|_| ok(SAMPLE)));
-        let mut notes = BTreeMap::new();
-        notes.insert("old-pricing-note".to_string(), "OLD BODY".to_string());
         let mk = |rerank| QmdRetriever {
             runner: r.clone(),
             index_name: "idx".into(),
             rerank,
             id: "qmd",
-            notes: Arc::new(notes.clone()),
         };
         let res = mk(false).retrieve("price?", 7).await.unwrap();
         assert_eq!(res.notes, vec!["pricing-decision", "old-pricing-note"]);
         assert_eq!(
             res.evidence,
-            vec!["We chose usage-based pricing.", "OLD BODY"]
+            vec!["We chose usage-based pricing.", ""],
+            "the snippet-less hit is empty evidence, not the note body"
         );
+        assert_eq!(res.evidence_gaps, 1);
         assert_eq!(res.model_calls, None);
         mk(true).retrieve("price?", 7).await.unwrap();
         let log = r.log.lock().unwrap();
@@ -590,7 +610,6 @@ mod tests {
             index_name: "i".into(),
             rerank: true,
             id: "qmd-rerank",
-            notes: Arc::new(BTreeMap::new()),
         };
         assert!(rt.retrieve("x", 3).await.unwrap_err().contains("boom"));
     }
@@ -603,7 +622,6 @@ mod tests {
             index_name: "idx".into(),
             rerank: false,
             id: "qmd",
-            notes: Arc::new(BTreeMap::new()),
         };
         let e = rt.retrieve("q", 3).await.unwrap_err();
         assert!(e.contains("produced no output"), "{e}");

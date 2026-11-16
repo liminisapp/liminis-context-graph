@@ -45,6 +45,8 @@ pub struct ConfigRun {
     /// Query-time model calls per query; `None` = not exposed by the system.
     pub model_calls_per_query: Option<f64>,
     pub lookup_calls: u64,
+    /// Returned hits with no evidence text, judged unsupported (see `RankedResult::evidence_gaps`).
+    pub evidence_gaps: u64,
     pub query_errors: Vec<String>,
     pub grounded: Grounded,
 }
@@ -370,6 +372,13 @@ impl Report {
             i.qmd_seconds.map_or("n/a".into(), |s| format!("{s:.1}"))
         );
         for (c, r) in self.ran() {
+            if r.evidence_gaps > 0 {
+                let _ = writeln!(
+                    o,
+                    "- `{}`: {} returned hit(s) carried no snippet. They were counted as ungrounded (no whole-note fallback), so this configuration's grounded figures are a lower bound.",
+                    c.id, r.evidence_gaps
+                );
+            }
             for e in r.query_errors.iter().take(3) {
                 let _ = writeln!(o, "- `{}` query error: {e}", c.id);
             }
@@ -495,6 +504,7 @@ impl Report {
                         "latency_p50_ms": r.latency_p50_ms, "latency_p95_ms": r.latency_p95_ms,
                         "model_calls_per_query": r.model_calls_per_query,
                         "lookup_calls": r.lookup_calls,
+                        "evidence_gaps": r.evidence_gaps,
                         "query_errors": r.query_errors,
                         "grounded": match &r.grounded {
                             Grounded::Judged { paid_calls, cache_hits } => json!({"paid_calls": paid_calls, "cache_hits": cache_hits}),
@@ -577,6 +587,7 @@ mod tests {
             latency_p95_ms: Some(30.0),
             model_calls_per_query: None,
             lookup_calls: 0,
+            evidence_gaps: 0,
             query_errors: vec![],
             grounded: Grounded::Skipped("no judge".into()),
         }))
@@ -716,5 +727,18 @@ mod tests {
         let md = r.render_markdown();
         assert!(md.contains("4 entity→note link(s) were accepted without `episode_uuids`"));
         assert_eq!(r.to_json()["ingest"]["lcg_unconfirmed_entity_links"], 4);
+    }
+
+    #[test]
+    fn evidence_gaps_are_reported_as_a_grounded_lower_bound() {
+        let mut r = report();
+        assert!(!r.render_markdown().contains("carried no snippet"));
+        if let Status::Ran(run) = &mut r.configs[0].status {
+            run.evidence_gaps = 3;
+        }
+        let md = r.render_markdown();
+        assert!(md.contains("3 returned hit(s) carried no snippet"), "{md}");
+        assert!(md.contains("lower bound"));
+        assert_eq!(r.to_json()["configs"][0]["evidence_gaps"], 3);
     }
 }

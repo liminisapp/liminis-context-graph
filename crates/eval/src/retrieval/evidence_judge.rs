@@ -153,6 +153,10 @@ impl<'a> CachedEvidenceJudge<'a> {
     }
 
     pub async fn supports(&self, key_fact: &str, evidence: &str) -> Result<bool, String> {
+        // Empty evidence (a hit with no passage text) supports nothing; don't pay to ask.
+        if evidence.trim().is_empty() {
+            return Ok(false);
+        }
         let key = cache_key(self.inner.model(), key_fact, evidence);
         if let Some(v) = self.entries.lock().expect("cache lock").get(&key) {
             self.cache_hits.fetch_add(1, Ordering::Relaxed);
@@ -267,6 +271,25 @@ mod tests {
         assert!(j2.supports("fact", "this has a Fact in it").await.unwrap());
         assert_eq!(j2.paid_calls(), 0);
         assert_eq!(inner.calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn empty_evidence_is_unsupported_without_a_judge_call() {
+        let d = tempfile::tempdir().unwrap();
+        let inner = SubstringJudge::new();
+        let j = CachedEvidenceJudge::load(&inner, &d.path().join("c.jsonl")).unwrap();
+        assert!(
+            !j.supports("", "  ").await.unwrap(),
+            "even an empty key fact"
+        );
+        assert!(!j.supports("fact", "").await.unwrap());
+        assert_eq!(j.paid_calls(), 0);
+        let texts = vec![String::new(), "has fact".to_string()];
+        assert_eq!(
+            j.first_supporting_rank("fact", &texts).await.unwrap(),
+            Some(1),
+            "rank positions stay aligned past an empty slot"
+        );
     }
 
     #[tokio::test]
