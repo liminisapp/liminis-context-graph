@@ -159,6 +159,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0752](0752-episode-origin-and-corroboration.md) | Episode Origin — Derived Content Cites But Never Corroborates | 2026-11-15 |
 | [0754](0754-retrieval-eval-architecture.md) | Retrieval-Quality Eval Architecture — Service-Spawn Driver, qmd Baseline, Metric Definitions | 2026-11-15 |
 | [0755](0755-knowledge-lint-deterministic-health.md) | `knowledge_lint` — A Deterministic, LLM-Free Notebook Health Report | 2026-11-15 |
+| [0776](0776-kind-aware-identity-set-check.md) | Kind-Aware D1 Identity-Set Check and Stamp Restore from the WAL Sidecar | 2026-11-16 |
 
 ## Historical numbering
 

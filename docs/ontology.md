@@ -72,12 +72,15 @@ ontology resolution has nothing to change there.
 
 **Published ontology is documentation, not policy.** When a group's stream is published (the
 existing whole-directory copy described in [Operations](operations.md)), the ontology that guided
-that group's extraction travels alongside it as `.wal-ontology.json` — informational only. A
+that group's extraction travels alongside it as `.wal-ontology.json` — informational, with one exception below. A
 consumer hydrating that stream can inspect it to see what vocabulary produced the graph, but it is
 never applied to the consumer's own extraction, `mode: strict` validation, canonicalization, or
 reprocessing for that group — the consumer's own local configuration (per-group file, workspace
 file, or neither) is always what governs. A stream published without this file still replays and
-behaves identically; only the documentation available to the consumer is degraded.
+behaves identically; only the documentation available to the consumer is degraded. The one field
+a rebuild reads back is `identity_types` — the group's identity-bearing set — which
+`knowledge_rebuild_from_wal` uses to restore a missing identity-set stamp (see below); it never
+overwrites an existing stamp, and a sidecar without the field restores nothing.
 
 ## Drift detection
 
@@ -290,14 +293,20 @@ two things wrongly merged.
 
 **Changing the flag is refused when it would reinterpret existing data.** lcg records, per group,
 which types were identity-bearing (`.lcg/identity-set/<group_id>.json`, outside the WAL and the
-DB, so it survives a clear or a rebuild-from-WAL). When a group's ontology first resolves in a
-process, its identity-bearing set is compared with the record:
+DB, so it survives a clear or a rebuild-from-WAL into the same workspace root — it does **not**
+travel with the WAL; after a rebuild into a fresh root it is restored from the WAL's
+`.wal-ontology.json`, and a group with no stamp still works because the check below is
+kind-aware). When a group's ontology first resolves in a process, its identity-bearing set is
+compared with the record:
 
 - A difference that touches only types no existing entity in the group carries **is accepted**;
   the record is updated and it takes effect for later extractions.
-- Adding or removing the flag for a type existing entities already carry (their full `labels`,
-  including ancestor labels and the kind label — so flagging `Document` is refused while any `Rfc`
-  entity carries the `Document` label) **is refused**. `knowledge_add_episode` for that group fails
+- Adding or removing the flag for a type whose existing entities **would change kind** **is
+  refused**: adding the flag to `T` is refused only if an entity whose leaf type is `T` has a
+  `kind` other than `T` (default `Entity`, NULL or empty); removing it is refused only if an entity
+  has `kind = T`. Entities of a subtype of `T` are not affected (kind is never inherited), and
+  entities whose kind already matches — e.g. replayed from a WAL with no stamp — are not
+  reinterpreted, so an unchanged ontology is never refused. `knowledge_add_episode` for that group fails
   with JSON-RPC error `-32003` (`error.data.reason = "identity_set_change_refused"`, plus
   `group_id`, `label`, `entity_count`), and the group appears in `knowledge_status`'s
   `group_identity_refusals`:
