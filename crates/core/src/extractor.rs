@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use tokio::time::sleep;
 
 use crate::{
+    anthropic_config::{AnthropicAuth, AnthropicEndpointConfig, VersionPlacement},
     backfill::derive_relation_type_from_fact,
     dedup_judge::{self, DedupVerdict, DuplicatePair},
     env::lcg_env_var,
@@ -159,13 +160,20 @@ fn build_edge_tool_schema(sanitized_names: &[String]) -> Value {
     })
 }
 
+/// Converts a `reqwest::Error` into [`Error`] with the request URL removed: `reqwest`'s `Display`
+/// embeds the URL, which for a gateway may carry query-string secrets (#346 FR-010).
+fn scrub_err(e: reqwest::Error) -> Error {
+    Error::from(e.without_url())
+}
+
 // ── AnthropicExtractor ────────────────────────────────────────────────────────
 
 /// Out-of-process entity/relationship extraction adapter (Principle V).
 pub struct AnthropicExtractor {
-    api_key: String,
+    /// Resolved endpoint / auth / request-shape settings (#346). Shared by every Anthropic-backed
+    /// call path (extract, classify, consolidate, judge) so none can fall back to the stock URL.
+    endpoint: AnthropicEndpointConfig,
     model: String,
-    url: String,
     client: Client,
     sink: Arc<dyn TelemetrySink>,
 }
@@ -175,6 +183,9 @@ impl AnthropicExtractor {
     ///
     /// - `ANTHROPIC_API_KEY` (required)
     /// - `LCG_EXTRACTION_LLM` (default `claude-haiku-4-5-20251001`)
+    ///
+    /// Always targets the stock endpoint; gateway settings are applied by the service via
+    /// [`AnthropicExtractor::with_endpoint_config`] (#346).
     pub fn from_env(sink: Arc<dyn TelemetrySink>) -> Self {
         let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
         // LCG_EXTRACTION_LLM may be "primary:fallback" format (consumed by LlmRouter).
@@ -187,9 +198,8 @@ impl AnthropicExtractor {
             .unwrap_or("claude-haiku-4-5-20251001")
             .to_string();
         Self {
-            api_key,
+            endpoint: AnthropicEndpointConfig::default_with_key(api_key),
             model,
-            url: ANTHROPIC_API_URL.to_string(),
             client: Client::new(),
             sink,
         }
@@ -197,9 +207,8 @@ impl AnthropicExtractor {
 
     pub fn with_model(model: String, api_key: String, sink: Arc<dyn TelemetrySink>) -> Self {
         Self {
-            api_key,
+            endpoint: AnthropicEndpointConfig::default_with_key(api_key),
             model,
-            url: ANTHROPIC_API_URL.to_string(),
             client: Client::new(),
             sink,
         }
@@ -213,12 +222,18 @@ impl AnthropicExtractor {
         sink: Arc<dyn TelemetrySink>,
     ) -> Self {
         Self {
-            api_key,
+            endpoint: AnthropicEndpointConfig::with_url_and_key(url, api_key),
             model,
-            url,
             client: Client::new(),
             sink,
         }
+    }
+
+    /// Replaces the endpoint / auth / request-shape configuration (#346). Builder-style so the
+    /// public constructors keep their signatures (same pattern as ADR-0497's `with_api_key`).
+    pub fn with_endpoint_config(mut self, endpoint: AnthropicEndpointConfig) -> Self {
+        self.endpoint = endpoint;
+        self
     }
 
     pub fn model_name(&self) -> &str {
@@ -227,6 +242,47 @@ impl AnthropicExtractor {
 
     fn is_sonnet(&self) -> bool {
         self.model.to_lowercase().contains("sonnet")
+    }
+
+    /// Prompt caching (the `anthropic-beta` header and `cache_control` system blocks) applies to
+    /// Sonnet-class models unless the operator turned it off for a strict gateway (#346).
+    fn caching_enabled(&self) -> bool {
+        self.is_sonnet() && self.endpoint.prompt_caching
+    }
+
+    /// Builds the POST request with URL, auth, version header (header placement only) and the
+    /// prompt-caching beta header. The single place that decides request headers, so every
+    /// Anthropic-backed call path shares one gateway shape (#346 FR-009).
+    fn post(&self) -> reqwest::RequestBuilder {
+        let mut req = self.client.post(&self.endpoint.url);
+        req = match &self.endpoint.auth {
+            AnthropicAuth::ApiKey(key) => req.header("x-api-key", key),
+            AnthropicAuth::Bearer(token) => req.bearer_auth(token),
+        };
+        if self.endpoint.version_in == VersionPlacement::Header {
+            req = req.header("anthropic-version", &self.endpoint.version);
+        }
+        if self.caching_enabled() {
+            req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
+        }
+        req
+    }
+
+    /// Applies the configured body shape to a freshly built request body: drops the top-level
+    /// `model` when the gateway encodes it in the URL, and carries `anthropic_version` in the
+    /// body for Bedrock-style gateways (#346).
+    fn shape_body(&self, body: &mut Value) {
+        if let Some(obj) = body.as_object_mut() {
+            if self.endpoint.omit_model {
+                obj.remove("model");
+            }
+            if self.endpoint.version_in == VersionPlacement::Body {
+                obj.insert(
+                    "anthropic_version".to_string(),
+                    Value::String(self.endpoint.version.clone()),
+                );
+            }
+        }
     }
 
     /// Sends `body` to the Anthropic Messages API, retrying up to 3 times on 429/529 with
@@ -240,19 +296,11 @@ impl AnthropicExtractor {
     async fn send_with_retry(&self, body: &Value) -> SendOutcome {
         let mut attempt = 0u32;
         loop {
-            let mut req = self
-                .client
-                .post(&self.url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01");
-
-            if self.is_sonnet() {
-                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
-            }
+            let req = self.post();
 
             let http_resp = match req.json(body).send().await {
                 Ok(r) => r,
-                Err(e) => return SendOutcome::Transport(Error::from(e)),
+                Err(e) => return SendOutcome::Transport(scrub_err(e)),
             };
             let status = http_resp.status();
 
@@ -291,7 +339,7 @@ impl AnthropicExtractor {
             opts.custom_instructions,
         );
 
-        let system_value: Value = if self.is_sonnet() {
+        let system_value: Value = if self.caching_enabled() {
             json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
         } else {
             json!(system_text)
@@ -334,6 +382,7 @@ impl AnthropicExtractor {
             "tool_choice": {"type": "tool", "name": "extract_entities"},
             "messages": [{"role": "user", "content": user_text}]
         });
+        self.shape_body(&mut body);
 
         let mut max_tokens_retried = false;
         loop {
@@ -469,7 +518,7 @@ impl AnthropicExtractor {
             opts.custom_instructions,
         );
 
-        let system_value: Value = if self.is_sonnet() {
+        let system_value: Value = if self.caching_enabled() {
             json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
         } else {
             json!(system_text)
@@ -492,6 +541,7 @@ impl AnthropicExtractor {
             "tool_choice": {"type": "tool", "name": "extract_edges"},
             "messages": [{"role": "user", "content": user_text}]
         });
+        self.shape_body(&mut body);
 
         let mut max_tokens_retried = false;
         loop {
@@ -672,36 +722,34 @@ impl AnthropicExtractor {
     ) -> Result<String, Error> {
         let (system_text, user_text) =
             crate::summary_merge::consolidation_prompts(entity_name, existing, incoming);
-        let system_value: Value = if self.is_sonnet() {
+        let system_value: Value = if self.caching_enabled() {
             json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
         } else {
             json!(system_text)
         };
-        let body = json!({
+        let mut body = json!({
             "model": &self.model,
             "max_tokens": 512,
             "system": system_value,
             "messages": [{"role": "user", "content": user_text}]
         });
+        self.shape_body(&mut body);
 
         let mut attempt = 0u32;
         loop {
-            let mut req = self
-                .client
-                .post(&self.url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01");
-            if self.is_sonnet() {
-                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
-            }
-            let http_resp = req.json(&body).send().await?;
+            let http_resp = self.post().json(&body).send().await.map_err(scrub_err)?;
             let status = http_resp.status();
             if (status == 429 || status == 529) && attempt < 3 {
                 sleep(Duration::from_secs(1u64 << attempt)).await;
                 attempt += 1;
                 continue;
             }
-            let resp: Value = http_resp.error_for_status()?.json().await?;
+            let resp: Value = http_resp
+                .error_for_status()
+                .map_err(scrub_err)?
+                .json()
+                .await
+                .map_err(scrub_err)?;
             self.emit_token_usage(&resp);
             let content = resp["content"]
                 .as_array()
@@ -741,7 +789,7 @@ impl AnthropicExtractor {
                 .to_string()
         };
 
-        let system_value: Value = if self.is_sonnet() {
+        let system_value: Value = if self.caching_enabled() {
             json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
         } else {
             json!(system_text)
@@ -752,7 +800,7 @@ impl AnthropicExtractor {
             .map(|(name, summary)| json!({"name": name, "summary": summary}))
             .collect();
 
-        let body = json!({
+        let mut body = json!({
             "model": &self.model,
             "max_tokens": 512,
             "system": system_value,
@@ -767,20 +815,11 @@ impl AnthropicExtractor {
                 }
             ]
         });
+        self.shape_body(&mut body);
 
         let mut attempt = 0u32;
         loop {
-            let mut req = self
-                .client
-                .post(&self.url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01");
-
-            if self.is_sonnet() {
-                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
-            }
-
-            let http_resp = req.json(&body).send().await?;
+            let http_resp = self.post().json(&body).send().await.map_err(scrub_err)?;
             let status = http_resp.status();
 
             if (status == 429 || status == 529) && attempt < 3 {
@@ -790,7 +829,12 @@ impl AnthropicExtractor {
                 continue;
             }
 
-            let resp: Value = http_resp.error_for_status()?.json().await?;
+            let resp: Value = http_resp
+                .error_for_status()
+                .map_err(scrub_err)?
+                .json()
+                .await
+                .map_err(scrub_err)?;
             self.emit_token_usage(&resp);
 
             let content = resp["content"]
@@ -828,36 +872,34 @@ impl AnthropicExtractor {
         if pairs.is_empty() {
             return Ok(vec![]);
         }
-        let system_value: Value = if self.is_sonnet() {
+        let system_value: Value = if self.caching_enabled() {
             json!([{"type": "text", "text": dedup_judge::JUDGE_SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}])
         } else {
             json!(dedup_judge::JUDGE_SYSTEM_PROMPT)
         };
-        let body = json!({
+        let mut body = json!({
             "model": &self.model,
             "max_tokens": dedup_judge::JUDGE_MAX_TOKENS,
             "system": system_value,
             "messages": [{"role": "user", "content": dedup_judge::user_prompt(pairs)}]
         });
+        self.shape_body(&mut body);
 
         let mut attempt = 0u32;
         loop {
-            let mut req = self
-                .client
-                .post(&self.url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01");
-            if self.is_sonnet() {
-                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
-            }
-            let http_resp = req.json(&body).send().await?;
+            let http_resp = self.post().json(&body).send().await.map_err(scrub_err)?;
             let status = http_resp.status();
             if (status == 429 || status == 529) && attempt < 3 {
                 sleep(Duration::from_secs(1u64 << attempt)).await;
                 attempt += 1;
                 continue;
             }
-            let resp: Value = http_resp.error_for_status()?.json().await?;
+            let resp: Value = http_resp
+                .error_for_status()
+                .map_err(scrub_err)?
+                .json()
+                .await
+                .map_err(scrub_err)?;
             self.emit_token_usage_for("dedup", &resp);
             let content = resp["content"]
                 .as_array()
@@ -898,7 +940,7 @@ impl AnthropicExtractor {
             input."
         );
 
-        let system_value: Value = if self.is_sonnet() {
+        let system_value: Value = if self.caching_enabled() {
             json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
         } else {
             json!(system_text)
@@ -909,7 +951,7 @@ impl AnthropicExtractor {
             .map(|(fact, current_type)| json!({"fact": fact, "current_type": current_type}))
             .collect();
 
-        let body = json!({
+        let mut body = json!({
             "model": &self.model,
             "max_tokens": 1024,
             "system": system_value,
@@ -924,20 +966,11 @@ impl AnthropicExtractor {
                 }
             ]
         });
+        self.shape_body(&mut body);
 
         let mut attempt = 0u32;
         loop {
-            let mut req = self
-                .client
-                .post(&self.url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", "2023-06-01");
-
-            if self.is_sonnet() {
-                req = req.header("anthropic-beta", "prompt-caching-2024-07-31");
-            }
-
-            let http_resp = req.json(&body).send().await?;
+            let http_resp = self.post().json(&body).send().await.map_err(scrub_err)?;
             let status = http_resp.status();
 
             if (status == 429 || status == 529) && attempt < 3 {
@@ -947,7 +980,12 @@ impl AnthropicExtractor {
                 continue;
             }
 
-            let resp: Value = http_resp.error_for_status()?.json().await?;
+            let resp: Value = http_resp
+                .error_for_status()
+                .map_err(scrub_err)?
+                .json()
+                .await
+                .map_err(scrub_err)?;
             self.emit_token_usage(&resp);
 
             let content = resp["content"]
@@ -2502,8 +2540,9 @@ impl Extractor for ConfigurableExtractor {
 /// Message shown when no extraction provider was configured. Moved verbatim (#331 FR-002) from
 /// what used to be a startup-fatal error in `main.rs` — only the timing changed, not the content.
 pub const NO_EXTRACTION_PROVIDER_MSG: &str =
-    "No extraction provider configured: ANTHROPIC_API_KEY is not set and \
-     LCG_EXTRACTION_URL is not set. Set ANTHROPIC_API_KEY, or explicitly opt into \
+    "No extraction provider configured: neither ANTHROPIC_API_KEY nor \
+     ANTHROPIC_AUTH_TOKEN is set, and LCG_EXTRACTION_URL is not set. Set ANTHROPIC_API_KEY \
+     (or ANTHROPIC_AUTH_TOKEN for a Bearer-authenticated gateway), or explicitly opt into \
      local extraction with --extractor-uds <path>, --extractor-http <url>, or \
      LCG_EXTRACTION_URL (e.g. --extractor-uds /tmp/liminis-inference.sock to use the \
      bundled macOS sidecar — note its Foundation Models backend is not recommended \
