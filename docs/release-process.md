@@ -88,6 +88,29 @@ an open one as a blocker: fix forward, or record in the release PR why the relea
 anyway. Failed tag-triggered runs are not reported by the listener — watch the run you just
 triggered.
 
+### Plan output lost (run red at `verify-plan`)
+
+On a tag run, `release.yml`'s `verify-plan` job fails if the plan output reached the build jobs
+empty or without a build matrix, and `host` refuses to publish unless both build jobs
+succeeded ([ADR-0725](adr/0725-release-plan-output-guard.md)). The usual cause is **secret
+masking**: the runner silently drops a job output that looks like a credential (for example
+`Authorization: Bearer <key>` in the CHANGELOG section, which is embedded in the plan manifest).
+Before this guard, that skipped the builds and published a release holding only
+`dist-manifest.json` from a green run (`v0.18.0`).
+
+If `verify-plan` is red: no release, announcement or docs dispatch happened. Find the log line
+"Skip output 'val' since it may contain secret" in the `plan` job, reword the offending CHANGELOG
+text, and re-cut the tag.
+
+To verify the guard without a real release:
+
+1. Run `scripts/test-assert-plan-output.sh` (offline; also run by CI's `lint` job).
+2. End to end: on a scratch branch put credential-looking text in the CHANGELOG section for a
+   throwaway pre-release version, push a tag such as `v0.0.0-guardtest.1`, and confirm
+   `verify-plan` is red and `host`, `announce` and `dispatch-docs` are skipped with no release
+   created. Then delete the tag. A push to `main` must still show `verify-plan` skipped and the
+   builds running.
+
 ## Docs publishing
 
 The docs site is **no longer published from `main`**. Every merge to `main` that

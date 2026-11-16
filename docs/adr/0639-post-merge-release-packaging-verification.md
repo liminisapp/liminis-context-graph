@@ -53,6 +53,10 @@ Checked against cargo-dist 0.32.0 (`dist generate --mode=ci` with `allow-dirty` 
   extension-pin / linkage steps. Removing `allow-dirty` and running `dist generate` would
   silently undo them. `dist plan` with `skip` still returns the full four-target matrix.
 
+- **Added later (hand-maintained):** the `verify-plan` job and the `host.needs` / `host.if` that
+  require it and require both build jobs to be `success`
+  ([ADR-0725](0725-release-plan-output-guard.md), #725).
+
 The `release.yml` header records the same boundary.
 
 ## Consequences
