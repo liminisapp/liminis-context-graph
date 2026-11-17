@@ -347,3 +347,286 @@ async fn older_sidecar_without_identity_field_rebuilds_without_error() {
     ingest(&state, 2).await.unwrap();
     assert_eq!(stamp(root.path()), vec!["Person".to_string()]);
 }
+
+// ── #778: a missing stamp must not hide an identity removal ───────────────────
+
+const PERSON_ORG_ID: &str = "mode: open\nentity_types:\n  - name: Person\n    identity: true\n  - name: Organization\n    identity: true\n";
+const ORG_ID: &str = "mode: open\nentity_types:\n  - name: Organization\n    identity: true\n";
+const PERSON_ONLY_ID: &str = PERSON_ID;
+const ORG_ONLY_FLAGLESS_PERSON_ID: &str =
+    "mode: open\nentity_types:\n  - name: Person\n    identity: true\n  - name: Organization\n";
+const NO_PERSON: &str = "mode: open\nentity_types:\n  - name: Organization\n";
+
+fn org(name: &str) -> ExtractedEntity {
+    ExtractedEntity {
+        name: name.to_string(),
+        entity_type: "Organization".to_string(),
+        summary: format!("Org {name}"),
+        original_entity_type: None,
+    }
+}
+
+/// A single workspace that "restarts": same DB, workspace root and WAL root, fresh `AppState`
+/// (empty ontology cache).
+struct Ws {
+    db: Arc<Db>,
+    root: TempDir,
+    wal: TempDir,
+    _db_dir: TempDir,
+}
+
+impl Ws {
+    /// Ingests one episode with `extraction` under `yaml`.
+    async fn new(yaml: &str, extraction: ExtractionResult) -> Ws {
+        let (db, _db_dir) = make_db();
+        let root = TempDir::new().unwrap();
+        let wal = TempDir::new().unwrap();
+        write_ontology(root.path(), yaml);
+        let state = make_state(Arc::clone(&db), root.path(), wal.path(), vec![extraction]);
+        ingest(&state, 1).await.unwrap();
+        Ws {
+            db,
+            root,
+            wal,
+            _db_dir,
+        }
+    }
+
+    fn restart(&self) -> Arc<AppState> {
+        make_state(
+            Arc::clone(&self.db),
+            self.root.path(),
+            self.wal.path(),
+            vec![ExtractionResult::default()],
+        )
+    }
+
+    fn stamp_path(&self) -> std::path::PathBuf {
+        identity_stamp::stamp_path(self.root.path(), G).unwrap()
+    }
+
+    fn sidecar_path(&self) -> std::path::PathBuf {
+        ontology_sidecar::wal_ontology_path(&group_wal_dir(self.wal.path(), G).unwrap())
+    }
+
+    fn delete_stamp(&self) {
+        std::fs::remove_file(self.stamp_path()).unwrap();
+    }
+}
+
+fn with_orgs() -> ExtractionResult {
+    ExtractionResult {
+        entities: vec![person("Ada").entities.remove(0), org("Acme")],
+        edges: vec![],
+    }
+}
+
+/// Asserts the group is refused (`-32003`) on both `knowledge_reload_ontology` and
+/// `knowledge_add_episode`, after a restart.
+async fn assert_refused(ws: &Ws, label: &str) {
+    let state = ws.restart();
+    let r = call(
+        &state,
+        "knowledge_reload_ontology",
+        json!({"group_id": G}),
+        false,
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert!(
+        !r["result"]["identity_refusal"].is_null(),
+        "reload must report a refusal: {r}"
+    );
+    match ingest(&state, 2).await {
+        Err(e @ Error::IdentitySetChangeRefused { .. }) => {
+            let msg = e.to_string();
+            assert!(msg.contains(label), "{msg}");
+        }
+        other => panic!("expected refusal, got {other:?}"),
+    }
+    // Also via dispatch: the wire error code is -32003.
+    let v = call(
+        &state,
+        "knowledge_add_episode",
+        json!({"group_id": G, "name": "x", "episode_body": "b", "source_description": "d"}),
+        false,
+    )
+    .await;
+    assert_eq!(v["error"]["code"], -32003, "{v}");
+}
+
+async fn assert_accepted(ws: &Ws) {
+    let state = ws.restart();
+    let r = call(
+        &state,
+        "knowledge_reload_ontology",
+        json!({"group_id": G}),
+        false,
+    )
+    .await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert!(r["result"]["identity_refusal"].is_null(), "{r}");
+    ingest(&state, 2).await.unwrap();
+}
+
+#[tokio::test]
+async fn removal_refused_when_stamp_missing_sidecar_present() {
+    let ws = Ws::new(PERSON_ID, person("Ada")).await;
+    ws.delete_stamp();
+    write_ontology(ws.root.path(), FLAGLESS);
+    assert_refused(&ws, "Person").await;
+    // The stamp was restored from the sidecar's set.
+    assert_eq!(stamp(ws.root.path()), vec!["Person".to_string()]);
+}
+
+#[tokio::test]
+async fn removal_refused_when_stamp_and_sidecar_missing() {
+    let ws = Ws::new(PERSON_ID, person("Ada")).await;
+    ws.delete_stamp();
+    std::fs::remove_file(ws.sidecar_path()).unwrap();
+    write_ontology(ws.root.path(), FLAGLESS);
+    assert_refused(&ws, "Person").await;
+}
+
+#[tokio::test]
+async fn removal_refused_when_sidecar_has_no_identity_field() {
+    let ws = Ws::new(PERSON_ID, person("Ada")).await;
+    ws.delete_stamp();
+    std::fs::write(
+        ws.sidecar_path(),
+        r#"{"hash":"h","mode":"open","entity_types":["Person"],"relation_types":[]}"#,
+    )
+    .unwrap();
+    write_ontology(ws.root.path(), FLAGLESS);
+    assert_refused(&ws, "Person").await;
+}
+
+#[tokio::test]
+async fn removal_refused_when_sidecar_records_empty_set_but_data_has_person_kind() {
+    let ws = Ws::new(PERSON_ID, person("Ada")).await;
+    ws.delete_stamp();
+    let text = std::fs::read_to_string(ws.sidecar_path()).unwrap();
+    let mut v: Value = serde_json::from_str(&text).unwrap();
+    v["identity_types"] = json!([]);
+    std::fs::write(ws.sidecar_path(), v.to_string()).unwrap();
+    write_ontology(ws.root.path(), FLAGLESS);
+    assert_refused(&ws, "Person").await;
+}
+
+#[tokio::test]
+async fn stored_data_wins_over_a_disagreeing_sidecar() {
+    // Sidecar says {Organization}, current is {Organization}, but stored kinds are Person.
+    let ws = Ws::new(PERSON_ID, person("Ada")).await;
+    ws.delete_stamp();
+    let text = std::fs::read_to_string(ws.sidecar_path()).unwrap();
+    let mut v: Value = serde_json::from_str(&text).unwrap();
+    v["identity_types"] = json!(["Organization"]);
+    std::fs::write(ws.sidecar_path(), v.to_string()).unwrap();
+    write_ontology(ws.root.path(), ORG_ID);
+    assert_refused(&ws, "Person").await;
+}
+
+#[tokio::test]
+async fn mixed_removal_is_refused_when_one_identity_type_stays() {
+    let ws = Ws::new(PERSON_ORG_ID, with_orgs()).await;
+    ws.delete_stamp();
+    std::fs::remove_file(ws.sidecar_path()).unwrap();
+    // Person stays identity-bearing; Organization loses its flag.
+    write_ontology(ws.root.path(), ORG_ONLY_FLAGLESS_PERSON_ID);
+    assert_refused(&ws, "Organization").await;
+}
+
+#[tokio::test]
+async fn type_removed_from_ontology_entirely_is_refused() {
+    let ws = Ws::new(PERSON_ID, person("Ada")).await;
+    ws.delete_stamp();
+    std::fs::remove_file(ws.sidecar_path()).unwrap();
+    write_ontology(ws.root.path(), NO_PERSON);
+    assert_refused(&ws, "Person").await;
+}
+
+#[tokio::test]
+async fn unchanged_ontology_with_missing_stamp_restores_and_accepts() {
+    let ws = Ws::new(PERSON_ID, person("Ada")).await;
+    ws.delete_stamp();
+    assert_accepted(&ws).await;
+    assert_eq!(stamp(ws.root.path()), vec!["Person".to_string()]);
+}
+
+#[tokio::test]
+async fn unchanged_ontology_with_missing_stamp_and_sidecar_accepts() {
+    // Stored kinds are all in the current identity set: not a removal.
+    let ws = Ws::new(PERSON_ONLY_ID, person("Ada")).await;
+    ws.delete_stamp();
+    std::fs::remove_file(ws.sidecar_path()).unwrap();
+    assert_accepted(&ws).await;
+}
+
+#[tokio::test]
+async fn empty_group_with_missing_stamp_is_accepted_and_writes_no_stamp() {
+    let (db, db_dir) = make_db();
+    let ws = Ws {
+        db,
+        root: TempDir::new().unwrap(),
+        wal: TempDir::new().unwrap(),
+        _db_dir: db_dir,
+    };
+    write_ontology(ws.root.path(), FLAGLESS);
+    assert_accepted(&ws).await;
+    assert!(!ws.stamp_path().exists());
+}
+
+#[tokio::test]
+async fn entity_kind_only_group_with_missing_stamp_is_accepted() {
+    // Ingested under a flagless ontology: kind is the default `Entity`.
+    let ws = Ws::new(FLAGLESS, person("Ada")).await;
+    assert!(!ws.stamp_path().exists());
+    assert_accepted(&ws).await;
+    assert!(!ws.stamp_path().exists());
+}
+
+#[tokio::test]
+async fn stamp_present_removal_is_still_refused() {
+    let ws = Ws::new(PERSON_ID, person("Ada")).await;
+    assert!(ws.stamp_path().exists());
+    write_ontology(ws.root.path(), FLAGLESS);
+    assert_refused(&ws, "Person").await;
+}
+
+#[tokio::test]
+async fn rebuild_then_plain_restart_do_not_conflict() {
+    let (pub_wal, _r, _d) = publish().await;
+    let (state, root, wal, db_dir, _x) = consumer(pub_wal.path(), true);
+    write_ontology(root.path(), PERSON_ID);
+    rebuild(&state).await;
+    assert_eq!(stamp(root.path()), vec!["Person".to_string()]);
+    // Plain restart over the same DB, root and WAL: stamp present, ontology unchanged.
+    let restarted = make_state(
+        state.db.load_full().unwrap(),
+        root.path(),
+        wal.path(),
+        vec![ExtractionResult::default()],
+    );
+    ingest(&restarted, 2).await.unwrap();
+    assert_eq!(stamp(root.path()), vec!["Person".to_string()]);
+    drop(db_dir);
+}
+
+#[tokio::test]
+async fn distinct_non_default_kinds_is_group_scoped_and_skips_default() {
+    let ws = Ws::new(PERSON_ORG_ID, with_orgs()).await;
+    let conn = ws.db.connect().unwrap();
+    assert_eq!(
+        conn.distinct_non_default_kinds(G).unwrap(),
+        vec!["Organization".to_string(), "Person".to_string()]
+    );
+    assert!(conn.distinct_non_default_kinds("other").unwrap().is_empty());
+    let flagless = Ws::new(FLAGLESS, person("Ada")).await;
+    assert!(flagless
+        .db
+        .connect()
+        .unwrap()
+        .distinct_non_default_kinds(G)
+        .unwrap()
+        .is_empty());
+}

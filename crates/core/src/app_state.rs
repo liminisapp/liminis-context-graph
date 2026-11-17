@@ -458,8 +458,12 @@ impl AppState {
     /// - Sets equal → nothing happens (no file is written for a flagless workspace).
     /// - Sets differ → each changed label is counted with one group-scoped, kind-aware query
     ///   (#776): only entities whose `kind` would change under the new set are carriers. Any
-    ///   carrier refuses (the stamp is left untouched); otherwise the stamp is rewritten. A
-    ///   missing stamp (a WAL-only rebuild) therefore self-heals when the data is consistent.
+    ///   carrier refuses (the stamp is left untouched); otherwise the stamp is rewritten.
+    /// - Stamp file absent (#778, ADR-0778): the stamp is first restored from the WAL ontology
+    ///   sidecar if it records `identity_types`; then the group's stored non-default entity kinds
+    ///   not in the current set are unioned in as removals, so a missing stamp cannot hide an
+    ///   identity removal. A consistent group self-heals (a WAL-only rebuild) and a flagless one
+    ///   writes no stamp.
     /// - Sets differ but the DB or stamp cannot be read → `unchecked`, so the caller does not
     ///   cache the entry and the check re-runs rather than silently accepting a flip.
     ///
@@ -473,12 +477,31 @@ impl AppState {
             return (None, None);
         };
         let current = resolved.map(|o| o.identity_set()).unwrap_or_default();
+        // #778: a missing stamp reads as the empty set, which hides an identity removal when
+        // `current` is also empty. Only the absent case gets extra work (restore + data scan),
+        // so stamped groups take exactly the path they always did.
+        let stamp_absent = identity_stamp::stamp_path(root, group_id)
+            .map(|p| !p.exists())
+            .unwrap_or(false);
+        if stamp_absent {
+            if let Some(wal_dir) = self
+                .wal_root
+                .as_deref()
+                .and_then(|wr| crate::wal_group::group_wal_dir(wr, group_id).ok())
+            {
+                if identity_stamp::restore_stamp_if_absent(root, &wal_dir, group_id) {
+                    eprintln!(
+                        "liminis-context-graph: identity-stamp: restored stamp for group {group_id:?} from the WAL ontology sidecar"
+                    );
+                }
+            }
+        }
         let recorded = match identity_stamp::read_stamp(root, group_id) {
             Ok(r) => r,
             Err(e) => return (None, Some(e)),
         };
-        let changed = identity_stamp::changed_labels(&recorded, &current);
-        if changed.is_empty() {
+        let mut changed = identity_stamp::changed_labels(&recorded, &current);
+        if changed.is_empty() && !stamp_absent {
             return (None, None);
         }
         let db_opt = self.db.load_full();
@@ -487,6 +510,19 @@ impl AppState {
             Some(Err(e)) => return (None, Some(format!("cannot open DB connection: {e}"))),
             None => return (None, Some("DB unavailable".to_string())),
         };
+        if stamp_absent {
+            // Stored data wins over the sidecar: any non-default kind not in the current set
+            // was identity-bearing at creation, so its absence is a removal.
+            match conn.distinct_non_default_kinds(group_id) {
+                Ok(kinds) => {
+                    changed = identity_stamp::merge_stored_kinds(changed, &kinds, &current)
+                }
+                Err(e) => return (None, Some(format!("cannot scan stored entity kinds: {e}"))),
+            }
+            if changed.is_empty() {
+                return (None, None);
+            }
+        }
         match identity_stamp::check_identity_change(&changed, |label, adding| {
             let descendants = match resolved {
                 Some(o) => o.descendants_of(label),

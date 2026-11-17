@@ -34,6 +34,17 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   (default 512 KiB) and `LCG_DOCUMENT_CHUNK_MAX_CHARS` (default 6000). `knowledge_process_chunk` is
   unchanged.
 
+### Fixed
+
+- The D1 identity-set guard now detects an identity removal when the group's stamp
+  (`.lcg/identity-set/<group>.json`) is missing (#778). Previously a missing stamp read as the empty
+  set, so removing `identity: true` from a group's only identity type compared equal and
+  `knowledge_reload_ontology` / `knowledge_add_episode` were accepted while entities still carried
+  `kind = <type>`. The stamp is now restored from the WAL ontology sidecar on first resolve (not only
+  after a rebuild), and the stored entity kinds are checked against the current identity set.
+  Operators may now see a `-32003` refusal for a group with a missing stamp and stale identity-kind
+  data, where it was previously accepted.
+
 ## [0.19.1] - 2026-11-16
 
 ### Upgrading
