@@ -1086,8 +1086,8 @@ async fn removing_identity_is_refused_by_kind_with_stamp_present_or_deleted() {
         if !stamp_present {
             identity_stamp::remove_stamp(root.path(), G);
         }
-        // Now drop the flag: with the stamp present this is a removal (kind = Person → refused);
-        // with it deleted the sets are equal (∅ = ∅), so there is no change to refuse.
+        // Now drop the flag: this is a removal (kind = Person → refused), whether the stamp is
+        // present or deleted (#778: a missing stamp is checked against the stored kinds).
         let s2 = make_state(
             Arc::clone(&db),
             Some(root.path()),
@@ -1095,12 +1095,12 @@ async fn removing_identity_is_refused_by_kind_with_stamp_present_or_deleted() {
             vec![],
         );
         let r = ingest(&s2, G, 2).await;
-        if stamp_present {
-            let (_, label, count) = refused(r);
-            assert_eq!((label.as_str(), count), ("Person", 1));
-        } else {
-            r.expect("no recorded set, no flag: nothing changed");
-        }
+        let (_, label, count) = refused(r);
+        assert_eq!(
+            (label.as_str(), count),
+            ("Person", 1),
+            "stamp_present={stamp_present}"
+        );
     }
 }
 
