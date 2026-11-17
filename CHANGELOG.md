@@ -9,28 +9,46 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-11-16
+
+### Upgrading
+
+- **Nothing to do.** No schema, storage or lbug change: storage stays 47, lbug stays 0.21.2, and the
+  MCP registry stays at 52 tools. 0.19.0 opens a database 0.19.1 has written.
+- A group that 0.19.0 refused after a rebuild into a fresh workspace (#775) is accepted on its next
+  start or `knowledge_reload_ontology`, provided its data is consistent with its ontology.
+
 ### Fixed
 
-- **A group rebuilt from its WAL into a fresh workspace root is no longer refused by the D1
-  identity-set guard (#775, #776).** The guard's carrier count now asks whether an entity's `kind`
-  would actually change under the new identity-bearing set, instead of counting every entity whose
-  labels mention the type. Replayed entities already carry the identity kinds, so a group with no
-  `.lcg/identity-set` stamp (WAL-only hosts, fresh clones) accepts `add_episode` and
-  `knowledge_reload_ontology` and self-heals its stamp; a genuine flip — adding identity to a type
-  whose entities have a different kind, or removing it from a type that is some entity's kind — is
-  still refused with `-32003`, with or without the stamp. A group refused under the old logic is
-  accepted on its next start or reload if its data is consistent.
+- **A group rebuilt from its WAL into a fresh workspace root is no longer locked by the D1
+  identity-set guard (#775, #776, ADR-0776).**
+  - The guard used to count every entity whose labels mention a type. It now counts only entities
+    whose `kind` would actually change under the new identity-bearing set. Replayed entities
+    already carry their identity kinds, so a group with no `.lcg/identity-set` stamp (WAL-only
+    hosts, fresh clones) accepts `add_episode` and `knowledge_reload_ontology` and writes its stamp.
+  - A genuine flip on an established group is still refused with `-32003`: adding identity to a
+    type whose entities have a different kind, or removing it from a type that some entity has as
+    its kind.
 
 ### Changed
 
-- **Identity flags on an ancestor type no longer refuse because a descendant carries its label
-  (#776, ADR-0776).** Kind is never inherited, so only entities whose leaf type is the flagged type
-  count. ADR-0616's "flipping a flag on an ancestor is refused while any descendant carries its
-  label" consequence is superseded.
-- **The WAL ontology sidecar (`.wal-ontology.json`) gains an optional `identity_types` field and is
-  now read on rebuild (#776).** `knowledge_rebuild_from_wal` restores a missing identity-set stamp
-  from it (never overwriting an existing one). Older sidecars without the field remain valid and
-  restore nothing. No storage-version, lbug or IPC change.
+- **Identity flags on an ancestor type** no longer refuse because a descendant carries its label
+  (#776). Kind is never inherited, so only entities whose own type is the flagged type count.
+  ADR-0616's "flipping a flag on an ancestor is refused while any descendant carries its label" is
+  superseded.
+- **The WAL ontology sidecar (`.wal-ontology.json`) gains an optional `identity_types` field**
+  (#776). `knowledge_rebuild_from_wal` restores a missing identity-set stamp from it and never
+  overwrites an existing one. Sidecars written before 0.19.1 don't have the field and restore
+  nothing; 0.19.0 ignores it.
+
+### Known issues
+
+- **Removing an identity flag while the stamp is missing isn't caught.** If a group's stamp is lost
+  and identity is removed from a type before any rebuild, the change is accepted, as in 0.19.0. A
+  rebuild from a WAL written by 0.19.1 restores the stamp and closes this gap (#778).
+- **Windows:** unchanged from 0.18.x. lbug's CHECKPOINT can silently corrupt some STRING and
+  INT8/UINT8 data (#719). The fix is merged upstream (LadybugDB/ladybug#1593) but isn't in an lbug
+  release yet.
 
 ## [0.19.0] - 2026-11-16
 
