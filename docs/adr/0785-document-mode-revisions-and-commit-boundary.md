@@ -131,9 +131,12 @@ the document, without extraction. It is not prevented.
 
 **Abandoned attempts are not cleaned up.** Their pending episodes are never believed and stay visible
 to default (non-belief) reads, like superseded episodes (ADR-0705 "Reads"); readers see
-`revision_id` without `revision_committed_at`. They still count toward ADR-0752's per-`doc_id` origin
-consistency, and the corroboration reads in `origin.rs` / `origin_reads.rs` do not yet consult the
-commit stamp. Garbage collection of abandoned rows is a follow-up.
+`revision_id` without `revision_committed_at`. They do **not** count toward ADR-0752's per-`doc_id`
+origin consistency (`origins_for_doc` skips pending rows), so a failed first ingest cannot fix a
+document's origin and a retry with a different origin is accepted. The cost is a narrow race: while a
+document ingest is still pending, a concurrent chunk-mode write to the same `doc_id` with another
+origin is not refused. The corroboration reads in `origin.rs` / `origin_reads.rs` do not yet consult
+the commit stamp. Garbage collection of abandoned rows is a follow-up.
 
 Rejected: supersede-at-the-end without gating (a failure leaves old and new both believed); one
 lock-held transaction for the whole document (Phase B makes LLM calls, readers would block for

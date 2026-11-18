@@ -2204,6 +2204,11 @@ impl<'db> Conn<'db> {
 
     /// The distinct origins already recorded for episodes of `doc_id` in `group_id` (superseded
     /// episodes included: a document has one origin for its whole life, FR-013).
+    ///
+    /// Pending document-mode episodes (issue #785: `revision_id` set, `revision_committed_at`
+    /// NULL) are excluded. They come from a revision that never committed, so they were never
+    /// believed. Counting them would let one failed first ingest fix the document's origin for
+    /// good, and a retry with the correct origin would then be refused.
     pub fn origins_for_doc(
         &self,
         group_id: &str,
@@ -2211,6 +2216,7 @@ impl<'db> Conn<'db> {
     ) -> Result<Vec<crate::origin::Origin>, Error> {
         let rows = self.query_params(
             "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             AND (ep.revision_id IS NULL OR ep.revision_committed_at IS NOT NULL) \
              RETURN DISTINCT coalesce(ep.origin, '')",
             serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
         )?;

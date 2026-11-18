@@ -787,6 +787,46 @@ async fn conflicting_origin_for_a_document_is_refused() {
     assert_eq!(snapshot(&f.db), before);
 }
 
+/// Review finding on PR 791: a failed first ingest leaves only pending episodes. Those must not
+/// fix the document's origin, so a retry with a different origin is accepted and commits.
+#[tokio::test]
+async fn failed_first_ingest_does_not_pin_the_documents_origin() {
+    let f = fx();
+    let mut p = doc_params("o", NOTE);
+    p["origin"] = json!("derived");
+    f.ex.fail_on.store(f.ex.call_count() + 2, Ordering::SeqCst);
+    let v = try_call("knowledge_process_document", p, &f.state).await;
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("was not committed"),
+        "{v}"
+    );
+    let pending: Vec<_> = episodes(&f.state)
+        .await
+        .into_values()
+        .filter(|e| e["origin"] == "derived" && e.get("revision_committed_at").is_none())
+        .collect();
+    assert_eq!(pending.len(), 1, "one derived unit written pending");
+
+    f.ex.fail_on.store(0, Ordering::SeqCst);
+    let r = ingest(&f.state, "o", NOTE).await;
+    assert_eq!(r["status"], "committed", "{r}");
+    assert_eq!(r["extraction_calls"], 5);
+    // A committed revision does fix the origin: a different one is refused again.
+    let mut p = doc_params("o", &NOTE.replace("Redis.", "Valkey."));
+    p["origin"] = json!("derived");
+    let v = try_call("knowledge_process_document", p, &f.state).await;
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("origin_conflict:"),
+        "{v}"
+    );
+}
+
 /// FR-023: the first document-mode ingest of a doc_id replaces that document's live chunk-mode
 /// episodes (reason `revision`) and reports them.
 #[tokio::test]
