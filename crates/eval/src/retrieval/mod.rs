@@ -71,6 +71,8 @@ pub trait Retriever: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub configs: Vec<String>,
+    /// Embedding instruction profiles measured (#790); empty = service default.
+    pub embedding_profiles: Vec<String>,
     pub k: usize,
     pub corpus_version: String,
     pub corpus_hash: String,
@@ -82,6 +84,67 @@ pub struct Plan {
     pub needs_lcg: bool,
     pub needs_qmd: bool,
     pub warnings: Vec<String>,
+}
+
+/// Config id for an LCG configuration measured under an embedding profile (#790). With a single
+/// (or no) profile the id is unchanged; with several, `<id>@<profile>` keeps the rows apart and
+/// side by side in the report.
+pub fn profiled_id(id: &str, profile: &str, multi: bool) -> String {
+    if multi {
+        format!("{id}@{profile}")
+    } else {
+        id.to_string()
+    }
+}
+
+impl Plan {
+    /// The report rows this plan will produce, in order: each LCG configuration once per profile
+    /// (when several profiles are measured), qmd configurations once.
+    pub fn expanded_configs(&self) -> Vec<String> {
+        let multi = self.embedding_profiles.len() > 1;
+        let mut out = Vec::new();
+        for c in &self.configs {
+            if multi && c.starts_with("lcg-") {
+                for p in &self.embedding_profiles {
+                    out.push(profiled_id(c, p, true));
+                }
+            } else {
+                out.push(c.clone());
+            }
+        }
+        out
+    }
+}
+
+/// Wraps an LCG retriever with the profile it was measured under: the report row id becomes
+/// `<id>@<profile>` and the description names the profile (#790).
+struct Profiled {
+    id: String,
+    profile: String,
+    inner: Box<dyn Retriever>,
+}
+
+impl Retriever for Profiled {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn description(&self) -> String {
+        format!(
+            "{} [embedding profile: {}]",
+            self.inner.description(),
+            self.profile
+        )
+    }
+    fn per_process(&self) -> bool {
+        self.inner.per_process()
+    }
+    fn retrieve<'a>(
+        &'a self,
+        question: &'a str,
+        k: usize,
+    ) -> BoxFuture<'a, Result<RankedResult, String>> {
+        self.inner.retrieve(question, k)
+    }
 }
 
 /// Default qmd index name. Includes a corpus-hash prefix because qmd keeps a collection's original
@@ -109,6 +172,7 @@ pub fn resolve(args: &RetrievalArgs, fx: &Fixture) -> Plan {
     }
     Plan {
         configs: args.configs.clone(),
+        embedding_profiles: args.embedding_profiles.clone(),
         k: args.k,
         corpus_version: fx.manifest.corpus_version.clone(),
         corpus_hash: fx.corpus_hash.clone(),
@@ -140,7 +204,13 @@ pub fn render_plan(p: &Plan) -> String {
         s += &format!("    {:<11} {n}\n", c.label());
     }
     s += &format!("  k:          {} (shared by every configuration)\n", p.k);
-    s += &format!("  configs:    {}\n", p.configs.join(", "));
+    s += &format!("  configs:    {}\n", p.expanded_configs().join(", "));
+    if !p.embedding_profiles.is_empty() {
+        s += &format!(
+            "  profiles:   {} (LCG configurations run once per profile, each in a fresh workspace)\n",
+            p.embedding_profiles.join(", ")
+        );
+    }
     if p.needs_qmd {
         s += &format!("  qmd index:  {}\n", p.qmd_index);
     }
@@ -375,71 +445,104 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
     let mut qmd_slots: BTreeMap<String, Slot> = BTreeMap::new();
 
     // ── LCG ─────────────────────────────────────────────────────────────────
-    // Keeps the service alive until the report is written.
-    let _service_guard = if plan.needs_lcg {
-        let opts = lcg::ServiceOpts {
-            bin: a.service_bin.clone().unwrap_or_else(default_service_bin),
-            embedder_http: a.embedder_http.clone(),
-            embedder_uds: a.embedder_uds.clone(),
-            extractor_http: a.extractor_http.clone(),
-            extractor_uds: a.extractor_uds.clone(),
-            replay_cassette: a.replay_cassette.clone(),
-            record_cassette: a.record_cassette.clone(),
-        };
-        eprintln!(
-            "lcg-eval retrieval: starting LCG service ({})",
-            opts.bin.display()
-        );
-        let guard = lcg::spawn_service(&opts).await?;
-        meta.lcg_build = guard.version.clone();
-        meta.embedder = a
-            .embedder_http
-            .clone()
-            .or(a.embedder_uds.clone())
-            .or_else(|| std::env::var("LCG_EMBEDDING_URL").ok())
-            .unwrap_or_default();
-        meta.extractor = if let Some(p) = &a.replay_cassette {
-            format!("cassette replay ({p})")
-        } else if let Some(u) = a.extractor_http.clone().or(a.extractor_uds.clone()) {
-            format!("OpenAI-compatible endpoint ({u})")
+    // Keeps every service alive until the report is written. One per measured embedding profile
+    // (#790): a document-prefix change means a re-embed, so each profile gets a fresh workspace
+    // and a fresh ingest rather than reusing another profile's vectors.
+    let mut _service_guards: Vec<lcg::ServiceGuard> = Vec::new();
+    if plan.needs_lcg {
+        let profile_runs: Vec<Option<String>> = if a.embedding_profiles.is_empty() {
+            vec![None]
         } else {
-            "service default (Anthropic via ANTHROPIC_API_KEY, or LCG_EXTRACTION_URL)".into()
+            a.embedding_profiles.iter().cloned().map(Some).collect()
         };
-        eprintln!(
-            "lcg-eval retrieval: ingesting {} notes into LCG",
-            plan.notes
-        );
-        let transport: Arc<dyn lcg::RpcTransport> = guard.client.clone();
-        let map = Arc::new(lcg::ingest(transport.as_ref(), &fx).await?);
-        ingest_cost.lcg_seconds = Some(map.seconds);
-        ingest_cost.lcg_chunks = map.chunks;
-        ingest_cost.lcg_extraction_requests = map.extraction_requests;
-        ingest_cost.lcg_rpc_calls = map.rpc_calls;
-        ingest_cost.lcg_unconfirmed_entity_links = map.unconfirmed_entity_links;
-        ingest_cost.lcg_supersessions = map.supersessions;
-        ingest_cost.lcg_superseded_episodes = map.superseded_episodes;
-        for id in a.configs.iter().filter(|c| c.starts_with("lcg-")) {
-            let r: Box<dyn Retriever> = match id.as_str() {
-                "lcg-passages" => Box::new(lcg::LcgPassages {
-                    t: transport.clone(),
-                }),
-                "lcg-entities-facts" => Box::new(lcg::LcgEntitiesFacts {
-                    t: transport.clone(),
-                    map: map.clone(),
-                    belief: false,
-                }),
-                _ => Box::new(lcg::LcgEntitiesFacts {
-                    t: transport.clone(),
-                    map: map.clone(),
-                    belief: true,
-                }),
+        let multi = a.embedding_profiles.len() > 1;
+        for profile in profile_runs {
+            let opts = lcg::ServiceOpts {
+                bin: a.service_bin.clone().unwrap_or_else(default_service_bin),
+                embedder_http: a.embedder_http.clone(),
+                embedder_uds: a.embedder_uds.clone(),
+                extractor_http: a.extractor_http.clone(),
+                extractor_uds: a.extractor_uds.clone(),
+                replay_cassette: a.replay_cassette.clone(),
+                record_cassette: a.record_cassette.clone(),
+                embedding_profile: profile.clone(),
             };
-            lcg_slots.insert(id.clone(), Slot::Run(r));
+            eprintln!(
+                "lcg-eval retrieval: starting LCG service ({}){}",
+                opts.bin.display(),
+                profile
+                    .as_deref()
+                    .map(|p| format!(" with embedding profile '{p}'"))
+                    .unwrap_or_default()
+            );
+            let guard = lcg::spawn_service(&opts).await?;
+            meta.lcg_build = guard.version.clone();
+            meta.embedder = a
+                .embedder_http
+                .clone()
+                .or(a.embedder_uds.clone())
+                .or_else(|| std::env::var("LCG_EMBEDDING_URL").ok())
+                .unwrap_or_default();
+            if !a.embedding_profiles.is_empty() {
+                meta.embedder +=
+                    &format!(" (embedding profiles: {})", a.embedding_profiles.join(", "));
+            }
+            meta.extractor = if let Some(p) = &a.replay_cassette {
+                format!("cassette replay ({p})")
+            } else if let Some(u) = a.extractor_http.clone().or(a.extractor_uds.clone()) {
+                format!("OpenAI-compatible endpoint ({u})")
+            } else {
+                "service default (Anthropic via ANTHROPIC_API_KEY, or LCG_EXTRACTION_URL)".into()
+            };
+            eprintln!(
+                "lcg-eval retrieval: ingesting {} notes into LCG",
+                plan.notes
+            );
+            let transport: Arc<dyn lcg::RpcTransport> = guard.client.clone();
+            let map = Arc::new(lcg::ingest(transport.as_ref(), &fx).await?);
+            // Ingest cost accumulates across profile runs (each re-ingests the corpus).
+            ingest_cost.lcg_seconds = Some(ingest_cost.lcg_seconds.unwrap_or(0.0) + map.seconds);
+            ingest_cost.lcg_chunks += map.chunks;
+            ingest_cost.lcg_extraction_requests += map.extraction_requests;
+            ingest_cost.lcg_rpc_calls += map.rpc_calls;
+            ingest_cost.lcg_unconfirmed_entity_links += map.unconfirmed_entity_links;
+            ingest_cost.lcg_supersessions += map.supersessions;
+            ingest_cost.lcg_superseded_episodes += map.superseded_episodes;
+            for id in a.configs.iter().filter(|c| c.starts_with("lcg-")) {
+                let r: Box<dyn Retriever> = match id.as_str() {
+                    "lcg-passages" => Box::new(lcg::LcgPassages {
+                        t: transport.clone(),
+                    }),
+                    "lcg-entities-facts" => Box::new(lcg::LcgEntitiesFacts {
+                        t: transport.clone(),
+                        map: map.clone(),
+                        belief: false,
+                    }),
+                    _ => Box::new(lcg::LcgEntitiesFacts {
+                        t: transport.clone(),
+                        map: map.clone(),
+                        belief: true,
+                    }),
+                };
+                let (slot_id, r): (String, Box<dyn Retriever>) = match &profile {
+                    Some(p) if multi => {
+                        let slot_id = profiled_id(id, p, true);
+                        (
+                            slot_id.clone(),
+                            Box::new(Profiled {
+                                id: slot_id,
+                                profile: p.clone(),
+                                inner: r,
+                            }),
+                        )
+                    }
+                    _ => (id.clone(), r),
+                };
+                lcg_slots.insert(slot_id, Slot::Run(r));
+            }
+            _service_guards.push(guard);
         }
-        Some(guard)
-    } else {
-        None
-    };
+    }
 
     // ── qmd ─────────────────────────────────────────────────────────────────
     if plan.needs_qmd {
@@ -529,7 +632,7 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
 
     // Slots in the order the user asked for them.
     let mut slots = Vec::new();
-    for id in &a.configs {
+    for id in &plan.expanded_configs() {
         if let Some(s) = lcg_slots.remove(id).or_else(|| qmd_slots.remove(id)) {
             slots.push(s);
         }
@@ -606,6 +709,73 @@ mod tests {
                 })
             })
         }
+    }
+
+    fn plan_with(configs: &[&str], profiles: &[&str]) -> Plan {
+        Plan {
+            configs: configs.iter().map(|s| s.to_string()).collect(),
+            embedding_profiles: profiles.iter().map(|s| s.to_string()).collect(),
+            k: 10,
+            corpus_version: "v".into(),
+            corpus_hash: "h".into(),
+            questions_version: "q".into(),
+            questions_hash: "qh".into(),
+            notes: 0,
+            category_counts: BTreeMap::new(),
+            qmd_index: "i".into(),
+            needs_lcg: true,
+            needs_qmd: true,
+            warnings: vec![],
+        }
+    }
+
+    // #790: several profiles expand each LCG configuration into side-by-side `<id>@<profile>`
+    // rows; qmd (no embedding profile) stays a single row.
+    #[test]
+    fn several_profiles_expand_lcg_rows_only() {
+        let p = plan_with(
+            &["lcg-passages", "qmd", "lcg-entities-facts"],
+            &["none", "bge-v1.5"],
+        );
+        assert_eq!(
+            p.expanded_configs(),
+            vec![
+                "lcg-passages@none",
+                "lcg-passages@bge-v1.5",
+                "qmd",
+                "lcg-entities-facts@none",
+                "lcg-entities-facts@bge-v1.5",
+            ]
+        );
+        let text = render_plan(&p);
+        assert!(text.contains("lcg-passages@bge-v1.5"), "{text}");
+        assert!(text.contains("profiles:   none, bge-v1.5"), "{text}");
+    }
+
+    #[test]
+    fn single_or_no_profile_keeps_config_ids_unchanged() {
+        for profiles in [&[][..], &["bge-v1.5"][..]] {
+            let p = plan_with(&["lcg-passages", "qmd"], profiles);
+            assert_eq!(p.expanded_configs(), vec!["lcg-passages", "qmd"]);
+        }
+        assert_eq!(profiled_id("lcg-passages", "e5", false), "lcg-passages");
+        assert_eq!(profiled_id("lcg-passages", "e5", true), "lcg-passages@e5");
+    }
+
+    #[test]
+    fn profiled_retriever_reports_its_row_id_and_profile() {
+        let r = Profiled {
+            id: "lcg-passages@e5".into(),
+            profile: "e5".into(),
+            inner: Box::new(Canned {
+                id: "lcg-passages",
+                notes: vec![],
+                evidence: vec![],
+                fail: false,
+            }),
+        };
+        assert_eq!(r.id(), "lcg-passages@e5");
+        assert!(r.description().contains("embedding profile: e5"));
     }
 
     #[tokio::test]

@@ -26,6 +26,11 @@ pub struct RetrievalArgs {
     pub service_bin: Option<PathBuf>,
     pub embedder_http: Option<String>,
     pub embedder_uds: Option<String>,
+    /// Instruction profiles to measure (#790). Empty = the service's own default (no
+    /// `LCG_EMBEDDING_PROFILE` is set). One entry runs every LCG configuration under that
+    /// profile; several expand each LCG configuration to `<id>@<profile>` rows, each profile in a
+    /// fresh workspace with a fresh ingest (a document-prefix change means a re-embed).
+    pub embedding_profiles: Vec<String>,
     pub extractor_http: Option<String>,
     pub extractor_uds: Option<String>,
     pub replay_cassette: Option<String>,
@@ -61,6 +66,11 @@ OPTIONS:
                                else `liminis-context-graph` on PATH).
     --embedder-http <URL>      Real embedder for the spawned service (required for LCG configs
     --embedder-uds <SOCKET>    unless LCG_EMBEDDING_URL is set; mock/hash embedders are refused).
+    --embedding-profile <LIST> Comma-separated embedding instruction profiles to measure (none,
+                               bge-v1.5, nomic-v1.5, e5, embedder), passed to the spawned
+                               service as LCG_EMBEDDING_PROFILE. With several, each LCG
+                               configuration is reported once per profile as <id>@<profile>,
+                               each in a fresh workspace (re-ingest). Default: service default.
     --extractor-http <URL>     Extraction endpoint for the spawned service (else the service's
     --extractor-uds <SOCKET>   own default, e.g. ANTHROPIC_API_KEY).
     --replay-cassette <PATH>   Serve ingest extraction from a recorded cassette (LCG_REPLAY_LLM).
@@ -85,6 +95,7 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
         service_bin: None,
         embedder_http: None,
         embedder_uds: None,
+        embedding_profiles: Vec::new(),
         extractor_http: None,
         extractor_uds: None,
         replay_cassette: None,
@@ -144,6 +155,22 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
             "--service-bin" => a.service_bin = Some(PathBuf::from(val("--service-bin")?)),
             "--embedder-http" => a.embedder_http = Some(val("--embedder-http")?),
             "--embedder-uds" => a.embedder_uds = Some(val("--embedder-uds")?),
+            "--embedding-profile" => {
+                let v = val("--embedding-profile")?;
+                let mut list = Vec::new();
+                for p in v.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+                    // Same parser (and same valid-names error) the service uses at startup.
+                    p.parse::<lcg_core::InstructionProfile>()
+                        .map_err(|e| e.to_string())?;
+                    if !list.iter().any(|x| x == p) {
+                        list.push(p.to_string());
+                    }
+                }
+                if list.is_empty() {
+                    return Err("--embedding-profile must name at least one profile".into());
+                }
+                a.embedding_profiles = list;
+            }
             "--extractor-http" => a.extractor_http = Some(val("--extractor-http")?),
             "--extractor-uds" => a.extractor_uds = Some(val("--extractor-uds")?),
             "--replay-cassette" => a.replay_cassette = Some(val("--replay-cassette")?),
@@ -225,5 +252,20 @@ mod tests {
         assert!(p(&["--corpus"]).unwrap_err().contains("requires a value"));
         assert!(p(&["--replay-cassette", "a", "--record-cassette", "b"]).is_err());
         assert!(p(&["--embedder-http", "a", "--embedder-uds", "b"]).is_err());
+        let e = p(&["--embedding-profile", "bogus"]).unwrap_err();
+        assert!(e.contains("bogus") && e.contains("bge-v1.5"), "{e}");
+        assert!(p(&["--embedding-profile", ","]).is_err());
+    }
+
+    #[test]
+    fn embedding_profile_parses_a_deduplicated_list() {
+        match p(&["--embedding-profile", "none, bge-v1.5,none"]).unwrap() {
+            RetrievalMode::Run(a) => assert_eq!(a.embedding_profiles, vec!["none", "bge-v1.5"]),
+            _ => panic!(),
+        }
+        match p(&[]).unwrap() {
+            RetrievalMode::Run(a) => assert!(a.embedding_profiles.is_empty()),
+            _ => panic!(),
+        }
     }
 }

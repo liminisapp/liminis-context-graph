@@ -145,6 +145,8 @@ pub struct ServiceOpts {
     pub replay_cassette: Option<String>,
     /// `LCG_RECORD_LLM` cassette to write during this run's ingest.
     pub record_cassette: Option<String>,
+    /// `LCG_EMBEDDING_PROFILE` for the spawned service (#790); `None` leaves the service default.
+    pub embedding_profile: Option<String>,
 }
 
 /// Mock and hash embedders produce meaningless vectors, so a real embedder must be named
@@ -229,6 +231,9 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     }
     if let Some(p) = &o.record_cassette {
         cmd.env("LCG_RECORD_LLM", p);
+    }
+    if let Some(p) = &o.embedding_profile {
+        cmd.env("LCG_EMBEDDING_PROFILE", p);
     }
     let mut child = cmd.spawn().map_err(|e| {
         format!(
