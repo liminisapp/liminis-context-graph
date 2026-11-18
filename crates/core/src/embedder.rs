@@ -471,24 +471,17 @@ pub struct InstructionConfig {
 
 impl InstructionConfig {
     /// Reads `LCG_EMBEDDING_PROFILE`, `LCG_EMBEDDING_QUERY_PREFIX` and
-    /// `LCG_EMBEDDING_DOCUMENT_PREFIX` (each with a `GRAPHITI_EMBEDDING_*` alias). An unknown
-    /// profile fails fast with the list of valid names (FR-006); an empty prefix value is an
-    /// explicit empty override.
+    /// `LCG_EMBEDDING_DOCUMENT_PREFIX`. These settings are new in #790, so there is no legacy
+    /// `GRAPHITI_*` spelling to fall back to (and none to deprecate). An unknown profile fails
+    /// fast with the list of valid names (FR-006); an empty prefix value is an explicit empty
+    /// override.
     pub fn from_env() -> Result<Self, Error> {
-        let profile = match lcg_env_var("LCG_EMBEDDING_PROFILE", "GRAPHITI_EMBEDDING_PROFILE") {
+        let profile = match std::env::var("LCG_EMBEDDING_PROFILE") {
             Ok(v) if !v.trim().is_empty() => v.parse()?,
             _ => InstructionProfile::None,
         };
-        let query_override = lcg_env_var(
-            "LCG_EMBEDDING_QUERY_PREFIX",
-            "GRAPHITI_EMBEDDING_QUERY_PREFIX",
-        )
-        .ok();
-        let document_override = lcg_env_var(
-            "LCG_EMBEDDING_DOCUMENT_PREFIX",
-            "GRAPHITI_EMBEDDING_DOCUMENT_PREFIX",
-        )
-        .ok();
+        let query_override = std::env::var("LCG_EMBEDDING_QUERY_PREFIX").ok();
+        let document_override = std::env::var("LCG_EMBEDDING_DOCUMENT_PREFIX").ok();
         Ok(Self {
             profile,
             query_override,

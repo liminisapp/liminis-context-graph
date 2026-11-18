@@ -39,7 +39,7 @@ fan-out (~15 implementors, 60+ call sites) is mechanical and compiler-guided. Ca
 
 `InstructionProfile` is `none` (default), `bge-v1.5`, `nomic-v1.5`, `e5`, or `embedder`; the query
 and document prefixes can be overridden independently (`LCG_EMBEDDING_PROFILE`,
-`LCG_EMBEDDING_QUERY_PREFIX`, `LCG_EMBEDDING_DOCUMENT_PREFIX`, with `GRAPHITI_*` aliases; an explicit
+`LCG_EMBEDDING_QUERY_PREFIX`, `LCG_EMBEDDING_DOCUMENT_PREFIX`, env-only with no legacy `GRAPHITI_*` aliases, since they are new; an explicit
 empty string disables a side). Prefixing lives in an `InstructedEmbedder` decorator over any embedder,
 not inside `OaiEmbedder`, so transport stays transport and every embedder (including test doubles)
 benefits. Whitespace-only text passes through unprefixed so a prefix can never turn a skipped empty
