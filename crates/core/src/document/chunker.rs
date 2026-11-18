@@ -101,13 +101,11 @@ struct Block {
     lines: Vec<usize>,
 }
 
-/// One physical line: `start..content_end` is the line without its terminator, `next` is where
-/// the following line starts.
+/// One physical line: `start..content_end` is the line without its terminator.
 #[derive(Debug, Clone, Copy)]
 struct Line {
     start: usize,
     content_end: usize,
-    next: usize,
 }
 
 fn split_lines(doc: &str) -> Vec<Line> {
@@ -126,11 +124,7 @@ fn split_lines(doc: &str) -> Vec<Line> {
         if content_end > start && bytes[content_end - 1] == b'\r' {
             content_end -= 1;
         }
-        out.push(Line {
-            start,
-            content_end,
-            next,
-        });
+        out.push(Line { start, content_end });
         start = next;
     }
     out

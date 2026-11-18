@@ -3,4 +3,5 @@
 //! revision and applies ADR-0705's supersession operations itself.
 
 pub mod chunker;
+pub mod context;
 pub mod diff;

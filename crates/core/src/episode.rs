@@ -576,6 +576,7 @@ pub async fn add_episode_with_opts(
         reference_time,
         ontology: ontology_ref,
         chunk_key: Some(name),
+        document_context: None,
     };
     let (content_embedding, extraction_outcome): (Vec<f32>, ExtractionOutcome) = tokio::select! {
         result = async {

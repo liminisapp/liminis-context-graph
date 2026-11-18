@@ -44,6 +44,10 @@ pub struct ExtractOptions<'a> {
     /// event can be traced back to the chunk that produced it. Purely observational: excluded
     /// from `cassette.rs`'s request-key hash, so it never affects cassette matching.
     pub chunk_key: Option<&'a str>,
+    /// Document-mode context block (issue #785, FR-011): the rendered `<DOCUMENT_CONTEXT>` that
+    /// precedes the source text in every user prompt. `None` everywhere except
+    /// `knowledge_process_document`, so chunk-mode prompts and cassette keys are byte-identical.
+    pub document_context: Option<&'a str>,
 }
 
 // ── Extractor trait ───────────────────────────────────────────────────────────
@@ -333,10 +337,13 @@ impl AnthropicExtractor {
         opts: &ExtractOptions<'_>,
     ) -> Result<(Vec<ExtractedEntity>, usize), Error> {
         let system_text = prompts::entity_system_prompt(opts.source_type, opts.ontology);
-        let user_text = prompts::entity_user_prompt_for(
-            opts.source_type,
-            opts.episode_body,
-            opts.custom_instructions,
+        let user_text = prompts::with_document_context(
+            opts.document_context,
+            prompts::entity_user_prompt_for(
+                opts.source_type,
+                opts.episode_body,
+                opts.custom_instructions,
+            ),
         );
 
         let system_value: Value = if self.caching_enabled() {
@@ -511,11 +518,14 @@ impl AnthropicExtractor {
         }
 
         let system_text = prompts::edge_system_prompt(opts.ontology);
-        let user_text = prompts::edge_user_prompt(
-            entity_names,
-            opts.reference_time,
-            opts.episode_body,
-            opts.custom_instructions,
+        let user_text = prompts::with_document_context(
+            opts.document_context,
+            prompts::edge_user_prompt(
+                entity_names,
+                opts.reference_time,
+                opts.episode_body,
+                opts.custom_instructions,
+            ),
         );
 
         let system_value: Value = if self.caching_enabled() {
@@ -1786,10 +1796,13 @@ impl OaiExtractor {
             prompts::entity_system_prompt(opts.source_type, opts.ontology),
             ENTITY_JSON_INSTRUCTION
         );
-        let user_text = prompts::entity_user_prompt_for(
-            opts.source_type,
-            opts.episode_body,
-            opts.custom_instructions,
+        let user_text = prompts::with_document_context(
+            opts.document_context,
+            prompts::entity_user_prompt_for(
+                opts.source_type,
+                opts.episode_body,
+                opts.custom_instructions,
+            ),
         );
 
         let ceiling = resolve_max_tokens_ceiling();
@@ -1941,11 +1954,14 @@ impl OaiExtractor {
             prompts::edge_system_prompt(opts.ontology),
             EDGE_JSON_INSTRUCTION
         );
-        let user_text = prompts::edge_user_prompt(
-            entity_names,
-            opts.reference_time,
-            opts.episode_body,
-            opts.custom_instructions,
+        let user_text = prompts::with_document_context(
+            opts.document_context,
+            prompts::edge_user_prompt(
+                entity_names,
+                opts.reference_time,
+                opts.episode_body,
+                opts.custom_instructions,
+            ),
         );
 
         let ceiling = resolve_max_tokens_ceiling();
@@ -3554,6 +3570,7 @@ mod tests {
             reference_time: "2026-01-01T00:00:00Z",
             ontology: None,
             chunk_key: Some("test-chunk"),
+            document_context: None,
         }
     }
 
