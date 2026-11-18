@@ -1,0 +1,9 @@
+{
+  "render_model": "claude-sonnet-5-5",
+  "prompt_version": "retrieval-v2-render-1",
+  "rendered_on": "2026-11-18",
+  "skeleton_hash": "72bc7df796c784c9",
+  "corpus_version": "meridian-notebook-2",
+  "questions_version": "meridian-questions-2",
+  "model_calls": 631
+}

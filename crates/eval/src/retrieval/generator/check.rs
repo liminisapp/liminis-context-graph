@@ -385,7 +385,11 @@ pub fn check_rendered(sk: &Skeleton, r: &Rendered) -> Findings {
                 if q.category == "passage" {
                     if let Some(x) = fact {
                         let chunks = chunk_markdown(body, sk.chunk_max_tokens);
-                        match chunks.iter().position(|c| has_value(c, &x.value) && has(c, &x.entity)) {
+                        // The chunk that carries the fact's sentence, not merely the first chunk that contains
+                        // its value (`10` is also a whole token of `10 April 2025`).
+                        match chunks.iter().position(|c| {
+                            has_value(c, &x.value) && has(c, &x.entity) && overlap(&e.key_fact, c) >= 0.6
+                        }) {
                             Some(i) if i >= 1 && chunks.len() >= 2 => {}
                             _ => f.errors.push(format!(
                                 "question '{}': the passage fact is not in a later chunk of a multi-chunk note '{}'",

@@ -1,0 +1,21 @@
+# Weekly digest — 1 May 2025
+
+A longer digest than usual this week, mostly because there were two reviews and a small reshuffle of how we handle onboarding. I have tried to keep it in the order things happened rather than by importance, which is how I would want to read it back later.
+
+**Monday.** The week opened with the usual planning meeting. The main item was the onboarding process, which has grown organically over the last year and now lives in several different places. Aiko Osei, who looks after onboarding, brought a draft of a single checklist that pulls everything together: accounts, access, introductions, first-week tasks and a gentle reminder about the less obvious things like where to find the kettle. People generally liked it. A few suggested trimming it, as a long checklist can be as intimidating as no checklist at all. Aiko will cut it down to a first-day list and a first-week list, and leave the rest as optional reading. That seemed a sensible compromise.
+
+**Tuesday.** A quiet day for meetings, which let people catch up on actual work. I spent most of it with the notes from the previous sprint, trying to work out why two items that looked small kept getting carried over. The reason, once I found it, was dull: both needed a sign-off from someone who had been away, and nobody had noticed the dependency. We have agreed to put the name of the approver on any item that needs one, so the blockage is visible from the start. It is a tiny change, but I suspect it will save more time than any of the bigger ideas floating around.
+
+**Wednesday.** Review day. Aiko Osei logged 12 incidents during the quarter, and we went through them together. Most were small onboarding hiccups: a login that was set up late, an introduction that was forgotten, a laptop that arrived without the right software. None was serious, but they share a theme, which is that things are done by memory rather than by a list. That is exactly the gap the new checklist is meant to close, and it gave the discussion a nice sense of purpose. Aiko said the real aim is not zero incidents but fewer repeats, and the team agreed. We will look at the figure again at the end of next quarter and see whether the repeats have fallen.
+
+In the afternoon, we turned to compliance. Bram Tanaka received a satisfaction rating of 8.7 out of 10 in the recent survey, which prompted some pleasure and a few jokes about the missing points. Bram took the comments seriously, though. The written feedback praised the clarity of the guidance and the speed of replies, and the main criticism was that the paperwork can feel heavy for small requests. He wants to try a lighter route for low-risk items, with a short form and a quick turnaround, and will draft a proposal. Whether it goes ahead will depend on whether it can be kept safe without becoming complicated.
+
+**Thursday.** The team lunch, finally. It was low-key and pleasant. A couple of newer colleagues said that the most helpful thing at the start had been a person to ask, rather than a document to read, which lined up neatly with the onboarding discussion. We agreed to formalise a buddy arrangement, with each new starter paired with someone who is not their manager. Aiko will include it in the checklist.
+
+**Friday.** Housekeeping and wrap-up. The shared folder for onboarding documents has been reorganised, and old versions moved into an archive. The meeting room booking tool was reset and is behaving. Two of the monitors in the cupboard turned out to be broken, so they are heading to recycling. And someone has offered to look at the corridor plants, which have been neglected.
+
+**Decisions this week.** One consolidated onboarding checklist, split into first-day and first-week. A named approver on every item that needs sign-off. A buddy for each new starter. A proposal for a lighter route on low-risk compliance requests. Nothing here is dramatic, but taken together they should make the next few weeks smoother.
+
+**Next week.** Aiko circulates the trimmed checklist. Bram drafts the proposal. I will check that the named-approver habit has caught on by looking at the board on Wednesday. If anything has slipped, we will talk about it rather than quietly carry it forward again.
+
+That is the digest. If something is missing or wrong, tell me and I will amend it.

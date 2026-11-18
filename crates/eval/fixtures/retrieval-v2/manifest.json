@@ -1,0 +1,2578 @@
+{
+  "corpus_version": "meridian-notebook-2",
+  "description": "Synthetic notebook (fictional 'Meridian' cooperative) shaped like a Liminis workspace: human notes, clipped articles, agent-maintained pages that restate them, filed answers, near-duplicates, and decisions revised several times (some by explicit supersession, some by plain later notes). Generated deterministically from scenario.json by `lcg-eval retrieval-gen`; contains no real or private data.",
+  "chunking": {
+    "max_tokens": 900
+  },
+  "notes": [
+    {
+      "id": "project-cedar-core-1",
+      "reference_time": "2025-01-18T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-marlin-core-1",
+      "reference_time": "2025-01-24T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-quill-core-1",
+      "reference_time": "2025-01-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-04-pricing-experiments",
+      "reference_time": "2025-01-26T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "answer-13-cedar-core-budget",
+      "reference_time": "2025-01-31T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "project-cedar-core-1"
+      ]
+    },
+    {
+      "id": "project-tern-core-1",
+      "reference_time": "2025-02-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-01-marlin-core-launch",
+      "reference_time": "2025-02-03T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "project-marlin-core-1"
+      ]
+    },
+    {
+      "id": "project-fable-core-1",
+      "reference_time": "2025-02-08T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-orbit-core-1",
+      "reference_time": "2025-02-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-19-quill-core-owner",
+      "reference_time": "2025-02-10T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "project-quill-core-1"
+      ]
+    },
+    {
+      "id": "project-quill-core-2",
+      "reference_time": "2025-02-12T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-juniper-core-1",
+      "reference_time": "2025-02-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-cedar-core-2",
+      "reference_time": "2025-02-17T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-juniper-core-2",
+      "reference_time": "2025-02-19T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "recap-04-orbit-core",
+      "reference_time": "2025-02-19T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-marlin-core-2",
+      "reference_time": "2025-02-20T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-helix-core-1",
+      "reference_time": "2025-02-22T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-32-hiring-pipelines",
+      "reference_time": "2025-02-22T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "project-orbit-core-2",
+      "reference_time": "2025-02-24T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-lumen-core-1",
+      "reference_time": "2025-02-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-23-fable-core-launch",
+      "reference_time": "2025-02-26T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "project-fable-core-1"
+      ]
+    },
+    {
+      "id": "clip-19-data-retention",
+      "reference_time": "2025-02-27T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "digest-004",
+      "reference_time": "2025-03-01T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-cedar-core",
+      "reference_time": "2025-03-02T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-cedar-core-1",
+        "project-cedar-core-2"
+      ]
+    },
+    {
+      "id": "wiki-lumen-core",
+      "reference_time": "2025-03-02T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-lumen-core-1"
+      ]
+    },
+    {
+      "id": "project-basalt-core-1",
+      "reference_time": "2025-03-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-sable-core-1",
+      "reference_time": "2025-03-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-tern-core-2",
+      "reference_time": "2025-03-04T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-22-procurement-basics",
+      "reference_time": "2025-03-04T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "wiki-orbit-core",
+      "reference_time": "2025-03-04T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-orbit-core-1",
+        "project-orbit-core-2"
+      ]
+    },
+    {
+      "id": "project-fable-core-2",
+      "reference_time": "2025-03-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-sable-core-1",
+      "reference_time": "2025-03-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-quill-core",
+      "reference_time": "2025-03-07T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-quill-core-1",
+        "project-quill-core-2"
+      ]
+    },
+    {
+      "id": "answer-16-juniper-core-owner",
+      "reference_time": "2025-03-07T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "project-juniper-core-1"
+      ]
+    },
+    {
+      "id": "project-helix-core-2",
+      "reference_time": "2025-03-08T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-lumen-core-2",
+      "reference_time": "2025-03-08T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-basalt-core-2",
+      "reference_time": "2025-03-08T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-region-sable-core-1",
+      "reference_time": "2025-03-09T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-006",
+      "reference_time": "2025-03-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-nimbus-core-1",
+      "reference_time": "2025-03-11T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-16-pricing-experiments",
+      "reference_time": "2025-03-12T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "answer-22-juniper-core-budget",
+      "reference_time": "2025-03-12T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "project-juniper-core-1"
+      ]
+    },
+    {
+      "id": "recap-08-lumen-core",
+      "reference_time": "2025-03-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-tern-supply-1",
+      "reference_time": "2025-03-17T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-05-vendor-risk",
+      "reference_time": "2025-03-19T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "decision-datastore-basalt-core-1",
+      "reference_time": "2025-03-20T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-tern-core",
+      "reference_time": "2025-03-21T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-tern-core-1",
+        "project-tern-core-2"
+      ]
+    },
+    {
+      "id": "vendor-fable-supply-1",
+      "reference_time": "2025-03-22T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-013",
+      "reference_time": "2025-03-22T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-marlin-core",
+      "reference_time": "2025-03-22T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-marlin-core-1",
+        "project-marlin-core-2"
+      ]
+    },
+    {
+      "id": "recap-05-helix-core",
+      "reference_time": "2025-03-24T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-helix-core",
+      "reference_time": "2025-03-25T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-helix-core-1",
+        "project-helix-core-2"
+      ]
+    },
+    {
+      "id": "vendor-orbit-supply-1",
+      "reference_time": "2025-03-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-31-data-retention",
+      "reference_time": "2025-03-26T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "wiki-basalt-core",
+      "reference_time": "2025-03-26T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-basalt-core-1",
+        "project-basalt-core-2"
+      ]
+    },
+    {
+      "id": "project-sable-core-2",
+      "reference_time": "2025-03-28T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-juniper-core",
+      "reference_time": "2025-03-29T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-juniper-core-1",
+        "project-juniper-core-2"
+      ]
+    },
+    {
+      "id": "vendor-orbit-supply-2",
+      "reference_time": "2025-03-30T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-release-juniper-core-1",
+      "reference_time": "2025-03-30T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-tracker-basalt-core-1",
+      "reference_time": "2025-03-30T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "project-nimbus-core-2",
+      "reference_time": "2025-03-31T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-tern-supply-2",
+      "reference_time": "2025-03-31T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-juniper-supply-1",
+      "reference_time": "2025-03-31T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-alerting-lumen-core-1",
+      "reference_time": "2025-03-31T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-34-procurement-basics",
+      "reference_time": "2025-04-01T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "digest-041",
+      "reference_time": "2025-04-02T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-29-fable-supply-price",
+      "reference_time": "2025-04-02T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "vendor-fable-supply-1"
+      ]
+    },
+    {
+      "id": "recap-09-orbit-supply",
+      "reference_time": "2025-04-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-orbit-core-1",
+      "reference_time": "2025-04-04T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-helix-supply-1",
+      "reference_time": "2025-04-05T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-nimbus-core",
+      "reference_time": "2025-04-05T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-nimbus-core-1",
+        "project-nimbus-core-2"
+      ]
+    },
+    {
+      "id": "vendor-fable-supply-2",
+      "reference_time": "2025-04-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-region-sable-core-2",
+      "reference_time": "2025-04-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-026",
+      "reference_time": "2025-04-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-06-helix-supply-price",
+      "reference_time": "2025-04-08T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "vendor-helix-supply-1"
+      ]
+    },
+    {
+      "id": "vendor-lumen-supply-1",
+      "reference_time": "2025-04-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "recap-02-orbit-core",
+      "reference_time": "2025-04-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-003",
+      "reference_time": "2025-04-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-08-hiring-pipelines",
+      "reference_time": "2025-04-10T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "wiki-fable-core",
+      "reference_time": "2025-04-14T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-fable-core-1",
+        "project-fable-core-2"
+      ]
+    },
+    {
+      "id": "recap-10-orbit-supply",
+      "reference_time": "2025-04-18T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-basalt-supply-1",
+      "reference_time": "2025-04-19T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-sable-core-2",
+      "reference_time": "2025-04-21T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-orbit-supply",
+      "reference_time": "2025-04-21T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-orbit-supply-1",
+        "vendor-orbit-supply-2"
+      ]
+    },
+    {
+      "id": "vendor-sable-supply-1",
+      "reference_time": "2025-04-22T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-nimbus-supply-1",
+      "reference_time": "2025-04-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-support-hours-orbit-core-1",
+      "reference_time": "2025-04-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "recap-07-nimbus-core",
+      "reference_time": "2025-04-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-helix-supply-2",
+      "reference_time": "2025-04-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-sable-core",
+      "reference_time": "2025-04-26T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "project-sable-core-1",
+        "project-sable-core-2"
+      ]
+    },
+    {
+      "id": "vendor-juniper-supply-2",
+      "reference_time": "2025-04-27T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-tern-supply",
+      "reference_time": "2025-04-27T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-tern-supply-1",
+        "vendor-tern-supply-2"
+      ]
+    },
+    {
+      "id": "wiki-fable-supply",
+      "reference_time": "2025-04-28T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-fable-supply-1",
+        "vendor-fable-supply-2"
+      ]
+    },
+    {
+      "id": "answer-05-nimbus-supply-price",
+      "reference_time": "2025-04-28T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "vendor-nimbus-supply-1"
+      ]
+    },
+    {
+      "id": "decision-alerting-basalt-core-1",
+      "reference_time": "2025-04-29T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-054",
+      "reference_time": "2025-04-30T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-04-juniper-supply-uptime",
+      "reference_time": "2025-04-30T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "vendor-juniper-supply-2"
+      ]
+    },
+    {
+      "id": "vendor-cedar-supply-1",
+      "reference_time": "2025-05-01T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-juniper-core-1",
+      "reference_time": "2025-05-01T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-055",
+      "reference_time": "2025-05-01T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "recap-11-nimbus-core",
+      "reference_time": "2025-05-02T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-lumen-supply-2",
+      "reference_time": "2025-05-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-sable-supply-2",
+      "reference_time": "2025-05-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-alerting-lumen-core-2",
+      "reference_time": "2025-05-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-009",
+      "reference_time": "2025-05-04T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-release-cedar-core-1",
+      "reference_time": "2025-05-05T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-032",
+      "reference_time": "2025-05-05T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-marlin-supply-1",
+      "reference_time": "2025-05-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-quill-supply-1",
+      "reference_time": "2025-05-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-orbit-core-2",
+      "reference_time": "2025-05-11T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "recap-12-helix-supply",
+      "reference_time": "2025-05-11T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-alerting-lumen-core",
+      "reference_time": "2025-05-12T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "decision-alerting-lumen-core-2"
+      ]
+    },
+    {
+      "id": "recap-13-sable-supply",
+      "reference_time": "2025-05-13T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-014",
+      "reference_time": "2025-05-13T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-helix-supply",
+      "reference_time": "2025-05-14T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-helix-supply-1",
+        "vendor-helix-supply-2"
+      ]
+    },
+    {
+      "id": "vendor-basalt-supply-2",
+      "reference_time": "2025-05-15T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-juniper-supply",
+      "reference_time": "2025-05-15T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-juniper-supply-1",
+        "vendor-juniper-supply-2"
+      ]
+    },
+    {
+      "id": "wiki-sable-supply",
+      "reference_time": "2025-05-15T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-sable-supply-1",
+        "vendor-sable-supply-2"
+      ]
+    },
+    {
+      "id": "answer-25-cedar-supply-renewal",
+      "reference_time": "2025-05-15T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "vendor-cedar-supply-1"
+      ]
+    },
+    {
+      "id": "vendor-nimbus-supply-2",
+      "reference_time": "2025-05-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-ines-lindqvist-1",
+      "reference_time": "2025-05-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-002",
+      "reference_time": "2025-05-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-25-fleet-maintenance",
+      "reference_time": "2025-05-16T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "wiki-lumen-supply",
+      "reference_time": "2025-05-16T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-lumen-supply-1",
+        "vendor-lumen-supply-2"
+      ]
+    },
+    {
+      "id": "decision-hosting-orbit-core-1",
+      "reference_time": "2025-05-17T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-design-quill-core-1",
+      "reference_time": "2025-05-18T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-basalt-core-2",
+      "reference_time": "2025-05-19T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-tomas-kowalski-1",
+      "reference_time": "2025-05-20T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-alerting-sable-core-1",
+      "reference_time": "2025-05-21T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-cedar-supply-2",
+      "reference_time": "2025-05-23T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-hosting-juniper-core-1",
+      "reference_time": "2025-05-23T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-044",
+      "reference_time": "2025-05-24T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-priya-varga-1",
+      "reference_time": "2025-05-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-support-hours-orbit-core-2",
+      "reference_time": "2025-05-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-30-incident-reviews",
+      "reference_time": "2025-05-25T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "digest-030",
+      "reference_time": "2025-05-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-region-sable-core-3",
+      "reference_time": "2025-05-27T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-tracker-juniper-core-1",
+      "reference_time": "2025-05-28T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-basalt-supply",
+      "reference_time": "2025-05-28T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-basalt-supply-1",
+        "vendor-basalt-supply-2"
+      ]
+    },
+    {
+      "id": "answer-21-lumen-supply-uptime",
+      "reference_time": "2025-05-28T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "vendor-lumen-supply-2"
+      ]
+    },
+    {
+      "id": "digest-005",
+      "reference_time": "2025-05-29T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-057",
+      "reference_time": "2025-05-29T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-12-ines-lindqvist-city",
+      "reference_time": "2025-05-29T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "person-ines-lindqvist-1"
+      ]
+    },
+    {
+      "id": "answer-14-nimbus-supply-uptime",
+      "reference_time": "2025-05-29T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "vendor-nimbus-supply-2"
+      ]
+    },
+    {
+      "id": "person-marcus-haddad-1",
+      "reference_time": "2025-05-30T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "vendor-marlin-supply-2",
+      "reference_time": "2025-06-01T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-08-nimbus-supply-contact",
+      "reference_time": "2025-06-03T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "vendor-nimbus-supply-2"
+      ]
+    },
+    {
+      "id": "vendor-quill-supply-2",
+      "reference_time": "2025-06-04T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-aiko-osei-1",
+      "reference_time": "2025-06-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-alerting-lumen-core-3",
+      "reference_time": "2025-06-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-tracker-orbit-core-1",
+      "reference_time": "2025-06-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-release-juniper-core-2",
+      "reference_time": "2025-06-09T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-design-sable-core-1",
+      "reference_time": "2025-06-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-tracker-basalt-core-2",
+      "reference_time": "2025-06-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-office-lumen-core-1",
+      "reference_time": "2025-06-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-nimbus-supply",
+      "reference_time": "2025-06-10T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-nimbus-supply-1",
+        "vendor-nimbus-supply-2"
+      ]
+    },
+    {
+      "id": "person-ines-lindqvist-2",
+      "reference_time": "2025-06-11T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-priya-varga-2",
+      "reference_time": "2025-06-11T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-aiko-osei-2",
+      "reference_time": "2025-06-11T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-support-hours-marlin-core-1",
+      "reference_time": "2025-06-11T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-lena-moreau-1",
+      "reference_time": "2025-06-12T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-region-tern-core-1",
+      "reference_time": "2025-06-12T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "recap-03-priya-varga",
+      "reference_time": "2025-06-12T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-09-marcus-haddad-city",
+      "reference_time": "2025-06-12T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "person-marcus-haddad-1"
+      ]
+    },
+    {
+      "id": "clip-09-customer-interviews",
+      "reference_time": "2025-06-13T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "answer-10-tomas-kowalski-city",
+      "reference_time": "2025-06-13T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "person-tomas-kowalski-1"
+      ]
+    },
+    {
+      "id": "wiki-marlin-supply",
+      "reference_time": "2025-06-14T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-marlin-supply-1",
+        "vendor-marlin-supply-2"
+      ]
+    },
+    {
+      "id": "person-tomas-kowalski-2",
+      "reference_time": "2025-06-15T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-cedar-supply",
+      "reference_time": "2025-06-15T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-cedar-supply-1",
+        "vendor-cedar-supply-2"
+      ]
+    },
+    {
+      "id": "decision-office-sable-core-1",
+      "reference_time": "2025-06-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-release-cedar-core-2",
+      "reference_time": "2025-06-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-quill-supply",
+      "reference_time": "2025-06-17T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "vendor-quill-supply-1",
+        "vendor-quill-supply-2"
+      ]
+    },
+    {
+      "id": "person-diego-ferreira-1",
+      "reference_time": "2025-06-18T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-sable-core-3",
+      "reference_time": "2025-06-18T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-orbit-core-3",
+      "reference_time": "2025-06-18T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-034",
+      "reference_time": "2025-06-19T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-30-tomas-kowalski-manager",
+      "reference_time": "2025-06-19T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "person-tomas-kowalski-2"
+      ]
+    },
+    {
+      "id": "person-marcus-haddad-2",
+      "reference_time": "2025-06-20T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-tomas-kowalski",
+      "reference_time": "2025-06-21T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-tomas-kowalski-1",
+        "person-tomas-kowalski-2"
+      ]
+    },
+    {
+      "id": "person-noor-okafor-1",
+      "reference_time": "2025-06-22T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-02-aiko-osei-city",
+      "reference_time": "2025-06-24T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "person-aiko-osei-1"
+      ]
+    },
+    {
+      "id": "person-lena-moreau-2",
+      "reference_time": "2025-06-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-noor-okafor-2",
+      "reference_time": "2025-06-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-callum-brennan-1",
+      "reference_time": "2025-06-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-diego-ferreira-2",
+      "reference_time": "2025-06-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-024",
+      "reference_time": "2025-06-27T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-hosting-orbit-core-2",
+      "reference_time": "2025-06-28T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-payments-marlin-core-1",
+      "reference_time": "2025-06-29T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-region-sable-core-4",
+      "reference_time": "2025-06-30T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-alerting-basalt-core-2",
+      "reference_time": "2025-06-30T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-region-lumen-core-1",
+      "reference_time": "2025-07-02T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-11-lena-moreau-start",
+      "reference_time": "2025-07-02T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "person-lena-moreau-1"
+      ]
+    },
+    {
+      "id": "person-sofia-petrov-1",
+      "reference_time": "2025-07-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-juniper-core-2",
+      "reference_time": "2025-07-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-053",
+      "reference_time": "2025-07-04T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-noor-okafor",
+      "reference_time": "2025-07-04T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-noor-okafor-1",
+        "person-noor-okafor-2"
+      ]
+    },
+    {
+      "id": "decision-hosting-basalt-core-1",
+      "reference_time": "2025-07-05T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-aiko-osei",
+      "reference_time": "2025-07-05T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-aiko-osei-1",
+        "person-aiko-osei-2"
+      ]
+    },
+    {
+      "id": "answer-27-ines-lindqvist-rota",
+      "reference_time": "2025-07-05T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "person-ines-lindqvist-2"
+      ]
+    },
+    {
+      "id": "decision-design-quill-core-2",
+      "reference_time": "2025-07-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-bram-tanaka-1",
+      "reference_time": "2025-07-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-sofia-petrov-2",
+      "reference_time": "2025-07-08T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-24-diego-ferreira-start",
+      "reference_time": "2025-07-09T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "person-diego-ferreira-1"
+      ]
+    },
+    {
+      "id": "person-yara-nakamura-1",
+      "reference_time": "2025-07-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "recap-01-aiko-osei",
+      "reference_time": "2025-07-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-marcus-haddad",
+      "reference_time": "2025-07-10T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-marcus-haddad-1",
+        "person-marcus-haddad-2"
+      ]
+    },
+    {
+      "id": "decision-design-sable-core-2",
+      "reference_time": "2025-07-12T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-callum-brennan-2",
+      "reference_time": "2025-07-14T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-basalt-policy-1",
+      "reference_time": "2025-07-15T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-basalt-core-3",
+      "reference_time": "2025-07-15T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-lena-moreau",
+      "reference_time": "2025-07-15T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-lena-moreau-1",
+        "person-lena-moreau-2"
+      ]
+    },
+    {
+      "id": "wiki-sofia-petrov",
+      "reference_time": "2025-07-15T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-sofia-petrov-1",
+        "person-sofia-petrov-2"
+      ]
+    },
+    {
+      "id": "digest-051",
+      "reference_time": "2025-07-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-ines-lindqvist",
+      "reference_time": "2025-07-19T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-ines-lindqvist-1",
+        "person-ines-lindqvist-2"
+      ]
+    },
+    {
+      "id": "wiki-priya-varga",
+      "reference_time": "2025-07-19T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-priya-varga-1",
+        "person-priya-varga-2"
+      ]
+    },
+    {
+      "id": "decision-alerting-sable-core-2",
+      "reference_time": "2025-07-22T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-sable-policy-1",
+      "reference_time": "2025-07-23T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-hosting-juniper-core-2",
+      "reference_time": "2025-07-23T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "journal-03",
+      "reference_time": "2025-07-24T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-callum-brennan",
+      "reference_time": "2025-07-24T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-callum-brennan-1",
+        "person-callum-brennan-2"
+      ]
+    },
+    {
+      "id": "decision-support-hours-marlin-core-2",
+      "reference_time": "2025-07-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "recap-15-noor-okafor",
+      "reference_time": "2025-07-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-bram-tanaka-2",
+      "reference_time": "2025-07-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-region-tern-core-2",
+      "reference_time": "2025-07-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-release-cedar-core-3",
+      "reference_time": "2025-07-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-038",
+      "reference_time": "2025-07-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-diego-ferreira",
+      "reference_time": "2025-07-26T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-diego-ferreira-1",
+        "person-diego-ferreira-2"
+      ]
+    },
+    {
+      "id": "policy-nimbus-policy-1",
+      "reference_time": "2025-07-27T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "recap-16-sofia-petrov",
+      "reference_time": "2025-07-27T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-29-vendor-risk",
+      "reference_time": "2025-07-27T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "answer-26-sofia-petrov-rota",
+      "reference_time": "2025-07-27T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "person-sofia-petrov-2"
+      ]
+    },
+    {
+      "id": "decision-office-sable-core-2",
+      "reference_time": "2025-07-29T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-region-sable-core-5",
+      "reference_time": "2025-07-29T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-hosting-marlin-core-1",
+      "reference_time": "2025-07-29T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-01-fleet-maintenance",
+      "reference_time": "2025-07-29T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "decision-datastore-sable-core-4",
+      "reference_time": "2025-07-30T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-cedar-policy-1",
+      "reference_time": "2025-07-31T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-basalt-policy",
+      "reference_time": "2025-07-31T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-basalt-policy-1"
+      ]
+    },
+    {
+      "id": "policy-basalt-policy-2",
+      "reference_time": "2025-08-01T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-tracker-orbit-core-2",
+      "reference_time": "2025-08-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-office-lumen-core-2",
+      "reference_time": "2025-08-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "journal-01",
+      "reference_time": "2025-08-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "recap-06-bram-tanaka",
+      "reference_time": "2025-08-04T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "person-yara-nakamura-2",
+      "reference_time": "2025-08-05T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-support-hours-orbit-core-3",
+      "reference_time": "2025-08-05T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-tracker-basalt-core-3",
+      "reference_time": "2025-08-05T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-020",
+      "reference_time": "2025-08-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-037",
+      "reference_time": "2025-08-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-048",
+      "reference_time": "2025-08-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-marlin-policy-1",
+      "reference_time": "2025-08-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-release-juniper-core-3",
+      "reference_time": "2025-08-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-quill-policy-1",
+      "reference_time": "2025-08-08T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-tracker-juniper-core-2",
+      "reference_time": "2025-08-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-sable-policy-2",
+      "reference_time": "2025-08-11T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-03-sable-policy-approver",
+      "reference_time": "2025-08-11T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "policy-sable-policy-1"
+      ]
+    },
+    {
+      "id": "digest-043",
+      "reference_time": "2025-08-13T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-tern-policy-1",
+      "reference_time": "2025-08-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-yara-nakamura",
+      "reference_time": "2025-08-16T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-yara-nakamura-1",
+        "person-yara-nakamura-2"
+      ]
+    },
+    {
+      "id": "answer-17-nimbus-policy-window",
+      "reference_time": "2025-08-16T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "policy-nimbus-policy-1"
+      ]
+    },
+    {
+      "id": "policy-nimbus-policy-2",
+      "reference_time": "2025-08-18T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-payments-marlin-core-2",
+      "reference_time": "2025-08-19T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-cedar-policy-2",
+      "reference_time": "2025-08-20T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-fable-policy-1",
+      "reference_time": "2025-08-21T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-nimbus-policy",
+      "reference_time": "2025-08-21T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-nimbus-policy-1",
+        "policy-nimbus-policy-2"
+      ]
+    },
+    {
+      "id": "wiki-support-hours-orbit-core",
+      "reference_time": "2025-08-21T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "decision-support-hours-orbit-core-3"
+      ]
+    },
+    {
+      "id": "answer-28-tern-policy-window",
+      "reference_time": "2025-08-21T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "policy-tern-policy-1"
+      ]
+    },
+    {
+      "id": "decision-design-quill-core-3",
+      "reference_time": "2025-08-22T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-bram-tanaka",
+      "reference_time": "2025-08-22T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "person-bram-tanaka-1",
+        "person-bram-tanaka-2"
+      ]
+    },
+    {
+      "id": "answer-07-tern-policy-approver",
+      "reference_time": "2025-08-22T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "policy-tern-policy-1"
+      ]
+    },
+    {
+      "id": "answer-15-yara-nakamura-rota",
+      "reference_time": "2025-08-22T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "person-yara-nakamura-2"
+      ]
+    },
+    {
+      "id": "policy-orbit-policy-1",
+      "reference_time": "2025-08-24T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-orbit-core-4",
+      "reference_time": "2025-08-24T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-quill-policy-2",
+      "reference_time": "2025-08-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-tern-policy",
+      "reference_time": "2025-08-25T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-tern-policy-1"
+      ]
+    },
+    {
+      "id": "decision-hosting-orbit-core-3",
+      "reference_time": "2025-08-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-marlin-policy-2",
+      "reference_time": "2025-08-28T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-juniper-policy-1",
+      "reference_time": "2025-08-28T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-052",
+      "reference_time": "2025-08-28T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-basalt-core-4",
+      "reference_time": "2025-08-31T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-design-sable-core-3",
+      "reference_time": "2025-09-01T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-support-hours-orbit-core-4",
+      "reference_time": "2025-09-02T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-office-lumen-core-3",
+      "reference_time": "2025-09-02T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-sable-policy",
+      "reference_time": "2025-09-02T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-sable-policy-1",
+        "policy-sable-policy-2"
+      ]
+    },
+    {
+      "id": "policy-helix-policy-1",
+      "reference_time": "2025-09-05T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-015",
+      "reference_time": "2025-09-05T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-062",
+      "reference_time": "2025-09-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-design-sable-core",
+      "reference_time": "2025-09-06T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "decision-design-sable-core-3"
+      ]
+    },
+    {
+      "id": "policy-orbit-policy-2",
+      "reference_time": "2025-09-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-lumen-policy-1",
+      "reference_time": "2025-09-09T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-hosting-basalt-core-2",
+      "reference_time": "2025-09-09T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-alerting-basalt-core-3",
+      "reference_time": "2025-09-09T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-11-urban-mobility",
+      "reference_time": "2025-09-09T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "decision-support-hours-marlin-core-3",
+      "reference_time": "2025-09-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-045",
+      "reference_time": "2025-09-11T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-cedar-policy",
+      "reference_time": "2025-09-11T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-cedar-policy-1",
+        "policy-cedar-policy-2"
+      ]
+    },
+    {
+      "id": "policy-tern-policy-2",
+      "reference_time": "2025-09-12T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-release-juniper-core-4",
+      "reference_time": "2025-09-12T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-juniper-core-3",
+      "reference_time": "2025-09-13T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-18-fable-policy-approver",
+      "reference_time": "2025-09-13T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "policy-fable-policy-1"
+      ]
+    },
+    {
+      "id": "decision-region-lumen-core-2",
+      "reference_time": "2025-09-14T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-011",
+      "reference_time": "2025-09-14T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-lumen-policy-2",
+      "reference_time": "2025-09-15T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "answer-20-orbit-policy-review",
+      "reference_time": "2025-09-16T09:00:00Z",
+      "origin": "answer",
+      "cites": [
+        "policy-orbit-policy-2"
+      ]
+    },
+    {
+      "id": "decision-office-sable-core-3",
+      "reference_time": "2025-09-17T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-007",
+      "reference_time": "2025-09-18T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-orbit-policy",
+      "reference_time": "2025-09-19T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-orbit-policy-1",
+        "policy-orbit-policy-2"
+      ]
+    },
+    {
+      "id": "policy-fable-policy-2",
+      "reference_time": "2025-09-20T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-juniper-policy-2",
+      "reference_time": "2025-09-20T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "recap-14-basalt-policy",
+      "reference_time": "2025-09-20T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-region-tern-core-3",
+      "reference_time": "2025-09-24T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-035",
+      "reference_time": "2025-09-24T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-marlin-policy",
+      "reference_time": "2025-09-24T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-marlin-policy-1",
+        "policy-marlin-policy-2"
+      ]
+    },
+    {
+      "id": "decision-hosting-marlin-core-2",
+      "reference_time": "2025-09-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-quill-policy",
+      "reference_time": "2025-09-26T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-quill-policy-1",
+        "policy-quill-policy-2"
+      ]
+    },
+    {
+      "id": "decision-alerting-sable-core-3",
+      "reference_time": "2025-09-27T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-021",
+      "reference_time": "2025-09-28T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-023",
+      "reference_time": "2025-09-28T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-059",
+      "reference_time": "2025-09-29T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-hosting-juniper-core-3",
+      "reference_time": "2025-10-01T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-tracker-juniper-core-3",
+      "reference_time": "2025-10-02T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "policy-helix-policy-2",
+      "reference_time": "2025-10-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-tracker-orbit-core-3",
+      "reference_time": "2025-10-05T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-design-quill-core-4",
+      "reference_time": "2025-10-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-016",
+      "reference_time": "2025-10-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-tracker-basalt-core-4",
+      "reference_time": "2025-10-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-helix-policy",
+      "reference_time": "2025-10-08T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-helix-policy-1"
+      ]
+    },
+    {
+      "id": "decision-payments-marlin-core-3",
+      "reference_time": "2025-10-09T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-lumen-policy",
+      "reference_time": "2025-10-10T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-lumen-policy-1",
+        "policy-lumen-policy-2"
+      ]
+    },
+    {
+      "id": "decision-hosting-orbit-core-4",
+      "reference_time": "2025-10-14T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-033",
+      "reference_time": "2025-10-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-12-documentation-habits",
+      "reference_time": "2025-10-18T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "digest-042",
+      "reference_time": "2025-10-21T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-juniper-policy",
+      "reference_time": "2025-10-22T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-juniper-policy-1",
+        "policy-juniper-policy-2"
+      ]
+    },
+    {
+      "id": "digest-001",
+      "reference_time": "2025-10-24T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-18-incident-reviews",
+      "reference_time": "2025-10-24T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "wiki-tracker-orbit-core",
+      "reference_time": "2025-10-25T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "decision-tracker-orbit-core-3"
+      ]
+    },
+    {
+      "id": "wiki-fable-policy",
+      "reference_time": "2025-10-27T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "policy-fable-policy-1",
+        "policy-fable-policy-2"
+      ]
+    },
+    {
+      "id": "decision-hosting-juniper-core-4",
+      "reference_time": "2025-10-30T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-release-juniper-core-5",
+      "reference_time": "2025-11-01T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-juniper-core-4",
+      "reference_time": "2025-11-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-design-quill-core-5",
+      "reference_time": "2025-11-03T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-hosting-marlin-core-3",
+      "reference_time": "2025-11-04T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-060",
+      "reference_time": "2025-11-07T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-datastore-juniper-core",
+      "reference_time": "2025-11-07T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "decision-datastore-juniper-core-4"
+      ]
+    },
+    {
+      "id": "decision-office-sable-core-4",
+      "reference_time": "2025-11-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-datastore-basalt-core-5",
+      "reference_time": "2025-11-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-hosting-basalt-core-3",
+      "reference_time": "2025-11-13T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-012",
+      "reference_time": "2025-11-13T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-release-juniper-core",
+      "reference_time": "2025-11-13T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "decision-release-juniper-core-5"
+      ]
+    },
+    {
+      "id": "decision-region-lumen-core-3",
+      "reference_time": "2025-11-17T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-region-tern-core-4",
+      "reference_time": "2025-11-18T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-019",
+      "reference_time": "2025-11-21T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-07-data-retention",
+      "reference_time": "2025-11-23T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "decision-tracker-basalt-core-5",
+      "reference_time": "2025-11-24T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-office-sable-core",
+      "reference_time": "2025-11-24T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "decision-office-sable-core-4"
+      ]
+    },
+    {
+      "id": "decision-tracker-juniper-core-4",
+      "reference_time": "2025-11-26T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "journal-02",
+      "reference_time": "2025-12-04T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "wiki-region-tern-core",
+      "reference_time": "2025-12-05T09:00:00Z",
+      "origin": "derived",
+      "cites": [
+        "decision-region-tern-core-4"
+      ]
+    },
+    {
+      "id": "decision-datastore-juniper-core-5",
+      "reference_time": "2025-12-11T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-office-sable-core-5",
+      "reference_time": "2025-12-17T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-payments-marlin-core-4",
+      "reference_time": "2025-12-19T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-hosting-orbit-core-5",
+      "reference_time": "2025-12-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-23-urban-mobility",
+      "reference_time": "2025-12-25T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "decision-region-lumen-core-4",
+      "reference_time": "2026-01-12T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "decision-hosting-marlin-core-4",
+      "reference_time": "2026-01-13T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "journal-04",
+      "reference_time": "2026-01-13T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-049",
+      "reference_time": "2026-01-14T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-022",
+      "reference_time": "2026-01-21T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-017",
+      "reference_time": "2026-01-27T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-26-cooperative-governance",
+      "reference_time": "2026-01-28T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "decision-tracker-juniper-core-5",
+      "reference_time": "2026-02-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-06-incident-reviews",
+      "reference_time": "2026-02-12T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "clip-20-hiring-pipelines",
+      "reference_time": "2026-02-12T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "clip-14-cooperative-governance",
+      "reference_time": "2026-02-20T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "clip-13-fleet-maintenance",
+      "reference_time": "2026-02-28T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "digest-058",
+      "reference_time": "2026-03-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-03-remote-onboarding",
+      "reference_time": "2026-03-19T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "clip-35-urban-mobility",
+      "reference_time": "2026-03-27T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "digest-040",
+      "reference_time": "2026-03-29T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-061",
+      "reference_time": "2026-04-05T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-02-cooperative-governance",
+      "reference_time": "2026-04-08T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "clip-10-procurement-basics",
+      "reference_time": "2026-04-20T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "clip-21-customer-interviews",
+      "reference_time": "2026-04-21T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "journal-06",
+      "reference_time": "2026-04-30T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-33-customer-interviews",
+      "reference_time": "2026-05-03T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "digest-056",
+      "reference_time": "2026-05-06T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-031",
+      "reference_time": "2026-05-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-27-remote-onboarding",
+      "reference_time": "2026-05-20T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "clip-28-pricing-experiments",
+      "reference_time": "2026-05-31T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "digest-025",
+      "reference_time": "2026-06-08T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-028",
+      "reference_time": "2026-06-12T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-018",
+      "reference_time": "2026-06-13T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-046",
+      "reference_time": "2026-06-25T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-063",
+      "reference_time": "2026-06-27T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-010",
+      "reference_time": "2026-06-28T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-050",
+      "reference_time": "2026-06-29T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-039",
+      "reference_time": "2026-07-01T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-15-remote-onboarding",
+      "reference_time": "2026-07-06T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "digest-036",
+      "reference_time": "2026-07-08T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-027",
+      "reference_time": "2026-07-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "journal-05",
+      "reference_time": "2026-07-11T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-029",
+      "reference_time": "2026-07-16T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "digest-064",
+      "reference_time": "2026-07-19T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-24-documentation-habits",
+      "reference_time": "2026-07-27T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "digest-008",
+      "reference_time": "2026-08-10T09:00:00Z",
+      "origin": "primary"
+    },
+    {
+      "id": "clip-17-vendor-risk",
+      "reference_time": "2026-08-11T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "clip-36-documentation-habits",
+      "reference_time": "2026-08-19T09:00:00Z",
+      "origin": "external"
+    },
+    {
+      "id": "digest-047",
+      "reference_time": "2026-08-24T09:00:00Z",
+      "origin": "primary"
+    }
+  ],
+  "supersedes": [
+    {
+      "old_note": "decision-design-sable-core-2",
+      "new_note": "decision-design-sable-core-3",
+      "effective_at": "2025-09-17T09:00:00Z"
+    },
+    {
+      "old_note": "decision-datastore-juniper-core-1",
+      "new_note": "decision-datastore-juniper-core-2",
+      "effective_at": "2025-07-10T09:00:00Z"
+    },
+    {
+      "old_note": "decision-datastore-juniper-core-2",
+      "new_note": "decision-datastore-juniper-core-3",
+      "effective_at": "2025-09-13T09:00:00Z"
+    },
+    {
+      "old_note": "decision-datastore-juniper-core-3",
+      "new_note": "decision-datastore-juniper-core-4",
+      "effective_at": "2025-10-24T09:00:00Z"
+    },
+    {
+      "old_note": "decision-region-tern-core-1",
+      "new_note": "decision-region-tern-core-2",
+      "effective_at": "2025-07-26T09:00:00Z"
+    },
+    {
+      "old_note": "decision-region-tern-core-2",
+      "new_note": "decision-region-tern-core-3",
+      "effective_at": "2025-09-21T09:00:00Z"
+    },
+    {
+      "old_note": "decision-region-tern-core-3",
+      "new_note": "decision-region-tern-core-4",
+      "effective_at": "2025-11-30T09:00:00Z"
+    },
+    {
+      "old_note": "decision-alerting-lumen-core-1",
+      "new_note": "decision-alerting-lumen-core-2",
+      "effective_at": "2025-04-19T09:00:00Z"
+    },
+    {
+      "old_note": "decision-release-juniper-core-3",
+      "new_note": "decision-release-juniper-core-4",
+      "effective_at": "2025-08-30T09:00:00Z"
+    },
+    {
+      "old_note": "decision-release-juniper-core-4",
+      "new_note": "decision-release-juniper-core-5",
+      "effective_at": "2025-11-14T09:00:00Z"
+    },
+    {
+      "old_note": "decision-support-hours-orbit-core-2",
+      "new_note": "decision-support-hours-orbit-core-3",
+      "effective_at": "2025-07-26T09:00:00Z"
+    },
+    {
+      "old_note": "decision-tracker-orbit-core-1",
+      "new_note": "decision-tracker-orbit-core-2",
+      "effective_at": "2025-07-20T09:00:00Z"
+    },
+    {
+      "old_note": "decision-tracker-orbit-core-2",
+      "new_note": "decision-tracker-orbit-core-3",
+      "effective_at": "2025-10-21T09:00:00Z"
+    },
+    {
+      "old_note": "decision-office-sable-core-1",
+      "new_note": "decision-office-sable-core-2",
+      "effective_at": "2025-08-03T09:00:00Z"
+    },
+    {
+      "old_note": "decision-datastore-sable-core-1",
+      "new_note": "decision-datastore-sable-core-2",
+      "effective_at": "2025-04-21T09:00:00Z"
+    },
+    {
+      "old_note": "decision-datastore-sable-core-3",
+      "new_note": "decision-datastore-sable-core-4",
+      "effective_at": "2025-08-09T09:00:00Z"
+    },
+    {
+      "old_note": "decision-alerting-sable-core-1",
+      "new_note": "decision-alerting-sable-core-2",
+      "effective_at": "2025-07-12T09:00:00Z"
+    },
+    {
+      "old_note": "decision-tracker-juniper-core-1",
+      "new_note": "decision-tracker-juniper-core-2",
+      "effective_at": "2025-08-20T09:00:00Z"
+    },
+    {
+      "old_note": "decision-tracker-juniper-core-2",
+      "new_note": "decision-tracker-juniper-core-3",
+      "effective_at": "2025-10-02T09:00:00Z"
+    },
+    {
+      "old_note": "decision-tracker-juniper-core-4",
+      "new_note": "decision-tracker-juniper-core-5",
+      "effective_at": "2026-02-25T09:00:00Z"
+    },
+    {
+      "old_note": "decision-hosting-juniper-core-2",
+      "new_note": "decision-hosting-juniper-core-3",
+      "effective_at": "2025-09-28T09:00:00Z"
+    },
+    {
+      "old_note": "decision-hosting-basalt-core-2",
+      "new_note": "decision-hosting-basalt-core-3",
+      "effective_at": "2025-11-30T09:00:00Z"
+    },
+    {
+      "old_note": "decision-region-sable-core-1",
+      "new_note": "decision-region-sable-core-2",
+      "effective_at": "2025-04-12T09:00:00Z"
+    },
+    {
+      "old_note": "decision-region-sable-core-3",
+      "new_note": "decision-region-sable-core-4",
+      "effective_at": "2025-06-23T09:00:00Z"
+    },
+    {
+      "old_note": "decision-hosting-marlin-core-1",
+      "new_note": "decision-hosting-marlin-core-2",
+      "effective_at": "2025-09-26T09:00:00Z"
+    },
+    {
+      "old_note": "decision-hosting-marlin-core-3",
+      "new_note": "decision-hosting-marlin-core-4",
+      "effective_at": "2026-01-21T09:00:00Z"
+    },
+    {
+      "old_note": "decision-release-cedar-core-1",
+      "new_note": "decision-release-cedar-core-2",
+      "effective_at": "2025-06-11T09:00:00Z"
+    },
+    {
+      "old_note": "decision-tracker-basalt-core-1",
+      "new_note": "decision-tracker-basalt-core-2",
+      "effective_at": "2025-06-30T09:00:00Z"
+    },
+    {
+      "old_note": "decision-tracker-basalt-core-3",
+      "new_note": "decision-tracker-basalt-core-4",
+      "effective_at": "2025-09-30T09:00:00Z"
+    },
+    {
+      "old_note": "decision-tracker-basalt-core-4",
+      "new_note": "decision-tracker-basalt-core-5",
+      "effective_at": "2025-12-07T09:00:00Z"
+    },
+    {
+      "old_note": "decision-payments-marlin-core-1",
+      "new_note": "decision-payments-marlin-core-2",
+      "effective_at": "2025-08-19T09:00:00Z"
+    },
+    {
+      "old_note": "decision-support-hours-marlin-core-1",
+      "new_note": "decision-support-hours-marlin-core-2",
+      "effective_at": "2025-07-19T09:00:00Z"
+    },
+    {
+      "old_note": "decision-support-hours-marlin-core-2",
+      "new_note": "decision-support-hours-marlin-core-3",
+      "effective_at": "2025-09-18T09:00:00Z"
+    },
+    {
+      "old_note": "decision-hosting-orbit-core-1",
+      "new_note": "decision-hosting-orbit-core-2",
+      "effective_at": "2025-07-13T09:00:00Z"
+    },
+    {
+      "old_note": "decision-hosting-orbit-core-2",
+      "new_note": "decision-hosting-orbit-core-3",
+      "effective_at": "2025-08-26T09:00:00Z"
+    },
+    {
+      "old_note": "decision-region-lumen-core-1",
+      "new_note": "decision-region-lumen-core-2",
+      "effective_at": "2025-09-14T09:00:00Z"
+    },
+    {
+      "old_note": "decision-region-lumen-core-3",
+      "new_note": "decision-region-lumen-core-4",
+      "effective_at": "2026-01-31T09:00:00Z"
+    },
+    {
+      "old_note": "decision-datastore-basalt-core-1",
+      "new_note": "decision-datastore-basalt-core-2",
+      "effective_at": "2025-05-30T09:00:00Z"
+    },
+    {
+      "old_note": "decision-datastore-basalt-core-2",
+      "new_note": "decision-datastore-basalt-core-3",
+      "effective_at": "2025-07-15T09:00:00Z"
+    },
+    {
+      "old_note": "decision-datastore-basalt-core-4",
+      "new_note": "decision-datastore-basalt-core-5",
+      "effective_at": "2025-11-24T09:00:00Z"
+    },
+    {
+      "old_note": "decision-datastore-orbit-core-2",
+      "new_note": "decision-datastore-orbit-core-3",
+      "effective_at": "2025-06-09T09:00:00Z"
+    },
+    {
+      "old_note": "decision-office-lumen-core-2",
+      "new_note": "decision-office-lumen-core-3",
+      "effective_at": "2025-09-19T09:00:00Z"
+    },
+    {
+      "old_note": "decision-design-quill-core-1",
+      "new_note": "decision-design-quill-core-2",
+      "effective_at": "2025-07-23T09:00:00Z"
+    },
+    {
+      "old_note": "decision-design-quill-core-2",
+      "new_note": "decision-design-quill-core-3",
+      "effective_at": "2025-08-22T09:00:00Z"
+    },
+    {
+      "old_note": "decision-design-quill-core-3",
+      "new_note": "decision-design-quill-core-4",
+      "effective_at": "2025-09-22T09:00:00Z"
+    }
+  ]
+}

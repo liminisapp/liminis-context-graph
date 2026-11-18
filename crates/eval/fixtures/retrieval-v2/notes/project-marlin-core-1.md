@@ -1,0 +1,3 @@
+# Marlin Core — what we know
+
+Quick note for myself and for anyone else who asks, because I keep having to dig these details out of old threads: Marlin Core is the project that handles scheduling for us. The money side is simple enough, since Marlin Core runs on a monthly budget of $4,200, and it helps to remember that when someone floats a new idea that needs more spend. Marlin Core is owned by Tomas Kowalski, so he is the person to ask when something looks odd or when a decision needs a signature. The plan is for it to launch in March 2027, which still feels a long way off, though I suspect it will arrive quickly. That is the lot for now. The shared folder still needs tidying, but that is a separate job and, honestly, one for another day.

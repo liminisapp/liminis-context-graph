@@ -504,9 +504,15 @@ fn evidence_is_stated_in_its_note_and_passage_facts_sit_beyond_the_first_chunk()
                     let chunks = chunk_markdown(body, max);
                     assert!(chunks.len() >= 2, "{}: note fits in one chunk", q.id);
                     let a = anchor(&q.evidence[0].note, &q.evidence[0].key_fact);
+                    // The chunk carrying the fact's sentence (as check.rs locates it), not merely
+                    // the first one containing the value as a substring (`10` in `10 April 2025`).
+                    let kf = &q.evidence[0].key_fact;
                     let at = chunks
                         .iter()
-                        .position(|c| anchored(c, &a))
+                        .position(|c| {
+                            anchored(c, &a)
+                                && lcg_eval::retrieval::generator::questions::overlap(kf, c) >= 0.6
+                        })
                         .expect("fact is inside one chunk");
                     assert!(at >= 1, "{}: the answer is in the first chunk", q.id);
                 }

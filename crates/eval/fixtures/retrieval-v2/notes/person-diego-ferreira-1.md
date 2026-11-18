@@ -1,0 +1,3 @@
+# Diego Ferreira: working notes
+
+Diego Ferreira is the team member responsible for support, and I am jotting this down because people keep asking where he is based. His home office is Bergen, so plan calls with that in mind, especially when scheduling around the morning handover. Diego Ferreira started at the company in February 2026, and he has already picked up most of the queue conventions without much hand-holding. Worth remembering when we assign mentoring time: he is settled in, but still appreciates a quick check-in now and then. I will keep this page up to date as things change and move it into the directory once that is tidier.

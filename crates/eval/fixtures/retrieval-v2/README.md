@@ -1,14 +1,17 @@
-# retrieval-v2: a realistic notebook for `lcg-eval retrieval` (skeleton checked in; prose to be rendered)
+# retrieval-v2: a realistic notebook for `lcg-eval retrieval`
 
 A synthetic notebook (fictional "Meridian" cooperative) shaped like a Liminis workspace. It contains
 no real or private data. Design record: [ADR-0788](../../../../docs/adr/0788-retrieval-corpus-v2-and-bootstrap-reporting.md);
 usage and the full description: [docs/retrieval-quality-evaluation.md](../../../../docs/retrieval-quality-evaluation.md).
 The 31-note `../retrieval/` fixture (v1) stays beside it as the fast smoke corpus and never changes.
 
-**Status: skeleton only.** Structure is generated deterministically; the prose is rendered once by
-an LLM and checked in. No model key was available when this was implemented, so **the notes and
-question wordings have not been rendered yet** and `lcg-eval retrieval --corpus` stops with a message
-saying so. Rendering is a maintainer step (below). Template prose is never checked in.
+**Status: rendered, human review pending.** Structure is generated deterministically; the prose was
+rendered once by an LLM and is checked in (`render.json`: `claude-sonnet-5-5`, prompt
+`retrieval-v2-render-1`, 631 calls, 0 check errors). It was rendered through the offline exchange
+(`retrieval-render --export-prompts`, replies written by Claude Code subagents on a Claude subscription,
+then `--replies`), so no API key was used; the prompts are byte-identical to an API render. Three
+incidental sentences were reworded by hand after the first check run because they tripped the
+negative-question rule ("renewed the certificate", "people joined" ×2). Template prose is never checked in.
 
 | | |
 |---|---|
@@ -24,7 +27,7 @@ saying so. Rendering is a maintainer step (below). Template prose is never check
 scenario.json         generator input: seed and quotas (hand-edited)
 skeleton.json         generated: facts, origins, citations, sizes, supersessions, question ground truth
 review.json           human-review template (pending, empty verdicts)
---- written by `retrieval-render` (not present until a maintainer renders) ---
+--- written by `retrieval-render` ---
 manifest.json  notes/*.md  questions.jsonl  questions.meta.json  render.json
 cassette.jsonl        (optional, maintainer-recorded) ingest extraction cassette
 ```
@@ -38,6 +41,9 @@ target/release/lcg-eval retrieval-gen --check --spec crates/eval/fixtures/retrie
   --out crates/eval/fixtures/retrieval-v2
 # render the prose with an LLM (needs ANTHROPIC_API_KEY, ~630 calls; --dry-run shows the count)
 target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2
+# or, with no API key: export the prompts, write each reply to <replies>/<key>.md (e.g. with agents), import
+target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2 --export-prompts prompts.jsonl
+target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2 --replies <replies> --model <model that wrote them>
 # fix anything the checks flag by re-rendering just those ids
 target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2 --only <id>,<id>
 ```

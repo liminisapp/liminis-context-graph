@@ -486,6 +486,83 @@ pub async fn render_all(
     Ok((out, calls))
 }
 
+// ── offline exchange: prompts out, replies in ────────────────────────────────────
+
+/// Stable key for one model call: the reply file for this prompt is `<replies>/<key>.md`.
+pub fn call_key(system: &str, user: &str) -> String {
+    lcg_core::sha256_hex::sha256_hex(format!("{system}\u{0}{user}").as_bytes())[..16].to_string()
+}
+
+/// Every call a full render makes, in the order `render_all` makes them, as JSON lines
+/// (`key`, `kind`, `ids`, `section`, `system`, `user`, `max_tokens`). Lets the replies be written
+/// outside this process (for example by an agent with no API key) and read back with `--replies`.
+pub fn export_calls(sk: &Skeleton) -> Vec<Value> {
+    let mut out = Vec::new();
+    for n in &sk.notes {
+        for s in 0..n.sections.max(1) {
+            let (user, max) = note_prompt(n, (n.sections > 1).then_some(s));
+            out.push(
+                json!({"key": call_key(NOTE_SYSTEM, &user), "kind": "note", "ids": [n.id],
+                "section": s + 1, "sections": n.sections.max(1), "system": NOTE_SYSTEM,
+                "user": user, "max_tokens": max}),
+            );
+        }
+    }
+    let mut by_cat: BTreeMap<&str, Vec<&SkQuestion>> = BTreeMap::new();
+    for q in &sk.questions {
+        by_cat.entry(q.category.as_str()).or_default().push(q);
+    }
+    for v in by_cat.into_values() {
+        for b in v.chunks(QUESTION_BATCH) {
+            let (user, max) = questions_prompt(b);
+            let ids: Vec<&str> = b.iter().map(|q| q.id.as_str()).collect();
+            out.push(
+                json!({"key": call_key(QUESTION_SYSTEM, &user), "kind": "questions",
+                "ids": ids, "system": QUESTION_SYSTEM, "user": user, "max_tokens": max}),
+            );
+        }
+    }
+    out
+}
+
+/// A [`TextModel`] that answers from reply files written ahead of time (`<dir>/<key>.md`).
+pub struct FileText {
+    dir: std::path::PathBuf,
+    model: String,
+}
+
+impl FileText {
+    pub fn new(dir: &Path, model: String) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            model,
+        }
+    }
+}
+
+impl TextModel for FileText {
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn complete<'a>(
+        &'a self,
+        system: &'a str,
+        user: &'a str,
+        _max_tokens: u32,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            let p = self.dir.join(format!("{}.md", call_key(system, user)));
+            let t = std::fs::read_to_string(&p)
+                .map_err(|e| format!("no reply file {}: {e}", p.display()))?;
+            if t.trim().is_empty() {
+                return Err(format!("reply file {} is empty", p.display()));
+            }
+            Ok(t)
+        })
+    }
+}
+
 // ── CLI: retrieval-render ────────────────────────────────────────────────────────
 
 pub const USAGE: &str = "lcg-eval retrieval-render — render the retrieval-v2 prose with an LLM (a deliberate, paid, maintainer step)
@@ -507,6 +584,9 @@ OPTIONS:
     --resume             Keep notes already in <DIR>/notes (continue a crashed run)
     --only <IDS>         Re-render just these note or question ids (e.g. ones the checks flagged)
     --dry-run            Print how many model calls the run would make and exit (no key needed)
+    --export-prompts <F> Write every call's prompt to F as JSON lines (key, system, user, ...) and exit
+    --replies <DIR>      Read each reply from DIR/<key>.md instead of calling the API (no key needed);
+                         --model then names the model that wrote the replies
     -h, --help           Print this help
 
 Re-rendering changes the corpus: bump corpus_version and questions_version in scenario.json,
@@ -637,6 +717,8 @@ async fn run(args: &[String]) -> Result<i32, String> {
         only: None,
     };
     let mut dry = false;
+    let mut export: Option<String> = None;
+    let mut replies: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -646,7 +728,8 @@ async fn run(args: &[String]) -> Result<i32, String> {
             }
             "--resume" => o.resume = true,
             "--dry-run" => dry = true,
-            flag @ ("--dir" | "--model" | "--concurrency" | "--only") => {
+            flag @ ("--dir" | "--model" | "--concurrency" | "--only" | "--export-prompts"
+            | "--replies") => {
                 i += 1;
                 let v = args
                     .get(i)
@@ -654,6 +737,8 @@ async fn run(args: &[String]) -> Result<i32, String> {
                 match flag {
                     "--dir" => dir = Some(v.clone()),
                     "--model" => model = v.clone(),
+                    "--export-prompts" => export = Some(v.clone()),
+                    "--replies" => replies = Some(v.clone()),
                     "--concurrency" => {
                         o.concurrency = v
                             .parse()
@@ -684,6 +769,12 @@ async fn run(args: &[String]) -> Result<i32, String> {
     let sk = Skeleton::from_json(&skeleton_text)?;
     if let Some(only) = &o.only {
         check_only_ids(&sk, only)?;
+    }
+    if let Some(f) = &export {
+        let lines: Vec<String> = export_calls(&sk).iter().map(|v| v.to_string()).collect();
+        std::fs::write(f, lines.join("\n") + "\n").map_err(|e| format!("{f}: {e}"))?;
+        println!("retrieval-render: wrote {} prompts to {f}", lines.len());
+        return Ok(0);
     }
     let existing = if o.resume || o.only.is_some() {
         check::load_rendered_partial(dir)
@@ -749,10 +840,15 @@ async fn run(args: &[String]) -> Result<i32, String> {
     if dry {
         return Ok(0);
     }
-    let key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-        "ANTHROPIC_API_KEY is not set: rendering calls a model and is a deliberate maintainer step".to_string()
-    })?;
-    let client = AnthropicText::new(key, model.clone());
+    let client: Box<dyn TextModel> = match &replies {
+        Some(r) => Box::new(FileText::new(Path::new(r), model.clone())),
+        None => {
+            let key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
+                "ANTHROPIC_API_KEY is not set: rendering calls a model and is a deliberate maintainer step".to_string()
+            })?;
+            Box::new(AnthropicText::new(key, model.clone()))
+        }
+    };
     std::fs::create_dir_all(dir.join("notes")).map_err(|e| e.to_string())?;
     // Recorded before the first model call so a crashed run can be resumed only by the same
     // model, prompt and skeleton. Removed once render.json takes over.
@@ -773,7 +869,7 @@ async fn run(args: &[String]) -> Result<i32, String> {
             format!("{}\n", body.trim_end()),
         );
     };
-    let (rendered, calls) = render_all(&sk, &client, existing, &o, &on_note).await?;
+    let (rendered, calls) = render_all(&sk, client.as_ref(), existing, &o, &on_note).await?;
     let meta = RenderMeta {
         render_model: model,
         prompt_version: PROMPT_VERSION.to_string(),

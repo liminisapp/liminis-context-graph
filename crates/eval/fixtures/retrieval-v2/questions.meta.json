@@ -1,0 +1,6 @@
+{
+  "questions_version": "meridian-questions-2",
+  "render_model": "claude-sonnet-5-5",
+  "prompt_version": "retrieval-v2-render-1",
+  "skeleton_hash": "72bc7df796c784c9"
+}
