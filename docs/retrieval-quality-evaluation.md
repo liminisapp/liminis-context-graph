@@ -23,10 +23,12 @@ It is a separate mode of the existing `lcg-eval` binary. The extraction eval
 
 | Configuration | What runs |
 |---|---|
-| `lcg-passages` | `knowledge_search_passages`. **Vector-only**: this method does no FTS and no RRF. |
+| `lcg-passages` | `knowledge_search_passages` with `mode: "vector"` sent explicitly. **Vector-only**: no FTS and no RRF. Pinned, so it stays a stable baseline whatever the service default is. |
 | `lcg-entities-facts` | `knowledge_find_entities` + `knowledge_find_relationships` (hybrid FTS + vector, RRF), default reads. k is split across the two reads (`ceil(k/2)` entities + `ceil(k/2)` facts) and the ranks are interleaved. |
 | `qmd` | `qmd query --no-rerank` (query expansion on). |
 | `qmd-rerank` | `qmd query` with its LLM reranker. |
+| `lcg-passages-hybrid-rrf` | *Opt-in (#789), not in the default run.* `knowledge_search_passages` with `mode: "hybrid"`, `top_rank_bonus: false`: BM25 over episode text + vector, plain RRF. |
+| `lcg-passages-hybrid-bonus` | *Opt-in (#789).* As above with `top_rank_bonus: true` (the default). Comparing the three `lcg-passages*` rows shows what RRF fusion and the top-rank bonus each add, per category. |
 | `lcg-entities-facts-belief` | *Extra, clearly labelled variant.* As `lcg-entities-facts`, but facts are read with `believed_only=true`. |
 
 Fact reads carry no `episodes` field: the harness maps each fact to its producing notes through

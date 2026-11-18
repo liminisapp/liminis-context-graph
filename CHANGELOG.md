@@ -22,6 +22,16 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- **Hybrid passage search: `knowledge_search_passages` `mode` and `top_rank_bonus` (#789,
+  ADR-0789).** `mode: "hybrid"` fuses BM25 over episode text (the existing `episode_content`
+  full-text index) with the vector ranking by Reciprocal Rank Fusion and adds a qmd-style top-rank
+  bonus (`top_rank_bonus: false` for plain RRF). `mode: "vector"` is the unchanged previous
+  behaviour. In hybrid mode `score` is the fused rank score and a new `similarity` field carries the
+  cosine where the vector retriever matched; `min_score` floors only the vector retriever.
+  `group_ids` and `origins` apply to both retrievers; a missing full-text index falls back to
+  vector-only. **The default stays `vector`** (set `LCG_PASSAGE_SEARCH_MODE=hybrid` to change it)
+  until the v2/v1 retrieval eval has been run on a real embedder. New opt-in eval configurations
+  `lcg-passages-hybrid-rrf` and `lcg-passages-hybrid-bonus`; `lcg-passages` now pins `mode: "vector"`.
 - **Document mode: `knowledge_process_document` (write) and `knowledge_preview_chunks` (read)
   (#785, ADR-0785, slice 1 of #733).** Send a whole document as a completeness claim; the server
   chunks it by section, skips unchanged sections by content hash (an identical resubmission makes
