@@ -26,7 +26,8 @@ type UnixStream = tokio::io::DuplexStream;
 
 use super::fixture::Fixture;
 use super::mapping::{
-    chunk_markdown, edge_groups, entity_groups, map_edges, map_entities, map_passages,
+    chunk_markdown, edge_groups, edge_producers, entity_groups, map_edges, map_entities,
+    map_passages,
 };
 use super::{RankedResult, Retriever};
 
@@ -569,7 +570,7 @@ impl Retriever for LcgEntitiesFacts {
     fn description(&self) -> String {
         format!(
             "knowledge_find_entities + knowledge_find_relationships (hybrid, RRF), min_similarity=0, {}; k split across the two reads (ceil(k/2) each), ranks interleaved",
-            if self.belief { "facts read with believed_only=true" } else { "default reads" }
+            if self.belief { "facts read with believed_only=true" } else { "default reads (facts read annotation-only, believed_only=false, for provenance)" }
         )
     }
     fn retrieve<'a>(&'a self, q: &'a str, k: usize) -> BoxFuture<'a, Result<RankedResult, String>> {
@@ -585,10 +586,12 @@ impl Retriever for LcgEntitiesFacts {
                     json!({"query": q, "num_results": per_read, "min_similarity": 0.0, "group_ids": [EVAL_GROUP]}),
                 )
                 .await?;
-            let mut fact_params = json!({"query": q, "num_results": per_read, "min_similarity": 0.0, "group_ids": [EVAL_GROUP]});
-            if self.belief {
-                fact_params["believed_only"] = json!(true);
-            }
+            // The belief parameter is always sent: it is what makes the read carry
+            // `belief.producing_episode_uuids`, the only edge→episode provenance these reads
+            // return (issue #787). `false` annotates without filtering, so the non-belief
+            // configuration's results are unchanged.
+            let fact_params = json!({"query": q, "num_results": per_read, "min_similarity": 0.0,
+                "group_ids": [EVAL_GROUP], "believed_only": self.belief});
             let facts = self
                 .t
                 .call("knowledge_find_relationships", fact_params)
@@ -607,7 +610,10 @@ impl Retriever for LcgEntitiesFacts {
                 let t1 = Instant::now();
                 let r = self
                     .t
-                    .call("knowledge_get_edges_by_uuids", json!({"uuids": unmapped}))
+                    .call(
+                        "knowledge_get_edges_by_uuids",
+                        json!({"uuids": unmapped, "believed_only": false}),
+                    )
                     .await?;
                 latency += t1.elapsed();
                 lookup_calls = 1;
@@ -616,8 +622,9 @@ impl Retriever for LcgEntitiesFacts {
                     .filter_map(|e| Some((e["uuid"].as_str()?.to_string(), e)))
                     .collect();
                 for e in edges.iter_mut() {
-                    if e["episodes"].as_array().is_none_or(Vec::is_empty) {
+                    if edge_producers(e).is_empty() {
                         if let Some(f) = e["uuid"].as_str().and_then(|u| fetched.get(u)) {
+                            e["belief"] = f["belief"].clone();
                             e["episodes"] = f["episodes"].clone();
                         }
                     }
@@ -742,6 +749,34 @@ mod tests {
         m.entity_notes
             .insert("e1".into(), ["note-b".to_string()].into_iter().collect());
         Arc::new(m)
+    }
+
+    /// Issue #787: the service returns no `episodes` on fact reads; provenance is
+    /// `belief.producing_episode_uuids`, which is only present when a belief param is sent — so the
+    /// default configuration must send `believed_only: false` (annotate, don't filter).
+    #[tokio::test]
+    async fn facts_are_mapped_through_belief_provenance_and_default_config_annotates() {
+        let t = Arc::new(FakeTransport::new(|m, _| match m {
+            "knowledge_find_entities" => Ok(json!({"nodes":[]})),
+            "knowledge_find_relationships" => Ok(json!({"edges":[
+                {"uuid":"f1","fact":"F","episode_uuids":[],
+                 "belief":{"believed":true,"producing_episode_uuids":["ep1"]}}]})),
+            other => Err(format!("unexpected {other}")),
+        }));
+        let rt = LcgEntitiesFacts {
+            t: t.clone(),
+            map: map(),
+            belief: false,
+        };
+        let r = rt.retrieve("q", 5).await.unwrap();
+        assert_eq!(r.notes, vec!["note-a"]);
+        assert_eq!(r.lookup_calls, 0, "no fallback lookup needed");
+        let log = t.log.lock().unwrap();
+        let fact_call = log
+            .iter()
+            .find(|(m, _)| m == "knowledge_find_relationships")
+            .unwrap();
+        assert_eq!(fact_call.1["believed_only"], false);
     }
 
     #[tokio::test]
