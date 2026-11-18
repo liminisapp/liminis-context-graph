@@ -78,6 +78,23 @@ stamping and mismatch detection for exactly this case (`knowledge_status`'s
 [Operations: `knowledge_status` health fields](operations.md#knowledge_status-health-fields)
 for the full mechanics.
 
+## Recommended instruction profile per embedder
+
+Asymmetric models want a role prefix on queries (and sometimes documents). LCG adds it when you
+select an [instruction profile](configuration.md#embedding-instruction-profiles); the default
+`none` changes nothing.
+
+| Embedder / model | Recommended `LCG_EMBEDDING_PROFILE` | Re-embed to adopt it on an existing workspace? |
+|---|---|---|
+| Ollama `nomic-embed-text` v1.5 | `nomic-v1.5` | **Yes** (document prefix) |
+| e5 family | `e5` | **Yes** (document prefix) |
+| Swift CoreML sidecar (BGE-base-en-v1.5) | `none` by default; `bge-v1.5` or `embedder` available | No (query instruction only) |
+| Hosted OpenAI models, other symmetric models | `none` | n/a |
+
+BGE's query instruction showed no clear gain on the v1 retrieval fixture (see the
+[configuration note](configuration.md#does-the-bge-instruction-help)), so it is available but not
+the default. LCG does not validate that a profile suits the configured model.
+
 ## Embedding is not extraction
 
 This page is about **embedding** — the `--embedder-uds`/`--embedder-http` flags above. It has

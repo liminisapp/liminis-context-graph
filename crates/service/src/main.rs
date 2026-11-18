@@ -22,7 +22,7 @@ use lcg_core::{
     db::Db,
     embedder::{
         is_auth_error, is_transport_error, redact_url_userinfo, resolve_embedding_api_key,
-        Embedder, OaiEmbedder, UnconfiguredEmbedder, EMBEDDER_UNREACHABLE_DEGRADED_REASON,
+        InstructionConfig, OaiEmbedder, UnconfiguredEmbedder, EMBEDDER_UNREACHABLE_DEGRADED_REASON,
     },
     env::lcg_env_var,
     error::Error as CoreError,
@@ -181,6 +181,8 @@ enum ProbeOutcome {
         embedding_dim: usize,
         embedding_model_probed: String,
         embedding_api_key: Option<String>,
+        /// The embedder's role-support advertisement (#790); `None` if it advertised nothing.
+        advert: Option<lcg_core::EmbedderAdvert>,
     },
     Fatal(String),
     Retryable(String),
@@ -306,7 +308,11 @@ async fn resolve_and_probe_embedder(
     };
 
     match probe_embedder.probe().await {
-        Ok((embedding_dim, embedding_model_probed)) => {
+        Ok(lcg_core::EmbedderInfo {
+            dim: embedding_dim,
+            model: embedding_model_probed,
+            advert,
+        }) => {
             eprintln!(
                 "embedder: transport={transport_label}, endpoint={endpoint}, dim={embedding_dim}"
             );
@@ -315,6 +321,7 @@ async fn resolve_and_probe_embedder(
                 embedding_dim,
                 embedding_model_probed,
                 embedding_api_key,
+                advert,
             }
         }
         Err(e) if is_transport_error(&e) => {
@@ -354,6 +361,7 @@ async fn resolve_and_probe_embedder(
                     embedding_dim: dim,
                     embedding_model_probed: embedder_model.to_string(),
                     embedding_api_key,
+                    advert: None,
                 }
             } else {
                 ProbeOutcome::Fatal(scrub_url(format!(
@@ -438,6 +446,10 @@ async fn bootstrap_app_state(
     let embedder_model = lcg_env_var("LCG_EMBEDDING_MODEL", "GRAPHITI_EMBEDDING_MODEL")
         .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
 
+    // Instruction profile + prefix overrides (#790). Parsed before any probe so an unknown profile
+    // name fails fast with the list of valid names (FR-006).
+    let instruction_config = InstructionConfig::from_env()?;
+
     // Dim override — used as fallback if probe fails (FR-008)
     let embedding_dim_override: Option<usize> =
         lcg_env_var("LCG_EMBEDDING_DIM", "GRAPHITI_EMBEDDING_DIM")
@@ -451,7 +463,7 @@ async fn bootstrap_app_state(
     // loop only actually iterates more than once when standalone `--mcp-stdio` is retrying.
     let retry_deadline = std::time::Instant::now() + EMBEDDER_RETRY_CEILING;
     let mut backoff = EMBEDDER_RETRY_INITIAL_BACKOFF;
-    let (resolved, embedding_dim, embedding_model_probed, embedding_api_key) = loop {
+    let (resolved, embedding_dim, embedding_model_probed, embedding_api_key, embedder_advert) = loop {
         // Bound each attempt to the time remaining in the window, not just the inter-attempt
         // backoff: neither transport's client (reqwest::Client::new() nor the UDS hyper pool)
         // has a request timeout configured, so a connection that stalls after being accepted —
@@ -485,12 +497,14 @@ async fn bootstrap_app_state(
                 embedding_dim,
                 embedding_model_probed,
                 embedding_api_key,
+                advert,
             } => {
                 break (
                     resolved,
                     embedding_dim,
                     embedding_model_probed,
                     embedding_api_key,
+                    advert,
                 )
             }
             ProbeOutcome::Fatal(msg) => return Err(msg.into()),
@@ -544,19 +558,40 @@ async fn bootstrap_app_state(
         }
     };
 
-    // Build the final embedder with the correct probed dim
-    let embedder: Arc<dyn Embedder> = match &resolved {
-        ResolvedTransport::Http(url) => Arc::new(
+    // Resolve who applies the instruction, once (#790): LCG (decorator installed, `input_type`
+    // never sent), the embedder (`input_type` sent, no decorator), or nobody. Exactly one
+    // applier is ever active, so a text can never receive two instructions.
+    let oai = match &resolved {
+        ResolvedTransport::Http(url) => {
             OaiEmbedder::new_http(url.clone(), embedding_model_probed.clone(), embedding_dim)?
-                .with_api_key(embedding_api_key.clone()),
-        ),
+                .with_api_key(embedding_api_key.clone())
+        }
         #[cfg(unix)]
-        ResolvedTransport::Uds(path) => Arc::new(OaiEmbedder::new_uds(
-            path.clone(),
-            embedding_model_probed.clone(),
-            embedding_dim,
-        )?),
+        ResolvedTransport::Uds(path) => {
+            OaiEmbedder::new_uds(path.clone(), embedding_model_probed.clone(), embedding_dim)?
+        }
     };
+    let (embedder, instructions) = lcg_core::embedder::build_embedder_stack(
+        oai,
+        &instruction_config,
+        embedder_advert.as_ref(),
+    )?;
+    if instruction_config.profile == lcg_core::InstructionProfile::Embedder
+        && instructions.source == lcg_core::InstructionSource::None
+    {
+        eprintln!(
+            "liminis-context-graph: LCG_EMBEDDING_PROFILE=embedder but the embedder did not \
+             advertise role support (no `instruction_roles` in its response); falling back to \
+             profile `none`."
+        );
+    }
+    eprintln!(
+        "embedder instructions: profile={}, applied_by={}, query_prefix={:?}, document_prefix={:?}",
+        instructions.profile.as_str(),
+        instructions.source.as_str(),
+        instructions.query_prefix,
+        instructions.document_prefix
+    );
 
     // Content-addressed embedding cache (issue #440, FR-003) — constructed once, right after the
     // embedder is resolved/probed, and threaded into both the startup recovery call below and

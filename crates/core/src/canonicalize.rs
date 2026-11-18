@@ -21,6 +21,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     app_state::AppState,
     db::{cosine_similarity, value_as_string},
+    embedder::EmbedRole,
     error::Error,
     ontology::{normalize_relation_type, Ontology},
     wal_exec,
@@ -345,7 +346,7 @@ pub async fn canonicalize_relations(
             );
         } else {
             for (name, desc) in &types_with_desc {
-                match state.embedder.embed(desc).await {
+                match state.embedder.embed(desc, EmbedRole::Document).await {
                     Ok(emb) => result.push((name.clone(), emb)),
                     Err(e) => {
                         embedding_skip_warning =
@@ -376,7 +377,7 @@ pub async fn canonicalize_relations(
             if fact.is_empty() {
                 continue;
             }
-            match state.embedder.embed(&fact).await {
+            match state.embedder.embed(&fact, EmbedRole::Document).await {
                 Ok(fact_emb) => {
                     let best = gloss_embeddings
                         .iter()

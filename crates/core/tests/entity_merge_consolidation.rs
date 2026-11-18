@@ -245,7 +245,10 @@ fn stored_summary(db: &Db) -> String {
 /// nearest neighbour of `embed(summary)` is the entity at (near-)zero cosine distance. Needs the
 /// summary index to exist (it does for the live DB; the rebuilt DB creates it first).
 async fn assert_embedding_matches(db: &Db, embedder: &dyn Embedder, summary: &str) {
-    let v = embedder.embed(summary).await.unwrap();
+    let v = embedder
+        .embed(summary, lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
     let lit = format!(
         "[{}]",
         v.iter()
@@ -290,8 +293,9 @@ async fn rebuild_from_wal(
         {
             let conn = db.connect().unwrap();
             conn.init_schema(DIM).unwrap();
-            let embed_fn: lcg_core::replay::RecomputeEmbedFn =
-                Box::new(move |texts: &[&str]| handle.block_on(embedder.embed_batch(texts)));
+            let embed_fn: lcg_core::replay::RecomputeEmbedFn = Box::new(move |texts: &[&str]| {
+                handle.block_on(embedder.embed_batch(texts, lcg_core::EmbedRole::Document))
+            });
             let stats = WalReplayer::new(&wal_dir)
                 .replay(&conn, embed_fn, DIM)
                 .expect("replay succeeds");

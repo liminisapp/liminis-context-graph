@@ -115,6 +115,10 @@ pub struct WalPositionRecord {
     /// The embedding vector dimension paired with `embedding_model`. Always `Some` exactly when
     /// `embedding_model` is `Some` — both are written together by `set_wal_position`.
     pub embedding_dim: Option<i64>,
+    /// The effective **document** prefix the group's stored vectors were computed under (issue
+    /// #790, FR-008). `None` — a pre-#790 row, or no identity recorded — is read as the empty
+    /// prefix by every comparison (FR-011), so upgrading under profile `none` is a `match`.
+    pub embedding_doc_prefix: Option<String>,
 }
 
 /// A chunk's live same-named episodes, partitioned by attribution (issue #292, ADR-0292).
@@ -396,9 +400,7 @@ impl Db {
                     crate::wal_group::DEFAULT_GROUP_ID,
                     seq,
                     generation.as_deref(),
-                    embedding_identity
-                        .as_ref()
-                        .map(|(model, dim)| (model.as_str(), *dim)),
+                    embedding_identity.as_ref(),
                 ) {
                     eprintln!(
                         "liminis-context-graph: open_or_rebuild: failed to persist applied_seq={seq} (non-fatal): {e}"
@@ -480,11 +482,23 @@ fn build_sync_recompute_fn(
         .map_err(|e| Error::Ipc(format!("failed to build embedding-recompute runtime: {e}")))?;
     let embedder = Arc::clone(&ctx.embedder);
     let cache = Arc::clone(&ctx.cache);
-    let (model, dim) = ctx.identity();
+    let crate::embedding_cache::EmbeddingIdentity {
+        model,
+        dim,
+        doc_prefix,
+    } = ctx.identity();
+    // Everything recomputed on replay is stored text: always the Document role (#790).
     Ok(Box::new(move |texts: &[&str]| {
-        cache.get_or_compute_batch(&model, dim, texts, |miss_texts| {
-            rt.block_on(embedder.embed_batch(miss_texts))
-        })
+        cache.get_or_compute_batch(
+            &model,
+            dim,
+            crate::embedder::EmbedRole::Document,
+            &doc_prefix,
+            texts,
+            |miss_texts| {
+                rt.block_on(embedder.embed_batch(miss_texts, crate::embedder::EmbedRole::Document))
+            },
+        )
     }))
 }
 
@@ -4340,11 +4354,20 @@ impl<'db> Conn<'db> {
     /// compared against another group's row (FR-008 of #378) — this always reads exactly one
     /// group's `WalPosition` row, selected by its primary key.
     pub fn get_wal_position(&self, group_id: &str) -> Result<WalPositionRecord, Error> {
-        let rows = self.query_params(
+        const Q: &str =
             "MATCH (w:WalPosition {id: $group_id}) RETURN w.applied_seq, w.generation, \
-             w.embedding_model, w.embedding_dim",
-            serde_json::json!({ "group_id": group_id }),
-        )?;
+             w.embedding_model, w.embedding_dim, w.embedding_doc_prefix";
+        let params = serde_json::json!({ "group_id": group_id });
+        let rows = match self.query_params(Q, params.clone()) {
+            Ok(rows) => rows,
+            // A database opened without `init_schema` (a legacy file reached by a path that
+            // bypasses the open-time migration) lacks the #790 column: add it and retry once.
+            Err(e) if e.to_string().contains("embedding_doc_prefix") => {
+                self.ensure_wal_position_doc_prefix_column();
+                self.query_params(Q, params)?
+            }
+            Err(e) => return Err(e),
+        };
         Ok(rows
             .into_iter()
             .next()
@@ -4353,6 +4376,7 @@ impl<'db> Conn<'db> {
                 generation: value_as_optional_string(&row[1]),
                 embedding_model: value_as_optional_string(&row[2]),
                 embedding_dim: value_as_optional_u64(&row[3]).map(|d| d as i64),
+                embedding_doc_prefix: value_as_optional_string(&row[4]),
             })
             .unwrap_or_default())
     }
@@ -4378,16 +4402,31 @@ impl<'db> Conn<'db> {
         group_id: &str,
         seq: u64,
         generation: Option<&str>,
-        embedding_identity: Option<(&str, i64)>,
+        embedding_identity: Option<&crate::embedding_cache::EmbeddingIdentity>,
     ) -> Result<(), Error> {
-        let mut prepared = self.inner.prepare(
-            "MERGE (w:WalPosition {id: $group_id}) SET w.applied_seq = $seq, \
+        const SET_Q: &str = "MERGE (w:WalPosition {id: $group_id}) SET w.applied_seq = $seq, \
              w.generation = $generation, w.embedding_model = $embedding_model, \
-             w.embedding_dim = $embedding_dim",
-        )?;
-        let (embedding_model, embedding_dim) = match embedding_identity {
-            Some((model, dim)) => (Value::String(model.to_string()), Value::Int64(dim)),
-            None => (Value::Null(LogicalType::Any), Value::Null(LogicalType::Any)),
+             w.embedding_dim = $embedding_dim, w.embedding_doc_prefix = $embedding_doc_prefix";
+        let mut prepared = match self.inner.prepare(SET_Q) {
+            Ok(p) => p,
+            // See `get_wal_position`: self-heal a pre-#790 schema, then retry once.
+            Err(e) if e.to_string().contains("embedding_doc_prefix") => {
+                self.ensure_wal_position_doc_prefix_column();
+                self.inner.prepare(SET_Q)?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let (embedding_model, embedding_dim, embedding_doc_prefix) = match embedding_identity {
+            Some(id) => (
+                Value::String(id.model.clone()),
+                Value::Int64(id.dim),
+                Value::String(id.doc_prefix.clone()),
+            ),
+            None => (
+                Value::Null(LogicalType::Any),
+                Value::Null(LogicalType::Any),
+                Value::Null(LogicalType::Any),
+            ),
         };
         let bound: Vec<(&str, Value)> = vec![
             ("group_id", Value::String(group_id.to_string())),
@@ -4401,9 +4440,78 @@ impl<'db> Conn<'db> {
             ),
             ("embedding_model", embedding_model),
             ("embedding_dim", embedding_dim),
+            ("embedding_doc_prefix", embedding_doc_prefix),
         ];
         self.inner.execute(&mut prepared, bound)?;
         Ok(())
+    }
+
+    /// Adds `WalPosition.embedding_doc_prefix` if a legacy schema lacks it (issue #790). Goes
+    /// through `inner.query` directly so the DDL is never recorded into `executed_mutations` and
+    /// re-logged to the WAL. Best-effort: a failure surfaces on the retried statement.
+    fn ensure_wal_position_doc_prefix_column(&self) {
+        if self
+            .inner
+            .query("MATCH (n:WalPosition) WHERE n.id = '_probe_' RETURN n.embedding_doc_prefix LIMIT 0")
+            .is_err()
+        {
+            let _ = self
+                .inner
+                .query("ALTER TABLE WalPosition ADD embedding_doc_prefix STRING");
+        }
+    }
+
+    /// The live-write variant of [`Self::set_wal_position`] (issue #790, SC-004): stamps
+    /// `running` like every other write, **except** that a *recorded, different* document prefix
+    /// is preserved rather than overwritten.
+    ///
+    /// Why: after `none` → `nomic-v1.5` the workspace holds vectors computed under the old
+    /// prefix. If the first live write re-stamped the new prefix, `embedding_model_status` would
+    /// flip to `match` and old- and new-prefix vectors would be served as one consistent index
+    /// with nothing surfacing it. Only a rebuild/replay (which recomputes every vector and calls
+    /// [`Self::set_wal_position`] directly) is allowed to claim the new prefix. Model name and
+    /// dimension keep their existing best-effort restamp behaviour.
+    ///
+    /// A row with no recorded model/dim and nothing applied (a fresh group, or one reset to
+    /// `applied_seq = 0`) is stamped normally: there are no stored vectors to protect. A NULL
+    /// recorded prefix on a row that does have a model/dim is a pre-#790 row and is read as the
+    /// empty prefix.
+    ///
+    /// An *unknown* row that already has applied content (`applied_seq > 0` but no recorded
+    /// model/dim — pre-#440, or its identity was cleared by a replay whose recompute failed)
+    /// holds vectors of unknown provenance. Before #790 no document prefix existed, so they can
+    /// only have been produced unprefixed: when the running document prefix is non-empty it is
+    /// therefore *not* claimed, and the row records the empty prefix instead, so the status stays
+    /// `mismatch` until a rebuild recomputes the vectors. With an empty running prefix nothing
+    /// changes (NULL and `""` compare equal).
+    pub fn set_wal_position_live(
+        &self,
+        group_id: &str,
+        seq: u64,
+        generation: Option<&str>,
+        running: &crate::embedding_cache::EmbeddingIdentity,
+    ) -> Result<(), Error> {
+        let recorded = self.get_wal_position(group_id)?;
+        let to_write = if recorded.embedding_model.is_some() && recorded.embedding_dim.is_some() {
+            let recorded_prefix = recorded.embedding_doc_prefix.as_deref().unwrap_or("");
+            crate::embedding_cache::EmbeddingIdentity {
+                model: running.model.clone(),
+                dim: running.dim,
+                doc_prefix: if recorded_prefix == running.doc_prefix {
+                    running.doc_prefix.clone()
+                } else {
+                    recorded_prefix.to_string()
+                },
+            }
+        } else if matches!(recorded.applied_seq, Some(n) if n > 0) {
+            crate::embedding_cache::EmbeddingIdentity {
+                doc_prefix: String::new(),
+                ..running.clone()
+            }
+        } else {
+            running.clone()
+        };
+        self.set_wal_position(group_id, seq, generation, Some(&to_write))
     }
 
     /// One-time migration (issue #378 FR-001/FR-009): carries a pre-378 database's
@@ -6085,6 +6193,190 @@ mod applied_seq_tests {
             conn.count_nodes("WalPosition").unwrap(),
             1,
             "MERGE must not create a second WalPosition row"
+        );
+    }
+
+    fn ident(model: &str, dim: i64, prefix: &str) -> crate::embedding_cache::EmbeddingIdentity {
+        crate::embedding_cache::EmbeddingIdentity {
+            model: model.to_string(),
+            dim,
+            doc_prefix: prefix.to_string(),
+        }
+    }
+
+    /// #790 FR-008: the document prefix round-trips through the WalPosition row.
+    #[test]
+    fn wal_position_round_trips_doc_prefix() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_wal_position("g", 1, None, Some(&ident("m", 4, "search_document: ")))
+            .unwrap();
+        let rec = conn.get_wal_position("g").unwrap();
+        assert_eq!(rec.embedding_model.as_deref(), Some("m"));
+        assert_eq!(rec.embedding_dim, Some(4));
+        assert_eq!(
+            rec.embedding_doc_prefix.as_deref(),
+            Some("search_document: ")
+        );
+
+        // Explicit-clear semantics: None identity clears the prefix too.
+        conn.set_wal_position("g", 2, None, None).unwrap();
+        assert_eq!(
+            conn.get_wal_position("g").unwrap().embedding_doc_prefix,
+            None
+        );
+    }
+
+    /// A legacy `WalPosition` table without `embedding_doc_prefix` (reached by a path that bypasses
+    /// the open-time migration) self-heals on first use instead of failing every position read.
+    #[test]
+    fn wal_position_self_heals_a_pre_790_schema() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.raw_query(
+            "CREATE NODE TABLE WalPosition (id STRING PRIMARY KEY, applied_seq INT64, \
+             generation STRING, embedding_model STRING, embedding_dim INT64)",
+        )
+        .unwrap();
+        // Read on the legacy schema works (adds the column), and a write then round-trips.
+        assert_eq!(
+            conn.get_wal_position("g").unwrap(),
+            WalPositionRecord::default()
+        );
+        conn.set_wal_position("g", 3, None, Some(&ident("m", 4, "p: ")))
+            .unwrap();
+        let rec = conn.get_wal_position("g").unwrap();
+        assert_eq!(rec.applied_seq, Some(3));
+        assert_eq!(rec.embedding_doc_prefix.as_deref(), Some("p: "));
+    }
+
+    /// #790 SC-004: a live write must not silently re-stamp a recorded, different document
+    /// prefix; a rebuild (plain `set_wal_position`) is what claims the new prefix.
+    #[test]
+    fn live_stamp_preserves_a_differing_recorded_doc_prefix() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        // Recorded under profile `none` (empty prefix).
+        conn.set_wal_position("g", 1, None, Some(&ident("m", 4, "")))
+            .unwrap();
+        // Process now runs nomic-v1.5; an ordinary write advances the position.
+        let running = ident("m", 4, "search_document: ");
+        conn.set_wal_position_live("g", 2, None, &running).unwrap();
+        let rec = conn.get_wal_position("g").unwrap();
+        assert_eq!(
+            rec.applied_seq,
+            Some(2),
+            "the position itself still advances"
+        );
+        // (An empty string reads back as `None` via `value_as_optional_string`; both mean "".)
+        assert_eq!(
+            rec.embedding_doc_prefix.as_deref().unwrap_or(""),
+            "",
+            "recorded (old) prefix must survive a live write so the mismatch stays surfaced"
+        );
+        // A rebuild stamps the running identity and clears the mismatch.
+        conn.set_wal_position("g", 3, None, Some(&running)).unwrap();
+        assert_eq!(
+            conn.get_wal_position("g")
+                .unwrap()
+                .embedding_doc_prefix
+                .as_deref(),
+            Some("search_document: ")
+        );
+    }
+
+    /// #790 SC-004 (unknown-identity case): a row with applied content but no recorded identity
+    /// (pre-#440, or cleared by a replay with a failed recompute) must not have a non-empty
+    /// document prefix claimed by an ordinary write — its vectors were produced unprefixed.
+    #[test]
+    fn live_stamp_does_not_claim_a_prefix_over_unknown_applied_content() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        let running = ident("m", 4, "search_document: ");
+        let prefix_of = |g: &str| {
+            conn.get_wal_position(g)
+                .unwrap()
+                .embedding_doc_prefix
+                .unwrap_or_default()
+        };
+
+        // Content applied, identity cleared (`None`): the stamp records the model/dim but keeps
+        // the prefix empty, so status against the running prefix is a mismatch.
+        conn.set_wal_position("cleared", 5, None, None).unwrap();
+        conn.set_wal_position_live("cleared", 6, None, &running)
+            .unwrap();
+        let rec = conn.get_wal_position("cleared").unwrap();
+        assert_eq!(rec.applied_seq, Some(6));
+        assert_eq!(rec.embedding_model.as_deref(), Some("m"));
+        assert_eq!(prefix_of("cleared"), "");
+
+        // Nothing applied (reset to 0): no vectors to protect, so the prefix is claimed.
+        conn.set_wal_position("reset", 0, None, None).unwrap();
+        conn.set_wal_position_live("reset", 1, None, &running)
+            .unwrap();
+        assert_eq!(prefix_of("reset"), "search_document: ");
+
+        // Empty running prefix over an unknown row: unchanged behaviour.
+        conn.set_wal_position("cleared2", 5, None, None).unwrap();
+        conn.set_wal_position_live("cleared2", 6, None, &ident("m", 4, ""))
+            .unwrap();
+        assert_eq!(prefix_of("cleared2"), "");
+    }
+
+    /// Live stamping is unchanged when nothing is recorded yet, when the prefix already matches,
+    /// and treats a NULL (pre-#790) recorded prefix as empty.
+    #[test]
+    fn live_stamp_stamps_normally_when_no_conflict() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        // Fresh group: no recorded identity -> stamp the running one.
+        let running = ident("m", 4, "search_document: ");
+        conn.set_wal_position_live("fresh", 1, None, &running)
+            .unwrap();
+        assert_eq!(
+            conn.get_wal_position("fresh")
+                .unwrap()
+                .embedding_doc_prefix
+                .as_deref(),
+            Some("search_document: ")
+        );
+
+        // Pre-#790 row: model/dim recorded, prefix NULL (simulated via raw SET), running `none`.
+        conn.set_wal_position("legacy", 1, None, Some(&ident("m", 4, "")))
+            .unwrap();
+        conn.raw_query("MATCH (w:WalPosition {id: 'legacy'}) SET w.embedding_doc_prefix = NULL")
+            .unwrap();
+        conn.set_wal_position_live("legacy", 2, None, &ident("m", 4, ""))
+            .unwrap();
+        assert_eq!(
+            conn.get_wal_position("legacy")
+                .unwrap()
+                .embedding_doc_prefix
+                .as_deref()
+                .unwrap_or(""),
+            ""
+        );
+        // A model change still restamps (best-effort marker behaviour is unchanged).
+        conn.set_wal_position_live("legacy", 3, None, &ident("other", 4, ""))
+            .unwrap();
+        assert_eq!(
+            conn.get_wal_position("legacy")
+                .unwrap()
+                .embedding_model
+                .as_deref(),
+            Some("other")
         );
     }
 

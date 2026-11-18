@@ -206,6 +206,7 @@ target/release/lcg-eval retrieval \
 | `--k <N>` | Shared cut-off, 1–100 (default 10). |
 | `--configs <LIST>` | Subset of the five configuration ids. |
 | `--service-bin`, `--embedder-http/--embedder-uds`, `--extractor-http/--extractor-uds` | How the spawned LCG service is configured. |
+| `--embedding-profile <LIST>` | Embedding [instruction profile(s)](configuration.md#embedding-instruction-profiles) to measure, e.g. `none,bge-v1.5`. See [Comparing embedding profiles](#comparing-embedding-profiles). |
 | `--replay-cassette <PATH>` / `--record-cassette <PATH>` | Replay or record ingest extraction ([cassettes](testing-and-evaluation.md#recordreplay-cassettes)) for a free, repeatable LCG ingest. |
 | `--qmd-bin`, `--qmd-index` | qmd executable and named index. The default index name includes the corpus hash (`lcg-eval-<corpus_version>-<hash8>`), so a changed corpus gets a fresh index. qmd keeps a collection's original directory: if you pass your own `--qmd-index` and reuse it after changing `--corpus` or editing notes, the run warns, and you must remove the old collection or pick a new name. |
 | `--judge-model`, `--judge-cache`, `--no-grounded` | Grounded-evidence judge (needs `ANTHROPIC_API_KEY`); verdicts are cached so re-runs cost nothing. Without a key the grounded columns are **skipped**, not zero. |
@@ -215,6 +216,35 @@ target/release/lcg-eval retrieval \
 The extraction backend for LCG ingestion (live Anthropic, a local OpenAI-compatible endpoint,
 or a cassette) and the ontology are whatever the spawned service uses; the report records the
 choice.
+
+## Comparing embedding profiles
+
+Asymmetric embedders (BGE, nomic, e5) are trained with role prefixes. `--embedding-profile` runs
+the LCG configurations under each named profile so the report shows the difference side by side:
+
+```sh
+# Bundled sidecar (BGE): none vs bge-v1.5
+lcg-eval retrieval --embedder-uds /tmp/liminis-inference.sock \
+  --configs lcg-passages,lcg-entities-facts --embedding-profile none,bge-v1.5 --out report-bge
+
+# Ollama (nomic): none vs nomic-v1.5
+lcg-eval retrieval --embedder-http http://127.0.0.1:11434/v1/embeddings \
+  --configs lcg-passages,lcg-entities-facts --embedding-profile none,nomic-v1.5 --out report-nomic
+```
+
+With more than one profile, each LCG configuration appears once per profile as
+`<id>@<profile>` (for example `lcg-passages@none` and `lcg-passages@bge-v1.5`), and every profile
+runs in its **own fresh workspace with a fresh ingest** — a document-prefix change means a
+re-embed, so vectors are never reused across profiles. (This is the same rebuild a real workspace
+needs; see the [re-embed rule](configuration.md#when-you-need-to-re-embed).) qmd configurations
+run once. With one profile the ids are unchanged and the profile is recorded in the report's
+embedder line. `--dry-run` prints the expanded rows. When `--embedding-profile` is given, the harness
+removes any exported `LCG_EMBEDDING_QUERY_PREFIX` / `LCG_EMBEDDING_DOCUMENT_PREFIX` from the spawned
+service's environment, so each row measures exactly the named profile.
+
+These are on-demand runs: they need a real embedder, an extraction backend (a cassette makes the
+ingest free and repeatable) and, for the grounded columns, a judge key. Differences on a small
+question set are within noise; read them with the confidence caveats above.
 
 ## Reading the report
 

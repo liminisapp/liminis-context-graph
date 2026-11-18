@@ -614,8 +614,22 @@ next write or an explicit rebuild — never a false `"match"`.
 |---|---|
 | `"not_applicable"` | nothing has ever been applied for this group (`applied_seq` itself is `null`) |
 | `"unknown"` | a position is recorded, but no embedding identity was recorded alongside it — a pre-#440 write, or a rebuild whose recompute attempts failed |
-| `"match"` | the recorded identity equals the running embedder's `(model, dim)` |
-| `"mismatch"` | the recorded identity differs from the running embedder's — by model name, by dimension (e.g. a `LCG_EMBEDDING_DIM` override under the same model name still counts), or both |
+| `"match"` | the recorded identity equals the running embedder's `(model, dim, document prefix)` |
+| `"mismatch"` | the recorded identity differs from the running embedder's — by model name, by dimension (e.g. a `LCG_EMBEDDING_DIM` override under the same model name still counts), by **document prefix** (issue #790), or any combination |
+
+**Document prefix (issue #790).** The identity also records the *document* prefix of the
+[instruction profile](configuration.md#embedding-instruction-profiles) (`wal.embedding_doc_prefix`,
+also per group in `wal_groups`; `knowledge_status.embedding_instructions` shows the profile and
+both prefixes in effect). An absent recorded prefix — every row written before #790 — is read as
+the empty prefix, so upgrading under profile `none` is a `"match"`. The *query* prefix is not part
+of identity: changing it never produces a mismatch and needs no re-embed. Unlike model name and
+dimension, a recorded document prefix is **not** re-stamped by ordinary writes: after
+`none` → `nomic-v1.5` the status stays `"mismatch"` through live writes until a rebuild
+(`knowledge_rebuild_from_wal` / `rebuild_from_workspace_wal`) recomputes every vector under the new
+prefix and records it, so old- and new-prefix vectors are never silently reported as one
+consistent index. The same holds for a group with applied content but no recorded identity (pre-#440,
+or cleared by a replay whose recompute failed): its vectors can only have been produced unprefixed,
+so a live write does not claim a non-empty document prefix for it either.
 
 A `"mismatch"` is never a hard failure — it is deliberately self-healing, the same way a
 `generation` mismatch triggers a full replay rather than refusing outright: the fix is to rebuild

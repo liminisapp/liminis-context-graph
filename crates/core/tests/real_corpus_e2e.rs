@@ -105,9 +105,13 @@ struct CountingEmbedder {
 }
 
 impl Embedder for CountingEmbedder {
-    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, LcgError>> {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+        role: lcg_core::EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, LcgError>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.inner.embed(text)
+        self.inner.embed(text, role)
     }
 
     fn dim(&self) -> usize {

@@ -78,13 +78,18 @@ impl Extractor for SlowExtractor {
 struct SlowBatchEmbedder;
 
 impl Embedder for SlowBatchEmbedder {
-    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+    fn embed<'a>(
+        &'a self,
+        _text: &'a str,
+        _role: lcg_core::EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         Box::pin(async { Ok(vec![0.0f32; 4]) })
     }
 
     fn embed_batch<'a>(
         &'a self,
         texts: &'a [&'a str],
+        _role: lcg_core::EmbedRole,
     ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
         let n = texts.len();
         Box::pin(async move {

@@ -9,6 +9,27 @@ A small HTTP service that runs on-device CoreML embeddings (BGE-base-en-v1.5) an
 - `POST /v1/embeddings` — CoreML BGE-base-en-v1.5, 768-dim, batched
 - `POST /v1/chat/completions` — Apple Foundation Models on-device LLM
 
+### Role-aware embeddings (optional)
+
+`/v1/embeddings` is a plain OpenAI-compatible embedder: a client sending only `{input, model}`
+gets the same vectors it always did. Two optional, backward-compatible additions let
+liminis-context-graph (LCG) use the model's own query/document instruction (issue #790):
+
+- **Request:** an optional `input_type` of `"query"` or `"document"`. When the loaded model has
+  instructions, the sidecar applies the one for that role to each non-empty input (for BGE
+  v1.5: the query instruction `Represent this sentence for searching relevant passages: `, and
+  nothing for documents). An unknown `input_type` is a `400`. An empty input still returns the
+  zero vector. For a model with no instructions `input_type` is accepted and ignored.
+- **Response:** `model` is the *real* loaded model id — `coreml-<model file stem>`, so the default
+  `bge-base-en-v1.5.mlpackage` still reports `coreml-bge-base-en-v1.5` — and, when the model has
+  instructions, an `instruction_roles` object (`{"query": "...", "document": ""}`) advertising
+  them. Set `LOCAL_INFERENCE_EMBEDDING_MODEL_ID` to pin the reported id if you rename the model
+  file (the id is part of an LCG workspace's recorded embedding identity).
+
+The advertisement changes nothing by itself: LCG only sends `input_type` when the operator selects
+`LCG_EMBEDDING_PROFILE=embedder`, and then adds no prefix of its own, so a text carries exactly one
+instruction. See [Embedding instruction profiles](../../docs/configuration.md#embedding-instruction-profiles).
+
 Both endpoints follow OpenAI's wire shapes. The embeddings contract is documented in [`docs/adr/0006-embedder-http-contract.md`](../../docs/adr/0006-embedder-http-contract.md) and the UDS transport in [`docs/adr/0016-oai-embedding-contract-uds-transport.md`](../../docs/adr/0016-oai-embedding-contract-uds-transport.md).
 
 ## Requirements

@@ -146,8 +146,9 @@ async fn fresh_wal_dump_has_no_vector_params_and_is_dramatically_smaller() {
     // is used anyway to exercise a real (if offline) recompute path rather than a degenerate
     // all-zero one.
     let embedder = HashEmbedder::new(dim);
-    let embed_fn: lcg_core::RecomputeEmbedFn =
-        Box::new(move |texts: &[&str]| futures::executor::block_on(embedder.embed_batch(texts)));
+    let embed_fn: lcg_core::RecomputeEmbedFn = Box::new(move |texts: &[&str]| {
+        futures::executor::block_on(embedder.embed_batch(texts, lcg_core::EmbedRole::Document))
+    });
     {
         let conn = db.connect().unwrap();
         let stats = WalReplayer::new(original_wal_dir())

@@ -20,9 +20,20 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
-use crate::embedder::Embedder;
+use crate::embedder::{EmbedRole, Embedder};
 use crate::error::Error;
 use crate::replay::RecomputeEmbedFn;
+
+/// The embedding identity recorded per workspace and compared on startup/replay (#440, extended
+/// by #790): model name, dimension, and the effective **document** prefix. The document prefix is
+/// part of identity because it changes what is stored; the query prefix is deliberately not,
+/// since it only changes what is searched with (FR-008/FR-010).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddingIdentity {
+    pub model: String,
+    pub dim: i64,
+    pub doc_prefix: String,
+}
 
 /// Bundles what a WAL-replaying call site needs to recompute embeddings during replay and to
 /// record the resulting model identity (issue #440): the running embedder, its model identifier
@@ -44,10 +55,16 @@ pub struct EmbedderContext {
 }
 
 impl EmbedderContext {
-    /// `(model, dim)` identity to compare/persist via `WalPositionRecord` (FR-004) — the sole
-    /// surviving model-identity mechanism now that the WAL-side stamp is gone (issue #526).
-    pub fn identity(&self) -> (String, i64) {
-        (self.model.clone(), self.embedder.dim() as i64)
+    /// `(model, dim, document prefix)` identity to compare/persist via `WalPositionRecord`
+    /// (FR-004, #790) — the sole surviving model-identity mechanism now that the WAL-side stamp
+    /// is gone (issue #526). The document prefix is the embedder stack's effective one, whether
+    /// LCG or the embedder applies it (FR-024).
+    pub fn identity(&self) -> EmbeddingIdentity {
+        EmbeddingIdentity {
+            model: self.model.clone(),
+            dim: self.embedder.dim() as i64,
+            doc_prefix: self.embedder.instructions().document_prefix,
+        }
     }
 
     /// Builds a synchronous, batch-shaped `RecomputeEmbedFn` (issue #486, formerly single-text —
@@ -66,11 +83,21 @@ impl EmbedderContext {
         let handle = tokio::runtime::Handle::current();
         let embedder = Arc::clone(&self.embedder);
         let cache = Arc::clone(&self.cache);
-        let (model, dim) = self.identity();
+        let EmbeddingIdentity {
+            model,
+            dim,
+            doc_prefix,
+        } = self.identity();
+        // Everything replayed/recomputed is stored text, so always the Document role (#790).
         Box::new(move |texts: &[&str]| {
-            cache.get_or_compute_batch(&model, dim, texts, |miss_texts| {
-                handle.block_on(embedder.embed_batch(miss_texts))
-            })
+            cache.get_or_compute_batch(
+                &model,
+                dim,
+                EmbedRole::Document,
+                &doc_prefix,
+                texts,
+                |miss_texts| handle.block_on(embedder.embed_batch(miss_texts, EmbedRole::Document)),
+            )
         })
     }
 }
@@ -115,10 +142,12 @@ impl EmbeddingCache {
         &self,
         model: &str,
         dim: i64,
+        role: EmbedRole,
+        prefix: &str,
         text: &str,
         compute: impl FnOnce() -> Result<Vec<f32>, Error>,
     ) -> Result<Vec<f32>, Error> {
-        let key = Self::cache_key(model, dim, text);
+        let key = Self::cache_key(model, dim, role, prefix, text);
 
         if let Some(cached) = self
             .entries
@@ -150,6 +179,8 @@ impl EmbeddingCache {
         &self,
         model: &str,
         dim: i64,
+        role: EmbedRole,
+        prefix: &str,
         texts: &[&str],
         compute_batch: impl FnOnce(&[&str]) -> Result<Vec<Vec<f32>>, Error>,
     ) -> Result<Vec<Vec<f32>>, Error> {
@@ -159,7 +190,7 @@ impl EmbeddingCache {
 
         let keys: Vec<[u8; 32]> = texts
             .iter()
-            .map(|text| Self::cache_key(model, dim, text))
+            .map(|text| Self::cache_key(model, dim, role, prefix, text))
             .collect();
         let mut results: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
 
@@ -217,13 +248,22 @@ impl EmbeddingCache {
             .collect())
     }
 
-    /// Content-address key for `(model, dim, text)` — see [`Self::get_or_compute`]'s doc comment
+    /// Content-address key for `(model, dim, role, prefix, text)` — see [`Self::get_or_compute`]'s doc comment
     /// for the collision-resistance caveat this key construction inherits.
-    fn cache_key(model: &str, dim: i64, text: &str) -> [u8; 32] {
+    ///
+    /// #790 (FR-012): the key also mixes in the `role` and the effective `prefix` applied for
+    /// that role, so identical text embedded as `Query` and as `Document` — which the model sees
+    /// as different inputs under a prefixed profile — never shares a vector, and two contexts
+    /// that differ only in prefix configuration never collide.
+    fn cache_key(model: &str, dim: i64, role: EmbedRole, prefix: &str, text: &str) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(model.as_bytes());
         hasher.update(b"\0");
         hasher.update(dim.to_le_bytes());
+        hasher.update(b"\0");
+        hasher.update(role.as_str().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(prefix.as_bytes());
         hasher.update(b"\0");
         hasher.update(text.as_bytes());
         hasher.finalize().into()
@@ -254,13 +294,13 @@ mod tests {
         let calls = AtomicUsize::new(0);
 
         let v1 = cache
-            .get_or_compute(MODEL_A, DIM_A, "hello", || {
+            .get_or_compute(MODEL_A, DIM_A, EmbedRole::Document, "", "hello", || {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(vec![1.0, 2.0, 3.0])
             })
             .unwrap();
         let v2 = cache
-            .get_or_compute(MODEL_A, DIM_A, "hello", || {
+            .get_or_compute(MODEL_A, DIM_A, EmbedRole::Document, "", "hello", || {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(vec![9.0, 9.0, 9.0])
             })
@@ -275,10 +315,14 @@ mod tests {
     fn distinct_texts_dont_collide() {
         let cache = EmbeddingCache::new();
         let a = cache
-            .get_or_compute(MODEL_A, DIM_A, "a", || Ok(vec![1.0]))
+            .get_or_compute(MODEL_A, DIM_A, EmbedRole::Document, "", "a", || {
+                Ok(vec![1.0])
+            })
             .unwrap();
         let b = cache
-            .get_or_compute(MODEL_A, DIM_A, "b", || Ok(vec![2.0]))
+            .get_or_compute(MODEL_A, DIM_A, EmbedRole::Document, "", "b", || {
+                Ok(vec![2.0])
+            })
             .unwrap();
         assert_eq!(a, vec![1.0]);
         assert_eq!(b, vec![2.0]);
@@ -290,7 +334,7 @@ mod tests {
         let cache = EmbeddingCache::new();
         let calls = AtomicUsize::new(0);
 
-        let first = cache.get_or_compute(MODEL_A, DIM_A, "x", || {
+        let first = cache.get_or_compute(MODEL_A, DIM_A, EmbedRole::Document, "", "x", || {
             calls.fetch_add(1, Ordering::SeqCst);
             Err(Error::Config("boom".to_string()))
         });
@@ -298,7 +342,7 @@ mod tests {
         assert!(cache.is_empty());
 
         let second = cache
-            .get_or_compute(MODEL_A, DIM_A, "x", || {
+            .get_or_compute(MODEL_A, DIM_A, EmbedRole::Document, "", "x", || {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(vec![5.0])
             })
@@ -315,10 +359,24 @@ mod tests {
     fn different_model_identity_does_not_collide_on_same_text() {
         let cache = EmbeddingCache::new();
         let a = cache
-            .get_or_compute("model-a", 768, "shared text", || Ok(vec![1.0, 0.0]))
+            .get_or_compute(
+                "model-a",
+                768,
+                EmbedRole::Document,
+                "",
+                "shared text",
+                || Ok(vec![1.0, 0.0]),
+            )
             .unwrap();
         let b = cache
-            .get_or_compute("model-b", 768, "shared text", || Ok(vec![0.0, 1.0]))
+            .get_or_compute(
+                "model-b",
+                768,
+                EmbedRole::Document,
+                "",
+                "shared text",
+                || Ok(vec![0.0, 1.0]),
+            )
             .unwrap();
         assert_eq!(a, vec![1.0, 0.0]);
         assert_eq!(
@@ -335,10 +393,19 @@ mod tests {
     fn different_dim_does_not_collide_on_same_text_and_model() {
         let cache = EmbeddingCache::new();
         let a = cache
-            .get_or_compute(MODEL_A, 768, "shared text", || Ok(vec![1.0]))
+            .get_or_compute(MODEL_A, 768, EmbedRole::Document, "", "shared text", || {
+                Ok(vec![1.0])
+            })
             .unwrap();
         let b = cache
-            .get_or_compute(MODEL_A, 1024, "shared text", || Ok(vec![2.0]))
+            .get_or_compute(
+                MODEL_A,
+                1024,
+                EmbedRole::Document,
+                "",
+                "shared text",
+                || Ok(vec![2.0]),
+            )
             .unwrap();
         assert_eq!(a, vec![1.0]);
         assert_eq!(
@@ -399,7 +466,7 @@ mod tests {
     fn batch_empty_input_returns_empty_without_calling_compute() {
         let cache = EmbeddingCache::new();
         let result = cache
-            .get_or_compute_batch(MODEL_A, DIM_A, &[], |_| {
+            .get_or_compute_batch(MODEL_A, DIM_A, EmbedRole::Document, "", &[], |_| {
                 panic!("compute_batch must not be called for empty input")
             })
             .unwrap();
@@ -410,11 +477,13 @@ mod tests {
     fn batch_cache_hit_avoids_calling_compute_batch() {
         let cache = EmbeddingCache::new();
         cache
-            .get_or_compute(MODEL_A, DIM_A, "hello", || Ok(vec![1.0, 2.0]))
+            .get_or_compute(MODEL_A, DIM_A, EmbedRole::Document, "", "hello", || {
+                Ok(vec![1.0, 2.0])
+            })
             .unwrap();
 
         let result = cache
-            .get_or_compute_batch(MODEL_A, DIM_A, &["hello"], |_| {
+            .get_or_compute_batch(MODEL_A, DIM_A, EmbedRole::Document, "", &["hello"], |_| {
                 panic!("compute_batch must not be called when every text is already cached")
             })
             .unwrap();
@@ -425,9 +494,14 @@ mod tests {
     fn batch_distinct_texts_resolve_in_request_order() {
         let cache = EmbeddingCache::new();
         let result = cache
-            .get_or_compute_batch(MODEL_A, DIM_A, &["a", "b", "c"], |texts| {
-                Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
-            })
+            .get_or_compute_batch(
+                MODEL_A,
+                DIM_A,
+                EmbedRole::Document,
+                "",
+                &["a", "b", "c"],
+                |texts| Ok(texts.iter().map(|t| vec![t.len() as f32]).collect()),
+            )
             .unwrap();
         assert_eq!(result, vec![vec![1.0], vec![1.0], vec![1.0]]);
         assert_eq!(cache.len(), 3);
@@ -438,15 +512,22 @@ mod tests {
         let cache = EmbeddingCache::new();
         let calls = AtomicUsize::new(0);
         let result = cache
-            .get_or_compute_batch(MODEL_A, DIM_A, &["x", "y", "x"], |texts| {
-                calls.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(
-                    texts.len(),
-                    2,
-                    "the repeated text must be deduplicated before reaching compute_batch"
-                );
-                Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
-            })
+            .get_or_compute_batch(
+                MODEL_A,
+                DIM_A,
+                EmbedRole::Document,
+                "",
+                &["x", "y", "x"],
+                |texts| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(
+                        texts.len(),
+                        2,
+                        "the repeated text must be deduplicated before reaching compute_batch"
+                    );
+                    Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
+                },
+            )
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -459,9 +540,14 @@ mod tests {
     #[test]
     fn batch_whole_call_error_propagates_without_partial_caching() {
         let cache = EmbeddingCache::new();
-        let result = cache.get_or_compute_batch(MODEL_A, DIM_A, &["x", "y"], |_| {
-            Err(Error::Config("boom".to_string()))
-        });
+        let result = cache.get_or_compute_batch(
+            MODEL_A,
+            DIM_A,
+            EmbedRole::Document,
+            "",
+            &["x", "y"],
+            |_| Err(Error::Config("boom".to_string())),
+        );
         assert!(result.is_err());
         assert!(cache.is_empty(), "a failed batch must not cache anything");
     }
@@ -469,8 +555,14 @@ mod tests {
     #[test]
     fn batch_length_mismatch_from_compute_batch_is_an_error_and_caches_nothing() {
         let cache = EmbeddingCache::new();
-        let result =
-            cache.get_or_compute_batch(MODEL_A, DIM_A, &["x", "y"], |_| Ok(vec![vec![1.0]]));
+        let result = cache.get_or_compute_batch(
+            MODEL_A,
+            DIM_A,
+            EmbedRole::Document,
+            "",
+            &["x", "y"],
+            |_| Ok(vec![vec![1.0]]),
+        );
         assert!(result.is_err());
         assert!(cache.is_empty());
     }
@@ -479,14 +571,24 @@ mod tests {
     fn batch_different_model_identity_does_not_collide_on_same_text() {
         let cache = EmbeddingCache::new();
         let a = cache
-            .get_or_compute_batch("model-a", 768, &["shared text"], |t| {
-                Ok(t.iter().map(|_| vec![1.0, 0.0]).collect())
-            })
+            .get_or_compute_batch(
+                "model-a",
+                768,
+                EmbedRole::Document,
+                "",
+                &["shared text"],
+                |t| Ok(t.iter().map(|_| vec![1.0, 0.0]).collect()),
+            )
             .unwrap();
         let b = cache
-            .get_or_compute_batch("model-b", 768, &["shared text"], |t| {
-                Ok(t.iter().map(|_| vec![0.0, 1.0]).collect())
-            })
+            .get_or_compute_batch(
+                "model-b",
+                768,
+                EmbedRole::Document,
+                "",
+                &["shared text"],
+                |t| Ok(t.iter().map(|_| vec![0.0, 1.0]).collect()),
+            )
             .unwrap();
         assert_eq!(a, vec![vec![1.0, 0.0]]);
         assert_eq!(
@@ -500,14 +602,24 @@ mod tests {
     fn batch_different_dim_does_not_collide_on_same_text_and_model() {
         let cache = EmbeddingCache::new();
         let a = cache
-            .get_or_compute_batch(MODEL_A, 768, &["shared text"], |t| {
-                Ok(t.iter().map(|_| vec![1.0]).collect())
-            })
+            .get_or_compute_batch(
+                MODEL_A,
+                768,
+                EmbedRole::Document,
+                "",
+                &["shared text"],
+                |t| Ok(t.iter().map(|_| vec![1.0]).collect()),
+            )
             .unwrap();
         let b = cache
-            .get_or_compute_batch(MODEL_A, 1024, &["shared text"], |t| {
-                Ok(t.iter().map(|_| vec![2.0]).collect())
-            })
+            .get_or_compute_batch(
+                MODEL_A,
+                1024,
+                EmbedRole::Document,
+                "",
+                &["shared text"],
+                |t| Ok(t.iter().map(|_| vec![2.0]).collect()),
+            )
             .unwrap();
         assert_eq!(a, vec![vec![1.0]]);
         assert_eq!(
@@ -521,15 +633,128 @@ mod tests {
     fn batch_mixed_cache_hit_and_miss_preserves_order() {
         let cache = EmbeddingCache::new();
         cache
-            .get_or_compute(MODEL_A, DIM_A, "cached", || Ok(vec![9.0]))
+            .get_or_compute(MODEL_A, DIM_A, EmbedRole::Document, "", "cached", || {
+                Ok(vec![9.0])
+            })
             .unwrap();
 
         let result = cache
-            .get_or_compute_batch(MODEL_A, DIM_A, &["fresh1", "cached", "fresh2"], |texts| {
-                assert_eq!(texts, ["fresh1", "fresh2"]);
-                Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
-            })
+            .get_or_compute_batch(
+                MODEL_A,
+                DIM_A,
+                EmbedRole::Document,
+                "",
+                &["fresh1", "cached", "fresh2"],
+                |texts| {
+                    assert_eq!(texts, ["fresh1", "fresh2"]);
+                    Ok(texts.iter().map(|t| vec![t.len() as f32]).collect())
+                },
+            )
             .unwrap();
         assert_eq!(result, vec![vec![6.0], vec![9.0], vec![6.0]]);
+    }
+
+    // ── #790 FR-012: role and effective prefix are part of the key ──────────────────────────
+
+    /// SC-005: the same text as Query and as Document never shares a vector; each is cached
+    /// independently and repeating either is a hit.
+    #[test]
+    fn same_text_different_role_does_not_collide() {
+        let cache = EmbeddingCache::new();
+        let calls = AtomicUsize::new(0);
+        let get = |role: EmbedRole, v: f32| {
+            cache
+                .get_or_compute(MODEL_A, DIM_A, role, "search_x: ", "same", || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![v])
+                })
+                .unwrap()
+        };
+        assert_eq!(get(EmbedRole::Query, 1.0), vec![1.0]);
+        assert_eq!(get(EmbedRole::Document, 2.0), vec![2.0]);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "two embedder calls");
+        // Repeats are hits: no extra calls, same independent values.
+        assert_eq!(get(EmbedRole::Query, 9.0), vec![1.0]);
+        assert_eq!(get(EmbedRole::Document, 9.0), vec![2.0]);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn same_text_and_role_different_prefix_does_not_collide() {
+        let cache = EmbeddingCache::new();
+        let a = cache
+            .get_or_compute(MODEL_A, DIM_A, EmbedRole::Document, "", "t", || {
+                Ok(vec![1.0])
+            })
+            .unwrap();
+        let b = cache
+            .get_or_compute(
+                MODEL_A,
+                DIM_A,
+                EmbedRole::Document,
+                "search_document: ",
+                "t",
+                || Ok(vec![2.0]),
+            )
+            .unwrap();
+        assert_eq!(a, vec![1.0]);
+        assert_eq!(b, vec![2.0]);
+    }
+
+    #[test]
+    fn batch_cache_separates_roles_and_prefixes() {
+        let cache = EmbeddingCache::new();
+        let q = cache
+            .get_or_compute_batch(MODEL_A, DIM_A, EmbedRole::Query, "q: ", &["t"], |_| {
+                Ok(vec![vec![1.0]])
+            })
+            .unwrap();
+        let d = cache
+            .get_or_compute_batch(MODEL_A, DIM_A, EmbedRole::Document, "p: ", &["t"], |_| {
+                Ok(vec![vec![2.0]])
+            })
+            .unwrap();
+        assert_eq!(q, vec![vec![1.0]]);
+        assert_eq!(d, vec![vec![2.0]]);
+        let hit = cache
+            .get_or_compute_batch(MODEL_A, DIM_A, EmbedRole::Query, "q: ", &["t"], |_| {
+                panic!("must be a cache hit")
+            })
+            .unwrap();
+        assert_eq!(hit, vec![vec![1.0]]);
+    }
+
+    /// The recompute closure always embeds as Document and keys the cache on the document prefix.
+    #[tokio::test]
+    async fn context_identity_reports_effective_document_prefix() {
+        use crate::embedder::{
+            InstructedEmbedder, InstructionConfig, InstructionProfile, MockEmbedder,
+        };
+        let eff = InstructionConfig {
+            profile: InstructionProfile::NomicV15,
+            ..Default::default()
+        }
+        .resolve(None)
+        .unwrap();
+        let ctx = EmbedderContext {
+            embedder: Arc::new(InstructedEmbedder::new(Arc::new(MockEmbedder::new(4)), eff)),
+            model: "m".to_string(),
+            cache: Arc::new(EmbeddingCache::new()),
+        };
+        assert_eq!(
+            ctx.identity(),
+            EmbeddingIdentity {
+                model: "m".to_string(),
+                dim: 4,
+                doc_prefix: "search_document: ".to_string()
+            }
+        );
+        let plain = EmbedderContext {
+            embedder: Arc::new(MockEmbedder::new(4)),
+            model: "m".to_string(),
+            cache: Arc::new(EmbeddingCache::new()),
+        };
+        assert_eq!(plain.identity().doc_prefix, "");
     }
 }

@@ -9,6 +9,7 @@ use crate::{
     db::Db,
     dedup_adapter::{pair_from, DedupMode},
     dedup_judge::{DedupVerdict, DuplicatePair},
+    embedder::EmbedRole,
     error::{is_missing_index_error, Error, MISSING_INDEX_USER_MSG},
     extractor::ExtractOptions,
     ontology::{normalize_entity_type, normalize_relation_type, OntologyMode},
@@ -579,7 +580,7 @@ pub async fn add_episode_with_opts(
     let (content_embedding, extraction_outcome): (Vec<f32>, ExtractionOutcome) = tokio::select! {
         result = async {
             tokio::try_join!(
-                state.embedder.embed(body),
+                state.embedder.embed(body, EmbedRole::Document),
                 state.extractor.extract(extract_opts)
             )
         } => result?,
@@ -832,8 +833,8 @@ pub async fn add_episode_with_opts(
 
     let (name_embeddings, summary_batch_embeddings) = tokio::select! {
         r = futures::future::try_join(
-            state.embedder.embed_batch(&name_refs),
-            state.embedder.embed_batch(&summary_refs),
+            state.embedder.embed_batch(&name_refs, EmbedRole::Document),
+            state.embedder.embed_batch(&summary_refs, EmbedRole::Document),
         ) => r?,
         _ = state.cancel_token.cancelled() => {
             state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
@@ -962,7 +963,7 @@ pub async fn add_episode_with_opts(
             Vec::new()
         } else {
             tokio::select! {
-                r = state.embedder.embed_batch(&missing_refs) => r?,
+                r = state.embedder.embed_batch(&missing_refs, EmbedRole::Document) => r?,
                 _ = state.cancel_token.cancelled() => {
                     state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
                     return Err(Error::Cancelled);
@@ -1039,7 +1040,7 @@ pub async fn add_episode_with_opts(
     let edge_facts: Vec<String> = extraction.edges.iter().map(|e| e.fact.clone()).collect();
     let edge_fact_refs: Vec<&str> = edge_facts.iter().map(|s| s.as_str()).collect();
     let fact_embeddings = tokio::select! {
-        r = state.embedder.embed_batch(&edge_fact_refs) => r?,
+        r = state.embedder.embed_batch(&edge_fact_refs, EmbedRole::Document) => r?,
         _ = state.cancel_token.cancelled() => {
             state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Cancelled);
@@ -1349,7 +1350,7 @@ pub async fn add_episode_with_opts(
     if !changed.is_empty() {
         let refs: Vec<&str> = changed.iter().map(|(_, s)| *s).collect();
         let embeddings = tokio::select! {
-            r = state.embedder.embed_batch(&refs) => r?,
+            r = state.embedder.embed_batch(&refs, EmbedRole::Document) => r?,
             _ = state.cancel_token.cancelled() => {
                 state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
                 return Err(Error::Cancelled);
@@ -1747,12 +1748,17 @@ pub async fn add_episode_with_opts(
             // computed by state_c's running embedder above — record that identity alongside
             // applied_seq/generation so embedding_model_status observes a live-ingest-only
             // group's identity too, not only a group that has been explicitly rebuilt.
-            let embedding_identity = (state_c.embedding_model.as_str(), state_c.embedder.dim() as i64);
-            if let Err(e) = conn.set_wal_position(
+            let embedding_identity = crate::embedding_cache::EmbeddingIdentity {
+                model: state_c.embedding_model.clone(),
+                dim: state_c.embedder.dim() as i64,
+                doc_prefix: state_c.embedder.instructions().document_prefix,
+            };
+            // `_live`: never silently re-stamps a recorded, different document prefix (#790).
+            if let Err(e) = conn.set_wal_position_live(
                 &gid_wal,
                 seq,
                 generation.as_deref(),
-                Some(embedding_identity),
+                &embedding_identity,
             ) {
                 eprintln!(
                     "liminis-context-graph: add_episode: failed to persist applied_seq={seq} (non-fatal): {e}"
