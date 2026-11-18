@@ -511,6 +511,7 @@ pub const GROUP_SCOPED_NODE_TABLES: &[&str] = &[
     "Episodic",
     "RelatesToNode_",
     "DocSupersession",
+    "DocRevision",
     "Community",
     "Saga",
 ];
@@ -850,6 +851,11 @@ impl<'db> Conn<'db> {
     }
 
     pub fn insert_episodic(&self, row: &EpisodicRow) -> Result<(), Error> {
+        // Document-mode rows (issue #785) take their own template, so the chunk-mode statement —
+        // and with it every chunk-mode WAL line — is byte-identical to before (FR-019).
+        if row.revision_id.is_some() {
+            return self.insert_document_episodic(row);
+        }
         self.exec_params(
             "CREATE (:Episodic {uuid: $uuid, name: $name, group_id: $group_id, \
              created_at: $created_at, source: $source, source_description: $source_description, \
@@ -879,6 +885,51 @@ impl<'db> Conn<'db> {
                 "doc_id": row.doc_id,
                 "origin": row.origin,
                 "write_path": row.write_path,
+            }),
+        )
+    }
+
+    /// [`Self::insert_episodic`] for a document-mode episode (issue #785): the same columns plus
+    /// the revision stamp and span. `revision_committed_at` is normally NULL here — the episode is
+    /// written pending and stamped by the revision's commit step.
+    fn insert_document_episodic(&self, row: &EpisodicRow) -> Result<(), Error> {
+        self.exec_params(
+            "CREATE (:Episodic {uuid: $uuid, name: $name, group_id: $group_id, \
+             created_at: $created_at, source: $source, source_description: $source_description, \
+             content: $content, content_embedding: $content_embedding, valid_at: $valid_at, \
+             entity_edges: $entity_edges, attributes: $attributes, ingested_at: $ingested_at, \
+             superseded_at: $superseded_at, superseded_by: $superseded_by, \
+             superseded_by_kind: $superseded_by_kind, \
+             supersession_reason: $supersession_reason, doc_id: $doc_id, origin: $origin, \
+             write_path: $write_path, revision_id: $revision_id, \
+             revision_committed_at: $revision_committed_at, byte_start: $byte_start, \
+             byte_end: $byte_end, heading_path: $heading_path, chunk_hash: $chunk_hash})",
+            serde_json::json!({
+                "uuid": row.uuid,
+                "name": row.name,
+                "group_id": row.group_id,
+                "created_at": row.created_at,
+                "source": row.source,
+                "source_description": row.source_description,
+                "content": row.content,
+                "content_embedding": row.content_embedding,
+                "valid_at": row.valid_at,
+                "entity_edges": row.entity_edges,
+                "attributes": row.attributes,
+                "ingested_at": ingested_at_or_now(&row.ingested_at),
+                "superseded_at": row.superseded_at,
+                "superseded_by": row.superseded_by,
+                "superseded_by_kind": row.superseded_by_kind,
+                "supersession_reason": row.supersession_reason,
+                "doc_id": row.doc_id,
+                "origin": row.origin,
+                "write_path": row.write_path,
+                "revision_id": row.revision_id,
+                "revision_committed_at": row.revision_committed_at,
+                "byte_start": row.byte_start,
+                "byte_end": row.byte_end,
+                "heading_path": row.heading_path.clone().unwrap_or_default(),
+                "chunk_hash": row.chunk_hash,
             }),
         )
     }
@@ -1851,6 +1902,158 @@ impl<'db> Conn<'db> {
             "MATCH (d:DocSupersession) WHERE d.group_id IN $gids DELETE d",
             serde_json::json!({ "gids": group_ids }),
         )
+    }
+
+    // ── Document revisions (issue #785, ADR-0785) ─────────────────────────────
+
+    /// Creates the `DocRevision` row of a committed revision. `MERGE ... ON CREATE SET` on the
+    /// server-minted uuid, so a replayed statement never overwrites the first row.
+    pub fn insert_doc_revision(
+        &self,
+        rev: &crate::document::DocRevisionRecord,
+    ) -> Result<(), Error> {
+        self.exec_params(
+            "MERGE (r:DocRevision {uuid: $uuid}) \
+             ON CREATE SET r.group_id = $group_id, r.doc_id = $doc_id, r.title = $title, \
+             r.source_path = $source_path, r.origin = $origin, r.effective_at = $effective_at, \
+             r.committed_at = $committed_at, r.reference_time = $reference_time, \
+             r.attributes = $attributes, r.content_hash = $content_hash, r.byte_len = $byte_len, \
+             r.chunker_version = $chunker_version, r.chunk_names = $chunk_names, \
+             r.previous_revision_id = $previous_revision_id",
+            serde_json::json!({
+                "uuid": rev.revision_id,
+                "group_id": rev.group_id,
+                "doc_id": rev.doc_id,
+                "title": rev.title,
+                "source_path": rev.source_path,
+                "origin": rev.origin,
+                "effective_at": rev.effective_at,
+                "committed_at": rev.committed_at,
+                "reference_time": rev.reference_time,
+                "attributes": rev.attributes,
+                "content_hash": rev.content_hash,
+                "byte_len": rev.byte_len,
+                "chunker_version": rev.chunker_version,
+                "chunk_names": rev.chunk_names,
+                "previous_revision_id": rev.previous_revision_id,
+            }),
+        )
+    }
+
+    /// The latest committed revision of `(group_id, doc_id)`, if any.
+    pub fn latest_doc_revision(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+    ) -> Result<Option<crate::document::DocRevisionRecord>, Error> {
+        let rows = match self.query_params(
+            "MATCH (r:DocRevision) WHERE r.group_id = $gid AND r.doc_id = $doc_id \
+             RETURN r.uuid, r.group_id, r.doc_id, r.title, r.source_path, r.origin, \
+             r.effective_at, r.committed_at, r.reference_time, r.attributes, r.content_hash, \
+             r.byte_len, r.chunker_version, r.chunk_names, r.previous_revision_id \
+             ORDER BY r.committed_at DESC, r.uuid DESC LIMIT 1",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        ) {
+            Err(e) if e.to_string().contains("does not exist") => return Ok(None),
+            other => other?,
+        };
+        Ok(rows.first().map(|r| doc_revision_from_row(r)))
+    }
+
+    /// Every live (not superseded) episode of `(group_id, doc_id)` with the columns the
+    /// document-mode baseline needs (issue #785).
+    pub fn document_baseline_episodes(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+    ) -> Result<Vec<crate::document::diff::BaselineEpisode>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             AND ep.superseded_at IS NULL \
+             RETURN ep.uuid, ep.name, ep.write_path, ep.revision_id, ep.revision_committed_at, \
+             ep.heading_path, ep.chunk_hash, ep.byte_start",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::document::diff::BaselineEpisode {
+                uuid: value_as_string(&r[0]),
+                name: value_as_string(&r[1]),
+                write_path: value_as_optional_string(&r[2]),
+                revision_id: value_as_optional_string(&r[3]),
+                revision_committed_at_us: match &r[4] {
+                    lbug::Value::Null(_) => None,
+                    other => Some(value_as_timestamp_micros(other)),
+                },
+                heading_path: value_as_str_list(&r[5]),
+                chunk_hash: value_as_optional_string(&r[6]),
+                byte_start: value_as_optional_i64(&r[7]),
+            })
+            .collect())
+    }
+
+    /// Stamps a revision's episodes committed at `committed_at` (issue #785). Guarded on
+    /// `revision_committed_at IS NULL`, so a replayed statement never moves the instant.
+    pub fn mark_revision_committed(
+        &self,
+        uuids: &[String],
+        revision_committed_at: &str,
+    ) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids AND ep.revision_committed_at IS NULL \
+             SET ep.revision_committed_at = $revision_committed_at",
+            serde_json::json!({ "uuids": uuids, "revision_committed_at": revision_committed_at }),
+        )
+    }
+
+    /// Whether the `DocRevision` table exists.
+    pub fn has_doc_revision_table(&self) -> bool {
+        self.query_params(
+            "MATCH (r:DocRevision) RETURN r.uuid LIMIT 0",
+            serde_json::json!({}),
+        )
+        .is_ok()
+    }
+
+    /// Deletes the `DocRevision` rows of the given groups (group purge, issue #785).
+    pub fn delete_doc_revisions_by_group_ids(&self, group_ids: &[&str]) -> Result<(), Error> {
+        if group_ids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (r:DocRevision) WHERE r.group_id IN $gids DELETE r",
+            serde_json::json!({ "gids": group_ids }),
+        )
+    }
+
+    /// Page of `DocRevision` rows for dump, in [`doc_revision_from_row`]'s column order.
+    pub(crate) fn dump_doc_revision_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        const COLS: &str = "RETURN r.uuid, r.group_id, r.doc_id, r.title, r.source_path, \
+             r.origin, r.effective_at, r.committed_at, r.reference_time, r.attributes, \
+             r.content_hash, r.byte_len, r.chunker_version, r.chunk_names, \
+             r.previous_revision_id ORDER BY r.uuid SKIP $offset LIMIT $limit";
+        let rows = match group_id {
+            Some(gid) => self.query_params(
+                &format!("MATCH (r:DocRevision) WHERE r.group_id = $gid {COLS}"),
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            ),
+            None => self.query_params(
+                &format!("MATCH (r:DocRevision) {COLS}"),
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            ),
+        };
+        match rows {
+            Err(e) if e.to_string().contains("does not exist") => Ok(Vec::new()),
+            other => other,
+        }
     }
 
     /// `knowledge_mark_chunk_removed`'s storage half: supersedes every live episode named
@@ -4922,7 +5125,9 @@ impl<'db> Conn<'db> {
     /// Page of Episodic rows for dump.
     /// Columns: [uuid, name, group_id, created_at, source, source_description, content,
     ///            content_embedding, valid_at, entity_edges, attributes, ingested_at,
-    ///            superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, origin]
+    ///            superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, origin,
+    ///            write_path, revision_id, revision_committed_at, byte_start, byte_end,
+    ///            heading_path, chunk_hash]
     pub(crate) fn dump_episodics_page(
         &self,
         group_id: Option<&str>,
@@ -4935,7 +5140,9 @@ impl<'db> Conn<'db> {
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
-                 n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin, n.write_path \
+                 n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin, n.write_path, \
+                 n.revision_id, n.revision_committed_at, n.byte_start, n.byte_end, \
+                 n.heading_path, n.chunk_hash \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -4945,7 +5152,9 @@ impl<'db> Conn<'db> {
                  RETURN n.uuid, n.name, n.group_id, n.created_at, n.source, \
                  n.source_description, n.content, n.content_embedding, n.valid_at, n.entity_edges, \
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
-                 n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin, n.write_path \
+                 n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin, n.write_path, \
+                 n.revision_id, n.revision_committed_at, n.byte_start, n.byte_end, \
+                 n.heading_path, n.chunk_hash \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -5228,6 +5437,34 @@ fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
         .collect()
 }
 
+/// Maps a `DocRevision` row (columns: uuid, group_id, doc_id, title, source_path, origin,
+/// effective_at, committed_at, reference_time, attributes, content_hash, byte_len,
+/// chunker_version, chunk_names, previous_revision_id) to its record (issue #785). Timestamps
+/// come back RFC 3339 with sub-second precision, so a re-bound value is the same instant.
+pub(crate) fn doc_revision_from_row(r: &[lbug::Value]) -> crate::document::DocRevisionRecord {
+    let ts = |v: &lbug::Value| match v {
+        lbug::Value::Null(_) => None,
+        other => Some(crate::belief::format_us(value_as_timestamp_micros(other))),
+    };
+    crate::document::DocRevisionRecord {
+        revision_id: value_as_string(&r[0]),
+        group_id: value_as_string(&r[1]),
+        doc_id: value_as_string(&r[2]),
+        title: value_as_optional_string(&r[3]),
+        source_path: value_as_optional_string(&r[4]),
+        origin: value_as_string(&r[5]),
+        effective_at: ts(&r[6]),
+        committed_at: ts(&r[7]).unwrap_or_default(),
+        reference_time: value_as_string(&r[8]),
+        attributes: value_as_string(&r[9]),
+        content_hash: value_as_string(&r[10]),
+        byte_len: value_as_optional_i64(&r[11]).unwrap_or(0),
+        chunker_version: value_as_optional_i64(&r[12]).unwrap_or(0),
+        chunk_names: value_as_str_list(&r[13]),
+        previous_revision_id: value_as_optional_string(&r[14]),
+    }
+}
+
 /// Key of a `DocSupersession` row: `group_id ␟ superseded_doc_id` (issue #707). Keying by the
 /// superseded document makes "at most one superseding document per group" structural.
 pub(crate) fn doc_supersession_key(group_id: &str, superseded_doc_id: &str) -> String {
@@ -5292,6 +5529,9 @@ const TIMESTAMP_PARAM_NAMES: &[&str] = &[
     "live_at",
     "effective_at",
     "recorded_at",
+    // Document mode (issue #785): bound by bare `SET`/`CREATE` on TIMESTAMP columns.
+    "revision_committed_at",
+    "committed_at",
 ];
 
 /// Maps a JSON param `(name, value)` to an lbug `Value`, applying timestamp typing only to
@@ -5513,6 +5753,15 @@ fn episode_origin_info_from_cols(
             other => Some(value_as_timestamp_micros(other)),
         },
         group_id: value_as_string(group_id),
+    }
+}
+
+fn value_as_optional_i64(v: &lbug::Value) -> Option<i64> {
+    match v {
+        lbug::Value::Int64(i) => Some(*i),
+        lbug::Value::Int32(i) => Some(i64::from(*i)),
+        lbug::Value::UInt64(i) => i64::try_from(*i).ok(),
+        _ => None,
     }
 }
 

@@ -197,6 +197,25 @@ pub struct EpisodicRow {
     /// row predates the marker. Deliberately not selected by episode reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_path: Option<String>,
+    /// Document mode (issue #785, ADR-0785): the server-minted revision this episode was written
+    /// under. `None` for every episode `knowledge_process_document` did not write (FR-003).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_id: Option<String>,
+    /// When the episode's revision committed; `None` while it is pending (or was abandoned). A
+    /// document-mode episode is believed only from this instant (ADR-0785).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision_committed_at: Option<String>,
+    /// Byte span of this episode's text inside its revision (FR-013).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_start: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_end: Option<i64>,
+    /// Heading path of the episode's section; empty for the preamble.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading_path: Option<Vec<String>>,
+    /// SHA-256 of the logical chunk's text (shared by every split unit of it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_hash: Option<String>,
 }
 
 /// `Episodic.write_path` value stamped by `knowledge_process_chunk` (issue #292, ADR-0292).

@@ -106,6 +106,7 @@ pub fn purge_groups(
     // Probed before the transaction: a failed statement inside it would abort the whole purge. A
     // database opened without the schema step has no such table, and then there is nothing to purge.
     let has_doc_supersessions = conn.has_doc_supersession_table();
+    let has_doc_revisions = conn.has_doc_revision_table();
     conn.exec_transaction_control("BEGIN TRANSACTION")?;
     let mut grouped: GroupedMutations = GroupedMutations::new();
     let mutate_result = (|| -> Result<(), Error> {
@@ -125,6 +126,11 @@ pub fn purge_groups(
             conn.delete_entities_by_group_ids(&single)?;
             if has_doc_supersessions {
                 conn.delete_doc_supersessions_by_group_ids(&single)?;
+            }
+            // Document revisions (issue #785): without this a purged group would keep a stale
+            // baseline, and a fresh ingest would diff against revisions whose episodes are gone.
+            if has_doc_revisions {
+                conn.delete_doc_revisions_by_group_ids(&single)?;
             }
             conn.delete_episodics_by_group_ids(&single)?;
             conn.drain_mutations_into(&mut grouped, gid);
