@@ -399,11 +399,26 @@ fn evidence_is_stated_in_its_note_and_passage_facts_sit_beyond_the_first_chunk()
         let _ = label;
         let max = fx.manifest.max_chunk_tokens;
         let mut passages = 0;
+        // An LLM render may reword the sentence, so "stated in its note" means what check.rs
+        // means: the fact's entity and value (from the skeleton) both appear. The verbatim
+        // sentence is only guaranteed for the template test double.
+        let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+        let anchor = |note: &str, key_fact: &str| -> (String, String) {
+            let f = sk
+                .note(note)
+                .and_then(|n| n.facts.iter().find(|x| x.statement == key_fact))
+                .unwrap_or_else(|| panic!("key fact of {note} is not a skeleton fact"));
+            (f.entity.to_lowercase(), f.value.to_lowercase())
+        };
+        let anchored = |text: &str, (entity, value): &(String, String)| {
+            let t = text.to_lowercase();
+            t.contains(entity.as_str()) && t.contains(value.as_str())
+        };
         for q in &fx.questions {
             for e in &q.evidence {
                 assert!(
-                    fx.notes[&e.note].contains(&e.key_fact),
-                    "{}: key fact not verbatim in {}",
+                    anchored(&fx.notes[&e.note], &anchor(&e.note, &e.key_fact)),
+                    "{}: key fact (entity and value) not found in {}",
                     q.id,
                     e.note
                 );
@@ -415,9 +430,10 @@ fn evidence_is_stated_in_its_note_and_passage_facts_sit_beyond_the_first_chunk()
                     let body = &fx.notes[&q.evidence[0].note];
                     let chunks = chunk_markdown(body, max);
                     assert!(chunks.len() >= 2, "{}: note fits in one chunk", q.id);
+                    let a = anchor(&q.evidence[0].note, &q.evidence[0].key_fact);
                     let at = chunks
                         .iter()
-                        .position(|c| c.contains(&q.evidence[0].key_fact))
+                        .position(|c| anchored(c, &a))
                         .expect("fact is inside one chunk");
                     assert!(at >= 1, "{}: the answer is in the first chunk", q.id);
                 }
