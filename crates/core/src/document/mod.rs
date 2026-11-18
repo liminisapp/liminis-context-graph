@@ -30,3 +30,6 @@ pub struct DocRevisionRecord {
     pub chunk_names: Vec<String>,
     pub previous_revision_id: Option<String>,
 }
+
+pub mod ingest;
+pub use ingest::{preview, process_document, DocumentRequest};
