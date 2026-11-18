@@ -15,6 +15,7 @@ pub mod mapping;
 pub mod metrics;
 pub mod qmd;
 pub mod report;
+pub mod stats;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
