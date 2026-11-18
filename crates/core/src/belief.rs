@@ -220,9 +220,13 @@ pub fn belief_interval(
     let mut present = 0usize;
     let mut pending = 0usize;
     let mut t2: Option<i64> = None;
-    // Belief starts at the edge's ingest, or — for document-mode producers (issue #785) — no
-    // earlier than the first commit among them.
-    let mut first_commit: Option<i64> = None;
+    let ingested = edge.ingested_at_us.unwrap_or(i64::MIN);
+    // Belief starts at the earliest instant any surviving producer became evidence — the same
+    // predicate as [`EpisodeSupersession::visible_at`]: the edge's ingest for an ordinary
+    // producer, and no earlier than its revision's commit for a document-mode one (issue #785).
+    // A minimum over all producers, so an edge kept alive first by a chunk-mode episode and later
+    // by a document revision starts where `evaluate` first says `Believed`.
+    let mut t1: Option<i64> = None;
     for uuid in &edge.episodes {
         let Some(ep) = episodes.get(uuid) else {
             continue;
@@ -232,12 +236,11 @@ pub fn belief_interval(
             pending += 1;
             continue;
         }
-        if let Some(c) = ep
-            .revision_committed_at_us
-            .filter(|_| ep.revision_id_present)
-        {
-            first_commit = Some(first_commit.map_or(c, |m| m.min(c)));
-        }
+        let start = match ep.revision_committed_at_us {
+            Some(c) if ep.revision_id_present => c.max(ingested),
+            _ => ingested,
+        };
+        t1 = Some(t1.map_or(start, |m| m.min(start)));
         match ep.superseded_at_us {
             None => return BeliefInterval::Open,
             Some(s) => t2 = Some(t2.map_or(s, |m| m.max(s))),
@@ -246,14 +249,11 @@ pub fn belief_interval(
     match t2 {
         None if pending > 0 => BeliefInterval::NoRecord(NoRecordCause::Pending),
         None => BeliefInterval::NoRecord(NoRecordCause::SupportDeleted),
-        Some(t2_us) => {
-            let ingested = edge.ingested_at_us.unwrap_or(i64::MIN);
-            BeliefInterval::Closed {
-                t1_us: first_commit.map_or(ingested, |c| c.max(ingested)),
-                t2_us,
-                derived_from_surviving_support: present - pending < edge.episodes.len(),
-            }
-        }
+        Some(t2_us) => BeliefInterval::Closed {
+            t1_us: t1.unwrap_or(ingested),
+            t2_us,
+            derived_from_surviving_support: present - pending < edge.episodes.len(),
+        },
     }
 }
 
@@ -691,6 +691,52 @@ mod tests {
                 t1_us: 100,
                 t2_us: 200,
                 derived_from_surviving_support: true
+            }
+        );
+    }
+
+    #[test]
+    fn mixed_chunk_and_document_producers_start_at_the_earliest_visible_one() {
+        // Mode transition: chunk-mode E1 supports the edge from its ingest at 100; a document
+        // revision committing at 300 reuses the edge (D) and supersedes E1 at 300; D is
+        // superseded at 500. Belief began at 100, as `evaluate` says.
+        let e = edge(100, &["e1", "d"], None);
+        let m: HashMap<_, _> = [
+            (
+                "e1".to_string(),
+                EpisodeSupersession {
+                    superseded_at_us: Some(300),
+                    ..Default::default()
+                },
+            ),
+            ("d".to_string(), doc_mode(Some(300), Some(500))),
+        ]
+        .into();
+        assert_eq!(evaluate(&e, &m, 150), BeliefState::Believed);
+        assert_eq!(evaluate(&e, &m, 400), BeliefState::Believed);
+        assert_eq!(evaluate(&e, &m, 500), BeliefState::Superseded);
+        assert_eq!(
+            belief_interval(&e, &m),
+            BeliefInterval::Closed {
+                t1_us: 100,
+                t2_us: 500,
+                derived_from_surviving_support: false
+            }
+        );
+        // Two document producers: the earlier commit wins, never before the edge's ingest.
+        let m: HashMap<_, _> = [
+            ("e1".to_string(), doc_mode(Some(400), Some(600))),
+            ("d".to_string(), doc_mode(Some(50), Some(500))),
+        ]
+        .into();
+        assert_eq!(evaluate(&e, &m, 99), BeliefState::NotYetIngested);
+        assert_eq!(evaluate(&e, &m, 100), BeliefState::Believed);
+        assert_eq!(
+            belief_interval(&e, &m),
+            BeliefInterval::Closed {
+                t1_us: 100,
+                t2_us: 600,
+                derived_from_surviving_support: false
             }
         );
     }
