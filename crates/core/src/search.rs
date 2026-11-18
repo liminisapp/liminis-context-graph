@@ -221,7 +221,8 @@ impl std::str::FromStr for PassageSearchMode {
 /// Top-rank bonus for a passage whose best rank in either retriever is 1 (qmd-style), as a
 /// fraction of the single-list rank-1 RRF contribution (`1/60`). qmd's absolute 0.05 / 0.02 would
 /// dwarf RRF scores of ~0.016 and degenerate to "first hit of either list wins", so the same 5:2
-/// ratio is applied relative to RRF's own scale. Tuned on v1/v2 (ADR-0789).
+/// ratio is applied relative to RRF's own scale. Initial values, not yet measured: to be tuned on
+/// v1/v2 once the eval has run (ADR-0789).
 pub const TOP1_BONUS_FRACTION: f64 = 0.25;
 /// Bonus for a best rank of 2 or 3. See [`TOP1_BONUS_FRACTION`].
 pub const TOP3_BONUS_FRACTION: f64 = 0.10;
