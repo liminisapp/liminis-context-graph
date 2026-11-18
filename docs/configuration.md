@@ -34,6 +34,9 @@ title: Configuration
 | `LCG_EMBEDDING_URL` | No | Fallback HTTP URL used when neither `--embedder-uds` nor `--embedder-http` is passed and the default UDS socket (`/tmp/liminis-inference.sock`) is absent. On Unix, if this var is also unset, the binary exits with an error. On non-Unix, defaults to `http://127.0.0.1:8765/v1/embeddings`. |
 | `LCG_EMBEDDING_MODEL` | No | Embedding model name sent in requests (default `bge-base-en-v1.5`) |
 | `LCG_EMBEDDING_DIM` | No | Embedding dimension override if probe fails at startup (default: auto-detected via probe). Does **not** override an authentication failure (HTTP 401/403) — see [Embedder sidecar](#embedder-sidecar) below. |
+| `LCG_EMBEDDING_PROFILE` | No | Embedding instruction profile: `none` (default), `bge-v1.5`, `nomic-v1.5`, `e5`, or `embedder`. Tells LCG which role prefixes to put on search strings (query) and stored text (document) for asymmetric embedding models. An unknown name is a startup error listing the valid ones. Alias `GRAPHITI_EMBEDDING_PROFILE`. See [Embedding instruction profiles](#embedding-instruction-profiles). |
+| `LCG_EMBEDDING_QUERY_PREFIX` | No | Explicit query prefix; overrides the profile's query prefix. An explicitly empty value disables it. A query-prefix change never needs a re-embed. Alias `GRAPHITI_EMBEDDING_QUERY_PREFIX`. |
+| `LCG_EMBEDDING_DOCUMENT_PREFIX` | No | Explicit document prefix; overrides the profile's document prefix. An explicitly empty value disables it. **Part of the workspace's embedding identity** — changing it needs a re-embed. Alias `GRAPHITI_EMBEDDING_DOCUMENT_PREFIX`. |
 | `LCG_EMBEDDING_API_KEY` | No | Bearer token sent as `Authorization: Bearer <key>` on the HTTP embedder transport (`--embedder-http`/`LCG_EMBEDDING_URL`). Falls back to `GRAPHITI_EMBEDDING_API_KEY`, then to `OPENAI_API_KEY`. Unset (or empty) sends no `Authorization` header, unchanged from prior versions. Never applies to the UDS transport (`--embedder-uds`) — a local socket never accepts a credential regardless of this variable. |
 | `OPENAI_API_KEY` | No | Convenience fallback for `LCG_EMBEDDING_API_KEY` (see above) — reuses an already-exported OpenAI key. Not a deprecated alias, so using it logs no *deprecation* warning — but since it sends whatever key is exported for OpenAI tooling generally to whatever `--embedder-http`/`LCG_EMBEDDING_URL` endpoint is configured (not necessarily OpenAI's own API), using this tier does log a one-line informational notice naming the endpoint the key will be sent to. |
 | `LCG_EMBEDDING_TIMEOUT_MS` | No | Whole-request timeout, in milliseconds, applied per attempt by **both** embedder transports — HTTP (`--embedder-http`/`LCG_EMBEDDING_URL`) and UDS (`--embedder-uds`, the default when the sidecar's socket exists) — covering single embed, batch embed, and the startup probe (default `30000`, generous enough for a default-sized 64-text batch under normal latency). An unparseable or zero value is rejected with a configuration error rather than silently ignored. See [ADR-0510](adr/0510-oaiembedder-http-timeouts.md) (HTTP) and [ADR-0541](adr/0541-uds-embedder-transport-timeouts.md) (UDS). |
@@ -323,6 +326,10 @@ win case above: here it's *your own* flag taking precedence, not the sidecar's.
 
 #### Switching an existing workspace's embedder
 
+> Changing only the [instruction profile](#embedding-instruction-profiles) (not the model) is a
+> smaller case: a query-prefix change needs no re-embed; a document-prefix change needs the
+> rebuild described there.
+
 The following applies only when *switching* the embedder for a workspace that already has a
 `.lcg/` database with content in it. A fresh workspace with no pre-existing `.lcg/` has nothing
 to re-ingest, so none of this applies to first-time setup.
@@ -349,6 +356,86 @@ this reason: an MCP client (not a shell you control) decides the launched proces
 directory, and `.lcg/` is created relative to it. Omitting `cwd` leaves `.lcg/` wherever the
 client process's own default working directory happens to be — for most MCP clients, that is
 not your project directory.
+
+## Embedding instruction profiles
+
+Open embedding models such as BGE, nomic and e5 are **asymmetric**: they were trained with a
+role-specific instruction (a prefix) on each side of a search, so the *search string* and the
+*stored text* should be embedded differently. LCG knows which side every piece of text is on —
+a search string is a **query**; episode content, entity names and summaries, and edge facts are
+**documents** — and can add the right prefix for you. With the default profile `none` it adds
+nothing, and every string sent to the embedder is exactly what it was before this existed.
+
+```sh
+LCG_EMBEDDING_PROFILE=nomic-v1.5 liminis-context-graph --mcp-stdio
+```
+
+| Profile | Query prefix (search strings) | Document prefix (stored text) | Use with |
+|---|---|---|---|
+| `none` (default) | *(none)* | *(none)* | anything; behaviour unchanged |
+| `bge-v1.5` | `Represent this sentence for searching relevant passages: ` | *(none)* | BGE-base/large-en-v1.5, including the bundled macOS sidecar |
+| `nomic-v1.5` | `search_query: ` | `search_document: ` | nomic-embed-text v1.5 (Ollama) |
+| `e5` | `query: ` | `passage: ` | e5 family |
+| `embedder` | *(the embedder applies its own)* | *(the embedder applies its own)* | the bundled sidecar — see below |
+
+The trailing space in each prefix is part of the prefix. A text that is empty or only whitespace
+is never prefixed, and a text that already starts with the prefix still gets it (there is no
+de-duplication). Symmetric text-vs-text comparisons (entity resolution, ontology
+canonicalization) embed both sides as documents.
+
+### Overrides
+
+`LCG_EMBEDDING_QUERY_PREFIX` and `LCG_EMBEDDING_DOCUMENT_PREFIX` override the profile's value for
+that side only, for a model or fine-tune no profile covers. An explicitly empty value
+(`LCG_EMBEDDING_DOCUMENT_PREFIX=`) disables that side's prefix and is different from leaving the
+variable unset (which uses the profile's value).
+
+### When you need to re-embed
+
+Only the **document** prefix changes what is stored, so only it is part of the workspace's
+embedding identity (recorded next to the model name and dimension):
+
+| You change | Re-embed? |
+|---|---|
+| the **query** prefix (including `none` → `bge-v1.5`, which has no document prefix) | **No.** Stored vectors are unaffected; the next search uses the new prefix. |
+| the **document** prefix (e.g. `none` → `nomic-v1.5` or `e5`) | **Yes.** |
+
+After a document-prefix change, `knowledge_status` reports `embedding_model_status: "mismatch"`
+for the affected groups. Run `knowledge_rebuild_from_wal` (or
+`knowledge_recover` with `{"strategy": "rebuild_from_workspace_wal"}`), which recomputes every
+stored vector under the new document prefix and records it. Until you do, ordinary writes do
+**not** clear the mismatch — LCG keeps the previously-recorded prefix so old- and new-prefix
+vectors are never silently presented as one consistent index. A workspace written before this
+feature has no recorded prefix and is treated as the empty prefix, so upgrading with profile
+`none` is a `match` and forces nothing.
+
+### The `embedder` profile (bundled sidecar)
+
+The bundled macOS sidecar can apply its own model's instruction. It always reports its real model
+id and, when the loaded model has instructions, an `instruction_roles` advertisement in its
+`/v1/embeddings` response. **That advertisement changes nothing by itself.** With profile `none`
+LCG sends exactly `{input, model}` as before. With `LCG_EMBEDDING_PROFILE=embedder`, and only if
+the embedder advertised support, LCG sends plain text plus `input_type: "query" | "document"` and
+the sidecar applies its model's instruction (for BGE v1.5: the query instruction only). If the
+embedder advertised nothing, `embedder` falls back to `none` with a warning on stderr.
+
+A text never receives two instructions: either LCG applies a named profile or override (and never
+sends `input_type`), or the embedder applies its own (and LCG adds nothing). `embedder` combined
+with an explicit prefix override is ambiguous and is a startup error.
+
+### Does the BGE instruction help?
+
+On the v1 Fernhill fixture (43 questions) BGE's query instruction showed no net gain for passage
+search (paraphrase and temporal up, answer questions down) and a small gain for entity and fact
+search, all within noise. `none` therefore stays the default, and `bge-v1.5` / `embedder` are
+available to opt into. nomic and e5, in contrast, expect their prefixes on both sides. The
+recommended profile per embedder is in [Embedding Options](embedding-options.md); the current
+measurement and how to repeat it is in
+[Retrieval Quality Evaluation](retrieval-quality-evaluation.md#comparing-embedding-profiles).
+
+`knowledge_status` shows what is in effect under `embedding_instructions` (`profile`, `source` —
+`none`, `lcg` or `embedder` — `query_prefix`, `document_prefix`), and the recorded document prefix
+as `wal.embedding_doc_prefix` (also per group in `wal_groups`).
 
 ## Extractor: local or hosted
 
