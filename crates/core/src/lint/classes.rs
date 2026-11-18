@@ -39,6 +39,8 @@ impl<'a> Ctx<'a> {
                         EpisodeSupersession {
                             superseded_at_us: e.superseded_at_us,
                             group_id: e.group_id.clone(),
+                            revision_id_present: e.revision_id_present,
+                            revision_committed_at_us: e.revision_committed_at_us,
                             ..Default::default()
                         },
                     )

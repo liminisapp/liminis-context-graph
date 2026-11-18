@@ -2134,7 +2134,8 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids \
              RETURN ep.uuid, ep.superseded_at, ep.superseded_by_kind, ep.superseded_by, \
-             ep.supersession_reason, ep.group_id, ep.doc_id",
+             ep.supersession_reason, ep.group_id, ep.doc_id, ep.revision_id, \
+             ep.revision_committed_at",
             serde_json::json!({ "uuids": uuids }),
         )?;
         for r in rows {
@@ -2151,6 +2152,12 @@ impl<'db> Conn<'db> {
                     reason: value_as_optional_string(&r[4]),
                     group_id: value_as_string(&r[5]),
                     doc_id: value_as_optional_string(&r[6]),
+                    // Document mode (issue #785): a pending episode is never believed.
+                    revision_id_present: value_as_optional_string(&r[7]).is_some(),
+                    revision_committed_at_us: match &r[8] {
+                        lbug::Value::Null(_) => None,
+                        other => Some(value_as_timestamp_micros(other)),
+                    },
                 },
             );
         }
@@ -2398,7 +2405,8 @@ impl<'db> Conn<'db> {
         let cypher = format!(
             "MATCH (ep:Episodic) {where_clause}RETURN ep.uuid, ep.group_id, ep.doc_id, \
              coalesce(ep.origin, ''), ep.superseded_at, ep.superseded_by_kind, \
-             ep.supersession_reason{attrs} ORDER BY ep.uuid LIMIT $limit"
+             ep.supersession_reason, ep.revision_id, ep.revision_committed_at{attrs} \
+             ORDER BY ep.uuid LIMIT $limit"
         );
         let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
         if let Some(g) = group_ids {
@@ -2421,8 +2429,13 @@ impl<'db> Conn<'db> {
                 },
                 superseded_by_kind: value_as_optional_string(&r[5]),
                 supersession_reason: value_as_optional_string(&r[6]),
+                revision_id_present: value_as_optional_string(&r[7]).is_some(),
+                revision_committed_at_us: match &r[8] {
+                    lbug::Value::Null(_) => None,
+                    other => Some(value_as_timestamp_micros(other)),
+                },
                 attributes: if with_attributes {
-                    value_as_optional_string(&r[7])
+                    value_as_optional_string(&r[9])
                 } else {
                     None
                 },
@@ -2607,7 +2620,8 @@ impl<'db> Conn<'db> {
         }
         let rows = self.query_params(
             "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids RETURN ep.uuid, ep.name, ep.group_id, \
-             ep.ingested_at, ep.superseded_at, ep.superseded_by, ep.supersession_reason",
+             ep.ingested_at, ep.superseded_at, ep.superseded_by, ep.supersession_reason, \
+             ep.revision_id, ep.revision_committed_at",
             serde_json::json!({ "uuids": uuids }),
         )?;
         for r in rows {
@@ -2627,7 +2641,7 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (ep:Episodic) WHERE ep.name = $name AND ep.group_id = $gid \
              RETURN ep.uuid, ep.name, ep.group_id, ep.ingested_at, ep.superseded_at, \
-             ep.superseded_by, ep.supersession_reason",
+             ep.superseded_by, ep.supersession_reason, ep.revision_id, ep.revision_committed_at",
             serde_json::json!({ "name": name, "gid": group_id }),
         )?;
         Ok(rows.iter().map(|r| episode_record_from_row(r)).collect())
@@ -5665,7 +5679,7 @@ fn logical_type_of(v: &serde_json::Value) -> LogicalType {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 /// Row shape: `uuid, name, group_id, ingested_at, superseded_at, superseded_by,
-/// supersession_reason` (issue #706).
+/// supersession_reason[, revision_id, revision_committed_at]` (issue #706; #785).
 fn episode_record_from_row(r: &[lbug::Value]) -> crate::correction_reads::EpisodeRecord {
     let micros = |v: &lbug::Value| match v {
         lbug::Value::Null(_) => None,
@@ -5679,6 +5693,8 @@ fn episode_record_from_row(r: &[lbug::Value]) -> crate::correction_reads::Episod
         superseded_at_us: micros(&r[4]),
         superseded_by: value_as_optional_string(&r[5]),
         supersession_reason: value_as_optional_string(&r[6]),
+        revision_id_present: r.get(7).and_then(value_as_optional_string).is_some(),
+        revision_committed_at_us: r.get(8).and_then(micros),
     }
 }
 

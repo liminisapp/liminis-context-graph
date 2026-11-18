@@ -36,11 +36,33 @@ pub struct EpisodeSupersession {
     pub group_id: String,
     /// The logical document the episode came from (issue #707).
     pub doc_id: Option<String>,
+    /// Whether the episode was written by `knowledge_process_document` under a revision (issue
+    /// #785, ADR-0785). Only such an episode can be pending.
+    pub revision_id_present: bool,
+    /// When that revision committed. `None` with `revision_id_present` means pending — written
+    /// but never committed (an ingest still running, failed or crashed) — and never believed.
+    pub revision_committed_at_us: Option<i64>,
 }
 
 impl EpisodeSupersession {
     fn is_document_superseded(&self) -> bool {
         self.kind.as_deref() == Some("document")
+    }
+
+    /// A document-mode episode whose revision has not committed (ADR-0785). Never believed.
+    pub fn is_pending(&self) -> bool {
+        self.revision_id_present && self.revision_committed_at_us.is_none()
+    }
+
+    /// Whether the episode counts as evidence at `t_us` at all: always for a non-document
+    /// episode, and from its revision's commit instant for a document-mode one.
+    pub fn visible_at(&self, t_us: i64) -> bool {
+        !self.revision_id_present || self.revision_committed_at_us.is_some_and(|c| c <= t_us)
+    }
+
+    /// Visible at `t_us` and not yet superseded then: the "live producer" predicate of [`evaluate`].
+    pub fn live_at(&self, t_us: i64) -> bool {
+        self.visible_at(t_us) && self.superseded_at_us.is_none_or(|s| s > t_us)
     }
 }
 
@@ -72,7 +94,8 @@ pub enum BeliefState {
     /// Every producing episode was hard-deleted (`knowledge_delete_episode` and friends). The
     /// evidence is gone, so the fact is unbelieved at every `t`.
     SupportDeleted,
-    /// The edge was first written after `t`.
+    /// The edge was first written after `t` — or every producing episode that still exists is a
+    /// document-mode episode whose revision had not committed at `t` (issue #785).
     NotYetIngested,
 }
 
@@ -111,16 +134,24 @@ pub fn evaluate(
         };
     }
     let mut any_present = false;
+    let mut any_visible = false;
     for uuid in &edge.episodes {
         if let Some(ep) = episodes.get(uuid) {
             any_present = true;
-            if ep.superseded_at_us.is_none_or(|s| s > t_us) {
+            // A document-mode producer counts only from its revision's commit (issue #785).
+            if !ep.visible_at(t_us) {
+                continue;
+            }
+            any_visible = true;
+            if ep.live_at(t_us) {
                 return BeliefState::Believed;
             }
         }
     }
-    if any_present {
+    if any_visible {
         BeliefState::Superseded
+    } else if any_present {
+        BeliefState::NotYetIngested
     } else {
         BeliefState::SupportDeleted
     }
@@ -134,6 +165,9 @@ pub enum NoRecordCause {
     Legacy,
     /// Every producing episode was hard-deleted, so the evidence (and its end) is gone.
     SupportDeleted,
+    /// Every surviving producing episode belongs to a document revision that never committed
+    /// (issue #785): the fact was never believed, so there is no interval to report.
+    Pending,
 }
 
 impl NoRecordCause {
@@ -141,6 +175,7 @@ impl NoRecordCause {
         match self {
             NoRecordCause::Legacy => "legacy",
             NoRecordCause::SupportDeleted => "support_deleted",
+            NoRecordCause::Pending => "pending",
         }
     }
 }
@@ -183,24 +218,42 @@ pub fn belief_interval(
         };
     }
     let mut present = 0usize;
+    let mut pending = 0usize;
     let mut t2: Option<i64> = None;
+    // Belief starts at the edge's ingest, or — for document-mode producers (issue #785) — no
+    // earlier than the first commit among them.
+    let mut first_commit: Option<i64> = None;
     for uuid in &edge.episodes {
         let Some(ep) = episodes.get(uuid) else {
             continue;
         };
         present += 1;
+        if ep.is_pending() {
+            pending += 1;
+            continue;
+        }
+        if let Some(c) = ep
+            .revision_committed_at_us
+            .filter(|_| ep.revision_id_present)
+        {
+            first_commit = Some(first_commit.map_or(c, |m| m.min(c)));
+        }
         match ep.superseded_at_us {
             None => return BeliefInterval::Open,
             Some(s) => t2 = Some(t2.map_or(s, |m| m.max(s))),
         }
     }
     match t2 {
+        None if pending > 0 => BeliefInterval::NoRecord(NoRecordCause::Pending),
         None => BeliefInterval::NoRecord(NoRecordCause::SupportDeleted),
-        Some(t2_us) => BeliefInterval::Closed {
-            t1_us: edge.ingested_at_us.unwrap_or(i64::MIN),
-            t2_us,
-            derived_from_surviving_support: present < edge.episodes.len(),
-        },
+        Some(t2_us) => {
+            let ingested = edge.ingested_at_us.unwrap_or(i64::MIN);
+            BeliefInterval::Closed {
+                t1_us: first_commit.map_or(ingested, |c| c.max(ingested)),
+                t2_us,
+                derived_from_surviving_support: present - pending < edge.episodes.len(),
+            }
+        }
     }
 }
 
@@ -236,6 +289,10 @@ pub fn in_force(
         let Some(ep) = episodes.get(uuid) else {
             continue;
         };
+        // An uncommitted document-mode producer makes no claim at all (issue #785).
+        if !ep.visible_at(t_us) {
+            continue;
+        }
         if ep.is_document_superseded() {
             match doc_record(ep, docs) {
                 Some(rec) if rec.effective_at_us <= t_us => any_ended = true,
@@ -293,6 +350,9 @@ pub fn supersession_info(
         let Some(ep) = episodes.get(uuid) else {
             continue;
         };
+        if ep.is_pending() {
+            continue;
+        }
         let at = ep.superseded_at_us?;
         if last.is_none_or(|(_, l)| at >= l) {
             last = Some((ep, at));
@@ -540,6 +600,7 @@ mod tests {
             reason: Some("document_superseded".into()),
             group_id: "g".into(),
             doc_id: Some(doc.into()),
+            ..Default::default()
         }
     }
 
@@ -551,7 +612,87 @@ mod tests {
             reason: Some("revision".into()),
             group_id: "g".into(),
             doc_id: Some("B".into()),
+            ..Default::default()
         }
+    }
+
+    fn doc_mode(committed: Option<i64>, superseded: Option<i64>) -> EpisodeSupersession {
+        EpisodeSupersession {
+            superseded_at_us: superseded,
+            revision_id_present: true,
+            revision_committed_at_us: committed,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn pending_document_producer_is_never_believed() {
+        let e = edge(100, &["p"], None);
+        let m: HashMap<_, _> = [("p".to_string(), doc_mode(None, None))].into();
+        assert_eq!(evaluate(&e, &m, 150), BeliefState::NotYetIngested);
+        assert_eq!(evaluate(&e, &m, i64::MAX), BeliefState::NotYetIngested);
+        assert!(!evaluate(&e, &m, i64::MAX).is_believed());
+        assert_eq!(
+            belief_interval(&e, &m),
+            BeliefInterval::NoRecord(NoRecordCause::Pending)
+        );
+        assert_eq!(in_force(&e, &m, &DocRecords::new(), 150), None);
+        assert!(supersession_info(&e, &m, &DocRecords::new()).is_none());
+    }
+
+    #[test]
+    fn committed_document_producer_is_believed_from_its_commit() {
+        // Edge written at 100, revision committed at 300.
+        let e = edge(100, &["d"], None);
+        let m: HashMap<_, _> = [("d".to_string(), doc_mode(Some(300), None))].into();
+        assert_eq!(evaluate(&e, &m, 299), BeliefState::NotYetIngested);
+        assert_eq!(evaluate(&e, &m, 300), BeliefState::Believed);
+        assert_eq!(belief_interval(&e, &m), BeliefInterval::Open);
+        assert_eq!(in_force(&e, &m, &DocRecords::new(), 200), None);
+        assert_eq!(in_force(&e, &m, &DocRecords::new(), 300), Some(true));
+        // Superseded at 500: the closed interval starts at the commit, not at the edge's write.
+        let m: HashMap<_, _> = [("d".to_string(), doc_mode(Some(300), Some(500)))].into();
+        assert_eq!(evaluate(&e, &m, 400), BeliefState::Believed);
+        assert_eq!(evaluate(&e, &m, 500), BeliefState::Superseded);
+        assert_eq!(
+            belief_interval(&e, &m),
+            BeliefInterval::Closed {
+                t1_us: 300,
+                t2_us: 500,
+                derived_from_surviving_support: false
+            }
+        );
+    }
+
+    #[test]
+    fn pending_producer_does_not_hide_a_live_or_superseded_one() {
+        let e = edge(100, &["p", "a"], None);
+        let live: HashMap<_, _> = [
+            ("p".to_string(), doc_mode(None, None)),
+            ("a".to_string(), EpisodeSupersession::default()),
+        ]
+        .into();
+        assert_eq!(evaluate(&e, &live, 150), BeliefState::Believed);
+        let gone: HashMap<_, _> = [
+            ("p".to_string(), doc_mode(None, None)),
+            (
+                "a".to_string(),
+                EpisodeSupersession {
+                    superseded_at_us: Some(200),
+                    ..Default::default()
+                },
+            ),
+        ]
+        .into();
+        assert_eq!(evaluate(&e, &gone, 250), BeliefState::Superseded);
+        assert_eq!(
+            belief_interval(&e, &gone),
+            BeliefInterval::Closed {
+                t1_us: 100,
+                t2_us: 200,
+                derived_from_surviving_support: true
+            }
+        );
     }
 
     fn rec(effective: i64, recorded: i64) -> DocRecords {
