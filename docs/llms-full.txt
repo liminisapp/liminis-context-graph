@@ -4731,6 +4731,15 @@ It is a separate mode of the existing `lcg-eval` binary. The extraction eval
 | `qmd-rerank` | `qmd query` with its LLM reranker. |
 | `lcg-entities-facts-belief` | *Extra, clearly labelled variant.* As `lcg-entities-facts`, but facts are read with `believed_only=true`. |
 
+Fact reads carry no `episodes` field: the harness maps each fact to its producing notes through
+`belief.producing_episode_uuids`, which the service returns only when a belief parameter is sent. Both
+LCG fact configurations therefore send `believed_only` (`false` for `lcg-entities-facts`, which annotates
+without filtering). Only the fact read can express belief (ADR-0705); the entity read of
+`lcg-entities-facts-belief` is unfiltered and can still credit a superseded note. During ingest the
+harness validates every `knowledge_supersede_document` response and aborts, naming both note ids, if a
+call ended belief for zero episodes (replays and future-dated supersessions excepted); the report's
+ingest block shows "Belief ended for N episode(s) across M document supersession(s)".
+
 The first four are the headline table. The fifth exists because only edge reads can express
 belief time ([ADR-0705](adr/0705-belief-time-separate-from-validity.md)): passages and entities
 have no belief filter and return superseded text by default, so without it the temporal
@@ -4770,7 +4779,7 @@ entity result can credit several notes before the list is cut to k notes.
   pass runs before the timed pass. qmd runs as one process per query, so its latency is
   per-process (it includes model load) and it gets a single warm-up query rather than a full pass.
 - **Query-time model calls.** LCG: one embedder call per read (a fallback `get_edges_by_uuids`
-  lookup, if the read path omits provenance, is counted separately). qmd does not expose its
+  lookup, if a fact read omits provenance, is counted separately; it should now be 0). qmd does not expose its
   expansion/rerank call counts, so they are reported as `n/a (not exposed)`, never as 0.
 - **Ingestion cost** is reported separately: LCG ingest wall time and number of extraction
   requests (each is at least one LLM call); qmd index time.
