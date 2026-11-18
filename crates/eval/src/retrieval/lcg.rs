@@ -233,6 +233,19 @@ pub fn verify_embedding_profile(requested: Option<&str>, status: &Value) -> Resu
     ))
 }
 
+/// Pins the child's instruction config to the requested profile (#790). The child inherits the
+/// parent's environment, so a stray `LCG_EMBEDDING_QUERY_PREFIX` / `LCG_EMBEDDING_DOCUMENT_PREFIX`
+/// would silently override the profile's prefixes on that side while the service still reports
+/// the requested profile name — a mislabeled row. Both overrides are therefore removed whenever
+/// a profile is requested; with none requested the child keeps the operator's environment.
+fn apply_embedding_profile_env(cmd: &mut tokio::process::Command, profile: Option<&str>) {
+    if let Some(p) = profile {
+        cmd.env("LCG_EMBEDDING_PROFILE", p)
+            .env_remove("LCG_EMBEDDING_QUERY_PREFIX")
+            .env_remove("LCG_EMBEDDING_DOCUMENT_PREFIX");
+    }
+}
+
 pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     validate_embedder(o, std::env::var("LCG_EMBEDDING_URL").ok().as_deref())?;
     let ws = tempfile::tempdir().map_err(|e| format!("cannot create workspace: {e}"))?;
@@ -253,9 +266,7 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     if let Some(p) = &o.record_cassette {
         cmd.env("LCG_RECORD_LLM", p);
     }
-    if let Some(p) = &o.embedding_profile {
-        cmd.env("LCG_EMBEDDING_PROFILE", p);
-    }
+    apply_embedding_profile_env(&mut cmd, o.embedding_profile.as_deref());
     let mut child = cmd.spawn().map_err(|e| {
         format!(
             "cannot start service '{}': {e} (pass --service-bin, or build with `cargo build --release -p lcg-service`)",
@@ -713,6 +724,30 @@ pub mod testing {
 mod tests {
     use super::testing::FakeTransport;
     use super::*;
+
+    #[test]
+    fn requested_profile_strips_inherited_prefix_overrides() {
+        let envs = |profile: Option<&str>| {
+            let mut cmd = tokio::process::Command::new("true");
+            apply_embedding_profile_env(&mut cmd, profile);
+            cmd.as_std()
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|v| v.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let e = envs(Some("none"));
+        assert_eq!(e["LCG_EMBEDDING_PROFILE"].as_deref(), Some("none"));
+        // `Some(None)` is an explicit removal from the inherited environment.
+        assert_eq!(e["LCG_EMBEDDING_QUERY_PREFIX"], None);
+        assert_eq!(e["LCG_EMBEDDING_DOCUMENT_PREFIX"], None);
+        // No profile requested: the operator's environment is left alone.
+        assert!(envs(None).is_empty());
+    }
 
     #[test]
     fn requested_embedding_profile_must_be_the_one_in_effect() {

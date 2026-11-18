@@ -5056,7 +5056,9 @@ runs in its **own fresh workspace with a fresh ingest** — a document-prefix ch
 re-embed, so vectors are never reused across profiles. (This is the same rebuild a real workspace
 needs; see the [re-embed rule](configuration.md#when-you-need-to-re-embed).) qmd configurations
 run once. With one profile the ids are unchanged and the profile is recorded in the report's
-embedder line. `--dry-run` prints the expanded rows.
+embedder line. `--dry-run` prints the expanded rows. When `--embedding-profile` is given, the harness
+removes any exported `LCG_EMBEDDING_QUERY_PREFIX` / `LCG_EMBEDDING_DOCUMENT_PREFIX` from the spawned
+service's environment, so each row measures exactly the named profile.
 
 These are on-demand runs: they need a real embedder, an extraction backend (a cassette makes the
 ingest free and repeatable) and, for the grounded columns, a judge key. Differences on a small
