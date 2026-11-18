@@ -176,6 +176,9 @@ pub enum WritePath {
     Episode,
     /// `knowledge_process_chunk`.
     Chunk,
+    /// `knowledge_process_document` (issue #785). Not chunk-eligible, so a chunk-mode revise by
+    /// name leaves these rows alone (ADR-0292 §2).
+    Document,
 }
 
 impl WritePath {
@@ -183,8 +186,23 @@ impl WritePath {
         match self {
             WritePath::Episode => crate::types::WRITE_PATH_EPISODE,
             WritePath::Chunk => crate::types::WRITE_PATH_CHUNK,
+            WritePath::Document => crate::types::WRITE_PATH_DOCUMENT,
         }
     }
+}
+
+/// The document-mode stamp of one extraction unit (issue #785, ADR-0785): written on the episode
+/// row, pending until the revision's commit step sets `revision_committed_at`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DocumentEpisode {
+    pub revision_id: String,
+    pub byte_start: i64,
+    pub byte_end: i64,
+    pub heading_path: Vec<String>,
+    /// The logical chunk's hash (shared by all its units).
+    pub chunk_hash: String,
+    /// The rendered `<DOCUMENT_CONTEXT>` block handed to the extractor (FR-011).
+    pub context: String,
 }
 
 /// Optional behaviours of [`add_episode_with_opts`]; `add_episode` uses the default.
@@ -203,6 +221,9 @@ pub struct EpisodeOpts {
     /// Provenance stamp for the episode (issue #292). Defaults to [`WritePath::Episode`], so only
     /// `knowledge_process_chunk` opts in to `Chunk`.
     pub write_path: WritePath,
+    /// Document-mode stamp (issue #785). `None` on every other path, which leaves the episode's
+    /// revision columns NULL and its extraction prompt free of any document context.
+    pub document: Option<DocumentEpisode>,
 }
 
 /// Phase C's result: `(edges_inserted, edges_dropped_unresolvable,
@@ -568,6 +589,7 @@ pub async fn add_episode_with_opts(
     // validation, and (via `ancestor_map` below) canonicalization for this group only.
     let resolved_ontology = state.resolve_ontology(group_id);
     let ontology_ref = resolved_ontology.as_deref();
+    let document_context = opts.document.as_ref().map(|d| d.context.clone());
     let extract_opts = ExtractOptions {
         episode_body: body,
         group_id,
@@ -576,6 +598,7 @@ pub async fn add_episode_with_opts(
         reference_time,
         ontology: ontology_ref,
         chunk_key: Some(name),
+        document_context: document_context.as_deref(),
     };
     let (content_embedding, extraction_outcome): (Vec<f32>, ExtractionOutcome) = tokio::select! {
         result = async {
@@ -1398,6 +1421,7 @@ pub async fn add_episode_with_opts(
     let doc_id_owned = opts.doc_id;
     let chunk_guard = opts.guard_chunk_collision;
     let write_path_stamp = opts.write_path.as_str();
+    let document_stamp = opts.document;
     let chunk_name_for_supersede = name.to_string();
     // `attributes` is expected to already be a serialized JSON object (handlers.rs's
     // `attributes_param_to_string` guarantees this for the two IPC entry points), but
@@ -1679,6 +1703,13 @@ pub async fn add_episode_with_opts(
             doc_id: doc_id_owned,
             origin: Some(origin.as_str().to_string()),
             write_path: Some(write_path_stamp.to_string()),
+            // Document mode (issue #785): written pending — `revision_committed_at` stays NULL
+            // until the revision's commit step, so belief ignores the episode until then.
+            revision_id: document_stamp.as_ref().map(|d| d.revision_id.clone()),
+            byte_start: document_stamp.as_ref().map(|d| d.byte_start),
+            byte_end: document_stamp.as_ref().map(|d| d.byte_end),
+            heading_path: document_stamp.as_ref().map(|d| d.heading_path.clone()),
+            chunk_hash: document_stamp.as_ref().map(|d| d.chunk_hash.clone()),
             ..Default::default()
         })?;
 

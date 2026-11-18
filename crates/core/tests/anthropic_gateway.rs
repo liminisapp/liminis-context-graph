@@ -170,6 +170,7 @@ fn opts(body: &str) -> ExtractOptions<'_> {
         reference_time: "2026-01-01T00:00:00Z",
         ontology: None,
         chunk_key: None,
+        document_context: None,
     }
 }
 

@@ -1405,6 +1405,113 @@ async fn test_knowledge_status_not_queryable_includes_wal_seq_fields() {
     );
 }
 
+// ── Tier 1a: knowledge_process_document / knowledge_preview_chunks (issue #785) ──
+
+#[tokio::test]
+async fn test_knowledge_process_document_ok() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let doc = "# Note\n\nAlice works at Acme Corp.\n\n## More\n\nBob works there too.\n";
+    let v = dispatch_val(
+        7850,
+        "knowledge_process_document",
+        json!({"doc_id": "note-1", "content": doc, "reference_time": "2024-06-01T12:00:00Z"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 7850);
+    let r = &v["result"];
+    assert_eq!(r["success"], true, "{v}");
+    assert_eq!(r["status"], "committed", "{v}");
+    assert_eq!(r["doc_id"], "note-1");
+    for k in [
+        "revision_id",
+        "chunker_version",
+        "extraction_calls",
+        "chunks",
+        "removed",
+        "superseded_episode_uuids",
+        "retired_episode_uuids",
+        "stale_superseded_episode_uuids",
+        "mode_transition_superseded_episode_uuids",
+        "nodes_extracted",
+        "edges_extracted",
+        "duration_seconds",
+    ] {
+        assert!(r.get(k).is_some(), "expected key {k}: {v}");
+    }
+    let c = &r["chunks"][0];
+    for k in [
+        "index",
+        "name",
+        "heading_path",
+        "byte_start",
+        "byte_end",
+        "content_hash",
+        "classification",
+        "units",
+        "episode_uuids",
+        "previous_episode_uuids",
+    ] {
+        assert!(c.get(k).is_some(), "expected chunk key {k}: {v}");
+    }
+    // Byte-identical resubmission is a no-op.
+    let again = dispatch_val(
+        7851,
+        "knowledge_process_document",
+        json!({"doc_id": "note-1", "content": doc}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&again, 7851);
+    assert_eq!(again["result"]["status"], "unchanged");
+    assert_eq!(again["result"]["extraction_calls"], 0);
+}
+
+#[tokio::test]
+async fn test_knowledge_process_document_requires_doc_id() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        7852,
+        "knowledge_process_document",
+        json!({"content": "# A\n\nb\n"}),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 7852, -32000);
+}
+
+#[tokio::test]
+async fn test_knowledge_preview_chunks_ok() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    let v = dispatch_val(
+        7853,
+        "knowledge_preview_chunks",
+        json!({"content": "Pre.\n\n# A\n\nBody.\n"}),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 7853);
+    let r = &v["result"];
+    assert_eq!(r["chunk_count"], 2, "{v}");
+    for k in ["chunker_version", "byte_len", "chunks", "document_map"] {
+        assert!(r.get(k).is_some(), "expected key {k}: {v}");
+    }
+    let c = &r["chunks"][1];
+    assert_eq!(c["heading_path"], json!(["A"]));
+    for k in [
+        "byte_start",
+        "byte_end",
+        "content_hash",
+        "char_count",
+        "units",
+    ] {
+        assert!(c.get(k).is_some(), "expected chunk key {k}: {v}");
+    }
+}
+
 // ── Tier 1a: knowledge_process_chunk ─────────────────────────────────────────
 
 #[tokio::test]

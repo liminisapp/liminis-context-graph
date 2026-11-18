@@ -191,6 +191,10 @@ async fn handle(
         "health_check" => handle_health_check(state).await,
         "knowledge_status" => handle_knowledge_status(state).await,
         "knowledge_process_chunk" => handle_knowledge_process_chunk(req, state).await,
+        "knowledge_process_document" => {
+            handle_knowledge_process_document(req, state, progress_tx).await
+        }
+        "knowledge_preview_chunks" => handle_knowledge_preview_chunks(req).await,
         "knowledge_add_episode" => handle_add_episode(req, state).await,
         "knowledge_find_entities" => handle_find_entities(req, state).await,
         "knowledge_resolve_entity" => handle_resolve_entity(req, state).await,
@@ -1218,6 +1222,7 @@ async fn handle_knowledge_process_chunk(
         // Issue #292: only this handler stamps `chunk`, which is what makes its own prior
         // writes recognisable to a later revise.
         write_path: episode::WritePath::Chunk,
+        document: None,
     };
     let result = episode::add_episode_with_opts(
         Arc::clone(&state),
@@ -1280,6 +1285,83 @@ async fn handle_knowledge_process_chunk(
     }
 
     Ok(response)
+}
+
+/// Parses an optional RFC 3339 timestamp param; a present non-string or unparsable value is an
+/// error rather than "omitted".
+fn optional_rfc3339_param(p: &Value, key: &str) -> Result<Option<String>, Error> {
+    match &p[key] {
+        Value::Null => Ok(None),
+        Value::String(s) => {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map_err(|_| Error::Ipc(format!("{key} is not valid ISO 8601: {s}")))?;
+            Ok(Some(s.clone()))
+        }
+        _ => Err(Error::Ipc(format!("{key} must be an ISO 8601 string"))),
+    }
+}
+
+fn optional_string_param(p: &Value, key: &str) -> Result<Option<String>, Error> {
+    match &p[key] {
+        Value::Null => Ok(None),
+        Value::String(s) if s.trim().is_empty() => Ok(None),
+        Value::String(s) => Ok(Some(s.clone())),
+        _ => Err(Error::Ipc(format!("{key} must be a string"))),
+    }
+}
+
+/// `knowledge_process_document` (issue #785, ADR-0785): ingests one whole document under a
+/// completeness claim. The server chunks it, diffs it against the document's previous committed
+/// revision, extracts only added/changed chunks (with document context) and, once every chunk
+/// has succeeded, commits the revision — superseding changed chunks and retiring removed ones in
+/// one step. A failed call retires nothing. `_progress_token` streams per-chunk progress.
+async fn handle_knowledge_process_document(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+) -> Result<Value, Error> {
+    let p = &req.params;
+    let doc_id = optional_doc_id_param(&p["doc_id"])?.ok_or_else(|| {
+        Error::Ipc(
+            "doc_id is required: a document-mode ingest is a completeness claim about one document"
+                .to_string(),
+        )
+    })?;
+    let content = match &p["content"] {
+        Value::String(s) => s.clone(),
+        Value::Null => return Err(Error::Ipc("content is required".to_string())),
+        _ => return Err(Error::Ipc("content must be a string".to_string())),
+    };
+    let group_id = p["group_id"]
+        .as_str()
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
+    let reference_time = optional_rfc3339_param(p, "reference_time")?
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let request = crate::document::DocumentRequest {
+        doc_id,
+        group_id,
+        content,
+        origin: crate::origin::parse_origin_param(p)?,
+        title: optional_string_param(p, "title")?,
+        source_path: optional_string_param(p, "source_path")?,
+        effective_at: optional_rfc3339_param(p, "effective_at")?,
+        reference_time,
+        attributes: attributes_param_to_string(&p["attributes"]),
+    };
+    crate::document::process_document(state, request, progress_tx).await
+}
+
+/// `knowledge_preview_chunks` (issue #785, FR-006): the chunks `knowledge_process_document`
+/// would produce for `content`, with heading paths, hashes and byte spans. Touches neither the
+/// graph nor the WAL.
+async fn handle_knowledge_preview_chunks(req: &IpcRequest) -> Result<Value, Error> {
+    let content = match &req.params["content"] {
+        Value::String(s) => s.clone(),
+        Value::Null => return Err(Error::Ipc("content is required".to_string())),
+        _ => return Err(Error::Ipc("content must be a string".to_string())),
+    };
+    crate::document::preview(&content)
 }
 
 // ── Search handlers — no lock (hot read path, never blocked by writes) ────────

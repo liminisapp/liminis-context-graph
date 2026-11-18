@@ -20,6 +20,8 @@ fn ep(uuid: &str, doc: Option<&str>, origin: Origin) -> LintEpisode {
         superseded_at_us: None,
         superseded_by_kind: None,
         supersession_reason: None,
+        revision_id_present: false,
+        revision_committed_at_us: None,
         attributes: None,
     }
 }

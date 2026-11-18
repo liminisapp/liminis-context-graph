@@ -38,6 +38,10 @@ pub struct EpisodeRecord {
     pub superseded_at_us: Option<i64>,
     pub superseded_by: Option<String>,
     pub supersession_reason: Option<String>,
+    /// Document mode (issue #785): whether the episode carries a revision id, and when that
+    /// revision committed (`None` while pending or abandoned).
+    pub revision_id_present: bool,
+    pub revision_committed_at_us: Option<i64>,
 }
 
 /// An episode that MENTIONS at least one of a set of entities.
@@ -116,6 +120,9 @@ pub fn revision_unit_uuids(old: &EpisodeRecord, pool: &[EpisodeRecord]) -> Vec<S
                 && p.name == old.name
                 && p.ingested_at_us.is_some_and(|i| i <= t)
                 && p.superseded_at_us.is_none_or(|s| s > t)
+                // A document-mode unit belongs to the revision only once it committed by `T`
+                // (issue #785): an abandoned attempt's pending episode of the same name is not one.
+                && (!p.revision_id_present || p.revision_committed_at_us.is_some_and(|c| c <= t))
         })
         .map(|p| (p.ingested_at_us, p.uuid.clone()))
         .collect();
@@ -323,7 +330,27 @@ mod tests {
             superseded_at_us: superseded,
             superseded_by: by.map(str::to_string),
             supersession_reason: superseded.map(|_| "revision".to_string()),
+            ..Default::default()
         }
+    }
+
+    /// Issue #785: a document-mode revision's units are its committed episodes; a pending
+    /// episode of the same name from an abandoned attempt, ingested inside the window, is not.
+    #[test]
+    fn revision_units_skip_uncommitted_document_episodes() {
+        let old = ep("old", 10, Some(100), Some("final"));
+        let doc = |uuid: &str, ingested: i64, committed: Option<i64>| EpisodeRecord {
+            revision_id_present: true,
+            revision_committed_at_us: committed,
+            ..ep(uuid, ingested, None, None)
+        };
+        let pool = vec![
+            old.clone(),
+            doc("abandoned", 50, None),
+            doc("unit1", 60, Some(100)),
+            doc("final", 70, Some(100)),
+        ];
+        assert_eq!(revision_unit_uuids(&old, &pool), vec!["unit1", "final"]);
     }
 
     fn cand(uuid: &str, ingested: Option<i64>) -> MentioningEpisode {

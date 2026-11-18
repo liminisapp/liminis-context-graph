@@ -26,6 +26,9 @@ pub struct LintEpisode {
     /// `episode` or `document` (ADR-0707).
     pub superseded_by_kind: Option<String>,
     pub supersession_reason: Option<String>,
+    /// Document mode (issue #785): a revision-stamped episode counts only from its commit.
+    pub revision_id_present: bool,
+    pub revision_committed_at_us: Option<i64>,
     /// Raw JSON `attributes`; only loaded when the unlinked-mention category is selected.
     pub attributes: Option<String>,
 }
@@ -33,7 +36,8 @@ pub struct LintEpisode {
 impl LintEpisode {
     /// The same predicate `belief::evaluate` uses: a future-dated supersession still counts as live.
     pub fn is_live(&self, t_us: i64) -> bool {
-        self.superseded_at_us.is_none_or(|s| s > t_us)
+        (!self.revision_id_present || self.revision_committed_at_us.is_some_and(|c| c <= t_us))
+            && self.superseded_at_us.is_none_or(|s| s > t_us)
     }
 
     pub fn doc_key(&self) -> String {

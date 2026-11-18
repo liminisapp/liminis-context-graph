@@ -75,6 +75,9 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // kuzu_driver.py, like `origin`: which write path produced the episode (`chunk` for
     // `knowledge_process_chunk`, `episode` for every other path). Distinct from `origin`, which is
     // content kind. NULL means written before the column existed, so no backfill.
+    // Document mode (issue #785, ADR-0785) adds `revision_id`, `revision_committed_at`,
+    // `byte_start`, `byte_end`, `heading_path` and `chunk_hash`: a fourth deliberate divergence,
+    // all NULL on every episode `knowledge_process_document` did not write (FR-003), so no backfill.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Episodic (\
          uuid STRING PRIMARY KEY, \
@@ -95,7 +98,13 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          supersession_reason STRING, \
          doc_id STRING, \
          origin STRING, \
-         write_path STRING\
+         write_path STRING, \
+         revision_id STRING, \
+         revision_committed_at TIMESTAMP, \
+         byte_start INT64, \
+         byte_end INT64, \
+         heading_path STRING[], \
+         chunk_hash STRING\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -131,6 +140,29 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          superseding_doc_id STRING, \
          effective_at TIMESTAMP, \
          recorded_at TIMESTAMP\
+         )",
+    )?;
+    // Document revisions (issue #785, ADR-0785): one row per committed `knowledge_process_document`
+    // completeness claim. `committed_at` is the commit instant that gates belief in the revision's
+    // episodes; `chunk_names` is the ordered manifest the next diff pairs against; `effective_at`
+    // is caller-supplied and never becomes `valid_at`. Not part of graphiti's schema.
+    conn.raw_query(
+        "CREATE NODE TABLE IF NOT EXISTS DocRevision (\
+         uuid STRING PRIMARY KEY, \
+         group_id STRING, \
+         doc_id STRING, \
+         title STRING, \
+         source_path STRING, \
+         origin STRING, \
+         effective_at TIMESTAMP, \
+         committed_at TIMESTAMP, \
+         reference_time STRING, \
+         attributes STRING, \
+         content_hash STRING, \
+         byte_len INT64, \
+         chunker_version INT64, \
+         chunk_names STRING[], \
+         previous_revision_id STRING\
          )",
     )?;
     // Stub tables for graphiti's community/saga subsystem (not implemented in liminis-graph;
@@ -430,6 +462,13 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
         ("Episodic", "origin", "STRING"),
         // Write-path provenance (issue #292, ADR-0292). NULL = pre-marker row; no backfill.
         ("Episodic", "write_path", "STRING"),
+        // Document mode (issue #785, ADR-0785). NULL on every non-document episode; no backfill.
+        ("Episodic", "revision_id", "STRING"),
+        ("Episodic", "revision_committed_at", "TIMESTAMP"),
+        ("Episodic", "byte_start", "INT64"),
+        ("Episodic", "byte_end", "INT64"),
+        ("Episodic", "heading_path", "STRING[]"),
+        ("Episodic", "chunk_hash", "STRING"),
         ("RelatesToNode_", "warrant", "STRING"),
         ("RelatesToNode_", "valid_at_source", "STRING"),
     ] {

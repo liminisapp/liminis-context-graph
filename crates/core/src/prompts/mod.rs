@@ -241,9 +241,35 @@ pub fn edge_user_prompt(
     }
 }
 
+/// Prepends a document-mode `<DOCUMENT_CONTEXT>` block (issue #785, FR-011) to a built user
+/// prompt, ahead of the source-text tag. `None` (every chunk-mode call) returns `user` unchanged,
+/// so the chunk-mode prompt is byte-identical (FR-019).
+pub fn with_document_context(document_context: Option<&str>, user: String) -> String {
+    match document_context.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(ctx) => format!("{ctx}\n\n{user}"),
+        None => user,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn document_context_is_prepended_only_when_present() {
+        let user = edge_user_prompt(&["A".to_string()], "2026-01-01T00:00:00Z", "body", None);
+        assert_eq!(with_document_context(None, user.clone()), user);
+        assert_eq!(with_document_context(Some("  "), user.clone()), user);
+        let with = with_document_context(
+            Some("<DOCUMENT_CONTEXT>\nx\n</DOCUMENT_CONTEXT>"),
+            user.clone(),
+        );
+        assert!(with.starts_with("<DOCUMENT_CONTEXT>"));
+        assert!(with.ends_with(&user));
+        assert!(
+            with.find("</DOCUMENT_CONTEXT>").unwrap() < with.find("<CURRENT_MESSAGE>").unwrap()
+        );
+    }
 
     #[test]
     fn prompt_files_are_non_empty() {

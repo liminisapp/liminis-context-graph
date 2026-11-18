@@ -79,13 +79,16 @@ fn request_key(value: &Value) -> String {
 
 fn extract_request_value(opts: &ExtractOptions<'_>) -> Value {
     let entity_system_prompt = prompts::entity_system_prompt(opts.source_type, opts.ontology);
-    let entity_user_prompt = prompts::entity_user_prompt_for(
-        opts.source_type,
-        opts.episode_body,
-        opts.custom_instructions,
+    let entity_user_prompt = prompts::with_document_context(
+        opts.document_context,
+        prompts::entity_user_prompt_for(
+            opts.source_type,
+            opts.episode_body,
+            opts.custom_instructions,
+        ),
     );
     let edge_system_prompt = prompts::edge_system_prompt(opts.ontology);
-    json!({
+    let mut value = json!({
         "call_type": "extract",
         "source_type": format!("{:?}", opts.source_type),
         "group_id": opts.group_id,
@@ -95,7 +98,13 @@ fn extract_request_value(opts: &ExtractOptions<'_>) -> Value {
         "entity_system_prompt": entity_system_prompt,
         "entity_user_prompt": entity_user_prompt,
         "edge_system_prompt": edge_system_prompt,
-    })
+    });
+    // Document mode only (issue #785): appended when present, so every chunk-mode key — and
+    // every cassette recorded before document mode existed — is unchanged.
+    if let Some(ctx) = opts.document_context {
+        value["document_context"] = json!(ctx);
+    }
+    value
 }
 
 fn classify_entities_request_value(
@@ -566,7 +575,39 @@ mod tests {
             reference_time: "2026-01-01T00:00:00Z",
             ontology: None,
             chunk_key: None,
+            document_context: None,
         }
+    }
+
+    /// Issue #785 (FR-019): a chunk-mode request (no document context) keys exactly as it did
+    /// before document mode existed, so recorded cassettes keep matching.
+    #[test]
+    fn extract_key_without_document_context_is_the_pre_785_shape() {
+        let o = opts("Alice works at Acme.");
+        let pre_785 = json!({
+            "call_type": "extract",
+            "source_type": format!("{:?}", o.source_type),
+            "group_id": o.group_id,
+            "reference_time": o.reference_time,
+            "custom_instructions": o.custom_instructions,
+            "episode_body": o.episode_body,
+            "entity_system_prompt": prompts::entity_system_prompt(o.source_type, None),
+            "entity_user_prompt": prompts::entity_user_prompt_for(o.source_type, o.episode_body, None),
+            "edge_system_prompt": prompts::edge_system_prompt(None),
+        });
+        assert_eq!(
+            request_key(&extract_request_value(&o)),
+            request_key(&pre_785)
+        );
+    }
+
+    #[test]
+    fn extract_key_changes_with_document_context() {
+        let a = request_key(&extract_request_value(&opts("Alice works at Acme.")));
+        let mut o = opts("Alice works at Acme.");
+        o.document_context = Some("<DOCUMENT_CONTEXT>\nTitle: T\n</DOCUMENT_CONTEXT>");
+        let b = request_key(&extract_request_value(&o));
+        assert_ne!(a, b);
     }
 
     #[test]

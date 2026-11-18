@@ -360,3 +360,56 @@ fn migrate_retries_lookup_key_backfill_after_a_prior_failure() {
         "the retried backfill must actually populate lookup_key, not just flip the status flag"
     );
 }
+
+/// Issue #785: a pre-document-mode `Episodic` table gains the six nullable document-mode columns
+/// (no backfill: an existing row reads them back NULL), and a second migrate is a no-op. The
+/// `DocRevision` table is created by `schema::init`'s `IF NOT EXISTS`, which every open runs.
+#[test]
+fn migrate_adds_document_mode_episodic_columns_on_existing_db() {
+    let dir = TempDir::new().unwrap();
+    let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.run_cypher("CREATE NODE TABLE Episodic (uuid STRING PRIMARY KEY, name STRING)")
+        .unwrap();
+    conn.run_cypher("CREATE (:Episodic {uuid:'ep1', name:'e'})")
+        .unwrap();
+    let probe = "MATCH (n:Episodic) RETURN n.revision_id, n.revision_committed_at, \
+                 n.byte_start, n.byte_end, n.heading_path, n.chunk_hash LIMIT 0";
+    assert!(
+        conn.run_cypher(probe).is_err(),
+        "precondition: columns absent"
+    );
+
+    schema::migrate(&conn, 4);
+    conn.run_cypher(probe)
+        .expect("document-mode columns must bind after migrate");
+    let rows = conn
+        .cypher_query(
+            "MATCH (n:Episodic {uuid:'ep1'}) RETURN n.revision_id IS NULL, \
+             n.revision_committed_at IS NULL, n.byte_start IS NULL, n.chunk_hash IS NULL",
+        )
+        .unwrap();
+    assert_eq!(rows[0], vec!["True", "True", "True", "True"]);
+    conn.run_cypher(
+        "MATCH (n:Episodic {uuid:'ep1'}) SET n.heading_path = ['A', 'B'], n.byte_start = 3",
+    )
+    .expect("the new columns are writable");
+
+    schema::migrate(&conn, 4);
+    conn.run_cypher(probe)
+        .expect("still present after a second migrate");
+    let rows = conn
+        .cypher_query("MATCH (n:Episodic {uuid:'ep1'}) RETURN n.byte_start")
+        .unwrap();
+    assert_eq!(rows[0][0], "3", "a second migrate must not disturb values");
+}
+
+#[test]
+fn init_creates_the_doc_revision_table() {
+    let dir = TempDir::new().unwrap();
+    let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.init_schema(4).unwrap();
+    assert!(conn.has_doc_revision_table());
+    conn.init_schema(4).expect("re-init is idempotent");
+}

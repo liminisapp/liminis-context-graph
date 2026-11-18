@@ -177,9 +177,12 @@ pub const CLASSIFICATION: &[(&str, WriteClass)] = &[
     ("knowledge_get_entity_neighbors", WriteClass::ReadOnly),
     ("knowledge_get_entities_by_source", WriteClass::ReadOnly),
     ("knowledge_validate_corrections", WriteClass::ReadOnly),
+    // Pure chunking: never touches the graph or the WAL (issue #785).
+    ("knowledge_preview_chunks", WriteClass::ReadOnly),
     // ── single group from params.group_id (omitted → default group) ──
     ("knowledge_add_episode", WriteClass::GroupParam),
     ("knowledge_process_chunk", WriteClass::GroupParam),
+    ("knowledge_process_document", WriteClass::GroupParam),
     ("knowledge_assert_entity", WriteClass::GroupParam),
     ("knowledge_assert_relationship", WriteClass::GroupParam),
     ("knowledge_merge_entities", WriteClass::GroupParam),

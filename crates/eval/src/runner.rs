@@ -307,6 +307,7 @@ pub async fn run_backend(
             reference_time: REFERENCE_TIME,
             ontology,
             chunk_key: Some(&chunk.title),
+            document_context: None,
         };
         let start = Instant::now();
         // Per-chunk drop-count visibility (#342) comes from the StructuredOutputCounts.salvaged

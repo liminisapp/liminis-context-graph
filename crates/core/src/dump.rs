@@ -42,7 +42,21 @@ const EPISODIC_CYPHER: &str = "\
     n.superseded_at = CASE WHEN $superseded_at IS NULL THEN NULL ELSE timestamp($superseded_at) END, \
     n.superseded_by = $superseded_by, n.superseded_by_kind = $superseded_by_kind, \
     n.supersession_reason = $supersession_reason, n.doc_id = $doc_id, n.origin = $origin, \
-    n.write_path = $write_path";
+    n.write_path = $write_path, n.revision_id = $revision_id, \
+    n.revision_committed_at = CASE WHEN $revision_committed_at IS NULL THEN NULL \
+    ELSE timestamp($revision_committed_at) END, \
+    n.byte_start = $byte_start, n.byte_end = $byte_end, n.heading_path = $heading_path, \
+    n.chunk_hash = $chunk_hash";
+
+const DOC_REVISION_CYPHER: &str = "\
+    MERGE (n:DocRevision {uuid: $uuid}) \
+    SET n.group_id = $group_id, n.doc_id = $doc_id, n.title = $title, \
+    n.source_path = $source_path, n.origin = $origin, \
+    n.effective_at = CASE WHEN $effective_at IS NULL THEN NULL ELSE timestamp($effective_at) END, \
+    n.committed_at = timestamp($committed_at), n.reference_time = $reference_time, \
+    n.attributes = $attributes, n.content_hash = $content_hash, n.byte_len = $byte_len, \
+    n.chunker_version = $chunker_version, n.chunk_names = $chunk_names, \
+    n.previous_revision_id = $previous_revision_id";
 
 const DOC_SUPERSESSION_CYPHER: &str = "\
     MERGE (n:DocSupersession {key: $key}) \
@@ -149,6 +163,7 @@ fn dump_nodes_phase(
     total += dump_community_nodes(conn, writer, group_id)?;
     total += dump_saga_nodes(conn, writer, group_id)?;
     total += dump_doc_supersession_nodes(conn, writer, group_id)?;
+    total += dump_doc_revision_nodes(conn, writer, group_id)?;
     Ok(total)
 }
 
@@ -237,7 +252,8 @@ fn dump_episodic_nodes(
                 for row in &rows {
                     // cols: [uuid, name, group_id, created_at, source, source_description,
                     //         content, content_embedding, valid_at, entity_edges, attributes, ingested_at,
-                    //         superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, origin, write_path]
+                    //         superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, origin, write_path,
+                    //         revision_id, revision_committed_at, byte_start, byte_end, heading_path, chunk_hash]
                     let uuid = value_as_string(&row[0]);
                     let name = value_as_string(&row[1]);
                     let grp = value_as_string(&row[2]);
@@ -271,6 +287,25 @@ fn dump_episodic_nodes(
                         s if s.is_empty() => serde_json::Value::Null,
                         s => serde_json::Value::String(s),
                     };
+                    // Document mode (issue #785), appended last. Every column is NULL on a
+                    // non-document episode and must round-trip as NULL.
+                    let null_or_str = |v: &lbug::Value| match value_as_string(v) {
+                        s if s.is_empty() => serde_json::Value::Null,
+                        s => serde_json::Value::String(s),
+                    };
+                    let revision_id = null_or_str(&row[19]);
+                    let revision_committed_at = dump_opt_ts_json(&row[20]);
+                    let int_or_null = |v: &lbug::Value| match v {
+                        lbug::Value::Int64(i) => serde_json::json!(i),
+                        _ => serde_json::Value::Null,
+                    };
+                    let byte_start = int_or_null(&row[21]);
+                    let byte_end = int_or_null(&row[22]);
+                    let heading_path = match &row[23] {
+                        lbug::Value::Null(_) => serde_json::Value::Null,
+                        v => serde_json::json!(value_as_str_list(v)),
+                    };
+                    let chunk_hash = null_or_str(&row[24]);
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -291,6 +326,12 @@ fn dump_episodic_nodes(
                         "doc_id": doc_id,
                         "origin": origin,
                         "write_path": write_path,
+                        "revision_id": revision_id,
+                        "revision_committed_at": revision_committed_at,
+                        "byte_start": byte_start,
+                        "byte_end": byte_end,
+                        "heading_path": heading_path,
+                        "chunk_hash": chunk_hash,
                     });
                     w.log_mutation(EPISODIC_CYPHER, params, "")?;
                 }
@@ -474,6 +515,53 @@ fn dump_doc_supersession_nodes(
                         "recorded_at": dump_ts_str(&row[5]),
                     });
                     w.log_mutation(DOC_SUPERSESSION_CYPHER, params, "")?;
+                }
+                Ok(())
+            })?;
+            total += count;
+        }
+        if count < PAGE_SIZE {
+            break;
+        }
+        offset += count;
+    }
+    Ok(total)
+}
+
+/// Document revisions (issue #785). Without them a compaction would lose every document's
+/// manifest and commit record, and the next ingest would re-extract the whole document.
+fn dump_doc_revision_nodes(
+    conn: &Conn<'_>,
+    writer: &mut WalWriter,
+    group_id: Option<&str>,
+) -> Result<usize, Error> {
+    let mut total = 0;
+    let mut offset = 0;
+    loop {
+        let rows = conn.dump_doc_revision_page(group_id, offset, PAGE_SIZE)?;
+        let count = rows.len();
+        if count > 0 {
+            writer.with_chunk(|w| {
+                for row in &rows {
+                    let rec = crate::db::doc_revision_from_row(row);
+                    let params = serde_json::json!({
+                        "uuid": rec.revision_id,
+                        "group_id": rec.group_id,
+                        "doc_id": rec.doc_id,
+                        "title": rec.title,
+                        "source_path": rec.source_path,
+                        "origin": rec.origin,
+                        "effective_at": rec.effective_at,
+                        "committed_at": rec.committed_at,
+                        "reference_time": rec.reference_time,
+                        "attributes": rec.attributes,
+                        "content_hash": rec.content_hash,
+                        "byte_len": rec.byte_len,
+                        "chunker_version": rec.chunker_version,
+                        "chunk_names": rec.chunk_names,
+                        "previous_revision_id": rec.previous_revision_id,
+                    });
+                    w.log_mutation(DOC_REVISION_CYPHER, params, "")?;
                 }
                 Ok(())
             })?;
