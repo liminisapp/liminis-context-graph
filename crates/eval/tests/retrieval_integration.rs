@@ -524,3 +524,20 @@ fn extraction_cli_is_unchanged() {
     let owned = vec!["--limit".to_string(), "3".to_string()];
     assert!(lcg_eval::cli::parse_args(&owned).is_err());
 }
+
+// ── v1 is frozen (#788 FR-026 / SC-009) ──────────────────────────────────────────
+
+#[test]
+fn v1_fixture_hashes_and_shape_are_unchanged() {
+    let fx = fixture::load(&fixture_dir()).unwrap();
+    assert_eq!(fx.corpus_hash, "26b9c77bff672642");
+    assert_eq!(fx.questions_hash, "9a7c6129bf1afbd8");
+    assert_eq!(fx.manifest.notes.len(), 31);
+    assert!(
+        fx.manifest
+            .notes
+            .iter()
+            .all(|n| n.origin.is_none() && n.cites.is_empty()),
+        "v1 declares no origins"
+    );
+}
