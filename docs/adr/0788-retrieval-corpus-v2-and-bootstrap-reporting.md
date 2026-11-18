@@ -20,19 +20,29 @@ no clipped articles, no near-duplicates, and only clean explicit supersession.
    format, extended only with additive fields (`origin`, `cites` on a manifest note; three question
    categories). v1 keeps its content, hashes and behaviour (a test pins its hashes) and remains the
    fast smoke corpus.
-2. **The corpus is generated, deterministically, by checked-in code.** `lcg-eval retrieval-gen`
-   turns `scenario.json` (seed, quotas) plus the vocabulary in code into the notes, manifest and
-   questions. No LLM, network or clock is involved, and no hash-map iteration; randomness is a
-   hand-rolled SplitMix64 with a forked stream per phase, so output is byte-stable across platforms
-   and crate upgrades (`rand`'s stream is not). The generator is library code behind a subcommand so
-   a test can run the drift check (`--check`) without a CLI. LLM-written prose was rejected for this
-   issue: it would not be reproducible and would cost money on every regeneration; the limitation
-   (template prose is more regular than real notes) is documented instead.
-3. **A fact model is the single source of truth.** Entities, attribute facts, buried "log" facts and
-   decision chains are built first; notes render them and questions and ground truth are read off the
-   same objects, so evidence strings are verbatim substrings, negatives are unanswerable, and
-   current/stale are right by construction. The generated output is re-validated through the
-   production loader before it is returned.
+2. **Structure is generated deterministically; prose is rendered once by an LLM and checked in
+   (scope change 2026-11-18).** `lcg-eval retrieval-gen` turns `scenario.json` (seed, quotas) and
+   the fact model in code into `skeleton.json`: entities and facts, which note carries which facts,
+   origins, citations, reference times, target sizes and sections, explicit supersessions, and the
+   question ground truth. Same scenario and seed give a byte-identical skeleton: hand-rolled
+   SplitMix64 with a forked stream per phase, no clock, no hash-map iteration, no model. A separate,
+   explicitly invoked `lcg-eval retrieval-render` has an LLM write each note in the voice its origin
+   implies and each question's wording (paraphrases included); the output is checked in, with the
+   render model and prompt version recorded in `render.json`. CI and normal eval runs never call a
+   model. Purely templated prose was rejected because it flatters BM25 and under-tests embeddings and
+   paraphrase, the very things the corpus exists to measure. There is **no template fallback for the
+   checked-in fixture**: template prose exists only as a test double that lets the pipeline run in
+   tests (a test fails if `render.json` names it). Re-rendering is a deliberate maintainer action
+   that bumps the corpus and question versions.
+3. **A fact model is the single source of truth.** Notes carry facts and questions are derived from
+   the same objects, so evidence key facts, negatives and currency are right by construction in the
+   skeleton. Because the text is no longer ours, **checks** (`generator/check.rs`) verify the rendered
+   prose against the skeleton instead of regenerating it: every fact present (entity and value
+   verbatim), evidence findable, passage facts in a later chunk, no foreign entity names, implicit
+   revisions not mentioning earlier values, explicit ones stating their effective date, citations
+   present, required names in question wording, and the paraphrase and negative checks re-run on the
+   rendered text. The manifest and the question ground truth must equal what the skeleton generates;
+   only the wording may change.
 4. **Origins are declared per note and stamped at ingest.** `ingest` sends `origin` on every chunk of
    a note that declares one; a note with none sends nothing (all of v1). Loader rules: the origin is
    in `primary|external|derived|answer`; `derived` requires `cites`; `cites` is valid only on
@@ -50,11 +60,11 @@ no clipped articles, no near-duplicates, and only clean explicit supersession.
    flag). v1's `direct` + flag negatives still load. `evidence` is therefore valid on `answer` and
    `passage` questions. The original four categories are always listed in plans and reports (so v1
    output is unchanged); the new ones appear only when a fixture has questions in them.
-7. **Paraphrase is enforced, not hoped for.** At most 25 % of a paraphrase question's content words
+7. **Paraphrase is enforced, not hoped for.** On the rendered wording, at most 25 % of a paraphrase question's content words
    (lowercase, longer than three letters, minus glue words) may appear in the fact sentence and at
-   most 50 % in the whole note. Note-side and question-side wordings of every domain, kind and
-   attribute share no content word by construction; failing candidates are replaced from a reserve.
-8. **Negatives are verified against the corpus.** A fake entity must appear in no note; a real entity
+   most 50 % in the whole note; the skeleton builder already requires it of the plain wording and
+   replaces failing candidates from a reserve, and the renderer is told which words to avoid.
+8. **Negatives are verified twice, against the skeleton and the rendered text.** A fake entity must appear in no note; a real entity
    asked for an attribute its kind never has must never share a note with that attribute's marker
    words. Near-miss distractors (shared family names and attributes) exist by construction.
 9. **Statistics are additive and exactly reproducible.** Percentile bootstrap over questions, 10,000
@@ -80,13 +90,13 @@ no clipped articles, no near-duplicates, and only clean explicit supersession.
     *derived-only rate* is how often a restating note was returned without any relevant primary
     note. `QuestionScore` carries the de-duplicated top-k list (not written to the JSON) so this
     needs no second query.
-12. **The human review is a checked-in record, never faked.** `review.json` holds a seeded stratified
-    sample (6 per category) with three verdicts per question, the reviewer, the date, the error rate
-    and the question-set version and hash. The generator writes it once as `pending` and never
-    overwrites it. A test checks that it matches the question set (ids exist, every category is
-    covered, the hash matches, a reviewed record's error rate agrees with its verdicts), so changing
-    the questions forces a re-review. `scenario.json` and `review.json` are outside the corpus and
-    question hashes.
+12. **The human review is a human's.** `review.json` is a checked-in template: a seeded stratified
+    sample (6 per category) with three empty verdicts per question, the skeleton hash and, after
+    rendering, the question-set hash and the question texts. The generator and renderer never write
+    verdicts, never overwrite a record marked reviewed, and a test fails if a pending record holds
+    verdicts. A reviewed record must have every verdict filled, an error rate that agrees with them,
+    and the hash of the rendered questions, so re-rendering forces a re-review. `scenario.json`,
+    `skeleton.json`, `render.json` and `review.json` are outside the corpus and question hashes.
 13. **Cassette (ADR-0044) and private runs.** v2 ingest is about 680 extraction calls; the maintainer
     records them once and the script replays `<corpus>/cassette.jsonl` by default. A changed corpus
     already fails loudly (a non-dedup cassette miss aborts ingest, naming the note and chunk; a test
@@ -101,10 +111,12 @@ no clipped articles, no near-duplicates, and only clean explicit supersession.
 
 - v2 can resolve differences of a few points of nDCG and says when it cannot; v1 remains for quick
   checks.
-- Any change to the generator or vocabulary changes the corpus hash and invalidates the review and
-  any cassette. The order is: freeze the generator, regenerate, review, record the cassette.
-- Template prose is more regular than real notes, so lexical systems can look better on v2 than on a
-  real notebook. The docs say so and describe the private-notebook cross-check.
-- Two steps need a human or a live endpoint and are not done by this change: the question review
-  (`review.json` is `pending`) and the cassette recording.
+- Any change to the generator or vocabulary changes the skeleton; re-rendering changes the corpus hash
+  and invalidates the review and any cassette. The order is: freeze the generator, generate the
+  skeleton, render, review, record the cassette.
+- LLM prose is more natural than templates but is still one model with one prompt, so the corpus is
+  more uniform than a real notebook. The docs say so and describe the private-notebook cross-check.
+- Three steps are not done by this change because they need a model key or a human: the render (no
+  Anthropic key was available, so the checked-in fixture is the skeleton only and the loader says so),
+  the question review (`review.json` is a pending template) and the cassette recording.
 - No LCG retrieval, ranking, or service change; no new dispatch method or MCP tool.

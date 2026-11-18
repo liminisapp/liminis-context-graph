@@ -16,7 +16,7 @@ It is a separate mode of the existing `lcg-eval` binary. The extraction eval
 ([testing-and-evaluation.md](testing-and-evaluation.md)) is unchanged.
 
 > **Status: no numbers published yet.** The harness and both fixtures (the 31-note v1 smoke corpus
-> and the 408-note v2 corpus) are in the repository; results appear here only after a maintainer
+> and the 408-note v2 skeleton, whose prose a maintainer still has to render) are in the repository; results appear here only after a maintainer
 > has run the comparison on a real embedder. Until then this page deliberately contains no scores.
 
 ## What it measures
@@ -153,9 +153,9 @@ Each rate carries a bootstrap interval. v1 declares no origins, so it never prin
 - LCG and qmd use **different embedding (and reranker) models**, so this compares systems, not
   retrieval algorithms.
 - Both corpora are synthetic. v1 is small and hand-built (results are indicative, not general). v2
-  is larger and template-generated, so its prose is **more regular than a real notebook's**: lexical
-  systems may look better on it than on real notes, and direct questions may sit near the ceiling.
-  The report prints the matching caveat, and says explicitly when a category is at the ceiling.
+  is larger and synthetic: its structure is generated and its prose is written by an LLM, so it is
+  **more uniform than a real notebook's** and direct questions may sit near the ceiling. The
+  report prints the matching caveat, and says explicitly when a category is at the ceiling.
 - LCG ingestion is only deterministic with a replayed extraction cassette; qmd's expansion and
   reranking depend on their models. Relevance metrics are exactly reproducible for a fixed LCG
   graph and embedder.
@@ -174,10 +174,10 @@ versioned: the report prints each corpus and question-set version and content ha
 | | v1 `crates/eval/fixtures/retrieval/` | v2 `crates/eval/fixtures/retrieval-v2/` |
 |---|---|---|
 | Purpose | Fast smoke corpus; frozen | Realistic corpus that can resolve differences |
-| Corpus | `fernhill-notebook-1`, 31 notes, ~1,200 words, hand-written | `meridian-notebook-2`, 408 notes, ~165,000 words, generated |
+| Corpus | `fernhill-notebook-1`, 31 notes, ~1,200 words, hand-written | `meridian-notebook-2`, 408 notes, about 155,000 target words, structure generated and prose LLM-rendered |
 | Questions | 43 (40 judged, 3 negative) in four categories | 244 in seven categories (≥ 30 each) |
 | Origins | none declared | primary 286, external 36, derived 56, answer 30 |
-| Chunks at 900 tokens | one per note | about 680; 84 notes span several chunks |
+| Chunks at 900 tokens | one per note | 63 long notes are sectioned (254 sections, each its own chunk or more) |
 
 ```text
 manifest.json         corpus_version, chunking, notes in ingest order (id, reference_time, and in v2
@@ -186,11 +186,14 @@ notes/<id>.md         one markdown note per manifest entry
 questions.jsonl       one question per line
 questions.meta.json   {"questions_version": "..."}
 scenario.json         (v2) the generator input: seed and quotas
+skeleton.json         (v2) generated: everything except the prose (facts, origins, citations,
+                      sizes, supersessions, question ground truth)
+render.json           (v2) written by the render step: render model, prompt version, skeleton hash
 review.json           (v2) the human-review record for a stratified sample of the questions
 ```
 
 Note ids are lowercase slugs (`[a-z0-9-]`) because they double as the file names qmd indexes.
-`scenario.json` and `review.json` are not part of the corpus or question hashes.
+`scenario.json`, `skeleton.json`, `render.json` and `review.json` are not part of the corpus or question hashes.
 
 ### v1 (smoke)
 
@@ -203,8 +206,8 @@ question is 0.025 of recall. Its content and hashes never change.
 
 `meridian-notebook-2` is a fictional cooperative's notebook shaped like a Liminis workspace:
 
-- **Size mix:** 302 notes under 250 words, 21 of 250–500, 75 of 500–2,000, 4 of 2,000–5,000 and 6
-  over 5,000 words. The long notes are weekly digests and journals with a handful of facts buried
+- **Size mix (target words):** 302 notes under 250 words, 22 of 250–500, 78 of 500–2,000 and 6
+  over 5,000. The long notes are weekly digests and journals with a handful of facts buried
   in otherwise generic text, so **choosing the right passage inside a note** is exercised.
 - **Origins:** human notes (`primary`), clipped articles (`external`, some carrying a vendor's
   public list price), agent-maintained entity and decision pages (`derived`, each citing the notes
@@ -233,64 +236,105 @@ question is 0.025 of recall. Its content and hashes never change.
 
   At 244 questions a single question moves recall by at most 0.0125 in aggregate (v1: 0.025).
 
-**Paraphrase rule.** The generator counts a question's content words (lowercase, longer than three
+**Paraphrase rule.** The checks count a question's content words (lowercase, longer than three
 letters, minus glue words like *what* and *does*) and requires at most **25 %** of them to appear in
-the fact sentence and at most **50 %** in the whole relevant note. A candidate that fails is replaced
-from a reserve; if there are not enough, generation fails. Note-side and question-side wordings of
+the fact sentence and at most **50 %** in the whole relevant note. The skeleton builder replaces a
+candidate whose plain wording fails from a reserve; the same bound is checked again on the rendered
+wording and the rendered note. Note-side and question-side wordings of
 every domain, kind and attribute share no content word by construction (*billing* vs *invoicing and
 payment collection*).
 
 **Negatives are unanswerable by construction and verified.** A fake entity is checked to appear in
 no note; a real entity asked for an attribute its kind never has is checked never to share a note
-with that attribute's marker words. The near-miss distractors (same family name, same attribute)
+with that attribute's marker words. Both are checked against the skeleton when it is built and
+again against the rendered text. The near-miss distractors (same family name, same attribute)
 are present in the corpus.
 
-**Limitation.** v2 is generated from templates, with varied phrasing, filler paragraphs, near-miss
-names and near-duplicate pages, but its prose is more regular than a human's. Lexical systems
-(qmd, FTS) can therefore do better here than on a real notebook, and direct questions may be at the
-ceiling for both systems. That is reported, with intervals, not hidden. Use the private-notebook run
-below as a cross-check.
+**Limitation.** An LLM writes the prose, so notes read naturally and paraphrase questions are not
+template paraphrases, but one model with one prompt still writes everything: the corpus is more
+uniform than a real notebook, and direct questions may be at the ceiling for both systems. That is
+reported, with intervals, not hidden. Use the private-notebook run below as a cross-check.
 
-### Regenerating v2 and checking drift
+### How v2 is built: skeleton, then render, then check
 
-The fixture is the output of `lcg-eval retrieval-gen` for the checked-in `scenario.json`. The
-generator is deterministic (a hand-rolled SplitMix64, no clock, no network, no model calls): the
-same scenario and seed give byte-identical output.
+v2 is built in two steps so that structure is reproducible and prose is natural.
+
+1. **Skeleton (deterministic, free).** `lcg-eval retrieval-gen` turns the checked-in `scenario.json`
+   (seed and quotas) and the fact model in code into `skeleton.json`: entities and facts, which note
+   carries which facts (and, for long notes, in which section), each note's origin, reference time,
+   target length and citations, the explicit supersessions with effective dates, and every
+   question's ground truth (relevant notes, gains, evidence key facts, current/stale). Same
+   scenario and seed give a byte-identical skeleton (hand-rolled SplitMix64, no clock, no network,
+   no model).
+2. **Render (explicit, paid, once; a maintainer step).** `lcg-eval retrieval-render` has an LLM write
+   every note in the voice its origin implies (journal, decision record, standup recap, clipped
+   article, agent topic page with citations, filed answer) and every question's wording, paraphrase
+   questions included. It writes `manifest.json` (generated from the skeleton), `notes/*.md`,
+   `questions.jsonl`, `questions.meta.json` and `render.json` (render model, prompt version, skeleton
+   hash). **The rendered output is checked in; CI and normal eval runs never call a model, and there
+   is no template fallback for the checked-in fixture.** A long note is rendered section by section
+   so each fact lands in the section the skeleton assigned it.
+3. **Checks (free, in `cargo test` and `retrieval-gen --check`).** They verify the checked-in text
+   against the skeleton rather than regenerating it: every skeleton fact appears in its note (entity
+   name and value verbatim); evidence key facts are findable in their notes; a passage fact sits in
+   a later chunk of a multi-chunk note; a note names no entity other than its own; an implicit
+   revision does not mention the earlier value and an explicit one states its effective date;
+   derived and answer pages carry their `[[citations]]`; questions keep the names they must (and a
+   paraphrase names none); the paraphrase lexical-overlap bound holds on the *rendered* wording
+   against the sentence carrying the fact and the whole note; and negatives remain unanswerable.
+   `manifest.json` and the question ground truth must equal what the skeleton generates (only the
+   wording may change), and `render.json` must name the current skeleton.
 
 ```bash
-# regenerate (rewrites notes/, manifest, questions; review.json is written only when absent)
+# 1. skeleton (deterministic; a pending review.json template is written only when absent)
 target/release/lcg-eval retrieval-gen \
   --spec crates/eval/fixtures/retrieval-v2/scenario.json --out crates/eval/fixtures/retrieval-v2
-# check that the checked-in files equal the generator output (exit 1 on drift, writes nothing)
+# check the skeleton against the scenario, and (once rendered) the text against the skeleton
 target/release/lcg-eval retrieval-gen --check \
   --spec crates/eval/fixtures/retrieval-v2/scenario.json --out crates/eval/fixtures/retrieval-v2
+# 2. render (needs ANTHROPIC_API_KEY; ~630 model calls; --dry-run prints the count and needs no key)
+ANTHROPIC_API_KEY=… target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2
+# re-render only what the checks flagged
+target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2 --only note-id,question-id
 ```
 
-`--seed N` overrides the scenario seed (write to a scratch `--out`) to get a different, equally
-valid fixture. A Rust test (`tests/retrieval_v2.rs`) runs the same drift check, so a template or
-scenario change that is not regenerated fails `cargo test`. Any change to the generator changes the
-corpus hash, invalidating the review record and any recorded cassette, so the order is: **freeze the
-generator → regenerate → review → record the cassette.**
+`--model` (default the judge model) is recorded in `render.json`. A crashed run continues with
+`--resume`. **Re-rendering changes the corpus: bump `corpus_version` and `questions_version` in
+`scenario.json`, regenerate the skeleton, then render.** A change to the skeleton makes a test fail
+until `skeleton.json` is regenerated. The order is: **freeze the generator → generate the skeleton →
+render → review → record the cassette.**
+
+**Current status.** No model key was available when this was implemented, so **the checked-in v2 is
+the skeleton only: it has not been rendered**, and `lcg-eval retrieval --corpus …/retrieval-v2`
+stops with a message saying so. Rendering, the question review and the cassette are maintainer
+steps. The Rust tests exercise the whole pipeline (checks, loader, ingest, report) against a
+template-prose test double built in a scratch directory; that prose is never checked in, and a test
+fails if a checked-in `render.json` names it.
 
 ### Human review of the questions
 
-`review.json` lists a seeded, stratified sample (6 questions per category, 42 in all, at least 10 %
+`review.json` is a template that lists a seeded, stratified sample (6 questions per category, 42 in all, at least 10 %
 of the set) with three verdicts per question: *ground truth correct*, *note relevance correct*, *key
 fact correct*, plus the reviewer, date, error rate and the question-set version and hash. **The
-checked-in record is `pending`: no human has reviewed it yet.** The fixture counts as reviewed only
+checked-in record is `pending` with empty verdicts: no human has reviewed it, and neither the
+generator nor the renderer ever writes verdicts.** After rendering, `retrieval-render` fills
+`questions_hash` and each sampled question's text (only while the record is pending; a record marked
+reviewed is never modified) so the reviewer can read the questions in one place. The fixture counts as reviewed only
 once a maintainer fills every verdict, sets `status` to `reviewed`, and records `reviewer`,
 `reviewed_on` and `error_rate` (the share of sampled questions with any `false` verdict). If the rate
 exceeds `error_rate_threshold` (default 5 %), correct or regenerate the affected categories and
-re-review. A test checks that the sampled ids exist, every category is covered, the recorded hash
-equals the question set's hash, and (when reviewed) that the error rate agrees with the verdicts.
+re-review. A test checks that the sampled ids exist, every category is covered, the record names the current
+skeleton and (once rendered) the question set's hash, that a pending record has no verdicts, and
+(when reviewed) that every verdict is filled and the error rate agrees with them.
 
 ### Recording the v2 cassette (free re-runs)
 
-Ingesting v2 means about 680 `knowledge_process_chunk` calls, each at least one extraction-LLM call.
+Ingesting v2 means one `knowledge_process_chunk` call per chunk (several hundred once rendered; the
+dry run prints the exact number), each at least one extraction-LLM call.
 Record them once and replay forever (cassettes: [ADR-0044](adr/0044-llm-cassette-record-replay-seam.md)):
 
 ```bash
-# once, with a live extractor (ANTHROPIC_API_KEY or LCG_EXTRACTION_URL) and a real embedder
+# once the prose is rendered, with a local or live extractor and a real embedder
 LCG_EVAL_EMBEDDER_HTTP=http://127.0.0.1:8080 \
 LCG_EVAL_RECORD_CASSETTE=crates/eval/fixtures/retrieval-v2/cassette.jsonl \
   crates/eval/scripts/07-retrieval-eval.sh --corpus crates/eval/fixtures/retrieval-v2
@@ -301,10 +345,10 @@ After that, `07-retrieval-eval.sh --corpus crates/eval/fixtures/retrieval-v2` re
 extraction requests**. The cassette is keyed by extraction input, not by corpus hash, so if the
 corpus changes, the changed chunks **fail loudly with a cassette miss that names the note and
 chunk** and the run stops; nothing falls back to a live model. The cassette is recorded against the
-corpus hash the report prints (`meridian-notebook-2`, hash in the report header); write that hash
+corpus hash the report prints (hash in the report header, after rendering); write that hash
 next to the file when committing it. Expect a few MB; if it is too large for the repository, keep it
 in external storage and set `LCG_EVAL_REPLAY_CASSETTE` instead of using the sidecar path.
-**The recording needs a live extraction endpoint and is a maintainer step; it has not been done yet.**
+**The recording needs a rendered corpus and an extraction endpoint (a local extractor is fine); it is a maintainer step and has not been done yet.**
 
 ### Question format
 
@@ -335,7 +379,7 @@ Paraphrase questions deliberately share little vocabulary with the relevant text
 
 ### Adding a question (v1 only; v2 is generated)
 
-Do not edit the v2 files by hand: change `scenario.json` or the generator and regenerate.
+Do not edit the v2 files by hand: change `scenario.json` or the generator, regenerate the skeleton and render.
 
 1. Add a line to `questions.jsonl` in the format above; pick a unique `id`.
 2. If it needs new content, add `notes/<id>.md` and a manifest entry (in ingest order, with a

@@ -948,7 +948,7 @@ async fn v2_report_has_intervals_origin_breakdown_and_is_reproducible() {
         "### negative (n = 34)",
         "Paired nDCG@k comparison",
         "## By origin of returned notes",
-        "synthetic and template-generated",
+        "synthetic (generated structure",
     ] {
         assert!(ma.contains(needle), "missing {needle:?}");
     }

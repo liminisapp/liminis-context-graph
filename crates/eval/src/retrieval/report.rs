@@ -516,7 +516,7 @@ impl Report {
 
     fn disclaimer(&self) -> String {
         let corpus = if self.total_questions() >= 100 {
-            "The corpus is synthetic and template-generated: its prose is more regular than a real notebook's, so lexical systems may look better here than on real notes. Treat results as a controlled comparison, not a forecast"
+            "The corpus is synthetic (generated structure, LLM-written prose) and more uniform than a real notebook, so direct questions may sit near the ceiling. Treat results as a controlled comparison, not a forecast"
         } else {
             "The corpus is small and hand-built: results are indicative, not general"
         };
@@ -1323,7 +1323,7 @@ mod tests {
         let mut r = report();
         r.meta.category_counts.insert(Category::Direct, 200);
         let md = r.render_markdown();
-        assert!(md.contains("synthetic and template-generated"), "{md}");
+        assert!(md.contains("synthetic (generated structure"), "{md}");
         assert!(!md.contains("small and hand-built"));
     }
 
