@@ -72,6 +72,10 @@ pub struct BaselineChunk {
     /// The text of each episode in `episode_uuids`, in the same order. An unchanged chunk's
     /// episodes tile its (identical) text, which is how the commit step re-locates them.
     pub episode_texts: Vec<String>,
+    /// The `revision_id` each episode in `episode_uuids` carries, in the same order. After a
+    /// complete commit they all name the latest revision; a mismatch means a torn tail cut that
+    /// commit's re-stamps, which the next ingest must repair (it may not take the no-op path).
+    pub episode_revision_ids: Vec<String>,
 }
 
 /// The previous committed state of a document.
@@ -163,6 +167,10 @@ impl Baseline {
                 chunk_hash: eps[0].chunk_hash.clone().unwrap_or_default(),
                 revision_id: rev,
                 episode_texts: eps.iter().map(|e| e.content.clone()).collect(),
+                episode_revision_ids: eps
+                    .iter()
+                    .map(|e| e.revision_id.clone().unwrap_or_default())
+                    .collect(),
                 episode_uuids: eps.into_iter().map(|e| e.uuid).collect(),
             });
         }
@@ -307,6 +315,7 @@ pub fn measure_pair(old: &str, new: &str, max_chars: usize) -> PairMeasure {
                 revision_id: "old".into(),
                 episode_uuids: vec![format!("ep-{}", c.index)],
                 episode_texts: vec![c.text.clone()],
+                episode_revision_ids: vec!["old".into()],
             })
             .collect(),
         ..Default::default()

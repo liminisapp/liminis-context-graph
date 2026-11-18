@@ -259,11 +259,24 @@ pub async fn process_document(
     // revision, no belief change. Identical content with new metadata (`attributes`, `title`,
     // `source_path`, `effective_at`) is a new completeness claim and falls through to commit a
     // revision with zero extraction, so the metadata is recorded rather than silently dropped.
+    //
+    // It also requires every live episode to carry the latest revision's id. A complete commit
+    // re-stamps every carried-forward episode, so a mismatch means a torn WAL tail cut that
+    // commit's re-stamps after its revision row and commit stamp landed: those episodes still
+    // hold an older revision's spans. Falling through to the zero-extraction commit re-stamps
+    // them, so resending the same bytes repairs the document instead of returning `unchanged`
+    // over spans that no longer slice it (SC-006).
     if to_extract == 0
         && nothing_to_retire
-        && previous
-            .as_ref()
-            .is_some_and(|p| p.content_hash == content_hash && same_metadata(p, &req))
+        && previous.as_ref().is_some_and(|p| {
+            p.content_hash == content_hash
+                && same_metadata(p, &req)
+                && baseline
+                    .chunks
+                    .iter()
+                    .flat_map(|c| &c.episode_revision_ids)
+                    .all(|r| *r == p.revision_id)
+        })
     {
         let prev = previous.as_ref();
         let chunks: Vec<Value> = d

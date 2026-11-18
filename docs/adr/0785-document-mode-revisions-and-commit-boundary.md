@@ -145,7 +145,8 @@ all but the latest are *stale* and superseded at the next commit, and a removal 
 `chunk_removed` was torn away is simply re-classified `removed`. Grouping by instant matters for the
 re-stamp: a torn tail that re-stamped only some of a split chunk's units leaves them with two
 revision ids but one commit instant, so they stay one chunk, never a stale half, and the next commit
-re-stamps the rest. So the torn-tail overlap — the same class every multi-line `with_chunk` already
+re-stamps the rest — including a resend of identical bytes, which the no-op rule (§5) refuses to
+treat as `unchanged` while any live episode carries an older revision id. So the torn-tail overlap — the same class every multi-line `with_chunk` already
 has — is repaired by the next ingest of the document, without extraction. It is not prevented.
 
 **Abandoned attempts are not cleaned up.** Their pending episodes are never believed and stay visible
@@ -169,7 +170,10 @@ crash); a WAL framing marker (replay is batch-aligned and cannot see it).
   instant, `attributes` as JSON) matches it → `status: "unchanged"`, zero extraction calls, nothing
   written (FR-021). Identical content with new metadata is a new completeness claim: it commits a
   revision with zero extraction that records the metadata, rather than dropping it silently.
-  `reference_time` is not compared (it defaults to the call instant). Unchanged sections' episodes
+  `reference_time` is not compared (it defaults to the call instant). It also requires every live
+  episode of the document to carry the latest revision's id (checked per episode, not per chunk);
+  otherwise a torn tail cut that revision's re-stamps, and the call commits a zero-extraction
+  revision that re-stamps them instead of answering `unchanged` over stale spans. Unchanged sections' episodes
   are re-stamped but not rewritten, so they keep the `attributes` they were extracted with. A pure
   reorder likewise commits a new revision (new manifest) with zero extraction.
 - **Mode transition (FR-023)**: live chunk-mode or pre-marker episodes with the same `doc_id` are

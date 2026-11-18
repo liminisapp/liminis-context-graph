@@ -1624,7 +1624,7 @@ document are serialized.
 
 | Field | |
 |---|---|
-| `status` | `committed`, or `unchanged` for a byte-identical resubmission with the same `title`, `source_path`, `effective_at` and `attributes`. Identical content with different metadata commits a new revision with zero extraction calls, which records the new metadata and changes no belief. |
+| `status` | `committed`, or `unchanged` for a byte-identical resubmission with the same `title`, `source_path`, `effective_at` and `attributes`. Identical content with different metadata commits a new revision with zero extraction calls, which records the new metadata and changes no belief. So does identical content whose stored spans are behind the latest revision (a crash cut the previous commit's re-stamps): the resend re-stamps them. |
 | `revision_id`, `previous_revision_id`, `committed_at`, `chunker_version` | The server-minted revision and its predecessor. |
 | `extraction_calls` | Units extracted by this call (0 when nothing changed). |
 | `chunks[]` | Per section: `index`, `name` (stable across revisions), `heading_path`, `byte_start`, `byte_end`, `content_hash`, `classification` (`added` / `changed` / `unchanged`), `units`, `episode_uuids`, `previous_episode_uuids`. |

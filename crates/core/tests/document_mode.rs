@@ -1283,6 +1283,78 @@ async fn torn_restamp_of_a_split_chunk_is_relocated_exactly_on_next_ingest() {
     assert_live_episodes_match(&s2, &v3, &rev3).await;
 }
 
+/// SC-006, FR-021: a torn tail that kept a revision's `DocRevision` row and commit stamp but cut
+/// all of its re-stamps leaves carried-forward episodes on the older revision's spans and id,
+/// while the latest revision's content hash already equals the document. Resending the same
+/// bytes must not answer `unchanged` over those stale spans: it commits a zero-extraction
+/// revision that re-stamps them, after which a resend is a true no-op again.
+#[tokio::test]
+async fn resend_after_torn_restamps_repairs_spans_instead_of_returning_unchanged() {
+    let f = fx();
+    let para = "A sentence about the cache layer and how it behaves under load. ".repeat(30);
+    let doc = |intro: &str| {
+        format!(
+            "# Plan\n\n{intro}\n\n## Detail\n\n{p}\n\n{p}\n\n{p}\n\n{p}\n\n## Later\n\nFollow up.\n",
+            p = para.trim()
+        )
+    };
+    ingest(&f.state, "d", &doc("Intro.")).await;
+    let v2 = doc("A longer introduction.");
+    let r2 = ingest(&f.state, "d", &v2).await;
+    assert_eq!(classes(&r2), vec!["changed", "unchanged", "unchanged"]);
+    let rev2 = r2["revision_id"].as_str().unwrap().to_string();
+
+    // Cut at the first re-stamp: the second revision's row, commit stamp and supersessions are
+    // kept, every re-stamp of its carried-forward episodes is lost.
+    let wal = truncated_wal(f.wal.path(), |v| {
+        cypher(v).contains("SET ep.revision_id = $revision_id")
+    });
+    let (s2, db2, _d, ex) = replayed(wal.path()).await;
+    let latest = db2
+        .connect()
+        .unwrap()
+        .latest_doc_revision(G, "d")
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.revision_id, rev2, "the second revision committed");
+    let stale: Vec<Value> = episodes(&s2)
+        .await
+        .into_values()
+        .filter(|e| e["superseded_at"].is_null() && e["revision_id"] != rev2.as_str())
+        .collect();
+    assert!(
+        !stale.is_empty(),
+        "carried-forward episodes kept the older stamp"
+    );
+    assert!(
+        stale.iter().any(|e| {
+            let (s, t) = (
+                e["byte_start"].as_u64().unwrap() as usize,
+                e["byte_end"].as_u64().unwrap() as usize,
+            );
+            v2.get(s..t) != e["content"].as_str()
+        }),
+        "and their spans no longer slice the document"
+    );
+
+    // Resending the identical document repairs them without extraction.
+    let r = call("knowledge_process_document", doc_params("d", &v2), &s2).await;
+    assert_eq!(
+        r["status"], "committed",
+        "must not be a no-op over stale spans: {r}"
+    );
+    assert_eq!(r["extraction_calls"], 0);
+    assert_eq!(ex.call_count(), 0);
+    assert_eq!(classes(&r), vec!["unchanged"; 3]);
+    assert!(uuids(&r["superseded_episode_uuids"]).is_empty());
+    let rev3 = r["revision_id"].as_str().unwrap().to_string();
+    assert_live_episodes_match(&s2, &v2, &rev3).await;
+
+    // Now consistent: the same bytes again are a true no-op.
+    let r = call("knowledge_process_document", doc_params("d", &v2), &s2).await;
+    assert_eq!(r["status"], "unchanged", "{r}");
+}
+
 /// US3 AC2, SC-004: a crash before the second revision's commit chunk rebuilds to the fully
 /// "before" state — its pending episodes exist but nothing of them is believed.
 #[tokio::test]
