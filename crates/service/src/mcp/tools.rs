@@ -663,6 +663,24 @@ pub fn registry() -> Vec<ToolSpec> {
             scope: Scope::Read,
             input_schema: empty_schema,
         },
+        ToolSpec {
+            name: "knowledge_preview_chunks",
+            description: "Read-only (issue #785): return exactly the chunks \
+                           `knowledge_process_document` would produce for `content` — each with \
+                           its `heading_path`, `content_hash`, `byte_start`/`byte_end` and the \
+                           byte spans of its extraction units — plus the document map. Writes \
+                           nothing, so a client never needs its own chunker.",
+            scope: Scope::Read,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "The whole document (required)."}
+                    },
+                    "required": ["content"]
+                })
+            },
+        },
         // ── write (15) ────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_process_chunk",
@@ -734,6 +752,51 @@ pub fn registry() -> Vec<ToolSpec> {
                         "same_revision_episode_uuids": {"type": "array", "items": {"type": "string"}, "description": "On the final unit of a multi-unit revision: episode_uuids returned by the earlier units. They stay live; the chunk's older episodes are superseded."}
                     },
                     "required": ["chunk_text", "chunk_id", "source_file"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_process_document",
+            description: "Document mode (issue #785): ingest one whole markdown document as a \
+                           completeness claim — \"this is document `doc_id`, in full\". The \
+                           server chunks it at structural boundaries (headings, paragraphs, \
+                           lists, tables), diffs it against the document's previous committed \
+                           revision, and extracts only the chunks whose text was added or \
+                           changed; unchanged chunks are skipped by content hash, so \
+                           re-submitting an identical document makes zero extraction calls. \
+                           Once every chunk has succeeded it commits the revision in one step: \
+                           changed chunks' earlier episodes are superseded (reason `revision`) \
+                           and chunks no longer in the document are retired (reason \
+                           `chunk_removed`) — you never send removals. A failed call retires \
+                           nothing. Each extraction sees the title, heading path, origin and a \
+                           document map as context, but facts are cited only to their own \
+                           chunk. Every episode carries the server-minted `revision_id` and its \
+                           `byte_start`/`byte_end` span in the submitted content. The result \
+                           lists each chunk's `classification` (added / changed / unchanged), \
+                           the `removed` chunks, `extraction_calls`, and the episodes created, \
+                           superseded and retired. `attributes` (issue #528) and `origin` \
+                           (issue #752) apply to every episode; a different origin for a known \
+                           `doc_id` is refused with `origin_conflict:`. The first document-mode \
+                           ingest of a `doc_id` supersedes its live chunk-mode episodes. \
+                           Documents over `LCG_DOCUMENT_MAX_BYTES` (default 512 KiB) and empty \
+                           or headings-only documents are rejected with nothing written. \
+                           `knowledge_process_chunk` is unchanged.",
+            scope: Scope::Write,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "doc_id": {"type": "string", "description": "Stable identity of the document within the group (required, non-empty). The diff is always against this document's last committed revision."},
+                        "content": {"type": "string", "description": "The whole document (markdown or plain text), required."},
+                        "group_id": {"type": "string", "default": "liminis"},
+                        "title": {"type": "string", "description": "Document title, given to the extractor as context and recorded on the revision."},
+                        "source_path": {"type": "string", "description": "Source path or URL, recorded on the revision and used in each episode's source_description."},
+                        "origin": origin_prop(),
+                        "effective_at": {"type": "string", "format": "date-time", "description": "When this revision took effect; recorded on the revision only (never valid_at, never belief time)."},
+                        "reference_time": {"type": "string", "format": "date-time", "description": "Extraction reference time, as for knowledge_process_chunk; defaults to now."},
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored on every episode of this revision and on the revision record."}
+                    },
+                    "required": ["doc_id", "content"]
                 })
             },
         },
@@ -1786,19 +1849,19 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_52_unique_tools() {
+    fn registry_has_54_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 52);
+        assert_eq!(r.len(), 54);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 52, "tool names must be unique");
+        assert_eq!(names.len(), 54, "tool names must be unique");
     }
 
     #[test]
     fn scope_bucket_sizes_match_fr_004_table() {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
-        assert_eq!(count(Scope::Read), 18);
-        assert_eq!(count(Scope::Write), 17);
+        assert_eq!(count(Scope::Read), 19);
+        assert_eq!(count(Scope::Write), 18);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 16);
     }
