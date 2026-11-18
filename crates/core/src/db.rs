@@ -4472,9 +4472,18 @@ impl<'db> Conn<'db> {
     /// [`Self::set_wal_position`] directly) is allowed to claim the new prefix. Model name and
     /// dimension keep their existing best-effort restamp behaviour.
     ///
-    /// A row with no recorded model/dim (a fresh group, or an "unknown" one) is stamped normally:
-    /// there is no recorded prefix to protect. A NULL recorded prefix on a row that does have a
-    /// model/dim is a pre-#790 row and is read as the empty prefix.
+    /// A row with no recorded model/dim and nothing applied (a fresh group, or one reset to
+    /// `applied_seq = 0`) is stamped normally: there are no stored vectors to protect. A NULL
+    /// recorded prefix on a row that does have a model/dim is a pre-#790 row and is read as the
+    /// empty prefix.
+    ///
+    /// An *unknown* row that already has applied content (`applied_seq > 0` but no recorded
+    /// model/dim — pre-#440, or its identity was cleared by a replay whose recompute failed)
+    /// holds vectors of unknown provenance. Before #790 no document prefix existed, so they can
+    /// only have been produced unprefixed: when the running document prefix is non-empty it is
+    /// therefore *not* claimed, and the row records the empty prefix instead, so the status stays
+    /// `mismatch` until a rebuild recomputes the vectors. With an empty running prefix nothing
+    /// changes (NULL and `""` compare equal).
     pub fn set_wal_position_live(
         &self,
         group_id: &str,
@@ -4493,6 +4502,11 @@ impl<'db> Conn<'db> {
                 } else {
                     recorded_prefix.to_string()
                 },
+            }
+        } else if matches!(recorded.applied_seq, Some(n) if n > 0) {
+            crate::embedding_cache::EmbeddingIdentity {
+                doc_prefix: String::new(),
+                ..running.clone()
             }
         } else {
             running.clone()
@@ -6276,6 +6290,46 @@ mod applied_seq_tests {
                 .as_deref(),
             Some("search_document: ")
         );
+    }
+
+    /// #790 SC-004 (unknown-identity case): a row with applied content but no recorded identity
+    /// (pre-#440, or cleared by a replay with a failed recompute) must not have a non-empty
+    /// document prefix claimed by an ordinary write — its vectors were produced unprefixed.
+    #[test]
+    fn live_stamp_does_not_claim_a_prefix_over_unknown_applied_content() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        let running = ident("m", 4, "search_document: ");
+        let prefix_of = |g: &str| {
+            conn.get_wal_position(g)
+                .unwrap()
+                .embedding_doc_prefix
+                .unwrap_or_default()
+        };
+
+        // Content applied, identity cleared (`None`): the stamp records the model/dim but keeps
+        // the prefix empty, so status against the running prefix is a mismatch.
+        conn.set_wal_position("cleared", 5, None, None).unwrap();
+        conn.set_wal_position_live("cleared", 6, None, &running)
+            .unwrap();
+        let rec = conn.get_wal_position("cleared").unwrap();
+        assert_eq!(rec.applied_seq, Some(6));
+        assert_eq!(rec.embedding_model.as_deref(), Some("m"));
+        assert_eq!(prefix_of("cleared"), "");
+
+        // Nothing applied (reset to 0): no vectors to protect, so the prefix is claimed.
+        conn.set_wal_position("reset", 0, None, None).unwrap();
+        conn.set_wal_position_live("reset", 1, None, &running)
+            .unwrap();
+        assert_eq!(prefix_of("reset"), "search_document: ");
+
+        // Empty running prefix over an unknown row: unchanged behaviour.
+        conn.set_wal_position("cleared2", 5, None, None).unwrap();
+        conn.set_wal_position_live("cleared2", 6, None, &ident("m", 4, ""))
+            .unwrap();
+        assert_eq!(prefix_of("cleared2"), "");
     }
 
     /// Live stamping is unchanged when nothing is recorded yet, when the prefix already matches,

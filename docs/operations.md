@@ -627,7 +627,9 @@ dimension, a recorded document prefix is **not** re-stamped by ordinary writes: 
 `none` → `nomic-v1.5` the status stays `"mismatch"` through live writes until a rebuild
 (`knowledge_rebuild_from_wal` / `rebuild_from_workspace_wal`) recomputes every vector under the new
 prefix and records it, so old- and new-prefix vectors are never silently reported as one
-consistent index.
+consistent index. The same holds for a group with applied content but no recorded identity (pre-#440,
+or cleared by a replay whose recompute failed): its vectors can only have been produced unprefixed,
+so a live write does not claim a non-empty document prefix for it either.
 
 A `"mismatch"` is never a hard failure — it is deliberately self-healing, the same way a
 `generation` mismatch triggers a full replay rather than refusing outright: the fix is to rebuild

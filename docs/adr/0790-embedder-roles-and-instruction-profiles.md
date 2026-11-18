@@ -99,7 +99,10 @@ the running prefix and record it.
 what SC-004 forbids. So `set_wal_position_live` (used by `advance_wal_position` and the `add_episode`
 stamp) reads the row first and preserves a *recorded, different* prefix; only rebuild/replay, which
 recompute everything and call `set_wal_position` directly, claim the new prefix. Model name and
-dimension restamp behaviour is unchanged. Cost: a group that is never rebuilt after a document-prefix
+dimension restamp behaviour is unchanged. A row with applied content (`applied_seq > 0`) but no
+recorded identity (pre-#440, or cleared by a replay with a failed recompute) holds vectors of unknown
+provenance that can only have been produced unprefixed, so a live write records the empty prefix for
+it rather than claiming a non-empty running one. Cost: a group that is never rebuilt after a document-prefix
 change stays `mismatch` — intended, and documented.
 
 ### 5. The embedding cache keys on role and effective prefix
