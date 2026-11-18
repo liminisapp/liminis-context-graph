@@ -69,6 +69,16 @@ Every place LCG sends text to the embedder, and the role it must state. This is 
 | Entity resolution / dedup name-vs-name comparison | **Document** on both sides (symmetric; per the issue, unless research shows otherwise) |
 | Ontology canonicalization fallback — type gloss descriptions and relationship facts compared by cosine similarity | **Document** on both sides (symmetric text-vs-text classification; research may revisit) |
 
+### Bundled sidecar today (added from review comment)
+
+The bundled sidecar (`native/local-inference`) is in scope for this issue. Not strictly needed for correctness, but it should be. Its current state:
+
+- It accepts only `{input, model}`; there is no `/v1/models` route.
+- The `model` in its responses is hard-coded to `coreml-bge-base-en-v1.5` even when `LOCAL_INFERENCE_EMBEDDING_MODEL` loads a different model, so LCG cannot learn which model it is talking to. If the app hard-coded a `bge-v1.5` profile and the model were swapped, LCG would silently apply the wrong instruction.
+- It truncates at 512 tokens; a query instruction of roughly 9 tokens is fine within that.
+
+Preferred design (Voyage / Cohere / Jina style), for Research to confirm or reject: the sidecar accepts an optional `input_type` of `query` or `document` and applies its own model's instruction; it reports its real model id and whether it supports roles; LCG always states the role, sends plain text to an embedder that advertises role support, and applies the profile prefix itself for embedders that do not (Ollama and other OpenAI-compatible servers). A text must never receive two prefixes. With this, the bundled sidecar needs no profile setting in the app, and the app-side issue (shadoworg/liminis-notes#1343) shrinks to the pin bump and profile settings for `.env`-configured embedders. The sidecar's CI runs on a pinned macOS runner (ADR-0502) and its source of truth is in this repo (ADR-0503).
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Role-aware embedding with a profile that instructs queries (Priority: P1)
@@ -165,6 +175,24 @@ The #754 retrieval eval measures profile `none` vs the model's profile and repor
 
 ---
 
+### User Story 7 - The bundled sidecar applies its own model's instruction, with no app-side profile (Priority: P2)
+
+A Liminis Notes user on macOS runs the bundled sidecar with default settings. LCG learns from the sidecar which model it really is and that it supports roles; LCG states the role on every request and sends plain text, and the sidecar applies BGE's query instruction for queries only. The app needs no profile setting for the bundled sidecar, and swapping the sidecar's model cannot cause the wrong instruction to be applied.
+
+**Why this priority**: This makes the largest user population correct by default and removes the silent wrong-instruction risk of a hard-coded profile. It is not required for correctness of the profile mechanism (Stories 1–4), which also serves Ollama and other OpenAI-compatible embedders.
+
+**Independent Test**: Against the sidecar (or a stub that mimics its advertisement), embed a query and a document and confirm exactly one instruction is applied to the query and none to the document; then enable an LCG profile on top and confirm the query still carries exactly one instruction.
+
+**Acceptance Scenarios**:
+
+1. **Given** a sidecar that advertises role support and its real model id, **When** LCG embeds a search string, **Then** LCG sends the plain text with role `query` and the vector produced reflects the model's query instruction applied exactly once.
+2. **Given** the same sidecar, **When** LCG embeds stored text, **Then** it is sent as role `document` and, for BGE v1.5, no instruction is applied.
+3. **Given** an embedder that does not advertise role support (e.g. Ollama), **When** a profile is configured, **Then** LCG applies the profile's prefix itself.
+4. **Given** a sidecar advertising role support and an LCG profile that also names a prefix for the same role, **When** a text is embedded, **Then** it carries exactly one instruction, never two.
+5. **Given** the sidecar is loaded with a different model via its model setting, **When** LCG queries it, **Then** the reported model id is the real one, not the hard-coded BGE name, and the instruction applied is that model's own (or none).
+
+---
+
 ### Edge Cases
 
 - **Empty-string text** or text that is empty after trimming: existing behaviour (skipping or zero-vector sentinel) must be preserved; a prefix must never turn an otherwise-skipped empty text into a non-empty embed request.
@@ -175,8 +203,12 @@ The #754 retrieval eval measures profile `none` vs the model's profile and repor
 - **Mixed state during re-embed**: while a document-prefix mismatch is outstanding and un-recomputed, newly ingested documents must not silently be embedded under the new prefix alongside old-prefix vectors without the mismatch being surfaced.
 - **Batching**: a batch call applies the role's prefix to every element, and returns vectors in input order as today.
 - **Replay on a different process/profile**: WAL replay always embeds as `Document` under the running configuration's document prefix, regardless of the profile in effect when the row was originally written.
-- **Token limits**: prefixes lengthen inputs slightly; inputs near an embedder's token limit behave as the embedder already does for over-long input.
+- **Token limits**: prefixes lengthen inputs slightly; inputs near an embedder's token limit behave as the embedder already does for over-long input. The sidecar's 512-token truncation comfortably accommodates the ~9-token BGE query instruction.
 - **Embedders that ignore instructions** (e.g. OpenAI models): selecting a profile for such a model is the operator's choice; LCG does not validate model/profile pairing.
+- **Double instruction**: when an embedder applies its own role instruction and an LCG profile or override also names a prefix for that role, exactly one instruction is applied.
+- **Role-unaware sidecar or older sidecar**: an embedder that ignores `input_type` or advertises nothing is treated as not supporting roles; LCG falls back to applying the profile prefix itself, and with profile `none` behaves exactly as today.
+- **Sidecar model swapped**: the sidecar reports the real loaded model id, so a model change is detected through the existing model-identity comparison rather than hidden behind a hard-coded name.
+- **Reported model id change for existing BGE workspaces**: when the sidecar stops reporting the hard-coded name, an existing BGE workspace must not be flagged for re-embed solely because of the naming change when the underlying model is unchanged.
 
 ## Requirements *(mandatory)*
 
@@ -188,7 +220,7 @@ The #754 retrieval eval measures profile `none` vs the model's profile and repor
 - **FR-004**: The profile MUST default to `none`. With `none` (and no overrides), the text sent to the embedder MUST be byte-identical to today's for every call site, and existing embedder and WAL-replay tests MUST continue to pass unchanged in behaviour.
 - **FR-005**: Operators MUST be able to override the query prefix and the document prefix independently of the profile. An explicit override (including an explicit empty string) takes precedence over the profile's value for that side only.
 - **FR-006**: An unrecognised profile name MUST cause a clear startup error listing the valid profile names.
-- **FR-007**: The prefix for a role MUST be applied by LCG before text reaches the embedder, so any OpenAI-compatible embedder behind the service benefits. The embedding sidecar remains a plain OpenAI-compatible embedder with no role awareness required of it.
+- **FR-007**: LCG MUST always state the role of every embedding request. For an embedder that does not advertise role support (Ollama and other OpenAI-compatible servers), LCG MUST apply the role's prefix itself before the text reaches the embedder, so any such embedder benefits. For an embedder that advertises role support (the bundled sidecar), LCG MUST send plain text with the role and let the embedder apply its own model's instruction (see FR-019 to FR-025).
 - **FR-008**: The effective **document prefix** MUST be recorded as part of the workspace's embedding identity alongside the existing model name and dimension. The query prefix MUST NOT be part of the recorded identity.
 - **FR-009**: A difference between the recorded document prefix and the running document prefix MUST be treated like a model or dimension change: the embedding-model status surfaces a mismatch, and re-embedding occurs through the existing recompute path (ADR-0440 / ADR-0486). Stored vectors produced under different document prefixes MUST never be silently mixed.
 - **FR-010**: A difference in the query prefix alone MUST NOT produce a mismatch and MUST NOT require or trigger a re-embed; the new query prefix MUST take effect on the next search.
@@ -197,15 +229,23 @@ The #754 retrieval eval measures profile `none` vs the model's profile and repor
 - **FR-013**: Batch embedding MUST apply the correct role prefix to every element and return one vector per input in input order, preserving existing empty-input and error semantics.
 - **FR-014**: Empty or skipped texts MUST remain skipped (or zero-vector sentinel) exactly as today; a prefix MUST NOT convert a skipped empty text into an embed request.
 - **FR-015**: The retrieval eval (#754) MUST support running each embedder configuration with a chosen profile, and its report MUST show `lcg-passages` and the entity/fact configurations for profile `none` versus the model-appropriate profile: sidecar BGE `none` vs `bge-v1.5`; Ollama nomic `none` vs `nomic-v1.5` after a re-embed.
-- **FR-016**: `docs/configuration.md` MUST document the profiles with their exact prefixes, the override settings, the default, and the re-embed rule (document-prefix change requires re-embed; query-prefix change does not).
-- **FR-017**: The configured profile and effective prefixes MUST be visible in the service status surface alongside the existing embedding identity, so operators can see what is in effect.
-- **FR-018**: Research MUST decide whether LCG can select the profile automatically from information the embedder advertises (e.g. the sidecar's model listing and recommended instructions). Whatever is chosen, explicit operator configuration MUST always take precedence, and an embedder that advertises nothing MUST behave as profile `none`.
+- **FR-016**: `docs/configuration.md` MUST document the profiles with their exact prefixes, the override settings, the default, and the re-embed rule (document-prefix change requires re-embed; query-prefix change does not), and MUST document how role support advertised by an embedder interacts with profiles.
+- **FR-017**: The configured profile and effective prefixes MUST be visible in the service status surface alongside the existing embedding identity, so operators can see what is in effect, including whether the embedder is applying instructions itself.
+- **FR-018**: Research MUST confirm or reject the preferred sidecar-advertisement design described in `## Background` (FR-019 to FR-025), including the advertisement mechanism (a model-listing route, the response, or both). If it is rejected, Research MUST propose an alternative that still prevents silent wrong-instruction application. Whatever is chosen, explicit operator configuration MUST always take precedence, and an embedder that advertises nothing MUST behave as profile `none`.
+- **FR-019**: The bundled sidecar MUST accept an optional `input_type` of `query` or `document` on embedding requests and apply its own loaded model's instruction for that role (for BGE v1.5: the query instruction only; documents unchanged). A request without `input_type` MUST behave exactly as today.
+- **FR-020**: The sidecar MUST report the real identifier of the model it has loaded, replacing the hard-coded name, and MUST advertise whether it supports roles, so LCG can learn both without the app hard-coding a profile.
+- **FR-021**: LCG MUST use the embedder's advertisement to decide who applies the instruction: when the embedder supports roles, LCG sends plain text plus the role; otherwise LCG applies the effective prefix itself.
+- **FR-022**: A text MUST never receive two instructions. When an embedder applies its own instruction for a role, LCG MUST NOT also prepend a prefix for that role, and an operator-configured profile or override MUST be applied exactly once (LCG remaining the single applier in that case). An automated test MUST cover sidecar plus profile together producing exactly one prefix.
+- **FR-023**: The sidecar MUST remain usable as a plain OpenAI-compatible embedder by clients that send only `{input, model}`; its additions are optional and backward compatible.
+- **FR-024**: The embedding identity recorded per workspace MUST reflect the effective document instruction regardless of whether LCG or the embedder applies it, so a change in the document-side instruction is still detected as a mismatch (FR-009) and a query-side change is not (FR-010).
+- **FR-025**: Moving from the sidecar's hard-coded model name to its real reported id MUST NOT cause an existing BGE workspace with an unchanged underlying model to be flagged for re-embed.
 
 ### Key Entities *(if applicable)*
 
 - **Embedding role**: Which side of retrieval a text is on — `Query` (a search string) or `Document` (stored text).
 - **Instruction profile**: A named bundle of a query prefix and a document prefix for a model family (`none`, `bge-v1.5`, `nomic-v1.5`, `e5`).
 - **Embedding identity**: The recorded `(model, dimension)` pair per workspace, extended with the document prefix; the thing compared on startup/replay to decide whether stored vectors are compatible with the running embedder.
+- **Embedder advertisement**: What an embedder reports about itself — its real model id and whether it applies role-specific instructions itself — used by LCG to choose between sending plain text and applying a prefix.
 
 ## Success Criteria *(mandatory)*
 
@@ -218,6 +258,10 @@ The #754 retrieval eval measures profile `none` vs the model's profile and repor
 - **SC-005**: Embedding identical text as `Query` and as `Document` under a prefixed profile produces two embedder calls and two independent cache entries; repeating each produces cache hits with no additional embedder calls.
 - **SC-006**: The #754 eval report contains `none` and profile rows for `lcg-passages` and the entity/fact configurations on the sidecar (BGE) embedder, and for nomic on Ollama after re-embed, with the difference visible per configuration.
 - **SC-007**: A reader of `docs/configuration.md` can, without reading code, determine which profile to pick for BGE/nomic/e5 and whether switching requires a re-embed.
+- **SC-008**: With the bundled sidecar and default LCG settings (profile `none`), a query embedded through LCG carries exactly the model's own query instruction and a document carries none, with no profile configured in the app.
+- **SC-009**: A test combining a role-supporting embedder with a configured LCG profile shows every embedded text carrying exactly one instruction for its role, never zero when one is configured and never two.
+- **SC-010**: The sidecar's reported model id equals the model actually loaded (including when the model is overridden by its model setting), and a request with only `{input, model}` still returns the same vectors as before the change.
+- **SC-011**: An existing BGE workspace upgraded to the new sidecar and LCG builds shows embedding status `match` and performs zero re-embeds.
 
 ## Assumptions
 
@@ -228,11 +272,15 @@ The #754 retrieval eval measures profile `none` vs the model's profile and repor
 - Configuration follows the project's existing convention for embedder settings (CLI flags and `LCG_EMBEDDING_*` environment variables, plus the `GRAPHITI_EMBEDDING_*` legacy aliases where the existing settings have them); exact setting names are a Plan-stage decision.
 - A single embedder (hence a single profile) is in effect per process, matching the current "one embedder per process" model.
 - The eval acceptance runs (sidecar and Ollama) are executed on-demand like other eval work, not as a PR-blocking CI gate.
+- The sidecar changes are additive and backward compatible: it is still an OpenAI-compatible embedder that works for clients sending only `{input, model}`; the role-aware behaviour is an optional extension (the `## Background` sentence that it "stays plain" is refined by FR-019 to FR-023 in that sense).
+- When an operator explicitly configures a profile or prefix override against an embedder that advertises role support, LCG is the single applier and the embedder must not also apply its own instruction; the exact signalling mechanism is a Research/Plan decision.
+- The sidecar's source of truth is this repository (ADR-0503) and its CI runs on a pinned macOS runner (ADR-0502), so sidecar changes land and are tested here.
+- If Research rejects the preferred design, the LCG-side profile mechanism (FR-001 to FR-017) still stands on its own and delivers value for every OpenAI-compatible embedder.
 
 ## Out of Scope *(optional)*
 
-- Changing the sidecar's embedding behaviour: it stays a plain OpenAI-compatible embedder (only, optionally, advertising its recommended profile if research selects that option).
-- The app-side change that switches the profile on for the bundled sidecar (filed in shadoworg/liminis-notes).
+- Role-specific behaviour in the sidecar beyond what FR-019 to FR-023 specify (for example custom per-request instruction strings, or instructions for models other than those the sidecar can load).
+- The app-side change in shadoworg/liminis-notes (tracked there as #1343): pin bump and profile settings for `.env`-configured embedders. With this issue's design the bundled sidecar needs no app-side profile.
 - The new evaluation corpus (#788) and the broader #789 work.
 - Model-specific features beyond text prefixes (e.g. Matryoshka truncation, task-specific heads, instruction-following embedders with free-form task descriptions).
 - Validating that a chosen profile is appropriate for the configured model.
@@ -242,5 +290,8 @@ The #754 retrieval eval measures profile `none` vs the model's profile and repor
 ## Source References *(optional)*
 
 - ADR-0006 (embedder HTTP contract), ADR-0016 (OAI embedding contract / UDS transport), ADR-0440 (recompute embeddings on WAL replay), ADR-0486 (batch WAL-replay embedding recompute)
-- Issues #754 (retrieval eval), #788 (new corpus), #789 (parent)
+- ADR-0502 (sidecar CI on a pinned macOS runner), ADR-0503 (sidecar source of truth in this repo)
+- Issues #754 (retrieval eval), #788 (new corpus), #789 (parent); shadoworg/liminis-notes#1343 (app side)
+- Sidecar: `native/local-inference` — `Sources/LocalInference/EmbeddingTypes.swift`, `EmbeddingsHandler.swift`
 - BGE-base-en-v1.5, nomic-embed-text v1.5 and e5 model cards (documented query/document instructions)
+- Prior art for an optional role field on embedding requests: Voyage (`input_type`), Cohere (`input_type`), Jina (`task`)
