@@ -24,6 +24,17 @@ use crate::embedder::{EmbedRole, Embedder};
 use crate::error::Error;
 use crate::replay::RecomputeEmbedFn;
 
+/// The embedding identity recorded per workspace and compared on startup/replay (#440, extended
+/// by #790): model name, dimension, and the effective **document** prefix. The document prefix is
+/// part of identity because it changes what is stored; the query prefix is deliberately not,
+/// since it only changes what is searched with (FR-008/FR-010).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbeddingIdentity {
+    pub model: String,
+    pub dim: i64,
+    pub doc_prefix: String,
+}
+
 /// Bundles what a WAL-replaying call site needs to recompute embeddings during replay and to
 /// record the resulting model identity (issue #440): the running embedder, its model identifier
 /// — not obtainable from `Arc<dyn Embedder>` alone, since the `Embedder` trait exposes `dim()`
@@ -36,17 +47,6 @@ use crate::replay::RecomputeEmbedFn;
 /// `embedder.embed(..)` to completion (a bare-sync caller with no ambient tokio runtime vs. one
 /// running inside `tokio::task::spawn_blocking`), so each builds its own `RecomputeEmbedFn`
 /// closure around this context rather than sharing one bridging implementation.
-/// The embedding identity recorded per workspace and compared on startup/replay (#440, extended
-/// by #790): model name, dimension, and the effective **document** prefix. The document prefix is
-/// part of identity because it changes what is stored; the query prefix is deliberately not,
-/// since it only changes what is searched with (FR-008/FR-010).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EmbeddingIdentity {
-    pub model: String,
-    pub dim: i64,
-    pub doc_prefix: String,
-}
-
 #[derive(Clone)]
 pub struct EmbedderContext {
     pub embedder: Arc<dyn Embedder>,
