@@ -210,6 +210,40 @@ fn render_checks_report_a_corpus_shape_shortfall_as_an_error() {
     );
 }
 
+#[test]
+fn render_checks_enforce_the_negative_and_paraphrase_floors_the_tests_assert() {
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    let mut r = check::load_rendered(template_dir()).unwrap();
+    let base = check::check_rendered(&sk, &r);
+    assert!(base.errors.is_empty(), "{}", check::describe(&base));
+    let neg = sk.questions.iter().find(|q| q.negative).unwrap().id.clone();
+    let para = sk
+        .questions
+        .iter()
+        .find(|q| q.category == "paraphrase")
+        .unwrap()
+        .id
+        .clone();
+    r.questions
+        .insert(neg.clone(), "zzqx wvvu plorg frimble snarkle?".into());
+    r.questions.insert(para.clone(), "What is it?".into());
+    let f = check::check_rendered(&sk, &r);
+    assert!(
+        f.errors
+            .iter()
+            .any(|e| e.contains(&neg) && e.contains("not a near miss")),
+        "{}",
+        check::describe(&f)
+    );
+    assert!(
+        f.errors
+            .iter()
+            .any(|e| e.contains(&para) && e.contains("content words")),
+        "{}",
+        check::describe(&f)
+    );
+}
+
 // ── SC-001: shape (checked on every fixture under test) ──────────────────────────
 
 #[test]

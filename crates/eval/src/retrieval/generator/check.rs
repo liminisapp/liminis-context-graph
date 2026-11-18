@@ -359,7 +359,7 @@ pub fn check_rendered(sk: &Skeleton, r: &Rendered) -> Findings {
             }
         }
         if q.negative {
-            check_negative(sk, r, q, &mut f);
+            check_negative(sk, r, q, text, &mut f);
         }
     }
     f
@@ -376,6 +376,12 @@ fn check_paraphrase(sk: &Skeleton, r: &Rendered, q: &SkQuestion, text: &str, f: 
         .basis
         .first()
         .and_then(|b| n.facts.iter().find(|x| &x.statement == b));
+    if content_words(text).len() < PARAPHRASE_MIN_CONTENT_WORDS {
+        f.errors.push(format!(
+            "question '{}': a paraphrase needs at least {PARAPHRASE_MIN_CONTENT_WORDS} content words",
+            q.id
+        ));
+    }
     let note_overlap = overlap(text, body);
     if note_overlap > PARAPHRASE_MAX_NOTE_OVERLAP {
         f.errors.push(format!(
@@ -407,7 +413,27 @@ fn check_paraphrase(sk: &Skeleton, r: &Rendered, q: &SkQuestion, text: &str, f: 
     }
 }
 
-fn check_negative(sk: &Skeleton, r: &Rendered, q: &SkQuestion, f: &mut Findings) {
+/// A negative must still be a near miss: its wording shares at least this share of its content
+/// words with some note, or it tests nothing. The v2 integration tests assert the same floor.
+pub const NEGATIVE_MIN_NEAR_MISS_OVERLAP: f64 = 0.33;
+
+/// Fewest content words a paraphrase question may have; fewer is not a searchable question.
+pub const PARAPHRASE_MIN_CONTENT_WORDS: usize = 3;
+
+fn check_negative(sk: &Skeleton, r: &Rendered, q: &SkQuestion, text: &str, f: &mut Findings) {
+    let best = r
+        .notes
+        .values()
+        .map(|b| overlap(text, b))
+        .fold(0.0_f64, f64::max);
+    if best < NEGATIVE_MIN_NEAR_MISS_OVERLAP {
+        f.errors.push(format!(
+            "question '{}': no note shares {:.0}% of its content words (best {:.0}%), so it is not a near miss",
+            q.id,
+            NEGATIVE_MIN_NEAR_MISS_OVERLAP * 100.0,
+            best * 100.0
+        ));
+    }
     let Some(name) = q.names.first() else { return };
     if q.markers.is_empty() {
         // A fake entity must appear nowhere.

@@ -289,6 +289,19 @@ pub struct Comparison {
     pub diff: Option<PairedDiff>,
 }
 
+/// A skip reason can carry the first raw query error (`all N queries failed; first error: ...`) or
+/// a judge error, either of which may echo private text. Under `--private` only the leading,
+/// message-free part survives.
+fn redact_reason(why: &str, private: bool) -> String {
+    if !private {
+        return why.to_string();
+    }
+    match why.split_once("; first error:") {
+        Some((head, _)) => format!("{head}; detail withheld"),
+        None => "detail withheld".to_string(),
+    }
+}
+
 impl Report {
     fn ran(&self) -> Vec<(&ConfigOutcome, &ConfigRun)> {
         self.configs
@@ -569,6 +582,7 @@ impl Report {
                     let _ = writeln!(o, "- `{}`: {}", c.id, c.description);
                 }
                 Status::Skipped(why) => {
+                    let why = redact_reason(why, m.private);
                     let _ = writeln!(o, "- `{}`: **skipped** — {why}", c.id);
                 }
             }
@@ -640,7 +654,7 @@ impl Report {
                 } => {
                     format!("{paid_calls} paid, {cache_hits} cached")
                 }
-                Grounded::Skipped(why) => format!("skipped ({why})"),
+                Grounded::Skipped(why) => format!("skipped ({})", redact_reason(why, m.private)),
             };
             let _ = writeln!(
                 o,
@@ -1002,7 +1016,7 @@ impl Report {
             .configs
             .iter()
             .map(|c| match &c.status {
-                Status::Skipped(why) => json!({"id": c.id, "description": c.description, "skipped": why}),
+                Status::Skipped(why) => json!({"id": c.id, "description": c.description, "skipped": redact_reason(why, m.private)}),
                 Status::Ran(r) => {
                     let by: serde_json::Map<String, Value> = r
                         .by_category
@@ -1050,7 +1064,7 @@ impl Report {
                         },
                         "grounded": match &r.grounded {
                             Grounded::Judged { paid_calls, cache_hits } => json!({"paid_calls": paid_calls, "cache_hits": cache_hits}),
-                            Grounded::Skipped(w) => json!({"skipped": w}),
+                            Grounded::Skipped(w) => json!({"skipped": redact_reason(w, m.private)}),
                         },
                         "questions": r.scores.iter().map(|s| json!({
                             "id": s.id, "category": s.category.label(),
@@ -1329,6 +1343,26 @@ mod tests {
         assert!(md.contains("private notebook"), "{md}");
         assert!(!md.contains("synthetic"), "{md}");
         assert!(!md.contains("hand-built"), "{md}");
+    }
+
+    #[test]
+    fn private_run_withholds_skip_reasons_that_echo_a_query_error() {
+        let secret = "SECRET-PRIVATE-QUERY-TEXT";
+        let mut r = report();
+        r.configs[1].status = Status::Skipped(format!(
+            "all 3 queries failed; first error: q1: bad request for {secret}"
+        ));
+        let public_md = r.render_markdown();
+        assert!(
+            public_md.contains(secret),
+            "non-private runs keep the detail"
+        );
+        r.meta.private = true;
+        let md = r.render_markdown();
+        let js = r.to_json().to_string();
+        assert!(!md.contains(secret) && !js.contains(secret), "{md}\n{js}");
+        assert!(md.contains("all 3 queries failed; detail withheld"), "{md}");
+        assert!(js.contains("all 3 queries failed; detail withheld"), "{js}");
     }
 
     #[test]
