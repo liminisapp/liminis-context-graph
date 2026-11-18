@@ -204,6 +204,9 @@ pub const WRITE_PATH_CHUNK: &str = "chunk";
 /// `Episodic.write_path` value stamped by every other write path (`knowledge_add_episode`, the
 /// library `add_episode`, the eval runner).
 pub const WRITE_PATH_EPISODE: &str = "episode";
+/// `Episodic.write_path` value stamped by `knowledge_process_document` (issue #785, ADR-0785).
+/// Not chunk-eligible, so a chunk-mode revise by name leaves document-mode rows alone.
+pub const WRITE_PATH_DOCUMENT: &str = "document";
 
 /// Whether a chunk ingest may treat an episode with this `write_path` as its own prior lineage
 /// (issue #292, ADR-0292). An allow-list on purpose: NULL (a row written before the marker, kept
