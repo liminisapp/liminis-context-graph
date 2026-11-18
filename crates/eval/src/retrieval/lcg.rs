@@ -212,6 +212,27 @@ fn stderr_tail(path: &Path) -> String {
     lines[lines.len().saturating_sub(5)..].join(" | ")
 }
 
+/// Checks that the instruction profile the eval asked for is the one the service reports in
+/// `knowledge_status.embedding_instructions.profile` (#790). Without this, a run such as
+/// `--embedding-profile none,embedder` against a non-advertising embedder would silently measure
+/// profile `none` twice and label one of the rows `embedder`.
+pub fn verify_embedding_profile(requested: Option<&str>, status: &Value) -> Result<(), String> {
+    let Some(requested) = requested else {
+        return Ok(());
+    };
+    let effective = status["embedding_instructions"]["profile"].as_str();
+    if effective == Some(requested.trim()) {
+        return Ok(());
+    }
+    Err(format!(
+        "requested embedding profile '{requested}' is not in effect: the service reports {} \
+         (an `embedder` profile falls back to `none` when the embedder advertises no \
+         `instruction_roles`; an older service build does not report `embedding_instructions` at \
+         all). Refusing to label this run '{requested}'.",
+        effective.map_or("no profile".to_string(), |e| format!("'{e}'"))
+    ))
+}
+
 pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     validate_embedder(o, std::env::var("LCG_EMBEDDING_URL").ok().as_deref())?;
     let ws = tempfile::tempdir().map_err(|e| format!("cannot create workspace: {e}"))?;
@@ -257,10 +278,13 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
                 // The socket can be bound before the service answers; bound the probe by what is
                 // left of the startup deadline so a silent service cannot outlive it.
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                if tokio::time::timeout(remaining, c.call("knowledge_status", json!({})))
-                    .await
-                    .is_ok_and(|r| r.is_ok())
+                if let Ok(Ok(status)) =
+                    tokio::time::timeout(remaining, c.call("knowledge_status", json!({}))).await
                 {
+                    // #790: the service falls back to profile `none` (stderr warning only) when
+                    // e.g. `embedder` is requested of an embedder that advertises no roles.
+                    // Refuse to measure under a label the service is not actually running.
+                    verify_embedding_profile(o.embedding_profile.as_deref(), &status)?;
                     break c;
                 }
             }
@@ -689,6 +713,21 @@ pub mod testing {
 mod tests {
     use super::testing::FakeTransport;
     use super::*;
+
+    #[test]
+    fn requested_embedding_profile_must_be_the_one_in_effect() {
+        let status = |p: &str| json!({"embedding_instructions": {"profile": p, "source": "none"}});
+        // No profile requested: nothing to verify, even on an old service.
+        assert!(verify_embedding_profile(None, &json!({})).is_ok());
+        assert!(verify_embedding_profile(Some("bge-v1.5"), &status("bge-v1.5")).is_ok());
+        // `embedder` requested but the service fell back to `none` (embedder advertised nothing).
+        let e = verify_embedding_profile(Some("embedder"), &status("none")).unwrap_err();
+        assert!(e.contains("'embedder'") && e.contains("'none'"), "{e}");
+        // Service that does not report the field at all.
+        assert!(verify_embedding_profile(Some("none"), &json!({}))
+            .unwrap_err()
+            .contains("no profile"));
+    }
 
     #[test]
     fn embedder_is_required() {
