@@ -1983,7 +1983,7 @@ impl<'db> Conn<'db> {
             "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
              AND ep.superseded_at IS NULL \
              RETURN ep.uuid, ep.name, ep.write_path, ep.revision_id, ep.revision_committed_at, \
-             ep.heading_path, ep.chunk_hash, ep.byte_start",
+             ep.heading_path, ep.chunk_hash, ep.byte_start, ep.byte_end",
             serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
         )?;
         Ok(rows
@@ -2000,8 +2000,38 @@ impl<'db> Conn<'db> {
                 heading_path: value_as_str_list(&r[5]),
                 chunk_hash: value_as_optional_string(&r[6]),
                 byte_start: value_as_optional_i64(&r[7]),
+                byte_end: value_as_optional_i64(&r[8]),
             })
             .collect())
+    }
+
+    /// Re-stamps one live episode of an **unchanged** chunk with the committing revision's id,
+    /// its span in that revision's content and its current heading path (issue #785). The text
+    /// is identical (same content hash), so only its position and context moved; without this a
+    /// carried-forward episode would keep a span into an older revision the client no longer
+    /// holds. `revision_committed_at` is deliberately left alone: the episode has been believed
+    /// since its own commit, and belief history must not move. Fixed values keyed by uuid, so a
+    /// replayed statement is idempotent.
+    pub fn restamp_carried_episode(
+        &self,
+        uuid: &str,
+        revision_id: &str,
+        byte_start: i64,
+        byte_end: i64,
+        heading_path: &[String],
+    ) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid = $uuid AND ep.superseded_at IS NULL \
+             SET ep.revision_id = $revision_id, ep.byte_start = $byte_start, \
+             ep.byte_end = $byte_end, ep.heading_path = $heading_path",
+            serde_json::json!({
+                "uuid": uuid,
+                "revision_id": revision_id,
+                "byte_start": byte_start,
+                "byte_end": byte_end,
+                "heading_path": heading_path,
+            }),
+        )
     }
 
     /// Stamps a revision's episodes committed at `committed_at` (issue #785). Guarded on

@@ -105,8 +105,20 @@ never belief time.
    lock, in one explicit lbug transaction, one commit instant `t` and one WAL chunk:
    `DocRevision` row → `revision_committed_at = t` on the new episodes → `revision` supersession of
    changed chunks' old episodes (`superseded_by` = the new final unit) → `chunk_removed` for removed
-   chunks → `revision` for stale and mode-transition episodes. Every statement is uuid-keyed and
-   guarded, so replay is idempotent.
+   chunks → `revision` for stale and mode-transition episodes → **re-stamp of unchanged chunks'
+   episodes** (below). Every statement is uuid-keyed and guarded, so replay is idempotent.
+
+**Unchanged chunks are carried forward and re-stamped.** An unchanged chunk is never re-extracted,
+but an edit elsewhere shifts its byte offsets and a parent heading rename changes its heading path.
+So the commit step sets each of its live episodes' `revision_id` to the committing revision, its
+`byte_start`/`byte_end` to its span in the new content (the text is identical, so every unit shifts
+by one delta, which stays exact even if the unit split changed), and its `heading_path` to the
+current one. Invariant: **every live document-mode episode slices the latest committed revision's
+content at its span** (FR-013, SC-006), so a client holding only the current document can resolve
+any believed fact to its passage, and the next diff pairs against current heading paths, not stale
+ones. `revision_committed_at` is deliberately not moved, because the episode has been believed since
+its own commit and belief history must not shift. Superseded episodes keep the span of the last
+revision they were live in. The re-stamps run last in the commit chunk.
 
 **Belief gating** (`belief.rs`): a revision-stamped episode is evidence only from its
 `revision_committed_at`. A pending producer is skipped; an edge whose only surviving producers are
@@ -121,10 +133,14 @@ the lint snapshot use the same predicate.
 | crash before the commit step | pending rows | pending rows (or a prefix) | before |
 | crash inside the commit, before `COMMIT` | rolled back | commit chunk absent | before |
 | `COMMIT` done, crash before the WAL flush | after | before (graph ahead of WAL, as chunk mode) | never mixed |
-| torn WAL tail inside the commit chunk | after | revision + stamp first, some supersessions missing | overlap until the next ingest |
+| torn WAL tail inside the commit chunk | after | revision + stamp first, some supersessions or re-stamps missing | overlap (or older spans) until the next ingest |
 
-**Self-heal.** The baseline groups live committed episodes by `name`; for a name with episodes from
-more than one committed revision, all but the latest are *stale* and superseded at the next commit,
+**Self-heal.** The baseline groups live committed episodes by `name`, then by commit instant
+(`revision_committed_at`), not by revision id. For a name with episodes from more than one commit,
+all but the latest are *stale* and superseded at the next commit. Grouping by instant matters for
+the re-stamp: a torn tail that re-stamped only some of a split chunk's units leaves them with two
+revision ids but one commit instant, so they stay one chunk, never a stale half, and the next commit
+re-stamps the rest.
 and a removal whose `chunk_removed` was torn away is simply re-classified `removed`. So the torn-tail
 overlap — the same class every multi-line `with_chunk` already has — is repaired by the next ingest of
 the document, without extraction. It is not prevented.

@@ -465,12 +465,34 @@ pub async fn process_document(
         chunk_names: outcomes.iter().map(|o| o.name.clone()).collect(),
         previous_revision_id: previous.as_ref().map(|p| p.revision_id.clone()),
     };
+    // Unchanged chunks' episodes are carried forward, not rewritten, but their position and
+    // heading path belong to this revision now: re-stamp them so every live episode's span
+    // slices *this* revision's content (FR-013, SC-006). The text is identical (same hash), so
+    // every unit shifts by the same delta — which also holds if the unit split itself changed.
+    let carried: Vec<(String, i64, i64, Vec<String>)> = d
+        .matches
+        .iter()
+        .zip(&chunked.chunks)
+        .filter(|(m, _)| m.classification == Classification::Unchanged)
+        .filter_map(|(m, c)| m.previous.map(|j| (&baseline.chunks[j], c)))
+        .flat_map(|(b, c)| {
+            let old_start = b.episode_spans.iter().flatten().map(|s| s.0).min();
+            let delta = old_start.map(|o| c.byte_start as i64 - o).unwrap_or(0);
+            b.episode_uuids
+                .iter()
+                .zip(&b.episode_spans)
+                .filter_map(move |(u, span)| {
+                    span.map(|(s, e)| (u.clone(), s + delta, e + delta, c.heading_path.clone()))
+                })
+        })
+        .collect();
     let stale = baseline.stale_uuids.clone();
     let transition = baseline.mode_transition_uuids.clone();
     let db_c = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let gid_c = req.group_id.clone();
     let new_c = new_episode_uuids.clone();
+    let rid_c = revision_id.clone();
     let (removed_c, stale_c, transition_c) =
         (removed_uuids.clone(), stale.clone(), transition.clone());
     let _write_guard = state.write_lock.write().await;
@@ -494,6 +516,11 @@ pub async fn process_document(
             let mut replaced = stale_c.clone();
             replaced.extend(transition_c.iter().cloned());
             conn.supersede_episodes_by_uuids(&replaced, t, None, "revision")?;
+            // Last, so a torn tail can only cut re-stamps (Baseline groups by commit instant, so
+            // a partly re-stamped chunk stays one chunk; the next commit re-stamps the rest).
+            for (uuid, start, end, heading_path) in &carried {
+                conn.restamp_carried_episode(uuid, &rid_c, *start, *end, heading_path)?;
+            }
             Ok(())
         })();
         if let Err(e) = result {

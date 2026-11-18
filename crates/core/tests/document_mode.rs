@@ -519,6 +519,114 @@ async fn heading_rename_and_move_reextract_only_what_changed() {
     assert_eq!(r["status"], "committed", "a new order is a new revision");
 }
 
+/// Asserts that every live (unsuperseded) episode of the group is stamped with `rev`, slices
+/// `content` exactly at its span, and carries the heading path the chunker gives that span now.
+async fn assert_live_episodes_match(state: &Arc<AppState>, content: &str, rev: &str) {
+    let preview = call(
+        "knowledge_preview_chunks",
+        json!({"content": content}),
+        state,
+    )
+    .await;
+    let path_at = |s: u64| -> Value {
+        preview["chunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["byte_start"].as_u64().unwrap() <= s && s < c["byte_end"].as_u64().unwrap())
+            .map(|c| c["heading_path"].clone())
+            .unwrap_or(Value::Null)
+    };
+    let eps = episodes(state).await;
+    let live: Vec<_> = eps
+        .values()
+        .filter(|e| e["superseded_at"].is_null())
+        .collect();
+    assert!(!live.is_empty());
+    for e in live {
+        let (s, t) = (
+            e["byte_start"].as_u64().unwrap(),
+            e["byte_end"].as_u64().unwrap(),
+        );
+        assert_eq!(
+            &content[s as usize..t as usize],
+            e["content"].as_str().unwrap(),
+            "SC-006: a live episode's span slices the latest revision: {e}"
+        );
+        assert_eq!(
+            e["revision_id"], rev,
+            "carried-forward episode re-stamped: {e}"
+        );
+        assert_eq!(e["heading_path"], path_at(s), "current heading path: {e}");
+    }
+}
+
+/// FR-013, SC-006: an unchanged chunk's episodes are carried forward, not re-extracted, but are
+/// re-stamped at commit with the new revision id, their span in the new content and their
+/// current heading path — so an edit that shifts later offsets, or a parent heading rename, never
+/// leaves a live episode pointing into a revision the client no longer holds. Split units of an
+/// unchanged section shift together.
+#[tokio::test]
+async fn unchanged_chunks_are_restamped_with_the_new_revisions_spans() {
+    let f = fx();
+    let para = "A sentence about the cache layer and how it behaves under load. ".repeat(30);
+    let doc = format!(
+        "# Plan\n\nIntro.\n\n## Accepted\n\nOption A.\n\n### Detail\n\n{p}\n\n{p}\n\n{p}\n\n{p}\n\n## Later\n\nFollow up.\n",
+        p = para.trim()
+    );
+    let r1 = ingest(&f.state, "d", &doc).await;
+    assert!(
+        r1["chunks"][2]["units"].as_u64().unwrap() > 1,
+        "the Detail section is split: {r1}"
+    );
+    let rev1 = r1["revision_id"].as_str().unwrap().to_string();
+    assert_live_episodes_match(&f.state, &doc, &rev1).await;
+
+    // Lengthening the intro shifts every later byte; only the intro is re-extracted.
+    let longer = doc.replace("Intro.", "A much longer introduction than before.");
+    let r2 = ingest(&f.state, "d", &longer).await;
+    assert_eq!(r2["extraction_calls"], 1, "{r2}");
+    assert_eq!(
+        classes(&r2),
+        vec!["changed", "unchanged", "unchanged", "unchanged"]
+    );
+    let rev2 = r2["revision_id"].as_str().unwrap().to_string();
+    assert_live_episodes_match(&f.state, &longer, &rev2).await;
+    // The response and the stored episodes agree on every chunk's span.
+    let eps = episodes(&f.state).await;
+    for c in r2["chunks"].as_array().unwrap() {
+        let first = &eps[&uuids(&c["episode_uuids"])[0]];
+        assert_eq!(first["byte_start"], c["byte_start"], "{c}");
+    }
+
+    // Renaming the parent re-extracts the parent only; its unchanged subsection's episodes take
+    // the new path (and the next diff pairs against it, not the stale one).
+    let renamed = longer.replace("## Accepted", "## Rejected");
+    let r3 = ingest(&f.state, "d", &renamed).await;
+    assert_eq!(r3["extraction_calls"], 1, "{r3}");
+    let rev3 = r3["revision_id"].as_str().unwrap().to_string();
+    assert_live_episodes_match(&f.state, &renamed, &rev3).await;
+    assert_eq!(
+        r3["chunks"][2]["heading_path"],
+        json!(["Plan", "Rejected", "Detail"])
+    );
+
+    // Carrying forward never moves belief: nothing unchanged was superseded along the way.
+    let superseded = episodes(&f.state)
+        .await
+        .values()
+        .filter(|e| e["superseded_at"].is_string())
+        .count();
+    assert_eq!(
+        superseded, 2,
+        "only the intro and the renamed parent were replaced"
+    );
+    // And a byte-identical resubmission is still a no-op.
+    let r4 = ingest(&f.state, "d", &renamed).await;
+    assert_eq!(r4["status"], "unchanged");
+    assert_eq!(r4["extraction_calls"], 0);
+}
+
 // ── US3: atomicity ──────────────────────────────────────────────────────────
 
 /// US3 AC1/AC3, SC-004: an extractor failure part-way through a revision leaves the previous

@@ -55,10 +55,11 @@ pub struct BaselineEpisode {
     pub heading_path: Vec<String>,
     pub chunk_hash: Option<String>,
     pub byte_start: Option<i64>,
+    pub byte_end: Option<i64>,
 }
 
 /// One logical chunk of the previous committed state: every live episode (split units included)
-/// of one `name` from the latest committed revision that wrote it.
+/// of one `name` from the latest commit that wrote or re-stamped it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineChunk {
     pub name: String,
@@ -67,6 +68,9 @@ pub struct BaselineChunk {
     pub revision_id: String,
     /// Ordered by `byte_start`.
     pub episode_uuids: Vec<String>,
+    /// `(byte_start, byte_end)` of each episode in `episode_uuids`, in the same order: where the
+    /// episode sits in the revision named by its `revision_id`.
+    pub episode_spans: Vec<Option<(i64, i64)>>,
 }
 
 /// The previous committed state of a document.
@@ -87,23 +91,25 @@ impl Baseline {
     /// manifest (`chunk_names`, in order).
     pub fn from_episodes(episodes: Vec<BaselineEpisode>, manifest: &[String]) -> Baseline {
         let mut out = Baseline::default();
-        // name → revision_id → (committed_at, episodes)
-        let mut by_name: HashMap<String, HashMap<String, (i64, Vec<BaselineEpisode>)>> =
-            HashMap::new();
+        // name → commit instant → episodes. Grouped by the instant, not the revision id: the
+        // commit step re-stamps an unchanged chunk's episodes with the new revision id but keeps
+        // their original commit instant (they have been believed since then), so a re-stamp that
+        // a torn WAL tail applied to only some of a chunk's split units still leaves those units
+        // one chunk, never a "stale" half.
+        let mut by_name: HashMap<String, HashMap<i64, Vec<BaselineEpisode>>> = HashMap::new();
         for ep in episodes {
             match ep.write_path.as_deref() {
                 Some(crate::types::WRITE_PATH_DOCUMENT) => {
-                    let (Some(rev), Some(at)) =
-                        (ep.revision_id.clone(), ep.revision_committed_at_us)
+                    let (Some(_), Some(at)) =
+                        (ep.revision_id.as_ref(), ep.revision_committed_at_us)
                     else {
                         continue; // Pending: never part of the believed state.
                     };
                     by_name
                         .entry(ep.name.clone())
                         .or_default()
-                        .entry(rev)
-                        .or_insert_with(|| (at, Vec::new()))
-                        .1
+                        .entry(at)
+                        .or_default()
                         .push(ep);
                 }
                 wp if crate::types::write_path_is_chunk_eligible(wp) => {
@@ -124,20 +130,27 @@ impl Baseline {
             pa.cmp(&pb).then_with(|| a.cmp(b))
         });
         for name in names {
-            let mut revs: Vec<(String, (i64, Vec<BaselineEpisode>))> = by_name
+            let mut commits: Vec<(i64, Vec<BaselineEpisode>)> = by_name
                 .remove(&name)
                 .unwrap_or_default()
                 .into_iter()
                 .collect();
-            // Latest commit wins; ties broken by revision id so the choice is deterministic.
-            revs.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| b.0.cmp(&a.0)));
-            let mut iter = revs.into_iter();
-            let Some((rev, (_, mut eps))) = iter.next() else {
+            // Latest commit wins; anything older under the same name is a torn-commit overlap.
+            commits.sort_by_key(|c| std::cmp::Reverse(c.0));
+            let mut iter = commits.into_iter();
+            let Some((_, mut eps)) = iter.next() else {
                 continue;
             };
-            for (_, (_, stale)) in iter {
+            for (_, stale) in iter {
                 out.stale_uuids.extend(stale.into_iter().map(|e| e.uuid));
             }
+            // The newest revision stamp among the chunk's episodes (lexical tie-break keeps the
+            // choice deterministic if a torn re-stamp left two).
+            let rev = eps
+                .iter()
+                .filter_map(|e| e.revision_id.clone())
+                .max()
+                .unwrap_or_default();
             eps.sort_by(|a, b| {
                 a.byte_start
                     .cmp(&b.byte_start)
@@ -148,6 +161,7 @@ impl Baseline {
                 heading_path: eps[0].heading_path.clone(),
                 chunk_hash: eps[0].chunk_hash.clone().unwrap_or_default(),
                 revision_id: rev,
+                episode_spans: eps.iter().map(|e| e.byte_start.zip(e.byte_end)).collect(),
                 episode_uuids: eps.into_iter().map(|e| e.uuid).collect(),
             });
         }
@@ -291,6 +305,7 @@ pub fn measure_pair(old: &str, new: &str, max_chars: usize) -> PairMeasure {
                 chunk_hash: c.chunk_hash.clone(),
                 revision_id: "old".into(),
                 episode_uuids: vec![format!("ep-{}", c.index)],
+                episode_spans: vec![Some((c.byte_start as i64, c.byte_end as i64))],
             })
             .collect(),
         ..Default::default()
@@ -349,6 +364,7 @@ mod tests {
                 heading_path: c.heading_path.clone(),
                 chunk_hash: Some(c.chunk_hash.clone()),
                 byte_start: Some(c.byte_start as i64),
+                byte_end: Some(c.byte_end as i64),
             })
             .collect();
         let manifest: Vec<String> = (0..d.chunks.len()).map(|i| format!("n-{i}")).collect();

@@ -718,8 +718,11 @@ With `_progress_token`, progress lines stream before the result: `{"type":"progr
 
 **Episode fields.** A document-mode episode read by `knowledge_get_episodes` also carries
 `revision_id`, `revision_committed_at` (absent while pending), `byte_start` / `byte_end` (its span
-in the submitted content: `content[byte_start..byte_end]` is the episode's text), `heading_path` and
-`chunk_hash`. Episodes from every other path carry none of these, so chunk-mode reads are unchanged.
+in the content of revision `revision_id`: `content[byte_start..byte_end]` is the episode's text),
+`heading_path` and `chunk_hash`. A live episode always names the latest committed revision: an
+unchanged section is not re-extracted, but each commit re-stamps its episodes with the new
+`revision_id`, span and `heading_path`, so the span is valid against the document you last sent. A
+superseded episode keeps the span of the last revision it was live in. Episodes from every other path carry none of these, so chunk-mode reads are unchanged.
 Its `write_path` is `document`, so a chunk-mode revise of the same name never touches it.
 
 **Limits.** A document over `LCG_DOCUMENT_MAX_BYTES` (default 512 KiB) is refused with
