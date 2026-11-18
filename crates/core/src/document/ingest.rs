@@ -563,12 +563,16 @@ pub async fn process_document(
         // One WAL chunk for the whole commit step; replay reproduces the commit as data.
         let flushed = crate::wal_exec::wal_flush_chunk(&state_c, &gid_c, conn.drain_mutations());
         if let Some((seq, generation)) = flushed {
-            let identity = (
-                state_c.embedding_model.as_str(),
-                state_c.embedder.dim() as i64,
-            );
+            // Same identity and live setter as Phase C (`episode.rs`): a document commit is a
+            // live write, so it never silently re-stamps a recorded, different document prefix
+            // (ADR-0790); only a rebuild that recomputes every vector may claim a new one.
+            let identity = crate::embedding_cache::EmbeddingIdentity {
+                model: state_c.embedding_model.clone(),
+                dim: state_c.embedder.dim() as i64,
+                doc_prefix: state_c.embedder.instructions().document_prefix,
+            };
             if let Err(e) =
-                conn.set_wal_position(&gid_c, seq, generation.as_deref(), Some(identity))
+                conn.set_wal_position_live(&gid_c, seq, generation.as_deref(), &identity)
             {
                 eprintln!(
                     "liminis-context-graph: process_document: failed to persist applied_seq={seq} \
