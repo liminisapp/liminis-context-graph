@@ -71,6 +71,33 @@ fn sentences(text: &str) -> Vec<String> {
 }
 
 /// Reads `notes/*.md` and `questions.jsonl` from a rendered fixture directory.
+/// Like [`load_rendered`] but for resuming a crashed render: whatever notes and question wording
+/// exist are returned, and a missing `notes/` or `questions.jsonl` (written only at the very end of
+/// a run) is simply empty rather than an error.
+pub fn load_rendered_partial(dir: &Path) -> Rendered {
+    let mut r = Rendered::default();
+    if let Ok(rd) = std::fs::read_dir(dir.join("notes")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "md") {
+                if let (Some(stem), Ok(body)) = (p.file_stem(), std::fs::read_to_string(&p)) {
+                    r.notes.insert(stem.to_string_lossy().to_string(), body);
+                }
+            }
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(dir.join("questions.jsonl")) {
+        for line in text.lines() {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if let (Some(id), Some(t)) = (v["id"].as_str(), v["text"].as_str()) {
+                    r.questions.insert(id.to_string(), t.to_string());
+                }
+            }
+        }
+    }
+    r
+}
+
 pub fn load_rendered(dir: &Path) -> Result<Rendered, String> {
     let mut r = Rendered::default();
     let notes = dir.join("notes");

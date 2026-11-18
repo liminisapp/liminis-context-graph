@@ -427,9 +427,17 @@ pub fn check_dir(
                 .into(),
         );
     }
-    if let Err(e) = fixture::load(dir) {
-        f.errors
-            .push(format!("the loader rejects the fixture: {e}"));
+    match fixture::load(dir) {
+        Ok(fx) => {
+            for e in fx.v2_shape_errors() {
+                f.errors.push(format!(
+                    "corpus shape: {e} (the rendered prose came out shorter or longer than the skeleton's targets; re-render the affected notes with --only)"
+                ));
+            }
+        }
+        Err(e) => f
+            .errors
+            .push(format!("the loader rejects the fixture: {e}")),
     }
     Ok(f)
 }

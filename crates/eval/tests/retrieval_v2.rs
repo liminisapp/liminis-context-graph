@@ -171,6 +171,45 @@ fn the_rendered_fixture_if_present_matches_the_skeleton_and_passes_every_check()
     );
 }
 
+// ── render-step robustness ──────────────────────────────────────────────────────
+
+#[test]
+fn resume_sees_notes_rendered_before_a_crash_even_without_questions_jsonl() {
+    // A crashed first render has notes/*.md (written as each note finishes) but no questions.jsonl
+    // (written only at the very end); --resume must still keep those notes.
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir(d.path().join("notes")).unwrap();
+    std::fs::write(d.path().join("notes/alpha.md"), "# Alpha\n").unwrap();
+    assert!(check::load_rendered(d.path()).is_err());
+    let r = check::load_rendered_partial(d.path());
+    assert_eq!(r.notes.len(), 1);
+    assert!(r.notes.contains_key("alpha") && r.questions.is_empty());
+    // Nothing rendered at all is an empty start, not an error.
+    let empty = tempfile::tempdir().unwrap();
+    let r = check::load_rendered_partial(empty.path());
+    assert!(r.notes.is_empty() && r.questions.is_empty());
+}
+
+#[test]
+fn render_checks_report_a_corpus_shape_shortfall_as_an_error() {
+    let ok = load_template();
+    assert!(
+        ok.v2_shape_errors().is_empty(),
+        "{:?}",
+        ok.v2_shape_errors()
+    );
+    // Prose that came out far too short: every note collapses to a few words.
+    let mut short = load_template();
+    for body in short.notes.values_mut() {
+        *body = "Brief note.".to_string();
+    }
+    let errs = short.v2_shape_errors();
+    assert!(
+        errs.iter().any(|e| e.contains("500-2,000")) && errs.iter().any(|e| e.contains("5,000")),
+        "{errs:?}"
+    );
+}
+
 // ── SC-001: shape (checked on every fixture under test) ──────────────────────────
 
 #[test]

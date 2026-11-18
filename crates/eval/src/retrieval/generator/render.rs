@@ -636,7 +636,7 @@ async fn run(args: &[String]) -> Result<i32, String> {
     })?;
     let sk = Skeleton::from_json(&skeleton_text)?;
     let existing = if o.resume || o.only.is_some() {
-        check::load_rendered(dir).unwrap_or_default()
+        check::load_rendered_partial(dir)
     } else {
         Rendered::default()
     };

@@ -636,6 +636,42 @@ pub struct CorpusStats {
 }
 
 impl Fixture {
+    /// The corpus-shape minimums retrieval-v2 promises (FR-002, SC-001). The render checks apply
+    /// them as errors so a maintainer learns of a prose-length shortfall during `retrieval-render`,
+    /// and the v2 integration tests assert the same numbers.
+    pub fn v2_shape_errors(&self) -> Vec<String> {
+        let st = self.stats();
+        let mut e = Vec::new();
+        if !(300..=500).contains(&st.notes) {
+            e.push(format!("{} notes; expected 300-500", st.notes));
+        }
+        if st.size_bands[0] < 150 {
+            e.push(format!(
+                "only {} short notes (< 250 words); expected >= 150",
+                st.size_bands[0]
+            ));
+        }
+        if st.size_bands[2] < 50 {
+            e.push(format!(
+                "only {} notes of 500-2,000 words; expected >= 50",
+                st.size_bands[2]
+            ));
+        }
+        if st.over_5000_words < 3 {
+            e.push(format!(
+                "only {} notes over 5,000 words; expected >= 3",
+                st.over_5000_words
+            ));
+        }
+        if st.multi_chunk_notes < 50 {
+            e.push(format!(
+                "only {} multi-chunk notes; expected >= 50",
+                st.multi_chunk_notes
+            ));
+        }
+        e
+    }
+
     pub fn stats(&self) -> CorpusStats {
         let mut st = CorpusStats {
             notes: self.manifest.notes.len(),
