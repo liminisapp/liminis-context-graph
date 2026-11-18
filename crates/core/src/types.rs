@@ -436,6 +436,12 @@ pub struct PassageResult {
     /// The originating episode's declared origin (issue #752): `primary`, `external`, `derived`
     /// or `answer`. A never-stamped episode reads as `primary`.
     pub origin: String,
+    /// Cosine similarity (`1 - distance`) where the vector retriever matched this passage
+    /// (issue #789, FR-007). Set only by hybrid passage search — in hybrid mode `score` is the
+    /// fused ranking score, not a cosine — and `None` for a lexical-only hit. Never serialized in
+    /// `vector` mode (or when absent), so the vector-mode response is unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<f64>,
 }
 
 /// Why an entity was returned by `knowledge_find_entities` (issue #629): the fused RRF score

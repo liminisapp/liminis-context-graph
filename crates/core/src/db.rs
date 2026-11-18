@@ -3268,18 +3268,7 @@ impl<'db> Conn<'db> {
         limit: usize,
         origins: Option<&[crate::origin::Origin]>,
     ) -> Result<Vec<PassageResult>, Error> {
-        let mut preds: Vec<&str> = Vec::new();
-        if matches!(group_ids, Some(g) if !g.is_empty()) {
-            preds.push("node.group_id IN $gids");
-        }
-        if origins.is_some() {
-            preds.push("coalesce(node.origin, '') IN $origins");
-        }
-        let where_clause = if preds.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", preds.join(" AND "))
-        };
+        let where_clause = episodic_where_clause(group_ids, origins);
         let probe = if origins.is_some() {
             limit.saturating_mul(KIND_ANN_OVERSAMPLE)
         } else {
@@ -3298,42 +3287,60 @@ impl<'db> Conn<'db> {
             "limit": limit as i64,
             "probe": probe as i64,
         });
-        if let Some(gids) = group_ids {
-            if !gids.is_empty() {
-                params["gids"] = serde_json::json!(gids);
-            }
-        }
-        if let Some(origins) = origins {
-            let mut names: Vec<&str> = origins.iter().map(|o| o.as_str()).collect();
-            // A never-stamped episode is stored as NULL (or "" after a dump round trip).
-            if origins.contains(&crate::origin::Origin::Primary) {
-                names.push("");
-            }
-            params["origins"] = serde_json::json!(names);
-        }
+        add_episodic_filter_params(&mut params, group_ids, origins);
         let result = self.query_params(&cypher, params)?;
-        let mut rows = Vec::new();
-        for row in result {
-            let valid_at = match value_as_optional_timestamp_str(&row[6]) {
-                Some(s) if s.is_empty() => None,
-                other => other,
-            };
-            rows.push(PassageResult {
-                uuid: value_as_string(&row[0]),
-                name: value_as_string(&row[1]),
-                content: value_as_string(&row[2]),
-                source_description: value_as_string(&row[3]),
-                group_id: value_as_string(&row[4]),
-                created_at: value_as_timestamp_str(&row[5]),
-                valid_at,
-                attributes: value_as_string(&row[7]),
-                score: value_as_f64(&row[8]),
-                origin: crate::origin::Origin::from_stored(Some(&value_as_string(&row[9])))
-                    .as_str()
-                    .to_string(),
-            });
+        Ok(result
+            .iter()
+            .map(|row| passage_from_row(row, value_as_f64(&row[8]), &row[9]))
+            .collect())
+    }
+
+    /// BM25 full-text search on Episodic nodes (issue #789, FR-011); returns `(uuid, score)`
+    /// pairs, best first, after the group and origin filters.
+    ///
+    /// Queries the existing `episode_content` index (so it also matches `source` and
+    /// `source_description`). The filter predicates run inside the FTS call, before `LIMIT`, so a
+    /// matching in-scope episode is not crowded out by out-of-scope ones; they are the same
+    /// predicates, with the same `Primary` → `''` rule and the same "empty `group_ids` means no
+    /// group filter" rule, as [`Self::vector_search_episodic_origins`]. `query` is bound as
+    /// `$q`; callers pass it through `search::sanitize_fts_query`.
+    pub fn fts_search_episodic(
+        &self,
+        query: &str,
+        group_ids: Option<&[&str]>,
+        origins: Option<&[crate::origin::Origin]>,
+        limit: usize,
+    ) -> Result<Vec<(String, f64)>, Error> {
+        let where_clause = episodic_where_clause(group_ids, origins);
+        let cypher = format!(
+            "CALL QUERY_FTS_INDEX('Episodic', 'episode_content', $q) \
+             WITH node, score {where_clause} \
+             RETURN node.uuid, score \
+             ORDER BY score DESC LIMIT $limit"
+        );
+        let mut params = serde_json::json!({ "q": query, "limit": limit as i64 });
+        add_episodic_filter_params(&mut params, group_ids, origins);
+        self.collect_uuid_score_pairs(&cypher, params)
+    }
+
+    /// Fetches passages by uuid (issue #789), with the same columns as the vector search
+    /// (including `origin`). `score` is `0.0` and the rows come back in storage order; callers
+    /// re-order them by their own ranking.
+    pub fn get_passages_by_uuids(&self, uuids: &[String]) -> Result<Vec<PassageResult>, Error> {
+        if uuids.is_empty() {
+            return Ok(vec![]);
         }
-        Ok(rows)
+        let result = self.query_params(
+            "MATCH (node:Episodic) WHERE node.uuid IN $uuids \
+             RETURN node.uuid, node.name, node.content, node.source_description, \
+             node.group_id, node.created_at, node.valid_at, node.attributes, \
+             coalesce(node.origin, '')",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        Ok(result
+            .iter()
+            .map(|row| passage_from_row(row, 0.0, &row[8]))
+            .collect())
     }
 
     /// Lists Entity nodes with optional group filter, ordered by uuid DESC.
@@ -6026,6 +6033,73 @@ pub(crate) fn compute_lookup_key(group_id: &str, kind: &str, name: &str) -> Stri
 /// (issue #615): the probe returns its top-`k` nearest rows *before* the predicate runs, so a
 /// rare kind would otherwise be crowded out of the candidate pool by nearer rows of other kinds.
 const KIND_ANN_OVERSAMPLE: usize = 10;
+
+/// `WHERE` clause shared by the two Episodic passage queries (vector and BM25, issue #789
+/// FR-006): an optional group filter (an empty `group_ids` means no filter, as it always has for
+/// passage search) and an optional origin filter.
+fn episodic_where_clause(
+    group_ids: Option<&[&str]>,
+    origins: Option<&[crate::origin::Origin]>,
+) -> String {
+    let mut preds: Vec<&str> = Vec::new();
+    if matches!(group_ids, Some(g) if !g.is_empty()) {
+        preds.push("node.group_id IN $gids");
+    }
+    if origins.is_some() {
+        preds.push("coalesce(node.origin, '') IN $origins");
+    }
+    if preds.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", preds.join(" AND "))
+    }
+}
+
+/// Binds the `$gids` / `$origins` parameters [`episodic_where_clause`] refers to.
+fn add_episodic_filter_params(
+    params: &mut serde_json::Value,
+    group_ids: Option<&[&str]>,
+    origins: Option<&[crate::origin::Origin]>,
+) {
+    if let Some(gids) = group_ids {
+        if !gids.is_empty() {
+            params["gids"] = serde_json::json!(gids);
+        }
+    }
+    if let Some(origins) = origins {
+        let mut names: Vec<&str> = origins.iter().map(|o| o.as_str()).collect();
+        // A never-stamped episode is stored as NULL (or "" after a dump round trip).
+        if origins.contains(&crate::origin::Origin::Primary) {
+            names.push("");
+        }
+        params["origins"] = serde_json::json!(names);
+    }
+}
+
+/// Builds a [`PassageResult`] from a row of the columns
+/// `uuid, name, content, source_description, group_id, created_at, valid_at, attributes` at
+/// indices 0..=7, with the (coalesced) origin at `origin_col`.
+fn passage_from_row(row: &[Value], score: f64, origin_col: &Value) -> PassageResult {
+    let valid_at = match value_as_optional_timestamp_str(&row[6]) {
+        Some(s) if s.is_empty() => None,
+        other => other,
+    };
+    PassageResult {
+        uuid: value_as_string(&row[0]),
+        name: value_as_string(&row[1]),
+        content: value_as_string(&row[2]),
+        source_description: value_as_string(&row[3]),
+        group_id: value_as_string(&row[4]),
+        created_at: value_as_timestamp_str(&row[5]),
+        valid_at,
+        attributes: value_as_string(&row[7]),
+        score,
+        origin: crate::origin::Origin::from_stored(Some(&value_as_string(origin_col)))
+            .as_str()
+            .to_string(),
+        similarity: None,
+    }
+}
 
 /// `WHERE` clause for the Entity search queries: optional group filter and optional kind filter
 /// (issue #615). A NULL `kind` column is the default kind, matching [`value_as_kind`]'s

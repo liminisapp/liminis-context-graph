@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::{
     db::Db,
     embedder::{EmbedRole, Embedder},
-    error::Error,
+    error::{is_fts_inconsistent_error, Error},
     types::{
         EdgeSearchEvidence, EntityRow, EntitySearchEvidence, PassageResult, RelatesToEdge,
         ScoredEdge, ScoredEntity,
@@ -163,6 +164,234 @@ pub async fn search_passages(
     .await??;
 
     Ok(results)
+}
+
+// ── Hybrid passage search (issue #789) ────────────────────────────────────────
+
+/// Retrieval mode for `knowledge_search_passages`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassageSearchMode {
+    /// Pure vector cosine (the pre-#789 behaviour, unchanged).
+    Vector,
+    /// BM25 over episode text + vector, fused with RRF (optionally with a top-rank bonus).
+    Hybrid,
+}
+
+impl PassageSearchMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PassageSearchMode::Vector => "vector",
+            PassageSearchMode::Hybrid => "hybrid",
+        }
+    }
+
+    /// The service default when a request names no mode: `LCG_PASSAGE_SEARCH_MODE`, else
+    /// `vector`. An unrecognised value warns on stderr (once per process) and falls back to
+    /// `vector`. Read per request, so it needs no `AppState` field.
+    pub fn default_from_env() -> Self {
+        static WARNED: AtomicBool = AtomicBool::new(false);
+        match std::env::var("LCG_PASSAGE_SEARCH_MODE") {
+            Ok(v) if !v.trim().is_empty() => v.parse().unwrap_or_else(|_| {
+                if !WARNED.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "liminis-context-graph: LCG_PASSAGE_SEARCH_MODE={v:?} is not \"vector\" or \
+                         \"hybrid\"; using vector"
+                    );
+                }
+                PassageSearchMode::Vector
+            }),
+            _ => PassageSearchMode::Vector,
+        }
+    }
+}
+
+impl std::str::FromStr for PassageSearchMode {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "vector" => Ok(PassageSearchMode::Vector),
+            "hybrid" => Ok(PassageSearchMode::Hybrid),
+            other => Err(format!(
+                "unknown passage search mode {other:?}; expected \"vector\" or \"hybrid\""
+            )),
+        }
+    }
+}
+
+/// Top-rank bonus for a passage whose best rank in either retriever is 1 (qmd-style), as a
+/// fraction of the single-list rank-1 RRF contribution (`1/60`). qmd's absolute 0.05 / 0.02 would
+/// dwarf RRF scores of ~0.016 and degenerate to "first hit of either list wins", so the same 5:2
+/// ratio is applied relative to RRF's own scale. Tuned on v1/v2 (ADR-0789).
+pub const TOP1_BONUS_FRACTION: f64 = 0.25;
+/// Bonus for a best rank of 2 or 3. See [`TOP1_BONUS_FRACTION`].
+pub const TOP3_BONUS_FRACTION: f64 = 0.10;
+
+/// Maximum query tokens sent to the full-text index, bounding lexical work on very long queries.
+const MAX_FTS_QUERY_TOKENS: usize = 64;
+
+/// Reduces an arbitrary user query to plain alphanumeric tokens joined by spaces, so no
+/// full-text query operator or special character ever reaches the index (FR-009). An empty
+/// result means there is nothing to search lexically.
+pub fn sanitize_fts_query(query: &str) -> String {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .take(MAX_FTS_QUERY_TOKENS)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Adds the top-rank bonus to fused hits and re-sorts (descending score, UUID tie-break).
+///
+/// Each passage gets at most one bonus, from its best (lowest) 0-based rank across `lists`:
+/// rank 0 gets [`TOP1_BONUS_FRACTION`], ranks 1–2 get [`TOP3_BONUS_FRACTION`], both times
+/// `1/60`. It does not stack across lists — RRF already rewards agreement by summing.
+fn apply_top_rank_bonus(lists: &[&[(String, f64)]], mut hits: Vec<FusedHit>) -> Vec<FusedHit> {
+    let mut best: HashMap<&str, usize> = HashMap::new();
+    for list in lists {
+        for (rank, (uuid, _)) in list.iter().enumerate().take(3) {
+            let e = best.entry(uuid.as_str()).or_insert(rank);
+            *e = (*e).min(rank);
+        }
+    }
+    for hit in &mut hits {
+        let fraction = match best.get(hit.uuid.as_str()) {
+            Some(0) => TOP1_BONUS_FRACTION,
+            Some(_) => TOP3_BONUS_FRACTION,
+            None => 0.0,
+        };
+        hit.rrf_score += fraction / 60.0;
+    }
+    hits.sort_by(|a, b| {
+        b.rrf_score
+            .partial_cmp(&a.rrf_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.uuid.cmp(&b.uuid))
+    });
+    hits
+}
+
+/// Logs once per process that the lexical leg was unavailable and hybrid search fell back to
+/// vector-only (FR-008) — the operator-visible signal.
+fn note_lexical_unavailable(err: &Error) {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "liminis-context-graph: passage search: episode full-text index unavailable, \
+             falling back to vector-only ranking: {err}"
+        );
+    }
+}
+
+/// The BM25 passage list (issue #789, FR-011): `(uuid, score)` best first, after the group and
+/// origin filters, as a distinct reusable intermediate (graph-aware fusion, #797, consumes it).
+/// Empty when the query has no lexical tokens, or when the index is missing or inconsistent
+/// (FR-008) — the latter is logged once. Any other error propagates.
+pub fn lexical_passage_list(
+    conn: &crate::db::Conn,
+    query: &str,
+    group_ids: Option<&[&str]>,
+    origins: Option<&[crate::origin::Origin]>,
+    limit: usize,
+) -> Result<Vec<(String, f64)>, Error> {
+    let q = sanitize_fts_query(query);
+    if q.is_empty() {
+        return Ok(vec![]);
+    }
+    match conn.fts_search_episodic(&q, group_ids, origins, limit) {
+        Ok(list) => Ok(list),
+        Err(e) if crate::error::is_missing_index_error(&e) || is_fts_inconsistent_error(&e) => {
+            note_lexical_unavailable(&e);
+            Ok(vec![])
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Hybrid passage search (issue #789): BM25 over episode text + HNSW, fused with RRF and an
+/// optional top-rank bonus (HOT path — no lock held).
+///
+/// - `min_score` floors the *vector* list's cosine similarity before fusion; lexical-only hits
+///   are never floored (FR-007).
+/// - `score` on each result is the fused score; `similarity` is the cosine where the vector
+///   retriever matched.
+/// - With no lexical hits the result is the vector ranking (FR-008), re-scored as fused.
+#[allow(clippy::too_many_arguments)]
+pub async fn search_passages_hybrid(
+    db: Arc<Db>,
+    embedder: Arc<dyn Embedder>,
+    query: &str,
+    group_ids: Option<Vec<String>>,
+    num_results: usize,
+    min_score: f64,
+    origins: Option<Vec<crate::origin::Origin>>,
+    top_rank_bonus: bool,
+) -> Result<Vec<PassageResult>, Error> {
+    let embedding = embedder.embed(query, EmbedRole::Query).await?;
+    let candidate_limit = num_results * 3;
+    let query_owned = query.to_string();
+
+    tokio::task::spawn_blocking(move || -> Result<Vec<PassageResult>, Error> {
+        let conn = db.connect()?;
+        let gid_refs: Option<Vec<&str>> = group_ids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+
+        let bm25 = lexical_passage_list(
+            &conn,
+            &query_owned,
+            gid_refs.as_deref(),
+            origins.as_deref(),
+            candidate_limit,
+        )?;
+
+        let vector_rows = conn.vector_search_episodic_origins(
+            &embedding,
+            gid_refs.as_deref(),
+            candidate_limit,
+            origins.as_deref(),
+        )?;
+        let vector = apply_similarity_floor(
+            vector_rows
+                .iter()
+                .map(|p| (p.uuid.clone(), p.score))
+                .collect(),
+            Some(min_score),
+        );
+
+        let mut fused = rrf_fuse_scored(&[&bm25, &vector]);
+        if top_rank_bonus {
+            fused = apply_top_rank_bonus(&[&bm25, &vector], fused);
+        }
+        fused.truncate(num_results);
+
+        let top_uuids: Vec<String> = fused.iter().map(|h| h.uuid.clone()).collect();
+        let mut rows: HashMap<String, PassageResult> = vector_rows
+            .into_iter()
+            .map(|p| (p.uuid.clone(), p))
+            .collect();
+        let missing: Vec<String> = top_uuids
+            .iter()
+            .filter(|u| !rows.contains_key(*u))
+            .cloned()
+            .collect();
+        for p in conn.get_passages_by_uuids(&missing)? {
+            rows.insert(p.uuid.clone(), p);
+        }
+
+        // `fused` is already in rank order; rows are looked up, not re-sorted, so the order is
+        // exactly the fused (deterministic) order.
+        Ok(fused
+            .into_iter()
+            .filter_map(|hit| {
+                let mut p = rows.remove(&hit.uuid)?;
+                p.score = hit.rrf_score;
+                p.similarity = similarity(hit.raw[1]);
+                Some(p)
+            })
+            .collect())
+    })
+    .await?
 }
 
 /// Hybrid BM25 + HNSW entity search with RRF fusion (HOT path).
@@ -359,6 +588,115 @@ pub async fn hybrid_edge_search_scored(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_fts_query_strips_operators_and_punctuation() {
+        assert_eq!(sanitize_fts_query("shift rostering"), "shift rostering");
+        assert_eq!(
+            sanitize_fts_query("a OR (b* AND \"c\") title:d"),
+            "a OR b AND c title d"
+        );
+        assert_eq!(sanitize_fts_query("?!... --- ::"), "");
+        assert_eq!(sanitize_fts_query("   "), "");
+        assert_eq!(sanitize_fts_query("café-déjà vu"), "café déjà vu");
+    }
+
+    #[test]
+    fn sanitize_fts_query_caps_token_count() {
+        let long = (0..200)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            sanitize_fts_query(&long).split(' ').count(),
+            MAX_FTS_QUERY_TOKENS
+        );
+    }
+
+    #[test]
+    fn passage_search_mode_parses_strictly() {
+        assert_eq!(
+            "vector".parse::<PassageSearchMode>(),
+            Ok(PassageSearchMode::Vector)
+        );
+        assert_eq!(
+            "hybrid".parse::<PassageSearchMode>(),
+            Ok(PassageSearchMode::Hybrid)
+        );
+        assert!("Hybrid".parse::<PassageSearchMode>().is_err());
+        assert!("".parse::<PassageSearchMode>().is_err());
+        assert!("bm25".parse::<PassageSearchMode>().is_err());
+        assert_eq!(PassageSearchMode::Hybrid.as_str(), "hybrid");
+    }
+
+    fn list(ids: &[&str]) -> Vec<(String, f64)> {
+        ids.iter().map(|u| (u.to_string(), 0.0)).collect()
+    }
+
+    fn order(hits: &[FusedHit]) -> Vec<&str> {
+        hits.iter().map(|h| h.uuid.as_str()).collect()
+    }
+
+    #[test]
+    fn top_rank_bonus_lifts_a_rank_one_hit_over_a_deeper_double_hit() {
+        // `x` is rank 1 in BM25 only; `d` is rank 4 in both lists. Without the bonus the double
+        // hit wins; with it the rank-1 hit does.
+        let bm25 = list(&["x", "p", "q", "d"]);
+        let vector = list(&["y", "r", "s", "d"]);
+        let plain = rrf_fuse_scored(&[&bm25, &vector]);
+        assert_eq!(plain[0].uuid, "d");
+        let bonus = apply_top_rank_bonus(&[&bm25, &vector], plain);
+        assert_ne!(bonus[0].uuid, "d");
+        assert!(["x", "y"].contains(&bonus[0].uuid.as_str()));
+    }
+
+    #[test]
+    fn top_rank_bonus_tiers_and_does_not_stack() {
+        let bm25 = list(&["a", "b", "c", "d"]);
+        let vector = list(&["a", "b", "c", "d"]);
+        let plain = rrf_fuse_scored(&[&bm25, &vector]);
+        let base: HashMap<String, f64> = plain
+            .iter()
+            .map(|h| (h.uuid.clone(), h.rrf_score))
+            .collect();
+        let bonus = apply_top_rank_bonus(&[&bm25, &vector], plain);
+        let got: HashMap<&str, f64> = bonus
+            .iter()
+            .map(|h| (h.uuid.as_str(), h.rrf_score))
+            .collect();
+        // Present in both lists at rank 1: one bonus, not two.
+        assert!((got["a"] - base["a"] - TOP1_BONUS_FRACTION / 60.0).abs() < 1e-12);
+        assert!((got["b"] - base["b"] - TOP3_BONUS_FRACTION / 60.0).abs() < 1e-12);
+        assert!((got["c"] - base["c"] - TOP3_BONUS_FRACTION / 60.0).abs() < 1e-12);
+        assert!((got["d"] - base["d"]).abs() < 1e-12, "rank 4 gets no bonus");
+    }
+
+    #[test]
+    fn top_rank_bonus_uses_best_rank_across_lists() {
+        let bm25 = list(&["a", "b", "z"]);
+        let vector = list(&["z", "q"]);
+        let hits = apply_top_rank_bonus(&[&bm25, &vector], rrf_fuse_scored(&[&bm25, &vector]));
+        let z = hits.iter().find(|h| h.uuid == "z").unwrap();
+        let plain = 1.0 / 62.0 + 1.0 / 60.0;
+        assert!((z.rrf_score - plain - TOP1_BONUS_FRACTION / 60.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn top_rank_bonus_is_deterministic_on_ties() {
+        let bm25 = list(&["b"]);
+        let vector = list(&["a"]);
+        let hits = apply_top_rank_bonus(&[&bm25, &vector], rrf_fuse_scored(&[&bm25, &vector]));
+        assert_eq!(order(&hits), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn fusion_of_overlapping_lists_has_each_passage_once() {
+        let bm25 = list(&["a", "b"]);
+        let vector = list(&["b", "c"]);
+        let hits = rrf_fuse_scored(&[&bm25, &vector]);
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].uuid, "b");
+    }
 
     #[test]
     fn order_by_rank_follows_the_fused_ranking_not_fetch_order() {

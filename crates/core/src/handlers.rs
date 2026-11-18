@@ -2178,34 +2178,66 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
     let min_score = p["min_score"].as_f64().unwrap_or(0.5).clamp(0.0, 1.0);
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
     let origins = crate::origin::parse_origins_param(p)?;
+    // Retrieval mode (issue #789, FR-003): an unknown or non-string value is a validation error,
+    // never silently ignored. Omitted ⇒ the configured default (`LCG_PASSAGE_SEARCH_MODE`).
+    let mode = match p.get("mode").filter(|v| !v.is_null()) {
+        None => search::PassageSearchMode::default_from_env(),
+        Some(v) => v
+            .as_str()
+            .ok_or_else(|| Error::Ipc("mode must be a string".to_string()))?
+            .parse::<search::PassageSearchMode>()
+            .map_err(Error::Ipc)?,
+    };
+    let top_rank_bonus = match p.get("top_rank_bonus").filter(|v| !v.is_null()) {
+        None => true,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| Error::Ipc("top_rank_bonus must be a boolean".to_string()))?,
+    };
 
-    let result = search::search_passages(
-        load_db(&state)?,
-        Arc::clone(&state.embedder),
-        &query,
-        group_ids.clone(),
-        num_results,
-        min_score,
-        origins.clone(),
-    )
-    .await;
+    let run = |state: Arc<AppState>| {
+        let query = query.clone();
+        let group_ids = group_ids.clone();
+        let origins = origins.clone();
+        async move {
+            let db = load_db(&state)?;
+            let embedder = Arc::clone(&state.embedder);
+            match mode {
+                search::PassageSearchMode::Vector => {
+                    search::search_passages(
+                        db,
+                        embedder,
+                        &query,
+                        group_ids,
+                        num_results,
+                        min_score,
+                        origins,
+                    )
+                    .await
+                }
+                search::PassageSearchMode::Hybrid => {
+                    search::search_passages_hybrid(
+                        db,
+                        embedder,
+                        &query,
+                        group_ids,
+                        num_results,
+                        min_score,
+                        origins,
+                        top_rank_bonus,
+                    )
+                    .await
+                }
+            }
+        }
+    };
 
-    let passages = match result {
+    let passages = match run(Arc::clone(&state)).await {
         Ok(p) => p,
         Err(e) if is_missing_index_error(&e) => {
             if !state.indices_built.load(Ordering::Acquire) {
                 build_indices_once(&state).await?;
-                search::search_passages(
-                    load_db(&state)?,
-                    Arc::clone(&state.embedder),
-                    &query,
-                    group_ids,
-                    num_results,
-                    min_score,
-                    origins,
-                )
-                .await
-                .map_err(|e2| {
+                run(Arc::clone(&state)).await.map_err(|e2| {
                     if is_missing_index_error(&e2) {
                         Error::Ipc(MISSING_INDEX_USER_MSG.to_string())
                     } else {
