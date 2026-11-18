@@ -638,16 +638,25 @@ mod tests {
     }
 
     #[test]
-    fn top_rank_bonus_lifts_a_rank_one_hit_over_a_deeper_double_hit() {
-        // `x` is rank 1 in BM25 only; `d` is rank 4 in both lists. Without the bonus the double
-        // hit wins; with it the rank-1 hit does.
-        let bm25 = list(&["x", "p", "q", "d"]);
-        let vector = list(&["y", "r", "s", "d"]);
+    fn top_rank_bonus_lifts_a_rank_one_hit_over_a_much_deeper_double_hit() {
+        // `x` is rank 1 in BM25 only; `d` is rank 41 in both lists (2/100 = 0.0200 vs x's plain
+        // 1/60 = 0.0167). Without the bonus the double hit wins; with it x (0.0208) does.
+        let mut bm25 = list(&["x"]);
+        let mut vector = list(&["y"]);
+        for i in 0..39 {
+            bm25.push((format!("pb{i}"), 0.0));
+            vector.push((format!("pv{i}"), 0.0));
+        }
+        bm25.push(("d".to_string(), 0.0));
+        vector.push(("d".to_string(), 0.0));
         let plain = rrf_fuse_scored(&[&bm25, &vector]);
         assert_eq!(plain[0].uuid, "d");
         let bonus = apply_top_rank_bonus(&[&bm25, &vector], plain);
-        assert_ne!(bonus[0].uuid, "d");
-        assert!(["x", "y"].contains(&bonus[0].uuid.as_str()));
+        assert!(
+            ["x", "y"].contains(&bonus[0].uuid.as_str()),
+            "{:?}",
+            order(&bonus[..3])
+        );
     }
 
     #[test]

@@ -20,6 +20,11 @@ pub const ALL_CONFIGS: [&str; 5] = [
     "lcg-entities-facts-belief",
 ];
 
+/// Opt-in LCG passage-search variants (#789), measured on one binary by sending `mode` explicitly:
+/// RRF fusion of BM25 and vector alone, and RRF with the top-rank bonus. Not in the default run.
+pub const HYBRID_PASSAGE_CONFIGS: [&str; 2] =
+    ["lcg-passages-hybrid-rrf", "lcg-passages-hybrid-bonus"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalArgs {
     pub corpus: PathBuf,
@@ -70,6 +75,8 @@ OPTIONS:
     --k <N>                    Shared cut-off for every configuration (1..=100, default 10).
     --configs <LIST>           Comma-separated subset of: lcg-passages, lcg-entities-facts, qmd,
                                qmd-rerank, lcg-entities-facts-belief. Default: all five.
+                               Opt-in (#789): lcg-passages-hybrid-rrf (BM25 + vector, RRF),
+                               lcg-passages-hybrid-bonus (the same plus the top-rank bonus).
     --service-bin <PATH>       liminis-context-graph binary to spawn (default: alongside lcg-eval,
                                else `liminis-context-graph` on PATH).
     --embedder-http <URL>      Real embedder for the spawned service (required for LCG configs
@@ -171,10 +178,11 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
                 let v = val("--configs")?;
                 let mut list = Vec::new();
                 for c in v.split(',').map(str::trim).filter(|c| !c.is_empty()) {
-                    if !ALL_CONFIGS.contains(&c) {
+                    if !ALL_CONFIGS.contains(&c) && !HYBRID_PASSAGE_CONFIGS.contains(&c) {
                         return Err(format!(
-                            "unknown configuration '{c}' (expected one of: {})",
-                            ALL_CONFIGS.join(", ")
+                            "unknown configuration '{c}' (expected one of: {}, {})",
+                            ALL_CONFIGS.join(", "),
+                            HYBRID_PASSAGE_CONFIGS.join(", ")
                         ));
                     }
                     if !list.iter().any(|x| x == c) {
@@ -305,6 +313,25 @@ mod tests {
                 assert_eq!(a.corpus, PathBuf::from(DEFAULT_FIXTURE_DIR));
                 assert!(!a.dry_run);
             }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn hybrid_passage_configs_are_opt_in() {
+        match p(&[]).unwrap() {
+            RetrievalMode::Run(a) => {
+                assert!(a.configs.iter().all(|c| !c.contains("hybrid")));
+            }
+            _ => panic!(),
+        }
+        match p(&[
+            "--configs",
+            "lcg-passages,lcg-passages-hybrid-rrf,lcg-passages-hybrid-bonus",
+        ])
+        .unwrap()
+        {
+            RetrievalMode::Run(a) => assert_eq!(a.configs.len(), 3),
             _ => panic!(),
         }
     }

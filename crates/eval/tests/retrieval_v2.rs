@@ -1191,7 +1191,10 @@ async fn run_report(fx: &Fixture, judge_path: &Path) -> Report {
     let dynt: Arc<dyn RpcTransport> = transport.clone();
     let map = lcg::ingest(dynt.as_ref(), fx).await.unwrap();
     let slots = vec![
-        Slot::Run(Box::new(LcgPassages { t: dynt.clone() })),
+        Slot::Run(Box::new(LcgPassages {
+            t: dynt.clone(),
+            mode: lcg::PassageMode::Vector,
+        })),
         Slot::Run(Box::new(NoteLexical {
             notes: fx
                 .notes

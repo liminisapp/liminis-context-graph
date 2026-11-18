@@ -509,8 +509,13 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_search_passages",
-            description: "Semantic passage search over ingested episode text, returning \
-                           scored text snippets. Each result includes the `attributes` (issue \
+            description: "Passage search over ingested episode text, returning scored \
+                           text snippets. `mode` selects `vector` (cosine similarity, the \
+                           default unless the service sets LCG_PASSAGE_SEARCH_MODE) or `hybrid` \
+                           (BM25 over episode text fused with the vector ranking by Reciprocal \
+                           Rank Fusion, issue #789); in hybrid mode `score` is the fused rank \
+                           score, not a cosine, and `similarity` carries the cosine where the \
+                           vector retriever matched. Each result includes the `attributes` (issue \
                            #528) of the episode it belongs to — no separate per-episode fetch \
                            is needed to obtain them. Each result also carries the `origin` \
                            (issue #752) of its episode, and `origins` restricts results to \
@@ -529,7 +534,22 @@ pub fn registry() -> Vec<ToolSpec> {
                         },
                         "min_score": {
                             "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5,
-                            "description": "Minimum similarity score (clamped 0.0-1.0)."
+                            "description": "Minimum cosine similarity (clamped 0.0-1.0). In hybrid \
+                                mode it floors only the vector retriever's candidates; a passage \
+                                found only by the lexical (BM25) retriever is not excluded by it."
+                        },
+                        "mode": {
+                            "type": "string", "enum": ["vector", "hybrid"],
+                            "description": "Retrieval mode: `vector` (cosine only) or `hybrid` \
+                                (BM25 + vector, RRF). Omitted: the service default \
+                                (LCG_PASSAGE_SEARCH_MODE, else `vector`). Unknown values are \
+                                rejected."
+                        },
+                        "top_rank_bonus": {
+                            "type": "boolean", "default": true,
+                            "description": "Hybrid mode only: give extra weight to a passage \
+                                ranked first, or in the top 3, by either retriever. Set false \
+                                for plain RRF."
                         },
                         "group_ids": group_ids_prop(),
                         "origins": origins_prop()
