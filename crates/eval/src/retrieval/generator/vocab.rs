@@ -213,7 +213,7 @@ pub const ATTRS: [AttrDef; 16] = [
         key: "owner",
         kind: 0,
         label: "Owner",
-        neg: &["owner", "owned"],
+        neg: &["owned by"],
         stmts: &[
             "{e} is owned by {v}.",
             "{v} is the accountable owner of {e}.",
@@ -264,7 +264,7 @@ pub const ATTRS: [AttrDef; 16] = [
         key: "dependency",
         kind: 0,
         label: "Supplier",
-        neg: &["supplier"],
+        neg: &["depends on", "supplier relationship"],
         stmts: &[
             "{e} depends on {v} for supply.",
             "{v} is the supplier behind {e}.",
@@ -420,7 +420,7 @@ pub const ATTRS: [AttrDef; 16] = [
         key: "approver",
         kind: 3,
         label: "Exception approver",
-        neg: &["exception"],
+        neg: &["approves", "sign-off", "approver"],
         stmts: &[
             "{v} approves exceptions to the {e}.",
             "Exceptions to the {e} need sign-off from {v}.",
@@ -435,7 +435,7 @@ pub const ATTRS: [AttrDef; 16] = [
         key: "review",
         kind: 3,
         label: "Review cadence",
-        neg: &["reviewed", "review cadence"],
+        neg: &["review cadence"],
         stmts: &[
             "The {e} is reviewed {v}.",
             "{e} gets a {v} review.",

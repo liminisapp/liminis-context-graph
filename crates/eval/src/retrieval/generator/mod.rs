@@ -1,26 +1,34 @@
-//! Deterministic generator for the retrieval-v2 fixture (#788, ADR-0788).
+//! Generator for the retrieval-v2 fixture (#788, ADR-0788).
 //!
-//! `scenario.json` (quotas, seed) plus the vocabulary in [`vocab`] fully determine every byte of
-//! `manifest.json`, `notes/*.md`, `questions.jsonl` and `questions.meta.json`: no network, no
-//! model calls, no clock, no hash-map iteration. `lcg-eval retrieval-gen --check` regenerates in
-//! memory and reports any drift from the checked-in files; a Rust test does the same.
+//! The fixture is built in two steps so that structure is reproducible and prose is natural:
 //!
-//! The generator builds a fact model first ([`world`]), renders notes from it ([`notes`]) and
-//! derives questions and ground truth from the same facts ([`questions`]), so evidence, negatives
-//! and currency are correct by construction. The output is then re-validated through the
-//! production loader.
+//! 1. **Skeleton (deterministic, free).** `scenario.json` (quotas, seed) plus the fact model in
+//!    code produce `skeleton.json`: entities and facts, which note carries which facts, each
+//!    note's origin, reference time, size and citations, the explicit supersessions, and the
+//!    question ground truth. Same scenario and seed ⇒ byte-identical skeleton. No network, no model.
+//! 2. **Render (explicit, paid, once).** `lcg-eval retrieval-render` has an LLM write each note and
+//!    each question's wording from the skeleton ([`render`]). The rendered notes and questions are
+//!    **checked in**; CI and ordinary eval runs never call a model. [`check`] verifies the
+//!    rendered text against the skeleton and detects drift.
+//!
+//! Template prose ([`notes`] builds it) exists only as a test double for the LLM so the pipeline
+//! can be exercised without one; it is never written into the checked-in fixture.
 
+pub mod check;
 pub mod notes;
 pub mod questions;
+pub mod render;
+pub mod skeleton;
 pub mod vocab;
 pub mod world;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use self::notes::GenNote;
+use self::check::Rendered;
+use self::skeleton::*;
 use self::world::{rfc3339, Rng, World};
 use super::fixture;
 
@@ -50,6 +58,7 @@ pub struct LongNotes {
 #[serde(deny_unknown_fields)]
 pub struct Scenario {
     pub seed: u64,
+    /// Bump when the prose is re-rendered: re-rendering changes the corpus.
     pub corpus_version: String,
     pub questions_version: String,
     pub description: String,
@@ -81,20 +90,94 @@ fn default_review() -> usize {
     6
 }
 
-/// Everything the generator writes, keyed by path relative to the fixture directory.
-#[derive(Debug, Clone)]
-pub struct Output {
-    pub files: BTreeMap<String, String>,
-    /// Pending human-review record; written only when `review.json` does not exist yet.
-    pub review: String,
-    pub notes: usize,
-    pub questions: usize,
+pub fn load_scenario(path: &Path) -> Result<Scenario, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read scenario {}: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
+
+/// Result of the deterministic step.
+#[derive(Debug, Clone)]
+pub struct Generated {
+    pub skeleton: Skeleton,
+    /// Template prose, a test double for the LLM renderer. Never checked in.
+    pub template: Rendered,
+    pub review_per_category: usize,
+}
+
+/// Builds the skeleton (and the template test double) in memory.
+pub fn generate(sc: &Scenario) -> Result<Generated, String> {
+    let root = Rng::new(sc.seed);
+    let mut w = World::build(sc, &root)?;
+    let corpus = notes::build(sc, &mut w, &root)?;
+    let qs = questions::build(sc, &w, &corpus, &root)?;
+
+    // Manifest order = ingest order: by recording date, creation order breaking ties. A derived
+    // or answer note is always dated after the notes it cites, so citations always point earlier.
+    let mut ordered: Vec<&notes::GenNote> = corpus.notes.iter().collect();
+    ordered.sort_by_key(|n| (n.day, n.seq));
+    let skeleton = Skeleton {
+        skeleton_version: SKELETON_VERSION,
+        corpus_version: sc.corpus_version.clone(),
+        questions_version: sc.questions_version.clone(),
+        description: sc.description.clone(),
+        seed: sc.seed,
+        chunk_max_tokens: sc.chunk_max_tokens,
+        entities: w.entities.iter().map(notes::entity_sk).collect(),
+        notes: ordered.iter().map(|n| n.sk.clone()).collect(),
+        supersedes: corpus
+            .supersedes
+            .iter()
+            .map(|(old, new, day)| SkSup {
+                old_note: old.clone(),
+                new_note: new.clone(),
+                effective_at: rfc3339(*day),
+            })
+            .collect(),
+        questions: qs,
+    };
+
+    let template = Rendered {
+        notes: corpus
+            .notes
+            .iter()
+            .map(|n| (n.sk.id.clone(), n.body.clone()))
+            .collect(),
+        questions: skeleton
+            .questions
+            .iter()
+            .map(|q| (q.id.clone(), q.text_hint.clone()))
+            .collect(),
+    };
+
+    // Re-validate the structure through the production loader, with the hints as wording.
+    let man = manifest_json(&skeleton);
+    let m = fixture::parse_manifest(man.as_bytes())
+        .map_err(|e| format!("generated manifest is invalid: {e}"))?;
+    let known: HashSet<&str> = m.notes.iter().map(|n| n.id.as_str()).collect();
+    let qtext = questions_jsonl(&skeleton, &template.questions)?;
+    fixture::parse_questions(&qtext, &known)
+        .map_err(|e| format!("generated questions are invalid: {e}"))?;
+    let findings = check::check_skeleton(&skeleton);
+    if !findings.errors.is_empty() {
+        return Err(format!(
+            "generated skeleton is inconsistent:\n{}",
+            check::describe(&findings)
+        ));
+    }
+    Ok(Generated {
+        skeleton,
+        template,
+        review_per_category: sc.review_per_category,
+    })
+}
+
+// ── manifest and questions from the skeleton (no prose involved) ─────────────────
 
 #[derive(Serialize)]
 struct ManNote<'a> {
     id: &'a str,
-    reference_time: String,
+    reference_time: &'a str,
     origin: &'a str,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     cites: &'a Vec<String>,
@@ -103,7 +186,7 @@ struct ManNote<'a> {
 struct ManSup<'a> {
     old_note: &'a str,
     new_note: &'a str,
-    effective_at: String,
+    effective_at: &'a str,
 }
 #[derive(Serialize)]
 struct Chunking {
@@ -117,16 +200,248 @@ struct Man<'a> {
     notes: Vec<ManNote<'a>>,
     supersedes: Vec<ManSup<'a>>,
 }
-#[derive(Serialize)]
-struct Meta<'a> {
-    questions_version: &'a str,
-    generator: &'a str,
-    seed: u64,
+
+fn pretty<T: Serialize>(v: &T) -> String {
+    let mut s = serde_json::to_string_pretty(v).expect("serializable");
+    s.push('\n');
+    s
 }
+
+/// `manifest.json`, fully determined by the skeleton.
+pub fn manifest_json(sk: &Skeleton) -> String {
+    pretty(&Man {
+        corpus_version: &sk.corpus_version,
+        description: &sk.description,
+        chunking: Chunking {
+            max_tokens: sk.chunk_max_tokens,
+        },
+        notes: sk
+            .notes
+            .iter()
+            .map(|n| ManNote {
+                id: &n.id,
+                reference_time: &n.reference_time,
+                origin: &n.origin,
+                cites: &n.cites,
+            })
+            .collect(),
+        supersedes: sk
+            .supersedes
+            .iter()
+            .map(|s| ManSup {
+                old_note: &s.old_note,
+                new_note: &s.new_note,
+                effective_at: &s.effective_at,
+            })
+            .collect(),
+    })
+}
+
+#[derive(Serialize)]
+struct RelOut<'a> {
+    note: &'a str,
+    gain: u32,
+}
+#[derive(Serialize)]
+struct EvOut<'a> {
+    note: &'a str,
+    key_fact: &'a str,
+}
+#[derive(Serialize)]
+struct QOut<'a> {
+    id: &'a str,
+    category: &'a str,
+    text: &'a str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    relevant_notes: Vec<RelOut<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    evidence: Vec<EvOut<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    current: &'a Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stale: &'a Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    negative: bool,
+}
+
+/// `questions.jsonl`: the skeleton's ground truth with `texts` as wording. The ground truth is
+/// fixed by the skeleton, so a hand edit of anything but the wording shows up as drift.
+pub fn questions_jsonl(sk: &Skeleton, texts: &BTreeMap<String, String>) -> Result<String, String> {
+    let mut out = String::new();
+    for q in &sk.questions {
+        let text = texts
+            .get(&q.id)
+            .ok_or_else(|| format!("question '{}' has no wording", q.id))?;
+        let line = QOut {
+            id: &q.id,
+            category: &q.category,
+            text,
+            relevant_notes: q
+                .relevant_notes
+                .iter()
+                .map(|r| RelOut {
+                    note: &r.note,
+                    gain: r.gain,
+                })
+                .collect(),
+            evidence: q
+                .evidence
+                .iter()
+                .map(|e| EvOut {
+                    note: &e.note,
+                    key_fact: &e.key_fact,
+                })
+                .collect(),
+            current: &q.current,
+            stale: &q.stale,
+            negative: q.negative,
+        };
+        out.push_str(&serde_json::to_string(&line).expect("serializable"));
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+// ── fixture files ────────────────────────────────────────────────────────────────
+
+/// Who rendered the prose and how; written to `render.json` and mirrored in
+/// `questions.meta.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RenderMeta {
+    pub render_model: String,
+    pub prompt_version: String,
+    pub rendered_on: String,
+    pub skeleton_hash: String,
+    pub corpus_version: String,
+    pub questions_version: String,
+    pub model_calls: usize,
+}
+
+#[derive(Serialize)]
+struct MetaFile<'a> {
+    questions_version: &'a str,
+    render_model: &'a str,
+    prompt_version: &'a str,
+    skeleton_hash: &'a str,
+}
+
+/// Writes manifest, notes, questions, `questions.meta.json` and `render.json` for `rendered`.
+/// Removes notes that are no longer in the skeleton. Does not touch `skeleton.json`,
+/// `scenario.json` or `review.json`.
+pub fn write_fixture(
+    dir: &Path,
+    sk: &Skeleton,
+    rendered: &Rendered,
+    meta: &RenderMeta,
+) -> Result<(), String> {
+    let notes_dir = dir.join("notes");
+    std::fs::create_dir_all(&notes_dir).map_err(|e| format!("{}: {e}", notes_dir.display()))?;
+    if let Ok(rd) = std::fs::read_dir(&notes_dir) {
+        for e in rd.flatten() {
+            let id = e
+                .path()
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string());
+            if e.path().extension().is_some_and(|x| x == "md")
+                && id.is_some_and(|i| sk.note(&i).is_none())
+            {
+                std::fs::remove_file(e.path()).map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    let w = |name: &str, text: &str| -> Result<(), String> {
+        let p = dir.join(name);
+        std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))
+    };
+    for n in &sk.notes {
+        let body = rendered
+            .notes
+            .get(&n.id)
+            .ok_or_else(|| format!("note '{}' has no rendered text", n.id))?;
+        let mut body = body.trim_end().to_string();
+        body.push('\n');
+        w(&format!("notes/{}.md", n.id), &body)?;
+    }
+    w("manifest.json", &manifest_json(sk))?;
+    w(
+        "questions.jsonl",
+        &questions_jsonl(sk, &rendered.questions)?,
+    )?;
+    w(
+        "questions.meta.json",
+        &pretty(&MetaFile {
+            questions_version: &sk.questions_version,
+            render_model: &meta.render_model,
+            prompt_version: &meta.prompt_version,
+            skeleton_hash: &meta.skeleton_hash,
+        }),
+    )?;
+    w("render.json", &pretty(meta))
+}
+
+/// Checks a rendered fixture directory against `sk`: structure pinned to the skeleton, prose
+/// checked by [`check::check_rendered`], and the loader run over the result.
+pub fn check_dir(
+    dir: &Path,
+    sk: &Skeleton,
+    skeleton_text: &str,
+) -> Result<check::Findings, String> {
+    let rendered = check::load_rendered(dir)?;
+    let mut f = check::check_rendered(sk, &rendered);
+    let read = |n: &str| std::fs::read_to_string(dir.join(n)).unwrap_or_default();
+    if read("manifest.json") != manifest_json(sk) {
+        f.errors.push(
+            "manifest.json differs from the skeleton; it is generated, not hand-edited".into(),
+        );
+    }
+    match questions_jsonl(sk, &rendered.questions) {
+        Ok(expect) if expect == read("questions.jsonl") => {}
+        Ok(_) => f.errors.push(
+            "questions.jsonl differs from the skeleton's ground truth (only the wording may change)"
+                .into(),
+        ),
+        Err(e) => f.errors.push(e),
+    }
+    if let Ok(text) = std::fs::read_to_string(dir.join("render.json")) {
+        match serde_json::from_str::<RenderMeta>(&text) {
+            Ok(m) => {
+                if m.skeleton_hash != skeleton_hash(skeleton_text) {
+                    f.errors.push(format!(
+                        "render.json was rendered from skeleton {} but skeleton.json is {}: re-render",
+                        m.skeleton_hash,
+                        skeleton_hash(skeleton_text)
+                    ));
+                }
+                if m.corpus_version != sk.corpus_version
+                    || m.questions_version != sk.questions_version
+                {
+                    f.errors
+                        .push("render.json versions differ from the skeleton's".into());
+                }
+            }
+            Err(e) => f.errors.push(format!("render.json: {e}")),
+        }
+    } else {
+        f.errors.push(
+            "render.json is missing (the render model and prompt version are recorded there)"
+                .into(),
+        );
+    }
+    if let Err(e) = fixture::load(dir) {
+        f.errors
+            .push(format!("the loader rejects the fixture: {e}"));
+    }
+    Ok(f)
+}
+
+// ── review record ────────────────────────────────────────────────────────────────
+
 #[derive(Serialize)]
 struct ReviewItem {
     id: String,
     category: String,
+    /// Filled by `retrieval-render` so the reviewer sees the question.
+    text: Option<String>,
     ground_truth_correct: Option<bool>,
     note_relevance_correct: Option<bool>,
     key_fact_correct: Option<bool>,
@@ -134,8 +449,10 @@ struct ReviewItem {
 #[derive(Serialize)]
 struct Review<'a> {
     status: &'a str,
+    skeleton_hash: String,
     questions_version: &'a str,
-    questions_hash: String,
+    /// Set by `retrieval-render` once there is a questions.jsonl to hash.
+    questions_hash: Option<String>,
     sample_policy: String,
     reviewer: Option<String>,
     reviewed_on: Option<String>,
@@ -144,122 +461,24 @@ struct Review<'a> {
     sample: Vec<ReviewItem>,
 }
 
-pub fn load_scenario(path: &Path) -> Result<Scenario, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read scenario {}: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
-}
-
-fn pretty<T: Serialize>(v: &T) -> String {
-    let mut s = serde_json::to_string_pretty(v).expect("serializable");
-    s.push('\n');
-    s
-}
-
-/// Generates the whole fixture in memory.
-pub fn generate(sc: &Scenario) -> Result<Output, String> {
-    let root = Rng::new(sc.seed);
-    let mut w = World::build(sc, &root)?;
-    let corpus = notes::build(sc, &mut w, &root)?;
-
-    // Manifest order = ingest order: by recording date, creation order breaking ties. A derived
-    // or answer note is always dated after the notes it cites, so citations always point earlier.
-    let mut ordered: Vec<&GenNote> = corpus.notes.iter().collect();
-    ordered.sort_by_key(|n| (n.day, n.seq));
-    let bodies: BTreeMap<String, String> = corpus
-        .notes
-        .iter()
-        .map(|n| (n.id.clone(), n.body.clone()))
-        .collect();
-
-    let manifest = Man {
-        corpus_version: &sc.corpus_version,
-        description: &sc.description,
-        chunking: Chunking {
-            max_tokens: sc.chunk_max_tokens,
-        },
-        notes: ordered
-            .iter()
-            .map(|n| ManNote {
-                id: &n.id,
-                reference_time: rfc3339(n.day),
-                origin: n.origin,
-                cites: &n.cites,
-            })
-            .collect(),
-        supersedes: corpus
-            .supersedes
-            .iter()
-            .map(|(old, new, day)| ManSup {
-                old_note: old,
-                new_note: new,
-                effective_at: rfc3339(*day),
-            })
-            .collect(),
-    };
-    let manifest_text = pretty(&manifest);
-
-    let qs = questions::build(sc, &w, &corpus, &bodies, &root)?;
-    let mut qtext = String::new();
-    for q in &qs {
-        qtext.push_str(&serde_json::to_string(q).expect("serializable"));
-        qtext.push('\n');
-    }
-    let meta_text = pretty(&Meta {
-        questions_version: &sc.questions_version,
-        generator: "lcg-eval retrieval-gen",
-        seed: sc.seed,
-    });
-
-    let mut files = BTreeMap::new();
-    files.insert("manifest.json".to_string(), manifest_text);
-    files.insert("questions.jsonl".to_string(), qtext.clone());
-    files.insert("questions.meta.json".to_string(), meta_text);
-    for n in &corpus.notes {
-        files.insert(format!("notes/{}.md", n.id), n.body.clone());
-    }
-
-    // Re-validate through the production loader, then the checks only the generator can make.
-    let m = fixture::parse_manifest(files["manifest.json"].as_bytes())
-        .map_err(|e| format!("generated manifest is invalid: {e}"))?;
-    let known: HashSet<&str> = m.notes.iter().map(|n| n.id.as_str()).collect();
-    fixture::parse_questions(&qtext, &known)
-        .map_err(|e| format!("generated questions are invalid: {e}"))?;
-    for q in &qs {
-        for e in &q.evidence {
-            if !bodies[&e.note].contains(&e.key_fact) {
-                return Err(format!(
-                    "question '{}': key fact is not stated verbatim in note '{}'",
-                    q.id, e.note
-                ));
-            }
-        }
-    }
-
-    let review = review_skeleton(sc, &qs, &fixture::questions_hash_of(&qtext), &root);
-    Ok(Output {
-        notes: corpus.notes.len(),
-        questions: qs.len(),
-        files,
-        review,
-    })
-}
-
-/// A pending review record with a seeded, stratified sample (never overwrites a filled record).
-fn review_skeleton(sc: &Scenario, qs: &[questions::QOut], hash: &str, root: &Rng) -> String {
+/// A pending review template with a seeded, stratified sample and **empty verdicts**. Verdicts are
+/// a human's to write; neither the generator nor the renderer ever fills them.
+pub fn review_template(g: &Generated, skeleton_text: &str, root_seed: u64) -> String {
+    let root = Rng::new(root_seed);
     let mut by_cat: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for q in qs {
-        by_cat.entry(q.category).or_default().push(&q.id);
+    for q in &g.skeleton.questions {
+        by_cat.entry(q.category.as_str()).or_default().push(&q.id);
     }
     let mut sample = Vec::new();
     for (cat, mut ids) in by_cat {
         root.fork(&format!("review|{cat}")).shuffle(&mut ids);
-        let mut picked: Vec<&str> = ids.into_iter().take(sc.review_per_category).collect();
+        let mut picked: Vec<&str> = ids.into_iter().take(g.review_per_category).collect();
         picked.sort();
         for id in picked {
             sample.push(ReviewItem {
                 id: id.to_string(),
                 category: cat.to_string(),
+                text: None,
                 ground_truth_correct: None,
                 note_relevance_correct: None,
                 key_fact_correct: None,
@@ -268,11 +487,12 @@ fn review_skeleton(sc: &Scenario, qs: &[questions::QOut], hash: &str, root: &Rng
     }
     pretty(&Review {
         status: "pending",
-        questions_version: &sc.questions_version,
-        questions_hash: hash.to_string(),
+        skeleton_hash: skeleton_hash(skeleton_text),
+        questions_version: &g.skeleton.questions_version,
+        questions_hash: None,
         sample_policy: format!(
-            "stratified: {} questions per category (seeded sample, at least 10% of all questions); a maintainer fills every verdict and sets status to \"reviewed\"",
-            sc.review_per_category
+            "stratified: {} questions per category (seeded sample, at least 10% of all questions). A maintainer fills every verdict (true/false) after reading the rendered question, its relevant notes and its key fact, then sets status to \"reviewed\" and records reviewer, reviewed_on and error_rate. Nobody else writes verdicts.",
+            g.review_per_category
         ),
         reviewer: None,
         reviewed_on: None,
@@ -282,70 +502,29 @@ fn review_skeleton(sc: &Scenario, qs: &[questions::QOut], hash: &str, root: &Rng
     })
 }
 
-/// Writes `out` into `dir`, removing notes the generator no longer produces. `review.json` is
-/// written only if absent.
-pub fn write_output(dir: &Path, out: &Output) -> Result<(), String> {
-    let notes_dir = dir.join("notes");
-    std::fs::create_dir_all(&notes_dir).map_err(|e| format!("{}: {e}", notes_dir.display()))?;
-    let wanted: BTreeSet<&str> = out.files.keys().map(String::as_str).collect();
-    if let Ok(rd) = std::fs::read_dir(&notes_dir) {
-        for e in rd.flatten() {
-            let rel = format!("notes/{}", e.file_name().to_string_lossy());
-            if e.path().extension().is_some_and(|x| x == "md") && !wanted.contains(rel.as_str()) {
-                std::fs::remove_file(e.path()).map_err(|e| e.to_string())?;
-            }
-        }
-    }
-    for (rel, text) in &out.files {
-        let p = dir.join(rel);
-        std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
-    }
-    let review = dir.join("review.json");
-    if !review.exists() {
-        std::fs::write(&review, &out.review).map_err(|e| format!("{}: {e}", review.display()))?;
-    }
-    Ok(())
-}
+// ── CLI: retrieval-gen ───────────────────────────────────────────────────────────
 
-/// Differences between `out` and what is on disk in `dir` (empty = no drift).
-pub fn check_output(dir: &Path, out: &Output) -> Vec<String> {
-    let mut drift = Vec::new();
-    for (rel, text) in &out.files {
-        match std::fs::read_to_string(dir.join(rel)) {
-            Ok(on_disk) if &on_disk == text => {}
-            Ok(_) => drift.push(format!("{rel}: differs from the generator output")),
-            Err(_) => drift.push(format!("{rel}: missing on disk")),
-        }
-    }
-    if let Ok(rd) = std::fs::read_dir(dir.join("notes")) {
-        for e in rd.flatten() {
-            let rel = format!("notes/{}", e.file_name().to_string_lossy());
-            if !out.files.contains_key(&rel) {
-                drift.push(format!("{rel}: on disk but not generated"));
-            }
-        }
-    }
-    drift.sort();
-    drift
-}
-
-pub const USAGE: &str = "lcg-eval retrieval-gen — regenerate (or check) the retrieval-v2 fixture
+pub const USAGE: &str = "lcg-eval retrieval-gen — regenerate (or check) the retrieval-v2 skeleton
 
 USAGE:
     lcg-eval retrieval-gen --spec <scenario.json> --out <DIR> [--check] [--seed <N>]
 
+The skeleton (skeleton.json) is everything about the fixture except its prose: entities, facts,
+which note carries which fact, origins, citations, sizes, supersessions and the question ground
+truth. It is deterministic: the same scenario and seed give byte-identical output, with no network
+access or model calls. The prose is written separately, once, by `lcg-eval retrieval-render`.
+
 OPTIONS:
     --spec <FILE>   Scenario (quotas and seed), e.g. crates/eval/fixtures/retrieval-v2/scenario.json
-    --out <DIR>     Fixture directory to write (or compare against with --check)
-    --check         Regenerate in memory and exit 1 if the files in --out differ (writes nothing)
-    --seed <N>      Override the scenario seed (e.g. to produce a different valid fixture elsewhere)
+    --out <DIR>     Fixture directory (writes skeleton.json; review.json only when absent)
+    --check         Regenerate in memory and exit 1 if skeleton.json differs. If the fixture has been
+                    rendered (render.json exists) also check the rendered notes and questions
+                    against the skeleton. Writes nothing.
+    --seed <N>      Override the scenario seed (write to a scratch --out)
     -h, --help      Print this help
-
-Generation is deterministic: the same scenario and seed always produce byte-identical output, with
-no network access or model calls. review.json is written only when absent and is never overwritten.
 ";
 
-pub fn run_cli(args: &[String]) -> i32 {
+fn run_gen(args: &[String]) -> Result<i32, String> {
     let mut spec = None;
     let mut out = None;
     let mut check = false;
@@ -355,80 +534,95 @@ pub fn run_cli(args: &[String]) -> i32 {
         match args[i].as_str() {
             "-h" | "--help" => {
                 println!("{USAGE}");
-                return 0;
+                return Ok(0);
             }
             "--check" => check = true,
             flag @ ("--spec" | "--out" | "--seed") => {
                 i += 1;
-                let Some(v) = args.get(i) else {
-                    eprintln!("lcg-eval retrieval-gen: {flag} requires a value");
-                    return 2;
-                };
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| format!("{flag} requires a value"))?;
                 match flag {
                     "--spec" => spec = Some(v.clone()),
                     "--out" => out = Some(v.clone()),
-                    _ => match v.parse::<u64>() {
-                        Ok(n) => seed = Some(n),
-                        Err(_) => {
-                            eprintln!("lcg-eval retrieval-gen: --seed must be an unsigned integer");
-                            return 2;
-                        }
-                    },
+                    _ => {
+                        seed = Some(
+                            v.parse::<u64>()
+                                .map_err(|_| "--seed must be an unsigned integer".to_string())?,
+                        )
+                    }
                 }
             }
-            other => {
-                eprintln!("lcg-eval retrieval-gen: unknown argument '{other}'");
-                return 2;
-            }
+            other => return Err(format!("unknown argument '{other}'")),
         }
         i += 1;
     }
     let (Some(spec), Some(out)) = (spec, out) else {
-        eprintln!("lcg-eval retrieval-gen: --spec and --out are required\n\n{USAGE}");
-        return 2;
+        return Err(format!("--spec and --out are required\n\n{USAGE}"));
     };
-    let result = (|| -> Result<(), String> {
-        let mut sc = load_scenario(Path::new(&spec))?;
-        if let Some(s) = seed {
-            sc.seed = s;
+    let mut sc = load_scenario(Path::new(&spec))?;
+    if let Some(s) = seed {
+        sc.seed = s;
+    }
+    let g = generate(&sc)?;
+    let text = g.skeleton.to_json();
+    let dir = Path::new(&out);
+    let summary = format!(
+        "{} notes, {} questions, seed {}, skeleton {}",
+        g.skeleton.notes.len(),
+        g.skeleton.questions.len(),
+        sc.seed,
+        skeleton_hash(&text)
+    );
+    if check {
+        let on_disk = std::fs::read_to_string(dir.join("skeleton.json")).unwrap_or_default();
+        let mut failed = false;
+        if on_disk != text {
+            eprintln!("  drift: skeleton.json differs from the generator output for the scenario and seed");
+            failed = true;
         }
-        let o = generate(&sc)?;
-        let dir = Path::new(&out);
-        if check {
-            let drift = check_output(dir, &o);
-            if drift.is_empty() {
-                println!(
-                    "retrieval-gen --check: {} matches the generator ({} notes, {} questions, seed {})",
-                    dir.display(),
-                    o.notes,
-                    o.questions,
-                    sc.seed
-                );
-                return Ok(());
-            }
-            for d in drift.iter().take(25) {
-                eprintln!("  drift: {d}");
-            }
-            return Err(format!(
-                "{} file(s) differ from the generator output; rerun without --check to regenerate",
-                drift.len()
-            ));
+        if dir.join("render.json").exists() {
+            let sk = Skeleton::from_json(&on_disk).unwrap_or_else(|_| g.skeleton.clone());
+            let f = check_dir(dir, &sk, &on_disk)?;
+            eprint!("{}", check::describe(&f));
+            failed |= !f.errors.is_empty();
+        } else {
+            println!(
+                "retrieval-gen --check: not rendered yet (no render.json); prose checks skipped"
+            );
         }
-        write_output(dir, &o)?;
+        if failed {
+            return Err("the fixture does not match the generator; see above".into());
+        }
         println!(
-            "retrieval-gen: wrote {} notes and {} questions to {} (seed {})",
-            o.notes,
-            o.questions,
-            dir.display(),
-            sc.seed
+            "retrieval-gen --check: {} matches ({summary})",
+            dir.display()
         );
-        Ok(())
-    })();
-    match result {
-        Ok(()) => 0,
+        return Ok(0);
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    std::fs::write(dir.join("skeleton.json"), &text).map_err(|e| e.to_string())?;
+    let review = dir.join("review.json");
+    if !review.exists() {
+        std::fs::write(&review, review_template(&g, &text, sc.seed)).map_err(|e| e.to_string())?;
+    }
+    println!(
+        "retrieval-gen: wrote skeleton.json to {} ({summary})",
+        dir.display()
+    );
+    Ok(0)
+}
+
+pub fn run_cli(args: &[String]) -> i32 {
+    match run_gen(args) {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("lcg-eval retrieval-gen: {e}");
-            1
+            if e.starts_with("unknown") || e.contains("requires a value") || e.contains("must be") {
+                2
+            } else {
+                1
+            }
         }
     }
 }

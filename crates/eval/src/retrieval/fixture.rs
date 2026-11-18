@@ -257,8 +257,18 @@ pub fn questions_hash_of(text: &str) -> String {
 /// Loads `dir` and validates everything. `Err` messages name the offending question or note.
 pub fn load(dir: &Path) -> Result<Fixture, String> {
     let manifest_path = dir.join("manifest.json");
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .map_err(|e| format!("cannot read {}: {e}", manifest_path.display()))?;
+    let manifest_bytes = std::fs::read(&manifest_path).map_err(|e| {
+        if dir.join("skeleton.json").exists() {
+            format!(
+                "{} has a skeleton but has not been rendered yet ({} is missing). The notes and questions are written by an LLM in a deliberate maintainer step: run `lcg-eval retrieval-render --dir {}` (needs ANTHROPIC_API_KEY; see docs/retrieval-quality-evaluation.md)",
+                dir.display(),
+                manifest_path.display(),
+                dir.display()
+            )
+        } else {
+            format!("cannot read {}: {e}", manifest_path.display())
+        }
+    })?;
     let manifest =
         parse_manifest(&manifest_bytes).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
 

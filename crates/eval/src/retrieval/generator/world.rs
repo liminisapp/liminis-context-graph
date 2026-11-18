@@ -130,6 +130,8 @@ pub struct LogFact {
     pub value: String,
     pub sentence: String,
     pub note: String,
+    /// Section of the long note that carries it (set when notes are built).
+    pub section: usize,
 }
 
 /// An external (clipped-article) fact: a vendor's public list price.
@@ -294,6 +296,7 @@ impl World {
                     sentence: fill(t, &[("e", &e.name), ("v", &value)]),
                     value,
                     note: String::new(),
+                    section: 0,
                 });
             }
         }

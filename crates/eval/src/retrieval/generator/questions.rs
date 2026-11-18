@@ -1,53 +1,28 @@
-//! Question generation for retrieval-v2 (#788): ground truth is read straight off the fact model.
+//! Question skeletons for retrieval-v2 (#788): ground truth is read straight off the fact model.
+//! The wording is rendered by an LLM later; here every question gets a plain `text_hint`, the
+//! names its wording must keep, and what the check step must be able to verify.
 //!
-//! Automatic checks enforced here (not left to review):
-//! * paraphrase questions share at most [`PARAPHRASE_MAX_FACT_OVERLAP`] of their content words
-//!   with the fact sentence and [`PARAPHRASE_MAX_NOTE_OVERLAP`] with the whole note;
-//! * a negative's fake entity appears in no note, and a real entity asked about an attribute it
-//!   never has never co-occurs with that attribute's marker words in any note;
-//! * a passage question's fact sits in a chunk after the first of a multi-chunk note.
+//! Checks made while the skeleton is built (they depend only on the fact model, never on prose):
+//! * a paraphrase question's hint shares at most [`PARAPHRASE_MAX_FACT_OVERLAP`] of its content
+//!   words with the canonical fact statement (the rendered wording is re-checked, with the note
+//!   text, by [`super::check`]);
+//! * a negative's fake entity matches no entity and appears in no fact statement; a real entity is
+//!   only asked about an attribute its kind never has;
+//! * a passage question's fact sits in a section after the first of a multi-section note, so its
+//!   chunk is never the note's first.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use serde::Serialize;
+use std::collections::BTreeSet;
 
 use super::notes::Corpus;
+use super::skeleton::*;
 use super::vocab::*;
 use super::world::*;
 use super::Scenario;
-use crate::retrieval::mapping::chunk_markdown;
 
 /// Maximum share of a paraphrase question's content words found in the fact sentence.
 pub const PARAPHRASE_MAX_FACT_OVERLAP: f64 = 0.25;
 /// Maximum share found in the whole relevant note.
 pub const PARAPHRASE_MAX_NOTE_OVERLAP: f64 = 0.5;
-
-#[derive(Debug, Serialize)]
-pub struct RelOut {
-    pub note: String,
-    pub gain: u32,
-}
-#[derive(Debug, Serialize)]
-pub struct EvOut {
-    pub note: String,
-    pub key_fact: String,
-}
-#[derive(Debug, Serialize)]
-pub struct QOut {
-    pub id: String,
-    pub category: &'static str,
-    pub text: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub relevant_notes: Vec<RelOut>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub evidence: Vec<EvOut>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub current: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub stale: Vec<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub negative: bool,
-}
 
 const STOP: [&str; 40] = [
     "what", "which", "who", "whom", "when", "where", "how", "does", "that", "with", "deals",
@@ -78,38 +53,39 @@ pub fn overlap(q: &str, doc: &str) -> f64 {
 struct Ctx<'a> {
     w: &'a World,
     corpus: &'a Corpus,
-    bodies: &'a BTreeMap<String, String>,
-    out: Vec<QOut>,
-    counters: BTreeMap<&'static str, usize>,
+    out: Vec<SkQuestion>,
+    counters: std::collections::BTreeMap<&'static str, usize>,
 }
 
 impl Ctx<'_> {
-    fn next_id(&mut self, prefix: &'static str) -> String {
-        let n = self.counters.entry(prefix).or_default();
-        *n += 1;
-        format!("{prefix}-{:02}", *n)
-    }
-
     fn add(
         &mut self,
         prefix: &'static str,
         category: &'static str,
-        text: String,
+        intent: String,
+        text_hint: String,
         rel: Vec<(String, u32)>,
     ) -> usize {
-        let id = self.next_id(prefix);
-        self.out.push(QOut {
+        let n = self.counters.entry(prefix).or_default();
+        *n += 1;
+        let id = format!("{prefix}-{:02}", *n);
+        self.out.push(SkQuestion {
             id,
-            category,
-            text,
+            category: category.to_string(),
+            intent,
+            text_hint,
             relevant_notes: rel
                 .into_iter()
-                .map(|(note, gain)| RelOut { note, gain })
+                .map(|(note, gain)| SkRel { note, gain })
                 .collect(),
             evidence: vec![],
             current: vec![],
             stale: vec![],
             negative: false,
+            names: vec![],
+            descriptor: None,
+            basis: vec![],
+            markers: vec![],
         });
         self.out.len() - 1
     }
@@ -119,28 +95,31 @@ impl Ctx<'_> {
     }
 }
 
-fn mentions(bodies: &BTreeMap<String, String>, needle: &str) -> bool {
-    let n = needle.to_lowercase();
-    bodies.values().any(|b| b.to_lowercase().contains(&n))
+/// How a paraphrase question refers to an entity without naming it.
+pub fn descriptor(kind: usize, domain_question: &str) -> String {
+    match kind {
+        0 => format!("the initiative that deals with {domain_question}"),
+        1 => format!("the outside provider that deals with {domain_question}"),
+        2 => format!("the employee who works on {domain_question}"),
+        _ => format!("the rule governing {domain_question}"),
+    }
 }
 
 pub fn build(
     sc: &Scenario,
     w: &World,
     corpus: &Corpus,
-    bodies: &BTreeMap<String, String>,
     root: &Rng,
-) -> Result<Vec<QOut>, String> {
+) -> Result<Vec<SkQuestion>, String> {
     let mut c = Ctx {
         w,
         corpus,
-        bodies,
         out: Vec::new(),
-        counters: BTreeMap::new(),
+        counters: Default::default(),
     };
     direct(&mut c, sc, root)?;
     paraphrase(&mut c, sc)?;
-    temporal(&mut c, sc, root)?;
+    temporal(&mut c, sc)?;
     answer(&mut c, sc)?;
     multi_hop(&mut c, sc, root)?;
     passage(&mut c, sc, root)?;
@@ -154,24 +133,39 @@ fn direct(c: &mut Ctx, sc: &Scenario, root: &Rng) -> Result<(), String> {
     for fi in c.w.pools.direct.iter().copied().take(n_internal) {
         let f = &c.w.facts[fi];
         let a = c.w.attr(f);
-        let text = fill(a.qd[r.below(a.qd.len())], &[("e", c.name(f.entity))]);
+        let name = c.name(f.entity).to_string();
+        let text = fill(a.qd[r.below(a.qd.len())], &[("e", &name)]);
         let mut rel = vec![(f.note.clone(), 2)];
         if let Some(recap) = c.corpus.recaps.get(&fi) {
             // A near-duplicate restatement is an acceptable (weaker) answer; the derived pages
             // that also restate this fact are deliberately not listed.
             rel.push((recap.clone(), 1));
         }
-        c.add("direct", "direct", text, rel);
+        let idx = c.add(
+            "direct",
+            "direct",
+            format!("Ask for the {} of {name}.", a.label.to_lowercase()),
+            text,
+            rel,
+        );
+        c.out[idx].names = vec![name];
+        c.out[idx].basis = vec![f.sentence.clone()];
     }
     for x in c.w.ext_facts.iter().take(sc.external_direct) {
         if x.note.is_empty() {
             return Err("an external fact has no note; raise external_notes".into());
         }
-        let text = format!(
-            "What standard rate did the trade press report for {}?",
-            c.w.entities[x.entity].name
+        let name = c.w.entities[x.entity].name.clone();
+        let text = format!("What standard rate did the trade press report for {name}?");
+        let idx = c.add(
+            "direct",
+            "direct",
+            format!("Ask what standard rate the trade press reported for {name} (a clipped article's figure)."),
+            text,
+            vec![(x.note.clone(), 2)],
         );
-        c.add("direct", "direct", text, vec![(x.note.clone(), 2)]);
+        c.out[idx].names = vec![name];
+        c.out[idx].basis = vec![x.sentence.clone()];
     }
     Ok(())
 }
@@ -196,13 +190,22 @@ fn paraphrase(c: &mut Ctx, sc: &Scenario) -> Result<(), String> {
             a.qp[0],
             &[("kq", KINDS[e.kind].q), ("dq", DOMAINS[e.domain].q)],
         );
-        let note = &c.bodies[&f.note];
-        if overlap(&text, &f.sentence) > PARAPHRASE_MAX_FACT_OVERLAP
-            || overlap(&text, note) > PARAPHRASE_MAX_NOTE_OVERLAP
-        {
+        if overlap(&text, &f.sentence) > PARAPHRASE_MAX_FACT_OVERLAP {
             continue; // re-draw from the reserve
         }
-        c.add("paraphrase", "paraphrase", text, vec![(f.note.clone(), 2)]);
+        let desc = descriptor(e.kind, DOMAINS[e.domain].q);
+        let idx = c.add(
+            "paraphrase",
+            "paraphrase",
+            format!(
+                "Ask for the {} of {desc} without naming it and without reusing the wording of the statement.",
+                a.label.to_lowercase()
+            ),
+            text,
+            vec![(f.note.clone(), 2)],
+        );
+        c.out[idx].descriptor = Some(desc);
+        c.out[idx].basis = vec![f.sentence.clone()];
         made += 1;
     }
     if made < sc.questions.paraphrase {
@@ -214,8 +217,7 @@ fn paraphrase(c: &mut Ctx, sc: &Scenario) -> Result<(), String> {
     Ok(())
 }
 
-fn temporal(c: &mut Ctx, sc: &Scenario, root: &Rng) -> Result<(), String> {
-    let _ = root;
+fn temporal(c: &mut Ctx, sc: &Scenario) -> Result<(), String> {
     let total = sc.questions.temporal;
     let chains = c.w.chains.len();
     if chains == 0 && total > 0 {
@@ -235,19 +237,28 @@ fn temporal(c: &mut Ctx, sc: &Scenario, root: &Rng) -> Result<(), String> {
         } else {
             format!("As of the latest notes, which {} is {p} on?", topic.label)
         };
-        let last = chain
-            .steps
-            .last()
-            .expect("chains are non-empty")
-            .note
-            .clone();
+        let last = chain.steps.last().expect("chains are non-empty");
         let stale: Vec<String> = chain.steps[..chain.steps.len() - 1]
             .iter()
             .map(|s| s.note.clone())
             .collect();
-        let idx = c.add("temporal", "temporal", text, vec![(last.clone(), 2)]);
-        c.out[idx].current = vec![last];
+        let last_note = last.note.clone();
+        let basis = format!("{p} now uses {} as its {}.", last.value, topic.label);
+        let idx = c.add(
+            "temporal",
+            "temporal",
+            format!(
+                "Ask which {} {p} uses now; the decision was revised {} times, so older notes are stale.",
+                topic.label,
+                chain.steps.len() - 1
+            ),
+            text,
+            vec![(last_note.clone(), 2)],
+        );
+        c.out[idx].current = vec![last_note];
         c.out[idx].stale = stale;
+        c.out[idx].names = vec![p];
+        c.out[idx].basis = vec![basis];
     }
     Ok(())
 }
@@ -256,16 +267,28 @@ fn answer(c: &mut Ctx, sc: &Scenario) -> Result<(), String> {
     for fi in c.w.pools.answer.iter().copied().take(sc.questions.answer) {
         let f = &c.w.facts[fi];
         let a = c.w.attr(f);
-        let text = fill(a.qd[0], &[("e", c.name(f.entity))]);
+        let name = c.name(f.entity).to_string();
+        let text = fill(a.qd[0], &[("e", &name)]);
         let mut rel = vec![(f.note.clone(), 2)];
         if let Some(ans) = c.corpus.answer_notes.get(&fi) {
             rel.push((ans.clone(), 1));
         }
-        let idx = c.add("answer", "answer", text, rel);
-        c.out[idx].evidence = vec![EvOut {
+        let idx = c.add(
+            "answer",
+            "answer",
+            format!(
+                "Ask for the {} of {name}; a grounded answer must state the fact.",
+                a.label.to_lowercase()
+            ),
+            text,
+            rel,
+        );
+        c.out[idx].evidence = vec![SkEv {
             note: f.note.clone(),
             key_fact: f.sentence.clone(),
         }];
+        c.out[idx].names = vec![name];
+        c.out[idx].basis = vec![f.sentence.clone()];
     }
     Ok(())
 }
@@ -294,12 +317,28 @@ fn multi_hop(c: &mut Ctx, sc: &Scenario, root: &Rng) -> Result<(), String> {
         let vf =
             c.w.fact_of(ve, ATTRS[ai].key)
                 .ok_or("supplier without attribute")?;
-        let text = fill(ATTRS[ai].qhop, &[("p", c.name(pe))]);
+        let pname = c.name(pe).to_string();
+        let text = fill(ATTRS[ai].qhop, &[("p", &pname)]);
         let rel = vec![
             (c.w.facts[dep].note.clone(), 2),
             (c.w.facts[vf].note.clone(), 2),
         ];
-        c.add("multihop", "multi-hop", text, rel);
+        let basis = vec![
+            c.w.facts[dep].sentence.clone(),
+            c.w.facts[vf].sentence.clone(),
+        ];
+        let idx = c.add(
+            "multihop",
+            "multi-hop",
+            format!(
+                "Ask for the {} of the supplier that {pname} depends on; needs the note naming the supplier and the supplier's own note.",
+                ATTRS[ai].label.to_lowercase()
+            ),
+            text,
+            rel,
+        );
+        c.out[idx].names = vec![pname];
+        c.out[idx].basis = basis;
     }
     // B: compare the monthly budgets of two projects.
     let mut pairs: Vec<(usize, usize)> = (0..12)
@@ -317,37 +356,35 @@ fn multi_hop(c: &mut Ctx, sc: &Scenario, root: &Rng) -> Result<(), String> {
         if c.w.facts[fa].value == c.w.facts[fb].value {
             continue; // an answerless comparison
         }
+        let (na, nb) = (c.name(ea).to_string(), c.name(eb).to_string());
         let text = if made % 2 == 0 {
-            format!(
-                "Which has the larger monthly budget, {} or {}?",
-                c.name(ea),
-                c.name(eb)
-            )
+            format!("Which has the larger monthly budget, {na} or {nb}?")
         } else {
-            format!(
-                "Between {} and {}, which one gets the bigger monthly budget?",
-                c.name(eb),
-                c.name(ea)
-            )
+            format!("Between {nb} and {na}, which one gets the bigger monthly budget?")
         };
         let rel = vec![
             (c.w.facts[fa].note.clone(), 2),
             (c.w.facts[fb].note.clone(), 2),
         ];
-        c.add("multihop", "multi-hop", text, rel);
+        let basis = vec![
+            c.w.facts[fa].sentence.clone(),
+            c.w.facts[fb].sentence.clone(),
+        ];
+        let idx = c.add(
+            "multihop",
+            "multi-hop",
+            format!("Ask which of {na} and {nb} has the larger monthly budget; needs both budget notes."),
+            text,
+            rel,
+        );
+        c.out[idx].names = vec![na, nb];
+        c.out[idx].basis = basis;
         made += 1;
     }
     if made < m - n_a {
         return Err("not enough distinct project pairs for the comparison questions".into());
     }
     Ok(())
-}
-
-/// Chunk index (0-based) holding `sentence`, with the note's chunk count.
-pub fn chunk_of(body: &str, sentence: &str, max_tokens: usize) -> Option<(usize, usize)> {
-    let chunks = chunk_markdown(body, max_tokens);
-    let idx = chunks.iter().position(|c| c.contains(sentence))?;
-    Some((idx, chunks.len()))
 }
 
 fn passage(c: &mut Ctx, sc: &Scenario, root: &Rng) -> Result<(), String> {
@@ -359,27 +396,34 @@ fn passage(c: &mut Ctx, sc: &Scenario, root: &Rng) -> Result<(), String> {
             break;
         }
         let lf = &c.w.log_facts[li];
-        if lf.note.is_empty() {
+        // A fact in the first section shares a chunk with the note's start; a later section is
+        // rendered under its own heading and is therefore a later chunk.
+        if lf.note.is_empty() || lf.section < 1 {
             continue;
         }
-        let Some((idx, n)) = chunk_of(&c.bodies[&lf.note], &lf.sentence, sc.chunk_max_tokens)
-        else {
-            continue;
-        };
-        if n < 2 || idx < 1 {
-            continue; // the answer must need passage choice inside a multi-chunk note
-        }
-        let text = fill(LOG_ATTRS[lf.attr].qd, &[("e", c.name(lf.entity))]);
-        let idx_q = c.add("passage", "passage", text, vec![(lf.note.clone(), 2)]);
-        c.out[idx_q].evidence = vec![EvOut {
+        let name = c.name(lf.entity).to_string();
+        let text = fill(LOG_ATTRS[lf.attr].qd, &[("e", &name)]);
+        let idx = c.add(
+            "passage",
+            "passage",
+            format!(
+                "Ask: \"{text}\" The answer is one paragraph (section {}) of a long note.",
+                lf.section + 1
+            ),
+            text,
+            vec![(lf.note.clone(), 2)],
+        );
+        c.out[idx].evidence = vec![SkEv {
             note: lf.note.clone(),
             key_fact: lf.sentence.clone(),
         }];
+        c.out[idx].names = vec![name];
+        c.out[idx].basis = vec![lf.sentence.clone()];
         made += 1;
     }
     if made < sc.questions.passage {
         return Err(format!(
-            "only {made} of {} passage questions have their fact beyond the first chunk of a multi-chunk note",
+            "only {made} of {} passage questions have their fact beyond the first section of a long note",
             sc.questions.passage
         ));
     }
@@ -392,6 +436,27 @@ fn negative(c: &mut Ctx, sc: &Scenario) -> Result<(), String> {
     let n = sc.questions.negative;
     let n_fake = n / 2;
     let mut texts: BTreeSet<String> = BTreeSet::new();
+    let statements: Vec<String> = c
+        .corpus
+        .notes
+        .iter()
+        .flat_map(|n| n.sk.facts.iter().map(|f| f.statement.to_lowercase()))
+        .collect();
+    // Per note: its canonical statements and the names of its entities, lowercased.
+    let note_texts: Vec<String> = c
+        .corpus
+        .notes
+        .iter()
+        .map(|n| {
+            let mut t: Vec<String> =
+                n.sk.facts
+                    .iter()
+                    .map(|f| f.statement.to_lowercase())
+                    .collect();
+            t.extend(n.sk.entities.iter().map(|e| e.name.to_lowercase()));
+            t.join(" ")
+        })
+        .collect();
     let mut made = 0;
     // (a) an entity that does not exist, named like ones that do.
     let mut i = 0;
@@ -399,15 +464,28 @@ fn negative(c: &mut Ctx, sc: &Scenario) -> Result<(), String> {
         let a = &ATTRS[(i * 7 + 3) % ATTRS.len()];
         let fake = format!("{} {}", WORDS[(i * 5 + 1) % 12], FAKE_SUFFIX[i % 3]);
         i += 1;
-        if mentions(c.bodies, &fake) {
+        let lf = fake.to_lowercase();
+        if c.w.entities.iter().any(|e| e.name.to_lowercase() == lf)
+            || statements.iter().any(|s| s.contains(&lf))
+        {
             continue;
         }
         let text = fill(a.qd[0], &[("e", &fake)]);
         if !texts.insert(text.clone()) {
             continue;
         }
-        let idx = c.add("negative", "negative", text, vec![]);
+        let idx = c.add(
+            "negative",
+            "negative",
+            format!(
+                "Ask for the {} of '{fake}', which exists nowhere in the notebook (it is named like real entities).",
+                a.label.to_lowercase()
+            ),
+            text,
+            vec![],
+        );
         c.out[idx].negative = true;
+        c.out[idx].names = vec![fake];
         made += 1;
     }
     // (b) a real entity asked about an attribute its kind never has.
@@ -420,19 +498,31 @@ fn negative(c: &mut Ctx, sc: &Scenario) -> Result<(), String> {
         if a.kind == e.kind {
             continue;
         }
-        let body_hits = c.bodies.values().any(|b| {
-            let lb = b.to_lowercase();
-            lb.contains(&e.name.to_lowercase()) && a.neg.iter().any(|w| lb.contains(w))
-        });
-        if body_hits {
+        // The entity must never share a note with the attribute's marker words (checked against
+        // the notes' canonical statements and entities, so it does not depend on any prose).
+        let name_lc = e.name.to_lowercase();
+        if note_texts
+            .iter()
+            .any(|t| t.contains(&name_lc) && a.neg.iter().any(|m| t.contains(m)))
+        {
             continue;
         }
         let text = fill(a.qd[0], &[("e", &e.name)]);
         if !texts.insert(text.clone()) {
             continue;
         }
-        let idx = c.add("negative", "negative", text, vec![]);
+        let (name, label) = (e.name.clone(), a.label.to_lowercase());
+        let markers: Vec<String> = a.neg.iter().map(|m| m.to_string()).collect();
+        let idx = c.add(
+            "negative",
+            "negative",
+            format!("Ask for the {label} of {name}, an attribute this kind of thing never has in the notebook."),
+            text,
+            vec![],
+        );
         c.out[idx].negative = true;
+        c.out[idx].names = vec![name];
+        c.out[idx].markers = markers;
         made += 1;
     }
     if made < n {
@@ -463,13 +553,8 @@ mod tests {
     }
 
     #[test]
-    fn chunk_of_locates_a_sentence_after_the_first_chunk() {
-        let body = format!(
-            "# T\n\n{}\n\n## B\n\nTHE FACT SENTENCE.\n",
-            "word ".repeat(1200)
-        );
-        let (idx, n) = chunk_of(&body, "THE FACT SENTENCE.", 100).unwrap();
-        assert!(n >= 2 && idx >= 1);
-        assert!(chunk_of(&body, "absent", 100).is_none());
+    fn descriptors_name_the_kind_and_the_domain_but_not_the_entity() {
+        let d = descriptor(2, "stock tracking");
+        assert!(d.contains("employee") && d.contains("stock tracking"));
     }
 }
