@@ -255,12 +255,15 @@ pub async fn process_document(
         }),
     );
 
-    // A byte-identical resubmission (FR-021): no extraction, no revision, no belief change.
+    // A byte-identical resubmission with the same document metadata (FR-021): no extraction, no
+    // revision, no belief change. Identical content with new metadata (`attributes`, `title`,
+    // `source_path`, `effective_at`) is a new completeness claim and falls through to commit a
+    // revision with zero extraction, so the metadata is recorded rather than silently dropped.
     if to_extract == 0
         && nothing_to_retire
         && previous
             .as_ref()
-            .is_some_and(|p| p.content_hash == content_hash)
+            .is_some_and(|p| p.content_hash == content_hash && same_metadata(p, &req))
     {
         let prev = previous.as_ref();
         let chunks: Vec<Value> = d
@@ -623,6 +626,24 @@ pub async fn process_document(
         "edges_extracted": edges_extracted,
         "duration_seconds": started.elapsed().as_secs_f64(),
     }))
+}
+
+/// Whether `req` carries the same document metadata as revision `prev`: `title`, `source_path`,
+/// `effective_at` (compared as an instant, since the column is a `TIMESTAMP` read back in its own
+/// format) and `attributes` (compared as JSON values, so key order and whitespace do not count).
+/// `reference_time` is not metadata — it defaults to the call's start instant.
+fn same_metadata(prev: &DocRevisionRecord, req: &DocumentRequest) -> bool {
+    let effective = req.effective_at.as_deref().map(|s| {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .map(|t| crate::belief::format_us(t.timestamp_micros()))
+            .unwrap_or_else(|_| s.to_string())
+    });
+    let json =
+        |s: &str| serde_json::from_str::<Value>(s).unwrap_or_else(|_| Value::String(s.into()));
+    prev.title == req.title
+        && prev.source_path == req.source_path
+        && prev.effective_at == effective
+        && json(&prev.attributes) == json(&req.attributes)
 }
 
 /// Where each of `parts` sits in `text` when they tile it exactly (concatenated in some order,

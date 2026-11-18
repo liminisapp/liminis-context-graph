@@ -361,6 +361,96 @@ async fn ingest_then_identical_reingest_makes_zero_extraction_calls() {
     assert_eq!(believed(&f.state).await, before_facts);
 }
 
+/// FR-021 with metadata: identical content under new `attributes` / `effective_at` / `title` is a
+/// new completeness claim. It commits a revision with zero extraction that records the new
+/// metadata, and changes no belief. The same metadata again, even with `effective_at` written in
+/// another notation for the same instant, is still a no-op.
+#[tokio::test]
+async fn metadata_only_change_commits_a_revision_without_extraction() {
+    let f = fx();
+    let with = |extra: Value| {
+        let mut p = doc_params("note-1", NOTE);
+        for (k, v) in extra.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        p
+    };
+    let meta = json!({"attributes": {"status": "draft"}, "effective_at": "2026-10-01T12:00:00Z"});
+    let r1 = call("knowledge_process_document", with(meta.clone()), &f.state).await;
+    assert_eq!(r1["status"], "committed", "{r1}");
+    let facts = believed(&f.state).await;
+    let snap = snapshot(&f.db);
+
+    // Same instant, other notation; attributes with the same value: unchanged.
+    let same =
+        json!({"attributes": {"status": "draft"}, "effective_at": "2026-10-01T14:00:00+02:00"});
+    let r = call("knowledge_process_document", with(same), &f.state).await;
+    assert_eq!(r["status"], "unchanged", "{r}");
+    assert_eq!(snapshot(&f.db), snap, "nothing written");
+
+    for (field, changed) in [
+        (
+            "attributes",
+            json!({"attributes": {"status": "reviewed"}, "effective_at": "2026-10-01T12:00:00Z"}),
+        ),
+        (
+            "effective_at",
+            json!({"attributes": {"status": "reviewed"}, "effective_at": "2026-10-02T12:00:00Z"}),
+        ),
+        (
+            "title",
+            json!({"attributes": {"status": "reviewed"}, "effective_at": "2026-10-02T12:00:00Z", "title": "Cache design"}),
+        ),
+    ] {
+        let prev =
+            f.db.connect()
+                .unwrap()
+                .latest_doc_revision(G, "note-1")
+                .unwrap()
+                .unwrap();
+        let r = call(
+            "knowledge_process_document",
+            with(changed.clone()),
+            &f.state,
+        )
+        .await;
+        assert_eq!(r["status"], "committed", "{field}: {r}");
+        assert_eq!(r["extraction_calls"], 0, "{field}");
+        assert_eq!(classes(&r), vec!["unchanged"; 5], "{field}");
+        assert_eq!(
+            r["previous_revision_id"],
+            prev.revision_id.as_str(),
+            "{field}"
+        );
+        let rev =
+            f.db.connect()
+                .unwrap()
+                .latest_doc_revision(G, "note-1")
+                .unwrap()
+                .unwrap();
+        assert_ne!(rev.revision_id, prev.revision_id, "{field}: a new revision");
+        assert_eq!(
+            serde_json::from_str::<Value>(&rev.attributes).unwrap(),
+            changed["attributes"],
+            "{field}"
+        );
+        assert!(uuids(&r["superseded_episode_uuids"]).is_empty(), "{field}");
+        assert_eq!(believed(&f.state).await, facts, "{field}: no belief change");
+        // Resending the same metadata is a no-op again.
+        let again = call("knowledge_process_document", with(changed), &f.state).await;
+        assert_eq!(again["status"], "unchanged", "{field}: {again}");
+    }
+    assert_eq!(f.ex.call_count(), 5, "only the first ingest extracted");
+    let rev =
+        f.db.connect()
+            .unwrap()
+            .latest_doc_revision(G, "note-1")
+            .unwrap()
+            .unwrap();
+    assert_eq!(rev.title.as_deref(), Some("Cache design"));
+    assert_live_episodes_match(&f.state, NOTE, &rev.revision_id).await;
+}
+
 /// US1 AC3 and the input edge cases: no doc_id, empty and headings-only documents are refused
 /// with nothing written.
 #[tokio::test]

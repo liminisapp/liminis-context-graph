@@ -164,9 +164,14 @@ crash); a WAL framing marker (replay is batch-aligned and cannot see it).
 
 ### 5. Diff policy
 
-- **No-op**: nothing added, changed, removed, stale or in transition, and the whole-document hash
-  equals the previous revision's → `status: "unchanged"`, zero extraction calls, nothing written
-  (FR-021). A pure reorder commits a new revision (new manifest) with zero extraction.
+- **No-op**: nothing added, changed, removed, stale or in transition, the whole-document hash
+  equals the previous revision's, and the metadata (`title`, `source_path`, `effective_at` as an
+  instant, `attributes` as JSON) matches it → `status: "unchanged"`, zero extraction calls, nothing
+  written (FR-021). Identical content with new metadata is a new completeness claim: it commits a
+  revision with zero extraction that records the metadata, rather than dropping it silently.
+  `reference_time` is not compared (it defaults to the call instant). Unchanged sections' episodes
+  are re-stamped but not rewritten, so they keep the `attributes` they were extracted with. A pure
+  reorder likewise commits a new revision (new manifest) with zero extraction.
 - **Mode transition (FR-023)**: live chunk-mode or pre-marker episodes with the same `doc_id` are
   superseded (`revision`, no `superseded_by`) at every commit and reported as
   `mode_transition_superseded_episode_uuids`. No `chunk_id`-prefix adoption: it would be a guess.

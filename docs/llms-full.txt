@@ -1598,14 +1598,14 @@ full". See [ADR-0785](adr/0785-document-mode-revisions-and-commit-boundary.md).
 | `origin` | As for `knowledge_process_chunk` (issue #752); applies to every episode, and a different origin for a known `doc_id` is refused with `origin_conflict:`. |
 | `effective_at` | Recorded on the revision only — never `valid_at`, never belief time. |
 | `reference_time` | Extraction reference time, as in chunk mode; defaults to now. |
-| `attributes` | JSON object stored on every episode of the revision and on the revision record. |
+| `attributes` | JSON object recorded on the revision record and on every episode the call extracts. An unchanged section's episodes are not rewritten, so they keep the `attributes` they were extracted with; the latest revision record holds the document's current value. |
 
 **What the server does.** It chunks the document by section (a heading plus its body up to the
 next heading of any level; text before the first heading is the preamble), splitting a section over
 `LCG_DOCUMENT_CHUNK_MAX_CHARS` into units. It then matches each section against the previous
 revision by the hash of its exact text: **unchanged sections are skipped without extraction**, so
-re-sending an identical document makes zero extraction calls and writes nothing (`status:
-"unchanged"`). Moving a section is free. Editing a section re-extracts only that section. Renaming a
+re-sending an identical document with the same metadata makes zero extraction calls and writes
+nothing (`status: "unchanged"`). Moving a section is free. Editing a section re-extracts only that section. Renaming a
 heading re-extracts only the section whose heading line changed, never its subsections, because the
 new heading can change how the body reads. Each extraction receives a `<DOCUMENT_CONTEXT>` block
 (title, source path, origin, the section's heading path and a document map) marked as context, not
@@ -1624,7 +1624,7 @@ document are serialized.
 
 | Field | |
 |---|---|
-| `status` | `committed`, or `unchanged` for a byte-identical resubmission. |
+| `status` | `committed`, or `unchanged` for a byte-identical resubmission with the same `title`, `source_path`, `effective_at` and `attributes`. Identical content with different metadata commits a new revision with zero extraction calls, which records the new metadata and changes no belief. |
 | `revision_id`, `previous_revision_id`, `committed_at`, `chunker_version` | The server-minted revision and its predecessor. |
 | `extraction_calls` | Units extracted by this call (0 when nothing changed). |
 | `chunks[]` | Per section: `index`, `name` (stable across revisions), `heading_path`, `byte_start`, `byte_end`, `content_hash`, `classification` (`added` / `changed` / `unchanged`), `units`, `episode_uuids`, `previous_episode_uuids`. |

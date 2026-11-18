@@ -774,9 +774,14 @@ pub fn registry() -> Vec<ToolSpec> {
                            `byte_start`/`byte_end` span in the submitted content. The result \
                            lists each chunk's `classification` (added / changed / unchanged), \
                            the `removed` chunks, `extraction_calls`, and the episodes created, \
-                           superseded and retired. `attributes` (issue #528) and `origin` \
-                           (issue #752) apply to every episode; a different origin for a known \
-                           `doc_id` is refused with `origin_conflict:`. The first document-mode \
+                           superseded and retired. `origin` (issue #752) applies to every \
+                           episode; a different origin for a known `doc_id` is refused with \
+                           `origin_conflict:`. `attributes` (issue #528) are recorded on the \
+                           revision and on every episode the call extracts. Identical content \
+                           with the same `title`, `source_path`, `effective_at` and \
+                           `attributes` returns `status: unchanged` and writes nothing; with \
+                           different metadata it commits a revision with zero extraction \
+                           calls. The first document-mode \
                            ingest of a `doc_id` supersedes its live chunk-mode episodes. \
                            Documents over `LCG_DOCUMENT_MAX_BYTES` (default 512 KiB) and empty \
                            or headings-only documents are rejected with nothing written. \
