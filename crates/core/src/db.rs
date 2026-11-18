@@ -4541,6 +4541,201 @@ impl<'db> Conn<'db> {
         Ok(rows)
     }
 
+    // ── Graph-aware search primitives (issue #797, ADR-0797) ─────────────────
+
+    /// Entities whose materialized `lookup_key` is one of `keys` (see [`compute_lookup_key`]).
+    /// One batched probe with **no** scan fallback and no self-heal write: unlike
+    /// [`Self::resolve_entities_by_name_any_kind`] this is safe to call with many candidate keys
+    /// on a read path. A row whose `lookup_key` was never written is simply not found. Rows are
+    /// ordered by uuid; `Merged` tombstones are returned (the caller filters them).
+    pub fn entities_by_lookup_keys(&self, keys: &[String]) -> Result<Vec<EntityRow>, Error> {
+        if keys.is_empty() {
+            return Ok(vec![]);
+        }
+        let result = self.query_params(
+            "MATCH (e:Entity) WHERE e.lookup_key IN $keys \
+             RETURN e.uuid, e.name, e.group_id, e.labels, e.created_at, \
+             e.summary, e.attributes, e.kind, e.ingested_at ORDER BY e.uuid",
+            serde_json::json!({ "keys": keys }),
+        )?;
+        Ok(result
+            .into_iter()
+            .map(|row| EntityRow {
+                uuid: value_as_string(&row[0]),
+                name: value_as_string(&row[1]),
+                group_id: value_as_string(&row[2]),
+                labels: value_as_str_list(&row[3]),
+                created_at: value_as_timestamp_str(&row[4]),
+                summary: value_as_string(&row[5]),
+                attributes: value_as_string(&row[6]),
+                kind: value_as_kind(&row[7]),
+                ingested_at: value_as_timestamp_str(&row[8]),
+                ..Default::default()
+            })
+            .collect())
+    }
+
+    /// One hop of neighbourhood expansion: every fact incident to an entity in `frontier`, in
+    /// both directions, as two directed queries (one batched lookup per direction instead of
+    /// one per entity, unlike [`Self::get_entity_neighbors`]). Each row carries what scoring and
+    /// belief need — `episodes`, `warrant` and `fact_embedding` — plus the far endpoint's name,
+    /// group and whether it is a `Merged` tombstone.
+    ///
+    /// `group_ids: Some(gids)` keeps only facts whose `rn.group_id` **and** far endpoint are in
+    /// `gids`, so traversal never leaves the requested groups through a cross-group edge.
+    /// Each direction is capped at `row_cap` rows ordered by `rn.uuid`; the returned flag is
+    /// `true` when either direction hit the cap (a truncated walk).
+    pub fn expand_frontier(
+        &self,
+        frontier: &[String],
+        group_ids: Option<&[&str]>,
+        row_cap: usize,
+    ) -> Result<(Vec<FrontierEdge>, bool), Error> {
+        if frontier.is_empty() || row_cap == 0 {
+            return Ok((vec![], false));
+        }
+        let gid_filter = match group_ids {
+            Some(_) => "AND rn.group_id IN $gids AND n.group_id IN $gids",
+            None => "",
+        };
+        let ret = "RETURN rn.uuid, rn.name, rn.fact, rn.group_id, rn.episodes, rn.warrant, \
+                   rn.fact_embedding, rn.valid_at, rn.invalid_at, rn.attributes, \
+                   rn.relation_type, rn.ingested_at, rn.created_at, rn.valid_at_source, \
+                   c.uuid, n.uuid, n.name, n.group_id, n.labels \
+                   ORDER BY rn.uuid ASC, n.uuid ASC LIMIT $cap";
+        let out_sql = format!(
+            "MATCH (c:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(n:Entity) \
+             WHERE c.uuid IN $frontier {gid_filter} {ret}"
+        );
+        let in_sql = format!(
+            "MATCH (n:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(c:Entity) \
+             WHERE c.uuid IN $frontier {gid_filter} {ret}"
+        );
+        let mut params = serde_json::json!({ "frontier": frontier, "cap": row_cap as i64 });
+        if let Some(gids) = group_ids {
+            params["gids"] = serde_json::json!(gids);
+        }
+        let mut out = Vec::new();
+        let mut truncated = false;
+        for (sql, outgoing) in [(&out_sql, true), (&in_sql, false)] {
+            let rows = self.query_params(sql, params.clone())?;
+            if rows.len() >= row_cap {
+                truncated = true;
+            }
+            for r in rows {
+                let from_uuid = value_as_string(&r[14]);
+                let far_uuid = value_as_string(&r[15]);
+                let (source, target) = if outgoing {
+                    (from_uuid.clone(), far_uuid.clone())
+                } else {
+                    (far_uuid.clone(), from_uuid.clone())
+                };
+                let edge = RelatesToEdge {
+                    uuid: value_as_string(&r[0]),
+                    name: value_as_string(&r[1]),
+                    fact: value_as_string(&r[2]),
+                    group_id: value_as_string(&r[3]),
+                    episodes: value_as_str_list(&r[4]),
+                    warrant: value_as_optional_string(&r[5]),
+                    fact_embedding: value_as_float_array(&r[6]),
+                    valid_at: value_as_optional_timestamp_str(&r[7]),
+                    invalid_at: value_as_optional_timestamp_str(&r[8]),
+                    attributes: value_as_string(&r[9]),
+                    relation_type: value_as_optional_string(&r[10]),
+                    ingested_at: value_as_timestamp_str(&r[11]),
+                    created_at: value_as_timestamp_str(&r[12]),
+                    valid_at_source: value_as_optional_string(&r[13]),
+                    source_node_uuid: source,
+                    target_node_uuid: target,
+                    ..Default::default()
+                };
+                out.push(FrontierEdge {
+                    edge,
+                    from_uuid,
+                    far_uuid,
+                    far_name: value_as_string(&r[16]),
+                    far_group_id: value_as_string(&r[17]),
+                    far_merged: value_as_str_list(&r[18]).iter().any(|l| l == "Merged"),
+                });
+            }
+        }
+        Ok((out, truncated))
+    }
+
+    /// Passage rows for the given episode uuids, with what graph-aware search needs to score and
+    /// filter them: origin, the full supersession / revision state and `ingested_at`, and —
+    /// when `with_embedding` — `content_embedding`. Ordered by uuid; a uuid absent from the
+    /// result no longer exists. `PassageResult::score` is `0.0` (the caller scores).
+    pub fn get_episode_passages(
+        &self,
+        uuids: &[String],
+        with_embedding: bool,
+    ) -> Result<Vec<EpisodePassage>, Error> {
+        if uuids.is_empty() {
+            return Ok(vec![]);
+        }
+        let emb_col = if with_embedding {
+            ", ep.content_embedding"
+        } else {
+            ""
+        };
+        let cypher = format!(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids \
+             RETURN ep.uuid, ep.name, ep.content, ep.source_description, ep.group_id, \
+             ep.created_at, ep.valid_at, ep.attributes, coalesce(ep.origin, ''), \
+             ep.superseded_at, ep.superseded_by_kind, ep.superseded_by, ep.supersession_reason, \
+             ep.doc_id, ep.revision_id, ep.revision_committed_at, ep.ingested_at{emb_col} \
+             ORDER BY ep.uuid"
+        );
+        let rows = self.query_params(&cypher, serde_json::json!({ "uuids": uuids }))?;
+        let opt_us = |v: &lbug::Value| match v {
+            lbug::Value::Null(_) => None,
+            other => Some(value_as_timestamp_micros(other)),
+        };
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let valid_at = match value_as_optional_timestamp_str(&r[6]) {
+                    Some(s) if s.is_empty() => None,
+                    other => other,
+                };
+                let origin = crate::origin::Origin::from_stored(Some(&value_as_string(&r[8])));
+                let group_id = value_as_string(&r[4]);
+                EpisodePassage {
+                    passage: PassageResult {
+                        uuid: value_as_string(&r[0]),
+                        name: value_as_string(&r[1]),
+                        content: value_as_string(&r[2]),
+                        source_description: value_as_string(&r[3]),
+                        group_id: group_id.clone(),
+                        created_at: value_as_timestamp_str(&r[5]),
+                        valid_at,
+                        attributes: value_as_string(&r[7]),
+                        score: 0.0,
+                        origin: origin.as_str().to_string(),
+                    },
+                    origin,
+                    supersession: crate::belief::EpisodeSupersession {
+                        superseded_at_us: opt_us(&r[9]),
+                        kind: value_as_optional_string(&r[10]),
+                        superseded_by: value_as_optional_string(&r[11]),
+                        reason: value_as_optional_string(&r[12]),
+                        group_id,
+                        doc_id: value_as_optional_string(&r[13]),
+                        revision_id_present: value_as_optional_string(&r[14]).is_some(),
+                        revision_committed_at_us: opt_us(&r[15]),
+                    },
+                    ingested_at_us: opt_us(&r[16]),
+                    content_embedding: if with_embedding {
+                        value_as_float_array(&r[17])
+                    } else {
+                        vec![]
+                    },
+                }
+            })
+            .collect())
+    }
+
     /// Returns the count of nodes with the given label.
     ///
     /// Returns `Err` if `label` contains characters that are not alphanumeric or `_`
@@ -5820,6 +6015,30 @@ pub struct SiblingEdgeRow {
     pub target_uuid: String,
     pub name: String,
     pub episodes: Vec<String>,
+}
+
+/// One fact reached from a frontier entity by [`Conn::expand_frontier`] (issue #797). `edge`
+/// carries its true direction in `source_node_uuid` / `target_node_uuid`; `from_uuid` is the
+/// frontier entity it was reached from and `far_uuid` the other endpoint.
+#[derive(Debug, Clone)]
+pub struct FrontierEdge {
+    pub edge: RelatesToEdge,
+    pub from_uuid: String,
+    pub far_uuid: String,
+    pub far_name: String,
+    pub far_group_id: String,
+    pub far_merged: bool,
+}
+
+/// One episode as graph-aware search sees it (issue #797): the passage fields, origin,
+/// supersession / revision state and `ingested_at`, and optionally its content embedding.
+#[derive(Debug, Clone)]
+pub struct EpisodePassage {
+    pub passage: PassageResult,
+    pub origin: crate::origin::Origin,
+    pub supersession: crate::belief::EpisodeSupersession,
+    pub ingested_at_us: Option<i64>,
+    pub content_embedding: Vec<f32>,
 }
 
 /// The columns an origin-stamp rule selects on (issue #752).
@@ -7365,5 +7584,182 @@ mod fts_backstop_tests {
         conn.init_schema(4).unwrap();
         assert!(!conn.repair_fts_after(&Error::QueryFailed("boom".to_string())));
         assert_eq!(conn.fts_repair_snapshot().0, 0);
+    }
+}
+
+#[cfg(test)]
+mod graph_search_primitive_tests {
+    //! Issue #797: the batched read primitives graph-aware search composes.
+    use super::*;
+    use tempfile::TempDir;
+
+    const DIM: usize = 4;
+
+    fn open() -> (TempDir, Db) {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        db.connect().unwrap().init_schema(DIM).unwrap();
+        (dir, db)
+    }
+
+    fn entity(conn: &Conn<'_>, uuid: &str, name: &str, group: &str, labels: &[&str]) {
+        conn.insert_entity(&EntityRow {
+            uuid: uuid.into(),
+            name: name.into(),
+            group_id: group.into(),
+            labels: labels.iter().map(|s| s.to_string()).collect(),
+            created_at: "2026-01-01 00:00:00".into(),
+            name_embedding: vec![0.1; DIM],
+            attributes: "{}".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    fn edge(conn: &Conn<'_>, uuid: &str, src: &str, dst: &str, group: &str) {
+        conn.insert_relates_to_edge(&RelatesToEdge {
+            uuid: uuid.into(),
+            name: "REL".into(),
+            source_node_uuid: src.into(),
+            target_node_uuid: dst.into(),
+            group_id: group.into(),
+            fact: format!("{src} rel {dst}"),
+            fact_embedding: vec![0.5; DIM],
+            created_at: "2026-01-01 00:00:00".into(),
+            attributes: "{}".into(),
+            episodes: vec![format!("ep-{uuid}")],
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    fn graph() -> (TempDir, Db) {
+        let (dir, db) = open();
+        {
+            let c = db.connect().unwrap();
+            entity(&c, "a", "Alpha", "g", &["Entity"]);
+            entity(&c, "b", "Beta", "g", &["Entity"]);
+            entity(&c, "c", "Gamma", "g", &["Entity"]);
+            entity(&c, "m", "Merged One", "g", &["Entity", "Merged"]);
+            entity(&c, "x", "Other", "h", &["Entity"]);
+            edge(&c, "e1", "a", "b", "g"); // outgoing from a
+            edge(&c, "e2", "c", "a", "g"); // incoming to a
+            edge(&c, "e3", "a", "m", "g"); // to a tombstone
+            edge(&c, "e4", "a", "x", "g"); // far endpoint in another group
+        }
+        (dir, db)
+    }
+
+    #[test]
+    fn expand_frontier_returns_both_directions_with_true_endpoints() {
+        let (_d, db) = graph();
+        let c = db.connect().unwrap();
+        let (rows, truncated) = c.expand_frontier(&["a".into()], None, 100).unwrap();
+        assert!(!truncated);
+        let mut got: Vec<(String, String, String, String)> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.edge.uuid.clone(),
+                    r.edge.source_node_uuid.clone(),
+                    r.edge.target_node_uuid.clone(),
+                    r.far_uuid.clone(),
+                )
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("e1".into(), "a".into(), "b".into(), "b".into()),
+                ("e2".into(), "c".into(), "a".into(), "c".into()),
+                ("e3".into(), "a".into(), "m".into(), "m".into()),
+                ("e4".into(), "a".into(), "x".into(), "x".into()),
+            ]
+        );
+        let e1 = rows.iter().find(|r| r.edge.uuid == "e1").unwrap();
+        assert_eq!(e1.edge.episodes, vec!["ep-e1".to_string()]);
+        assert_eq!(e1.edge.fact_embedding.len(), DIM);
+        assert_eq!(e1.far_name, "Beta");
+        assert!(rows.iter().find(|r| r.edge.uuid == "e3").unwrap().far_merged);
+        assert!(!e1.far_merged);
+    }
+
+    #[test]
+    fn expand_frontier_group_scope_drops_edges_to_other_groups() {
+        let (_d, db) = graph();
+        let c = db.connect().unwrap();
+        let (rows, _) = c.expand_frontier(&["a".into()], Some(&["g"]), 100).unwrap();
+        assert!(rows.iter().all(|r| r.edge.uuid != "e4"), "{rows:?}");
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn expand_frontier_reports_the_cap() {
+        let (_d, db) = graph();
+        let c = db.connect().unwrap();
+        let (rows, truncated) = c.expand_frontier(&["a".into()], None, 1).unwrap();
+        assert!(truncated);
+        assert_eq!(rows.len(), 2, "one row per direction");
+        assert!(c.expand_frontier(&[], None, 10).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn entities_by_lookup_keys_probes_exact_keys_only() {
+        let (_d, db) = graph();
+        let c = db.connect().unwrap();
+        let keys = vec![
+            compute_lookup_key("g", "Entity", "alpha"),
+            compute_lookup_key("g", "Entity", "  BETA "),
+            compute_lookup_key("g", "Entity", "alph"),
+            compute_lookup_key("h", "Entity", "gamma"),
+        ];
+        let rows = c.entities_by_lookup_keys(&keys).unwrap();
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "Beta"]);
+        assert!(c.entities_by_lookup_keys(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn get_episode_passages_carries_origin_liveness_and_embedding() {
+        let (_d, db) = open();
+        let c = db.connect().unwrap();
+        for (uuid, origin, superseded) in [
+            ("p1", None, None),
+            ("p2", Some("derived"), Some("2026-02-01 00:00:00")),
+        ] {
+            c.insert_episodic(&EpisodicRow {
+                uuid: uuid.into(),
+                name: uuid.into(),
+                group_id: "g".into(),
+                created_at: "2026-01-01 00:00:00".into(),
+                source: "text".into(),
+                source_description: format!("{uuid}.md"),
+                content: format!("content {uuid}"),
+                content_embedding: vec![0.25; DIM],
+                valid_at: "2026-01-01 00:00:00".into(),
+                ingested_at: "2026-01-01 00:00:00".into(),
+                attributes: "{}".into(),
+                origin: origin.map(str::to_string),
+                superseded_at: superseded.map(str::to_string),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        let rows = c
+            .get_episode_passages(&["p2".into(), "p1".into(), "gone".into()], true)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].passage.uuid, "p1");
+        assert_eq!(rows[0].origin, crate::origin::Origin::Primary);
+        assert_eq!(rows[0].content_embedding, vec![0.25; DIM]);
+        assert!(rows[0].supersession.superseded_at_us.is_none());
+        assert!(rows[0].ingested_at_us.is_some());
+        assert_eq!(rows[1].origin, crate::origin::Origin::Derived);
+        assert_eq!(rows[1].passage.origin, "derived");
+        assert!(rows[1].supersession.superseded_at_us.is_some());
+        let no_emb = c.get_episode_passages(&["p1".into()], false).unwrap();
+        assert!(no_emb[0].content_embedding.is_empty());
+        assert_eq!(no_emb[0].passage.source_description, "p1.md");
     }
 }
