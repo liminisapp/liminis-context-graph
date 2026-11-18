@@ -339,6 +339,12 @@ assert_contains "$REPO_R7/no/such/dir" "$out" "07 invalid --corpus names the pat
 assert_not_contains "STUB-INVOKED" "$(cat "$REPO_R7/retr-argv.log")" "07 invalid --corpus spends nothing"
 out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus 2>&1)"; rc=$?
 assert_rc 2 "$rc" "07 --corpus without a value fails"
+out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus "" 2>&1)"; rc=$?
+assert_rc 2 "$rc" "07 --corpus with an empty value fails instead of selecting v1"
+out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus= 2>&1)"; rc=$?
+assert_rc 2 "$rc" "07 --corpus= (empty) fails instead of selecting v1"
+out="$(env LCG_EVAL_REPO="$REPO_R7" LCG_EVAL_CORPUS="" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" 2>&1)"; rc=$?
+assert_rc 2 "$rc" "07 an empty LCG_EVAL_CORPUS fails instead of selecting v1"
 out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --bogus 2>&1)"; rc=$?
 assert_rc 2 "$rc" "07 unknown argument fails"
 assert_contains "--bogus" "$out" "07 unknown argument is named"

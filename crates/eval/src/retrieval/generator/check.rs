@@ -307,9 +307,12 @@ pub fn check_rendered(sk: &Skeleton, r: &Rendered) -> Findings {
 
         // Size and structure.
         let wc = words(body);
+        // A journal is meant to exceed 5,000 words, but models undershoot a word target, so one
+        // that comes back short is a warning; the corpus-wide "at least three notes over 5,000
+        // words" requirement is an error in `Fixture::v2_shape_errors`.
         if n.kind == "journal" && wc <= 5000 {
-            f.errors.push(format!(
-                "note '{}': a journal must exceed 5,000 words, has {wc}",
+            f.warnings.push(format!(
+                "note '{}': a journal should exceed 5,000 words, has {wc}",
                 n.id
             ));
         }

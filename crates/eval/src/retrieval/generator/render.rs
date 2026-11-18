@@ -681,6 +681,23 @@ pub fn check_only_ids(sk: &Skeleton, only: &BTreeSet<String>) -> Result<(), Stri
     }
 }
 
+/// Removes the previously rendered notes and question wording ahead of a full render.
+pub fn reset_for_full_run(dir: &Path) -> Result<(), String> {
+    if let Ok(rd) = std::fs::read_dir(dir.join("notes")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "md") {
+                std::fs::remove_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            }
+        }
+    }
+    match std::fs::remove_file(dir.join("questions.jsonl")) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("questions.jsonl: {e}")),
+    }
+}
+
 /// Written next to the notes while a render is unfinished; see `run`.
 pub const PROGRESS_FILE: &str = "render.progress.json";
 
@@ -850,6 +867,11 @@ async fn run(args: &[String]) -> Result<i32, String> {
         }
     };
     std::fs::create_dir_all(dir.join("notes")).map_err(|e| e.to_string())?;
+    if !partial {
+        // A full run replaces everything, so nothing from an earlier skeleton may survive in
+        // notes/ or questions.jsonl to be "resumed" under this run's provenance after a crash.
+        reset_for_full_run(dir)?;
+    }
     // Recorded before the first model call so a crashed run can be resumed only by the same
     // model, prompt and skeleton. Removed once render.json takes over.
     let progress = Progress {

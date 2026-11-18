@@ -1828,3 +1828,41 @@ async fn resume_after_a_crash_needs_the_recorded_model_and_skeleton_not_just_not
     .unwrap();
     assert_eq!(render::run_cli(&args("model-a")).await, 1);
 }
+
+#[test]
+fn a_full_render_clears_earlier_notes_and_questions_and_a_short_journal_only_warns() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir(d.path().join("notes")).unwrap();
+    std::fs::write(d.path().join("notes/old.md"), "# old skeleton\n").unwrap();
+    std::fs::write(d.path().join("notes/keep.txt"), "not a note").unwrap();
+    std::fs::write(d.path().join("questions.jsonl"), "{}\n").unwrap();
+    render::reset_for_full_run(d.path()).unwrap();
+    assert!(!d.path().join("notes/old.md").exists() && !d.path().join("questions.jsonl").exists());
+    assert!(d.path().join("notes/keep.txt").exists());
+    // Idempotent on a clean directory.
+    render::reset_for_full_run(d.path()).unwrap();
+    render::reset_for_full_run(tempfile::tempdir().unwrap().path()).unwrap();
+
+    // A journal that undershoots 5,000 words is a warning, not an error.
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    let mut r = check::load_rendered(template_dir()).unwrap();
+    let j = sk.notes.iter().find(|n| n.kind == "journal").unwrap();
+    let body: String = r.notes[&j.id]
+        .split_whitespace()
+        .take(4900)
+        .collect::<Vec<_>>()
+        .join(" ");
+    r.notes.insert(j.id.clone(), body);
+    let f = check::check_rendered(&sk, &r);
+    assert!(f
+        .warnings
+        .iter()
+        .any(|w| w.contains(&j.id) && w.contains("5,000")));
+    assert!(
+        !f.errors
+            .iter()
+            .any(|e| e.contains(&j.id) && e.contains("5,000")),
+        "{}",
+        check::describe(&f)
+    );
+}

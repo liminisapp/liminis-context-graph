@@ -36,18 +36,26 @@ DEFAULT_CORPUS="$REPO/crates/eval/fixtures/retrieval"
 BIN="$REPO/target/release/lcg-eval"
 SERVICE_BIN="$REPO/target/release/liminis-context-graph"
 
-CORPUS="${LCG_EVAL_CORPUS:-}"
+CORPUS="${LCG_EVAL_CORPUS-}"
+# "Explicit" means supplied at all, even empty: an unset shell variable passed as --corpus "$V2"
+# must not silently select v1.
+CORPUS_GIVEN=0
+if [ "${LCG_EVAL_CORPUS+set}" = "set" ]; then CORPUS_GIVEN=1; fi
 while [ $# -gt 0 ]; do
   case "$1" in
     --corpus)
       if [ $# -lt 2 ]; then echo "ERROR: --corpus requires a directory." >&2; exit 2; fi
-      CORPUS="$2"; shift 2 ;;
-    --corpus=*) CORPUS="${1#--corpus=}"; shift ;;
+      CORPUS="$2"; CORPUS_GIVEN=1; shift 2 ;;
+    --corpus=*) CORPUS="${1#--corpus=}"; CORPUS_GIVEN=1; shift ;;
     -h|--help) sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d'; exit 0 ;;
     *) echo "ERROR: unknown argument '$1' (usage: 07-retrieval-eval.sh [--corpus DIR])." >&2; exit 2 ;;
   esac
 done
-if [ -n "$CORPUS" ]; then
+if [ "$CORPUS_GIVEN" = "1" ]; then
+  if [ -z "$CORPUS" ]; then
+    echo "ERROR: --corpus (or LCG_EVAL_CORPUS) was given an empty path; pass a fixture directory or omit it to use the default (v1)." >&2
+    exit 2
+  fi
   # Explicit selection: fail here, naming the path, before anything is built or spent.
   if [ ! -f "$CORPUS/manifest.json" ] || [ ! -f "$CORPUS/questions.jsonl" ]; then
     echo "ERROR: --corpus '$CORPUS' is not a fixture directory (needs manifest.json and questions.jsonl)." >&2
