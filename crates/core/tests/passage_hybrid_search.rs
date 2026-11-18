@@ -17,6 +17,7 @@ use lcg_core::{
     extractor::ConfigurableExtractor,
     handlers,
     ipc::IpcRequest,
+    search::{TOP1_BONUS_FRACTION, TOP3_BONUS_FRACTION},
     telemetry::NoopSink,
     types::EpisodicRow,
 };
@@ -356,12 +357,29 @@ async fn top_rank_bonus_is_switchable() {
     let off = search(&state, off).await;
     assert_eq!(on.len(), 3);
     assert_eq!(off.len(), 3);
-    let top_on = on[0]["score"].as_f64().unwrap();
-    let top_off = off[0]["score"].as_f64().unwrap();
+    // Compare the same passage with the bonus on and off: the score difference is exactly the
+    // tier constant (rank 1 in either list → TOP1, ranks 2–3 → TOP3), scaled by 1/60.
+    let score_of = |rs: &[Value], u: &str| {
+        rs.iter().find(|p| p["uuid"] == u).unwrap()["score"]
+            .as_f64()
+            .unwrap()
+    };
+    let top1 = TOP1_BONUS_FRACTION / 60.0;
+    let top3 = TOP3_BONUS_FRACTION / 60.0;
+    // `c` is the vector retriever's rank-1 hit (axis 0 is closest to the query), so it always
+    // gets the top tier.
     assert!(
-        top_on > top_off,
-        "bonus raises the top score: {top_on} {top_off}"
+        (score_of(&on, "c") - score_of(&off, "c") - top1).abs() < 1e-9,
+        "c: top-tier bonus"
     );
+    // Every candidate is in the top 3 of at least one list, so each gets exactly one tier.
+    for u in ["a", "b", "c"] {
+        let diff = score_of(&on, u) - score_of(&off, u);
+        assert!(
+            (diff - top1).abs() < 1e-9 || (diff - top3).abs() < 1e-9,
+            "{u}: bonus {diff} is neither TOP1 nor TOP3"
+        );
+    }
 }
 
 #[tokio::test]
