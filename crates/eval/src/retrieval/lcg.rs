@@ -445,6 +445,12 @@ pub async fn ingest(t: &dyn RpcTransport, fx: &Fixture) -> Result<IngestMap, Str
             if let Some(rt) = &n.reference_time {
                 params["reference_time"] = json!(rt);
             }
+            // ADR-0752: stamp the declared origin on every chunk of the note, so a `derived` page
+            // is ingested as derived and cannot corroborate itself. Notes without a declared
+            // origin (all of v1) send no `origin` and ingest exactly as before.
+            if let Some(o) = &n.origin {
+                params["origin"] = json!(o);
+            }
             let r = t
                 .call("knowledge_process_chunk", params)
                 .await
@@ -1112,6 +1118,85 @@ mod tests {
             .unwrap();
         assert!(sup < idx);
         assert_eq!(log[0].1["reference_time"], "2026-01-01T00:00:00Z");
+    }
+
+    fn origin_fixture() -> Fixture {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("notes")).unwrap();
+        std::fs::write(
+            d.path().join("manifest.json"),
+            r#"{"corpus_version":"v2","notes":[{"id":"src","origin":"primary"},{"id":"page","origin":"derived","cites":["src"]},{"id":"plain"}]}"#,
+        )
+        .unwrap();
+        for n in ["src", "page", "plain"] {
+            std::fs::write(
+                d.path().join(format!("notes/{n}.md")),
+                format!("# {n}\nbody"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            d.path().join("questions.jsonl"),
+            r#"{"id":"q1","category":"direct","text":"hi","relevant_notes":[{"note":"src"}]}"#,
+        )
+        .unwrap();
+        let f = super::super::fixture::load(d.path()).unwrap();
+        std::mem::forget(d);
+        f
+    }
+
+    #[tokio::test]
+    async fn ingest_sends_the_declared_origin_and_nothing_for_undeclared_notes() {
+        let t = FakeTransport::new(|m, _| match m {
+            "knowledge_process_chunk" => Ok(json!({"episode_uuid": "ep"})),
+            "knowledge_build_indices" => Ok(json!({})),
+            "knowledge_get_entities_by_source" => Ok(json!({"nodes": []})),
+            other => Err(format!("unexpected {other}")),
+        });
+        ingest(&t, &origin_fixture()).await.unwrap();
+        let log = t.log.lock().unwrap();
+        let by_note = |n: &str| {
+            log.iter()
+                .find(|(m, p)| m == "knowledge_process_chunk" && p["doc_id"] == n)
+                .map(|(_, p)| p.clone())
+                .unwrap()
+        };
+        assert_eq!(by_note("src")["origin"], "primary");
+        assert_eq!(by_note("page")["origin"], "derived");
+        assert!(by_note("plain").get("origin").is_none());
+        // v1-style fixture: no origin key anywhere.
+        let t2 = FakeTransport::new(|m, _| match m {
+            "knowledge_process_chunk" => Ok(json!({"episode_uuid": "ep"})),
+            _ => Ok(json!({"nodes": []})),
+        });
+        ingest(&t2, &fixture()).await.unwrap();
+        assert!(t2
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m == "knowledge_process_chunk")
+            .all(|(_, p)| p.get("origin").is_none()));
+    }
+
+    #[tokio::test]
+    async fn a_cassette_miss_aborts_ingest_naming_note_and_chunk() {
+        // FR-023: with a replayed cassette that lacks an entry (changed corpus), the service
+        // returns an error from knowledge_process_chunk; ingest must stop, not fall back.
+        let t = FakeTransport::new(|m, p| match m {
+            "knowledge_process_chunk" if p["doc_id"] == "new" => {
+                Err("cassette miss: no recorded LLM response for this request".into())
+            }
+            "knowledge_process_chunk" => Ok(json!({"episode_uuid": "ep"})),
+            other => Err(format!("unexpected {other}")),
+        });
+        let e = ingest(&t, &fixture()).await.unwrap_err();
+        assert!(
+            e.contains("'new'") && e.contains("chunk 0") && e.contains("cassette miss"),
+            "{e}"
+        );
+        let calls = t.log.lock().unwrap().len();
+        assert_eq!(calls, 2, "no further calls after the miss: {calls}");
     }
 
     #[tokio::test]
