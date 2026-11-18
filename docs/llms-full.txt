@@ -262,6 +262,8 @@ Source: https://docs.liminis.app/liminis-context-graph/configuration
 | `LCG_EXTRACTION_API_KEY` | No | Bearer token sent as `Authorization: Bearer <key>` on the HTTP extraction transport (`--extractor-http`/`LCG_EXTRACTION_URL`), for authenticated OpenAI-compatible proxies such as a corporate LLM gateway. Unset sends no header. Never applies to `--extractor-uds`. |
 | `LCG_EXTRACTION_MAX_TOKENS_CEILING` | No | Uniform ceiling (in tokens) on the per-call `max_tokens` budget for entity/edge extraction, across both the hosted Anthropic path and self-hosted/OAI-compatible models (default `32768`). The per-call initial budget scales with input chunk size up to this ceiling; it exists to stop genuine non-termination (a model that never stops generating), not to optimize spend, so it is intentionally generous. An invalid value (non-numeric, or below the compiled-in 4096-token floor) logs a warning to stderr and falls back to the default. Setting it near the floor is valid but self-defeating: since the per-call budget is `clamp(chunk_len_bytes * ratio, 4096, ceiling)`, a ceiling close to 4096 collapses that range and every call effectively gets the same floor-sized budget regardless of chunk size — silently disabling proportional scaling, not just narrowing the runaway guard. |
 | `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` | No | Advisory threshold, in **characters** (not bytes), above which `knowledge_process_chunk`'s `chunk_text` is considered oversized (default `8000`). Ingestion is unaffected — no rejection, truncation, or internal splitting — but a call whose `chunk_text` exceeds this threshold gains a `warning` field in its result naming the actual character count and the recommended maximum, and emits a `chunk_text_oversized` telemetry event (see [Telemetry](telemetry.md)). Extraction quality degrades well before any context-window limit is reached, so splitting oversized input into multiple `knowledge_process_chunk` calls is the caller's responsibility. An invalid value (non-numeric, zero, or negative) logs a warning to stderr and falls back to the default. |
+| `LCG_DOCUMENT_MAX_BYTES` | No | Document-size cap for `knowledge_process_document` and `knowledge_preview_chunks`, in **UTF-8 bytes** (default `524288`, 512 KiB). A larger document is refused with `document_too_large` before any extraction or write. An invalid value (non-numeric, zero, or negative) logs a warning to stderr and falls back to the default. |
+| `LCG_DOCUMENT_CHUNK_MAX_CHARS` | No | Per-unit size, in **characters**, above which document mode splits a section into several extraction units (default `6000`, below the `8000`-character chunk advisory). The units stay one logical chunk for diffing. Changing it changes chunk boundaries, so the next ingest of an existing document re-extracts the sections it re-splits. Invalid values fall back to the default with a warning. |
 | `LCG_RECORD_LLM` | No | Path to an LLM cassette (JSONL). If set, every extraction call is recorded to this file in addition to running live — see [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). Mutually exclusive with `LCG_REPLAY_LLM`. |
 | `LCG_REPLAY_LLM` | No | Path to a previously recorded LLM cassette (JSONL). If set, extraction is served entirely from the cassette — no extractor provider is resolved, no credentials are required, and no network call is ever made. Mutually exclusive with `LCG_RECORD_LLM`. See [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). |
 | `LCG_DEDUP_LLM` | No | Enables the **LLM-verified extraction dedup check** ([ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)). **Off by default** (opt-in). When on *and* an extraction provider is configured, every embedding-path dedup candidate that survives the identifier-mismatch veto is judged by the same extractor used for extraction (the Anthropic API, or the OpenAI-compatible `--extractor-uds` / `--extractor-http` endpoint) — one batched call per chunk (split into sequential groups of at most 16 pairs, each bounded by its own 30 s timeout). `duplicate` merges; `not duplicate`, an extractor error, a timeout or any malformed/unattributable answer inserts a separate entity (a missed merge is recoverable, a wrong merge is not) and logs a warning. Exact-name matches, veto-rejected pairs and identical-normalized-name pairs never cost a call, and WAL replay never calls the LLM. Values `0`, `false`, `off`, `no` and the empty string are off; anything else is on. If on with no extractor configured the service still starts, warns, and runs veto-only. The active mode is logged at startup (`dedup: mode=…`) and reported as `dedup_mode` (`"veto-only"` or `"llm-verified"`) by `knowledge_status`. Dedup calls report token usage with `role="dedup"`. Under `LCG_RECORD_LLM` / `LCG_REPLAY_LLM` the verdicts are recorded and served as `judge_duplicates` cassette records; a cassette without them yields "not a duplicate". |
@@ -961,18 +963,19 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (53)
+## IPC methods (55)
 
-The socket dispatch handles **53 methods**: 52 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **55 methods**: 54 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (53) and the MCP tool registry (52, below) differ by exactly one — `health_check` is
+surface (55) and the MCP tool registry (54, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
 |----------|---------|
 | Health | `health_check` |
 | Status | `knowledge_status`, `knowledge_rebuild_status` |
-| Ingestion | `knowledge_process_chunk`, `knowledge_add_episode` |
+| Ingestion | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode` |
+| Document chunking (read-only) | `knowledge_preview_chunks` |
 | Direct assertion | `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | Search | `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
@@ -1143,8 +1146,8 @@ union of all active scopes.
 
 | Scope | Methods |
 |-------|---------|
-| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint` |
-| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
+| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
+| `write` | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |
 | `all` | every scope above (default) |
@@ -1185,7 +1188,7 @@ The check is made against the groups a call **actually changes**, not every grou
 
 | Tool(s) | Group(s) that must be listed |
 |---------|------------------------------|
-| `knowledge_add_episode`, `knowledge_process_chunk`, `knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_merge_entities`, `knowledge_add_cross_group_edge`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types` | `group_id` (default group if omitted) |
+| `knowledge_add_episode`, `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_merge_entities`, `knowledge_add_cross_group_edge`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types` | `group_id` (default group if omitted) |
 | `knowledge_supersede_document`, `knowledge_stamp_origin`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` | the required `group_id` |
 | `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed` | every entry of `group_ids` |
 | `knowledge_delete_episode` | the group that owns the episode (looked up; a missing episode is a no-op) |
@@ -1576,6 +1579,83 @@ gains:
 So between the effective date and the recording date an as-of read shows the old fact `believed` with
 `in_force: false` — the graph had not yet learned otherwise. Believed-only filtering is unchanged: it
 filters on belief, not on being in force, and there is no in-force-only filter yet.
+
+### Document mode: send the whole document, the server does the diff (issue #785)
+
+`knowledge_process_chunk` makes you chunk a document yourself and tell the server what changed. A
+section you stop sending stays believed for ever, a heading rename orphans the chunk ids under it,
+every chunk you resend is re-extracted, and the extractor never sees the document's title or the
+chunk's heading path. `knowledge_process_document` removes all four costs: you send the **whole
+document** every time, and each call is a **completeness claim** — "this is document `doc_id`, in
+full". See [ADR-0785](adr/0785-document-mode-revisions-and-commit-boundary.md).
+
+| Param | |
+|---|---|
+| `doc_id` | **Required.** The document's identity within the group; every call diffs against this document's last committed revision. |
+| `content` | **Required.** The whole document (markdown; other text is chunked best-effort). |
+| `group_id` | Default `liminis`. |
+| `title`, `source_path` | Given to the extractor as context and recorded on the revision; `source_path` (or `doc_id`) prefixes each episode's `source_description`. |
+| `origin` | As for `knowledge_process_chunk` (issue #752); applies to every episode, and a different origin for a known `doc_id` is refused with `origin_conflict:`. |
+| `effective_at` | Recorded on the revision only — never `valid_at`, never belief time. |
+| `reference_time` | Extraction reference time, as in chunk mode; defaults to now. |
+| `attributes` | JSON object stored on every episode of the revision and on the revision record. |
+
+**What the server does.** It chunks the document by section (a heading plus its body up to the
+next heading of any level; text before the first heading is the preamble), splitting a section over
+`LCG_DOCUMENT_CHUNK_MAX_CHARS` into units. It then matches each section against the previous
+revision by the hash of its exact text: **unchanged sections are skipped without extraction**, so
+re-sending an identical document makes zero extraction calls and writes nothing (`status:
+"unchanged"`). Moving a section is free. Editing a section re-extracts only that section. Renaming a
+heading re-extracts only the section whose heading line changed, never its subsections, because the
+new heading can change how the body reads. Each extraction receives a `<DOCUMENT_CONTEXT>` block
+(title, source path, origin, the section's heading path and a document map) marked as context, not
+source text. Facts are cited only to their own section's episode.
+
+**Commit.** New and changed sections are written *pending*. Only when every one of them has
+succeeded does one commit step supersede the changed sections' old episodes (reason `revision`) and
+retire the sections that are gone (reason `chunk_removed`); you never send removals. **A failed or
+cancelled call retires nothing**: the previous revision stays fully believed, and its pending
+episodes are never believed (they read `not_yet_ingested` on belief reads). Retry with the same
+content and the diff runs against the last *committed* revision. The first document-mode ingest of a
+`doc_id` also supersedes that document's live chunk-mode episodes. Concurrent calls for one
+document are serialized.
+
+**Response.**
+
+| Field | |
+|---|---|
+| `status` | `committed`, or `unchanged` for a byte-identical resubmission. |
+| `revision_id`, `previous_revision_id`, `committed_at`, `chunker_version` | The server-minted revision and its predecessor. |
+| `extraction_calls` | Units extracted by this call (0 when nothing changed). |
+| `chunks[]` | Per section: `index`, `name` (stable across revisions), `heading_path`, `byte_start`, `byte_end`, `content_hash`, `classification` (`added` / `changed` / `unchanged`), `units`, `episode_uuids`, `previous_episode_uuids`. |
+| `removed[]` | Sections gone from the document: `name`, `heading_path`, `episode_uuids`. |
+| `superseded_episode_uuids`, `retired_episode_uuids` | Superseded with `revision`, retired with `chunk_removed`. |
+| `mode_transition_superseded_episode_uuids`, `stale_superseded_episode_uuids` | Chunk-mode episodes of the document replaced on transition; overlap left by an interrupted earlier commit, repaired now. |
+| `nodes_extracted`, `edges_extracted`, `duration_seconds` | Totals. |
+
+With `_progress_token`, progress lines stream before the result: `{"type":"progress","phase":
+"chunked"|"extracting"|"committing", "chunk_index", "chunk_count", "classification", "unit",
+"units", "extracted", "total"}`.
+
+**Episode fields.** A document-mode episode read by `knowledge_get_episodes` also carries
+`revision_id`, `revision_committed_at` (absent while pending), `byte_start` / `byte_end` (its span
+in the submitted content: `content[byte_start..byte_end]` is the episode's text), `heading_path` and
+`chunk_hash`. Episodes from every other path carry none of these, so chunk-mode reads are unchanged.
+Its `write_path` is `document`, so a chunk-mode revise of the same name never touches it.
+
+**Limits.** A document over `LCG_DOCUMENT_MAX_BYTES` (default 512 KiB) is refused with
+`document_too_large` before any work. An empty, whitespace-only or headings-only document is refused
+with `empty_document`. To retire a whole document use `knowledge_supersede_document`,
+`knowledge_mark_chunk_removed` or `knowledge_delete_by_source`.
+
+**`knowledge_preview_chunks`** (read scope) takes `content` and returns exactly the chunking
+`knowledge_process_document` would use — `chunks[]` with `heading_path`, `byte_start`, `byte_end`,
+`content_hash`, `char_count` and each unit's span, plus `document_map` — touching neither the graph
+nor the WAL. A client never needs its own chunker.
+
+**Cut-over.** A client moving from its own chunker to document mode sees each section re-extracted
+once (different boundaries are a new revision). The change is additive under ADR-0705 and visible
+through `knowledge_get_correction_changes`; section names are stable from then on.
 
 ### Episode origin: derived pages never corroborate themselves (issue #752)
 
@@ -5488,6 +5568,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0754](0754-retrieval-eval-architecture.md) | Retrieval-Quality Eval Architecture — Service-Spawn Driver, qmd Baseline, Metric Definitions | 2026-11-15 |
 | [0755](0755-knowledge-lint-deterministic-health.md) | `knowledge_lint` — A Deterministic, LLM-Free Notebook Health Report | 2026-11-15 |
 | [0776](0776-kind-aware-identity-set-check.md) | Kind-Aware D1 Identity-Set Check and Stamp Restore from the WAL Sidecar | 2026-11-16 |
+| [0785](0785-document-mode-revisions-and-commit-boundary.md) | Document Mode — Server-Side Chunking, Revision Diff and a Data Commit Boundary | 2026-11-18 |
 | [0790](0790-embedder-roles-and-instruction-profiles.md) | Embedder Roles and Instruction Profiles | 2026-11-18 |
 
 ## Historical numbering

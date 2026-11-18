@@ -9,6 +9,31 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+### Upgrading
+
+- **Additive schema, no storage-version change.** `Episodic` gains six nullable columns
+  (`revision_id`, `revision_committed_at`, `byte_start`, `byte_end`, `heading_path`, `chunk_hash`)
+  and a `DocRevision` table appears. Existing rows read them as NULL; nothing is backfilled. The MCP
+  registry grows from 52 to 54 tools.
+- **Moving a client to document mode re-extracts once.** The server's chunker will not match a
+  client's own boundaries, so the first `knowledge_process_document` of a note re-extracts its
+  sections. The change is additive (ADR-0705) and visible through
+  `knowledge_get_correction_changes`; section names are stable from then on.
+
+### Added
+
+- **Document mode: `knowledge_process_document` (write) and `knowledge_preview_chunks` (read)
+  (#785, ADR-0785, slice 1 of #733).** Send a whole document as a completeness claim; the server
+  chunks it by section, skips unchanged sections by content hash (an identical resubmission makes
+  zero extraction calls), extracts changed ones with a `<DOCUMENT_CONTEXT>` block (title, heading
+  path, origin, document map), and commits the revision in one step — superseding changed sections
+  (`revision`) and retiring vanished ones (`chunk_removed`) without the client sending removals. A
+  failed or cancelled call retires nothing; its pending episodes are never believed. Episodes carry
+  the server-minted `revision_id` and their `byte_start`/`byte_end` span. The first document-mode
+  ingest of a `doc_id` supersedes its chunk-mode episodes. New settings `LCG_DOCUMENT_MAX_BYTES`
+  (default 512 KiB) and `LCG_DOCUMENT_CHUNK_MAX_CHARS` (default 6000). `knowledge_process_chunk` is
+  unchanged.
+
 ## [0.19.1] - 2026-11-16
 
 ### Upgrading

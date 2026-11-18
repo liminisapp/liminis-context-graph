@@ -42,18 +42,19 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (53)
+## IPC methods (55)
 
-The socket dispatch handles **53 methods**: 52 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **55 methods**: 54 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (53) and the MCP tool registry (52, below) differ by exactly one — `health_check` is
+surface (55) and the MCP tool registry (54, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
 |----------|---------|
 | Health | `health_check` |
 | Status | `knowledge_status`, `knowledge_rebuild_status` |
-| Ingestion | `knowledge_process_chunk`, `knowledge_add_episode` |
+| Ingestion | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode` |
+| Document chunking (read-only) | `knowledge_preview_chunks` |
 | Direct assertion | `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | Search | `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
@@ -224,8 +225,8 @@ union of all active scopes.
 
 | Scope | Methods |
 |-------|---------|
-| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint` |
-| `write` | `knowledge_process_chunk`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
+| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
+| `write` | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |
 | `all` | every scope above (default) |
@@ -266,7 +267,7 @@ The check is made against the groups a call **actually changes**, not every grou
 
 | Tool(s) | Group(s) that must be listed |
 |---------|------------------------------|
-| `knowledge_add_episode`, `knowledge_process_chunk`, `knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_merge_entities`, `knowledge_add_cross_group_edge`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types` | `group_id` (default group if omitted) |
+| `knowledge_add_episode`, `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_merge_entities`, `knowledge_add_cross_group_edge`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types` | `group_id` (default group if omitted) |
 | `knowledge_supersede_document`, `knowledge_stamp_origin`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` | the required `group_id` |
 | `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed` | every entry of `group_ids` |
 | `knowledge_delete_episode` | the group that owns the episode (looked up; a missing episode is a no-op) |
@@ -657,6 +658,83 @@ gains:
 So between the effective date and the recording date an as-of read shows the old fact `believed` with
 `in_force: false` — the graph had not yet learned otherwise. Believed-only filtering is unchanged: it
 filters on belief, not on being in force, and there is no in-force-only filter yet.
+
+### Document mode: send the whole document, the server does the diff (issue #785)
+
+`knowledge_process_chunk` makes you chunk a document yourself and tell the server what changed. A
+section you stop sending stays believed for ever, a heading rename orphans the chunk ids under it,
+every chunk you resend is re-extracted, and the extractor never sees the document's title or the
+chunk's heading path. `knowledge_process_document` removes all four costs: you send the **whole
+document** every time, and each call is a **completeness claim** — "this is document `doc_id`, in
+full". See [ADR-0785](adr/0785-document-mode-revisions-and-commit-boundary.md).
+
+| Param | |
+|---|---|
+| `doc_id` | **Required.** The document's identity within the group; every call diffs against this document's last committed revision. |
+| `content` | **Required.** The whole document (markdown; other text is chunked best-effort). |
+| `group_id` | Default `liminis`. |
+| `title`, `source_path` | Given to the extractor as context and recorded on the revision; `source_path` (or `doc_id`) prefixes each episode's `source_description`. |
+| `origin` | As for `knowledge_process_chunk` (issue #752); applies to every episode, and a different origin for a known `doc_id` is refused with `origin_conflict:`. |
+| `effective_at` | Recorded on the revision only — never `valid_at`, never belief time. |
+| `reference_time` | Extraction reference time, as in chunk mode; defaults to now. |
+| `attributes` | JSON object stored on every episode of the revision and on the revision record. |
+
+**What the server does.** It chunks the document by section (a heading plus its body up to the
+next heading of any level; text before the first heading is the preamble), splitting a section over
+`LCG_DOCUMENT_CHUNK_MAX_CHARS` into units. It then matches each section against the previous
+revision by the hash of its exact text: **unchanged sections are skipped without extraction**, so
+re-sending an identical document makes zero extraction calls and writes nothing (`status:
+"unchanged"`). Moving a section is free. Editing a section re-extracts only that section. Renaming a
+heading re-extracts only the section whose heading line changed, never its subsections, because the
+new heading can change how the body reads. Each extraction receives a `<DOCUMENT_CONTEXT>` block
+(title, source path, origin, the section's heading path and a document map) marked as context, not
+source text. Facts are cited only to their own section's episode.
+
+**Commit.** New and changed sections are written *pending*. Only when every one of them has
+succeeded does one commit step supersede the changed sections' old episodes (reason `revision`) and
+retire the sections that are gone (reason `chunk_removed`); you never send removals. **A failed or
+cancelled call retires nothing**: the previous revision stays fully believed, and its pending
+episodes are never believed (they read `not_yet_ingested` on belief reads). Retry with the same
+content and the diff runs against the last *committed* revision. The first document-mode ingest of a
+`doc_id` also supersedes that document's live chunk-mode episodes. Concurrent calls for one
+document are serialized.
+
+**Response.**
+
+| Field | |
+|---|---|
+| `status` | `committed`, or `unchanged` for a byte-identical resubmission. |
+| `revision_id`, `previous_revision_id`, `committed_at`, `chunker_version` | The server-minted revision and its predecessor. |
+| `extraction_calls` | Units extracted by this call (0 when nothing changed). |
+| `chunks[]` | Per section: `index`, `name` (stable across revisions), `heading_path`, `byte_start`, `byte_end`, `content_hash`, `classification` (`added` / `changed` / `unchanged`), `units`, `episode_uuids`, `previous_episode_uuids`. |
+| `removed[]` | Sections gone from the document: `name`, `heading_path`, `episode_uuids`. |
+| `superseded_episode_uuids`, `retired_episode_uuids` | Superseded with `revision`, retired with `chunk_removed`. |
+| `mode_transition_superseded_episode_uuids`, `stale_superseded_episode_uuids` | Chunk-mode episodes of the document replaced on transition; overlap left by an interrupted earlier commit, repaired now. |
+| `nodes_extracted`, `edges_extracted`, `duration_seconds` | Totals. |
+
+With `_progress_token`, progress lines stream before the result: `{"type":"progress","phase":
+"chunked"|"extracting"|"committing", "chunk_index", "chunk_count", "classification", "unit",
+"units", "extracted", "total"}`.
+
+**Episode fields.** A document-mode episode read by `knowledge_get_episodes` also carries
+`revision_id`, `revision_committed_at` (absent while pending), `byte_start` / `byte_end` (its span
+in the submitted content: `content[byte_start..byte_end]` is the episode's text), `heading_path` and
+`chunk_hash`. Episodes from every other path carry none of these, so chunk-mode reads are unchanged.
+Its `write_path` is `document`, so a chunk-mode revise of the same name never touches it.
+
+**Limits.** A document over `LCG_DOCUMENT_MAX_BYTES` (default 512 KiB) is refused with
+`document_too_large` before any work. An empty, whitespace-only or headings-only document is refused
+with `empty_document`. To retire a whole document use `knowledge_supersede_document`,
+`knowledge_mark_chunk_removed` or `knowledge_delete_by_source`.
+
+**`knowledge_preview_chunks`** (read scope) takes `content` and returns exactly the chunking
+`knowledge_process_document` would use — `chunks[]` with `heading_path`, `byte_start`, `byte_end`,
+`content_hash`, `char_count` and each unit's span, plus `document_map` — touching neither the graph
+nor the WAL. A client never needs its own chunker.
+
+**Cut-over.** A client moving from its own chunker to document mode sees each section re-extracted
+once (different boundaries are a new revision). The change is additive under ADR-0705 and visible
+through `knowledge_get_correction_changes`; section names are stable from then on.
 
 ### Episode origin: derived pages never corroborate themselves (issue #752)
 

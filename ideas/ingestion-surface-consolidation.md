@@ -4,6 +4,10 @@
 **Date**: 2026-09-05
 **Revised**: 2026-10-26, against `main` at `b963de40` (after the Temporal work, #705–#707)
 **Belongs to**: `liminis-context-graph` (the surface is lcg's; the fossils are in `liminis`)
+**Implemented in part**: document mode (§1, §5, §6's `process_document` / `preview_chunks`, §7's
+server-side chunker) shipped as #785 — see
+[ADR-0785](../docs/adr/0785-document-mode-revisions-and-commit-boundary.md). Open questions 2, 5 and
+6 are answered there.
 
 Confidence tags: **[V]** verified by direct read at a cited `file:line` · **[I]** inference · **[?]** open.
 Citations are to lcg `main` unless prefixed `liminis:` (the app, `shadoworg/liminis-notes` `main` at
@@ -310,11 +314,15 @@ Two costs remain:
    document: does a revision with failed chunks count as complete for retraction by absence? **[I]**
    It should not: removals inferred from a partial revision would retract facts the document still
    asserts. Apply removals only once every chunk of the revision has committed.
+   **Answered (#785, ADR-0785 §4):** new chunks are written pending and are never believed; one
+   commit step applies every supersession and removal, so a failed revision retires nothing.
 3. Does `knowledge_entity_edge_analysis` have a purpose worth keeping? (§6)
 4. Non-markdown content: design the content-type seam now, or markdown-only with a fallback later?
 5. **Revision identity.** Server-minted per document-mode ingest, carried on each episode, and the
    marker that a completeness claim applied (§5). Is a new episode column the right carrier, or a
    per-revision record alongside ADR-0707's `DocSupersession`? **[?]**
+   **Answered (#785, ADR-0785 §3):** both — `Episodic.revision_id` (plus commit stamp and span)
+   on every episode, and a `DocRevision` record holding metadata and the chunk manifest.
 6. **Mode transition — still undefined, now cheaper.** A document first ingested in chunk mode, later
    in document mode. The draft's two bad answers still apply in principle: treat the first
    document-mode ingest as a first observation and the chunk-mode episodes stay believed forever, or
@@ -323,3 +331,6 @@ Two costs remain:
    chunk-mode episodes by `name` prefix and supersede them with reason `revision`. The old facts lose
    belief at the instant the new ones gain it, with no matching needed. This is the realistic
    migration path for the app, so it should be specified rather than discovered.
+   **Answered (#785, ADR-0785 §5):** the first document-mode commit supersedes the document's live
+   chunk-mode episodes *by `doc_id`* (reason `revision`) and reports them. Name-prefix adoption was
+   not taken — it is a guess — so the app must send `doc_id` (or switch to document mode) first.
