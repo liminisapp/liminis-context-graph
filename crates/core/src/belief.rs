@@ -414,6 +414,67 @@ impl BeliefAnnotation {
     }
 }
 
+/// Everything [`evaluate`], [`in_force`] and [`supersession_info`] need for a batch of edges,
+/// loaded with the same three batched, uuid-keyed lookups every belief-aware read uses: the edge
+/// rows, the supersession state of their producing episodes, and — only when some producer was
+/// superseded by a document (issue #707) — the document supersession records.
+#[derive(Debug, Default)]
+pub(crate) struct BeliefContext {
+    pub rows: HashMap<String, EdgeBeliefRow>,
+    pub episodes: HashMap<String, EpisodeSupersession>,
+    pub docs: DocRecords,
+}
+
+impl BeliefContext {
+    /// The belief row of `uuid`, or an empty (legacy-shaped) row when the edge no longer exists.
+    pub fn row(&self, uuid: &str) -> EdgeBeliefRow {
+        self.rows.get(uuid).cloned().unwrap_or_else(|| EdgeBeliefRow {
+            uuid: uuid.to_string(),
+            ..Default::default()
+        })
+    }
+
+    /// The full `belief` annotation of `row` evaluated at `t_us`.
+    pub fn annotate(&self, row: &EdgeBeliefRow, t_us: i64) -> BeliefAnnotation {
+        let state = evaluate(row, &self.episodes, t_us);
+        let in_force = in_force(row, &self.episodes, &self.docs, t_us);
+        let supersession = supersession_info(row, &self.episodes, &self.docs);
+        BeliefAnnotation::new(row, state, in_force, supersession)
+    }
+}
+
+/// Loads the [`BeliefContext`] of `edge_uuids` (ADR-0705: batched lookups, belief evaluated in
+/// Rust). Shared by `knowledge_find_relationships`' belief annotation and
+/// `knowledge_graph_search` (issue #797), so both reads evaluate belief from the same records.
+pub(crate) fn load_context(
+    conn: &crate::db::Conn<'_>,
+    edge_uuids: &[String],
+) -> Result<BeliefContext, crate::error::Error> {
+    let rows = conn.get_edge_belief_rows(edge_uuids)?;
+    let mut ep_uuids: Vec<String> = rows
+        .values()
+        .flat_map(|r| r.episodes.iter().cloned())
+        .collect();
+    ep_uuids.sort();
+    ep_uuids.dedup();
+    let episodes = conn.get_episode_supersession(&ep_uuids)?;
+    // Document supersession records (issue #707), fetched only when some producing episode was
+    // superseded by a document, so reads without one issue no extra query.
+    let mut doc_keys: Vec<(String, String)> = episodes
+        .values()
+        .filter(|e| e.kind.as_deref() == Some("document"))
+        .filter_map(|e| Some((e.group_id.clone(), e.doc_id.clone()?)))
+        .collect();
+    doc_keys.sort();
+    doc_keys.dedup();
+    let docs = conn.get_doc_supersessions(&doc_keys)?;
+    Ok(BeliefContext {
+        rows,
+        episodes,
+        docs,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

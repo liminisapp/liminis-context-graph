@@ -1580,48 +1580,16 @@ fn apply_belief<T: serde::Serialize>(
     q: &BeliefQuery,
 ) -> Result<Vec<Value>, Error> {
     let uuids: Vec<String> = edges.iter().map(|e| uuid_of(e).to_string()).collect();
-    let rows = conn.get_edge_belief_rows(&uuids)?;
-    let mut ep_uuids: Vec<String> = rows
-        .values()
-        .flat_map(|r| r.episodes.iter().cloned())
-        .collect();
-    ep_uuids.sort();
-    ep_uuids.dedup();
-    let episodes = conn.get_episode_supersession(&ep_uuids)?;
-    // Document supersession records (issue #707), fetched only when some producing episode was
-    // superseded by a document, so reads without one issue no extra query.
-    let mut doc_keys: Vec<(String, String)> = episodes
-        .values()
-        .filter(|e| e.kind.as_deref() == Some("document"))
-        .filter_map(|e| Some((e.group_id.clone(), e.doc_id.clone()?)))
-        .collect();
-    doc_keys.sort();
-    doc_keys.dedup();
-    let docs = conn.get_doc_supersessions(&doc_keys)?;
+    let ctx = crate::belief::load_context(conn, &uuids)?;
     let mut out = Vec::with_capacity(edges.len());
     for edge in edges {
-        let uuid = uuid_of(&edge).to_string();
-        let row = rows
-            .get(&uuid)
-            .cloned()
-            .unwrap_or_else(|| crate::belief::EdgeBeliefRow {
-                uuid,
-                ..Default::default()
-            });
-        let state = crate::belief::evaluate(&row, &episodes, q.as_of_us);
-        if q.filter && !state.is_believed() {
+        let row = ctx.row(uuid_of(&edge));
+        let annotation = ctx.annotate(&row, q.as_of_us);
+        if q.filter && !annotation.believed {
             continue;
         }
         let mut v = serde_json::to_value(&edge).unwrap_or(Value::Null);
-        let in_force = crate::belief::in_force(&row, &episodes, &docs, q.as_of_us);
-        let supersession = crate::belief::supersession_info(&row, &episodes, &docs);
-        v["belief"] = serde_json::to_value(crate::belief::BeliefAnnotation::new(
-            &row,
-            state,
-            in_force,
-            supersession,
-        ))
-        .unwrap_or(Value::Null);
+        v["belief"] = serde_json::to_value(annotation).unwrap_or(Value::Null);
         out.push(v);
     }
     Ok(out)
