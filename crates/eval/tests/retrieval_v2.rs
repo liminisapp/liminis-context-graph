@@ -923,9 +923,22 @@ async fn v2_report_has_intervals_origin_breakdown_and_is_reproducible() {
     let b = run_report(&fx, &d.path().join("j2.jsonl")).await;
 
     let (ma, mb) = (a.render_markdown(), b.render_markdown());
+    // The `## Cost` section holds wall-clock latency (p50/p95), which varies run to run under
+    // host load; everything else in the markdown must be byte-identical for the same seed.
+    let without_cost = |m: &str| {
+        let (head, tail) = m
+            .split_once("\n## Cost\n")
+            .expect("report has a Cost section");
+        let rest = tail
+            .split_once("\n## Reproduction\n")
+            .expect("report has a Reproduction section")
+            .1;
+        format!("{head}\n{rest}")
+    };
     assert_eq!(
-        ma, mb,
-        "two runs with the same seed must produce the identical report"
+        without_cost(&ma),
+        without_cost(&mb),
+        "two runs with the same seed must produce the identical report (latency aside)"
     );
     // Everything except wall-clock latency is exactly reproducible.
     let (ja, jb) = (a.to_json(), b.to_json());
