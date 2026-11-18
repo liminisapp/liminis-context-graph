@@ -1323,7 +1323,7 @@ async fn handle_knowledge_process_document(
     let p = &req.params;
     let doc_id = optional_doc_id_param(&p["doc_id"])?.ok_or_else(|| {
         Error::Ipc(
-            "doc_id is required: a document-mode ingest is a completeness claim about one              document"
+            "doc_id is required: a document-mode ingest is a completeness claim about one document"
                 .to_string(),
         )
     })?;
