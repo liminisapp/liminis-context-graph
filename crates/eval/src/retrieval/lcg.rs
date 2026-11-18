@@ -26,7 +26,8 @@ type UnixStream = tokio::io::DuplexStream;
 
 use super::fixture::Fixture;
 use super::mapping::{
-    chunk_markdown, edge_groups, entity_groups, map_edges, map_entities, map_passages,
+    chunk_markdown, edge_groups, edge_producers, entity_groups, map_edges, map_entities,
+    map_passages,
 };
 use super::{RankedResult, Retriever};
 
@@ -282,6 +283,12 @@ pub struct IngestMap {
     pub entity_notes: HashMap<String, BTreeSet<String>>,
     pub chunks: usize,
     pub supersessions: usize,
+    /// Episodes whose belief the supersede calls ended, summed over all calls (issue #787). A
+    /// call that ends belief in nothing aborts the ingest, so for a run that completed this is
+    /// ≥ the number of non-future, non-replayed supersessions.
+    pub superseded_episodes: usize,
+    /// One record per supersede call, in manifest order.
+    pub supersede_outcomes: Vec<SupersedeOutcome>,
     /// `knowledge_process_chunk` calls — each makes ≥1 extraction-LLM call (not individually counted).
     pub extraction_requests: usize,
     pub rpc_calls: usize,
@@ -290,6 +297,91 @@ pub struct IngestMap {
     /// note credit may be over-attributed; surfaced in the report.
     pub unconfirmed_entity_links: usize,
     pub seconds: f64,
+}
+
+/// What one `knowledge_supersede_document` call did, as reported by the service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupersedeOutcome {
+    pub old_note: String,
+    pub new_note: String,
+    /// Episodes whose belief this call ended.
+    pub ended: usize,
+    /// The service already had an identical record (a replay); ended nothing by design.
+    pub already_recorded: bool,
+    /// `effective_at` was in the future at call time, so belief legitimately has not ended yet.
+    pub future_dated: bool,
+}
+
+/// Validates one `knowledge_supersede_document` response (issue #787). The original harness
+/// discarded it, so a call that did nothing was indistinguishable from one that worked and the
+/// belief configuration silently measured nothing. Fails — naming both note ids — on a response
+/// that is not a success, on `superseded_count == 0` (unless the call was a replay or is
+/// future-dated), and on `superseded_uuids` that disagree with the count or do not map to the
+/// superseded note in `episode_note`.
+pub fn check_supersede_response(
+    resp: &Value,
+    new_note: &str,
+    old_note: &str,
+    effective_at: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    episode_note: &HashMap<String, String>,
+) -> Result<SupersedeOutcome, String> {
+    let who = format!("supersede {old_note}→{new_note}");
+    if resp["success"] != json!(true) {
+        return Err(format!(
+            "{who}: response is not a success (expected {{\"success\":true,..}}): {resp}"
+        ));
+    }
+    let count = resp["superseded_count"]
+        .as_u64()
+        .ok_or_else(|| format!("{who}: response has no superseded_count: {resp}"))?
+        as usize;
+    let uuids: Vec<&str> = resp["superseded_uuids"]
+        .as_array()
+        .ok_or_else(|| format!("{who}: response has no superseded_uuids: {resp}"))?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    if uuids.len() != count {
+        return Err(format!(
+            "{who}: superseded_count {count} disagrees with {} superseded_uuids",
+            uuids.len()
+        ));
+    }
+    let already_recorded = resp["already_recorded"] == json!(true);
+    let future_dated = chrono::DateTime::parse_from_rfc3339(effective_at)
+        .map_err(|e| format!("{who}: effective_at '{effective_at}' is not RFC 3339: {e}"))?
+        .with_timezone(&chrono::Utc)
+        > now;
+    if count == 0 && !already_recorded && !future_dated {
+        return Err(format!(
+            "{who}: ended belief for 0 episodes (effective_at {effective_at} is not in the \
+             future and the call was not a replay) — document '{old_note}' has no live \
+             episodes under this doc_id, so the belief configuration would measure nothing"
+        ));
+    }
+    for u in &uuids {
+        match episode_note.get(*u) {
+            Some(n) if n == old_note => {}
+            Some(n) => {
+                return Err(format!(
+                    "{who}: ended belief for episode {u}, which the harness ingested as note '{n}'"
+                ))
+            }
+            None => {
+                return Err(format!(
+                    "{who}: ended belief for episode {u}, which the harness did not ingest"
+                ))
+            }
+        }
+    }
+    Ok(SupersedeOutcome {
+        old_note: old_note.to_string(),
+        new_note: new_note.to_string(),
+        ended: count,
+        already_recorded,
+        future_dated,
+    })
 }
 
 pub async fn ingest(t: &dyn RpcTransport, fx: &Fixture) -> Result<IngestMap, String> {
@@ -332,19 +424,30 @@ pub async fn ingest(t: &dyn RpcTransport, fx: &Fixture) -> Result<IngestMap, Str
     }
 
     for s in &fx.manifest.supersedes {
-        t.call(
-            "knowledge_supersede_document",
-            json!({
-                "group_id": EVAL_GROUP,
-                "superseding_doc_id": s.new_note,
-                "superseded_doc_id": s.old_note,
-                "effective_at": s.effective_at,
-            }),
-        )
-        .await
-        .map_err(|e| format!("supersede {}→{}: {e}", s.old_note, s.new_note))?;
+        let resp = t
+            .call(
+                "knowledge_supersede_document",
+                json!({
+                    "group_id": EVAL_GROUP,
+                    "superseding_doc_id": s.new_note,
+                    "superseded_doc_id": s.old_note,
+                    "effective_at": s.effective_at,
+                }),
+            )
+            .await
+            .map_err(|e| format!("supersede {}→{}: {e}", s.old_note, s.new_note))?;
         map.rpc_calls += 1;
         map.supersessions += 1;
+        let outcome = check_supersede_response(
+            &resp,
+            &s.new_note,
+            &s.old_note,
+            &s.effective_at,
+            chrono::Utc::now(),
+            &map.episode_note,
+        )?;
+        map.superseded_episodes += outcome.ended;
+        map.supersede_outcomes.push(outcome);
     }
 
     // Explicit index build so the lazy first-search build never lands in a timed query.
@@ -467,7 +570,7 @@ impl Retriever for LcgEntitiesFacts {
     fn description(&self) -> String {
         format!(
             "knowledge_find_entities + knowledge_find_relationships (hybrid, RRF), min_similarity=0, {}; k split across the two reads (ceil(k/2) each), ranks interleaved",
-            if self.belief { "facts read with believed_only=true" } else { "default reads" }
+            if self.belief { "facts read with believed_only=true" } else { "default reads (facts read annotation-only, believed_only=false, for provenance)" }
         )
     }
     fn retrieve<'a>(&'a self, q: &'a str, k: usize) -> BoxFuture<'a, Result<RankedResult, String>> {
@@ -483,10 +586,12 @@ impl Retriever for LcgEntitiesFacts {
                     json!({"query": q, "num_results": per_read, "min_similarity": 0.0, "group_ids": [EVAL_GROUP]}),
                 )
                 .await?;
-            let mut fact_params = json!({"query": q, "num_results": per_read, "min_similarity": 0.0, "group_ids": [EVAL_GROUP]});
-            if self.belief {
-                fact_params["believed_only"] = json!(true);
-            }
+            // The belief parameter is always sent: it is what makes the read carry
+            // `belief.producing_episode_uuids`, the only edge→episode provenance these reads
+            // return (issue #787). `false` annotates without filtering, so the non-belief
+            // configuration's results are unchanged.
+            let fact_params = json!({"query": q, "num_results": per_read, "min_similarity": 0.0,
+                "group_ids": [EVAL_GROUP], "believed_only": self.belief});
             let facts = self
                 .t
                 .call("knowledge_find_relationships", fact_params)
@@ -505,7 +610,10 @@ impl Retriever for LcgEntitiesFacts {
                 let t1 = Instant::now();
                 let r = self
                     .t
-                    .call("knowledge_get_edges_by_uuids", json!({"uuids": unmapped}))
+                    .call(
+                        "knowledge_get_edges_by_uuids",
+                        json!({"uuids": unmapped, "believed_only": false}),
+                    )
                     .await?;
                 latency += t1.elapsed();
                 lookup_calls = 1;
@@ -514,8 +622,9 @@ impl Retriever for LcgEntitiesFacts {
                     .filter_map(|e| Some((e["uuid"].as_str()?.to_string(), e)))
                     .collect();
                 for e in edges.iter_mut() {
-                    if e["episodes"].as_array().is_none_or(Vec::is_empty) {
+                    if edge_producers(e).is_empty() {
                         if let Some(f) = e["uuid"].as_str().and_then(|u| fetched.get(u)) {
+                            e["belief"] = f["belief"].clone();
                             e["episodes"] = f["episodes"].clone();
                         }
                     }
@@ -642,6 +751,34 @@ mod tests {
         Arc::new(m)
     }
 
+    /// Issue #787: the service returns no `episodes` on fact reads; provenance is
+    /// `belief.producing_episode_uuids`, which is only present when a belief param is sent — so the
+    /// default configuration must send `believed_only: false` (annotate, don't filter).
+    #[tokio::test]
+    async fn facts_are_mapped_through_belief_provenance_and_default_config_annotates() {
+        let t = Arc::new(FakeTransport::new(|m, _| match m {
+            "knowledge_find_entities" => Ok(json!({"nodes":[]})),
+            "knowledge_find_relationships" => Ok(json!({"edges":[
+                {"uuid":"f1","fact":"F","episode_uuids":[],
+                 "belief":{"believed":true,"producing_episode_uuids":["ep1"]}}]})),
+            other => Err(format!("unexpected {other}")),
+        }));
+        let rt = LcgEntitiesFacts {
+            t: t.clone(),
+            map: map(),
+            belief: false,
+        };
+        let r = rt.retrieve("q", 5).await.unwrap();
+        assert_eq!(r.notes, vec!["note-a"]);
+        assert_eq!(r.lookup_calls, 0, "no fallback lookup needed");
+        let log = t.log.lock().unwrap();
+        let fact_call = log
+            .iter()
+            .find(|(m, _)| m == "knowledge_find_relationships")
+            .unwrap();
+        assert_eq!(fact_call.1["believed_only"], false);
+    }
+
     #[tokio::test]
     async fn entities_facts_interleave_and_belief_flag() {
         let t = Arc::new(FakeTransport::new(|m, _| match m {
@@ -724,6 +861,102 @@ mod tests {
         f
     }
 
+    fn now() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-11-18T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn eps() -> HashMap<String, String> {
+        HashMap::from([("ep0".to_string(), "old".to_string())])
+    }
+
+    fn check(resp: Value, eff: &str) -> Result<SupersedeOutcome, String> {
+        check_supersede_response(&resp, "new", "old", eff, now(), &eps())
+    }
+
+    const PAST: &str = "2026-02-01T00:00:00Z";
+
+    #[test]
+    fn supersede_check_accepts_a_call_that_ended_belief() {
+        let o = check(
+            json!({"success": true, "superseded_count": 1, "superseded_uuids": ["ep0"]}),
+            PAST,
+        )
+        .unwrap();
+        assert_eq!(
+            (o.ended, o.already_recorded, o.future_dated),
+            (1, false, false)
+        );
+    }
+
+    #[test]
+    fn supersede_check_rejects_empty_and_unsuccessful_responses_naming_the_notes() {
+        for resp in [
+            json!({}),
+            json!({"success": false}),
+            json!({"success": true}),
+            json!({"success": true, "superseded_count": 1, "superseded_uuids": []}),
+        ] {
+            let e = check(resp.clone(), PAST).unwrap_err();
+            assert!(e.contains("old→new"), "{resp}: {e}");
+        }
+    }
+
+    #[test]
+    fn supersede_check_rejects_zero_episodes_ended() {
+        let e = check(
+            json!({"success": true, "already_recorded": false, "superseded_count": 0, "superseded_uuids": []}),
+            PAST,
+        )
+        .unwrap_err();
+        assert!(e.contains("old→new") && e.contains("0 episodes"), "{e}");
+    }
+
+    #[test]
+    fn supersede_check_tolerates_replays_and_future_dated_calls() {
+        let zero = json!({"success": true, "superseded_count": 0, "superseded_uuids": []});
+        let mut replay = zero.clone();
+        replay["already_recorded"] = json!(true);
+        let o = check(replay, PAST).unwrap();
+        assert!(o.already_recorded && o.ended == 0);
+        let o = check(zero, "2027-01-01T00:00:00Z").unwrap();
+        assert!(o.future_dated && o.ended == 0);
+    }
+
+    #[test]
+    fn supersede_check_rejects_uuids_that_do_not_map_to_the_superseded_note() {
+        let unknown = json!({"success": true, "superseded_count": 1, "superseded_uuids": ["zz"]});
+        assert!(check(unknown, PAST).unwrap_err().contains("did not ingest"));
+        let mut other = eps();
+        other.insert("ep0".into(), "someone-else".into());
+        let e = check_supersede_response(
+            &json!({"success": true, "superseded_count": 1, "superseded_uuids": ["ep0"]}),
+            "new",
+            "old",
+            PAST,
+            now(),
+            &other,
+        )
+        .unwrap_err();
+        assert!(e.contains("someone-else"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn ingest_aborts_when_a_supersede_call_ended_nothing() {
+        let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let t = FakeTransport::new(move |m, _p| match m {
+            "knowledge_process_chunk" => {
+                let n = counter.fetch_add(1, Ordering::Relaxed);
+                Ok(json!({"episode_uuid": format!("ep{n}")}))
+            }
+            "knowledge_supersede_document" => Ok(json!({})),
+            other => Err(format!("unexpected {other}")),
+        });
+        let e = ingest(&t, &fixture()).await.unwrap_err();
+        assert!(e.contains("old→new"), "{e}");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_silent_service_times_out_instead_of_hanging() {
@@ -756,7 +989,9 @@ mod tests {
                 assert_eq!(p["doc_id"], p["source_file"]);
                 Ok(json!({"episode_uuid": format!("ep{n}")}))
             }
-            "knowledge_supersede_document" => Ok(json!({})),
+            "knowledge_supersede_document" => Ok(
+                json!({"success": true, "already_recorded": false, "superseded_count": 1, "superseded_uuids": ["ep0"]}),
+            ),
             "knowledge_build_indices" => Ok(json!({})),
             "knowledge_get_entities_by_source" => {
                 if p["source"] == "old:" {
@@ -772,6 +1007,8 @@ mod tests {
         let m = ingest(&t, &fixture()).await.unwrap();
         assert_eq!(m.chunks, 2);
         assert_eq!(m.supersessions, 1);
+        assert_eq!(m.superseded_episodes, 1);
+        assert_eq!(m.supersede_outcomes[0].old_note, "old");
         assert_eq!(m.episode_note["ep0"], "old");
         // e9's episodes belong to note "new", so CONTAINS over-matching must not credit "old".
         assert!(m.entity_notes["e1"].contains("old"));

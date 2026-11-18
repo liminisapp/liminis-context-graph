@@ -591,6 +591,134 @@ async fn fact_asserted_by_both_documents_stays_believed() {
     );
 }
 
+/// Facts (sorted) returned by `knowledge_find_relationships` in `group` under the extra params.
+/// Asserts on membership, not counts: belief filtering over-fetches then truncates (ADR-0705).
+async fn found_facts(state: &Arc<AppState>, group: &str, extra: Value) -> Vec<String> {
+    let mut params = json!({"query": "decision fact", "group_ids": [group], "num_results": 50});
+    for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+        params[k] = v;
+    }
+    let r = call("knowledge_find_relationships", params, state).await;
+    let mut out: Vec<String> = r["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["fact"].as_str().unwrap().to_string())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Issue #787: the reproduction in miniature. A fact whose only producer is the superseded
+/// document is returned by `knowledge_find_relationships` without `believed_only` and omitted with
+/// it, through the same dispatch the retrieval eval uses. The successor's fact stays in both.
+#[tokio::test]
+async fn find_relationships_believed_only_drops_superseded_documents_facts() {
+    let (state, _db, _d) = state_with(
+        vec![
+            one("b", "decision fact old hosting"),
+            one("a", "decision fact new hosting"),
+        ],
+        None,
+    );
+    ingest(&state, G, "b1", Some("B")).await;
+    ingest(&state, G, "a1", Some("A")).await;
+    let eff = rfc3339(now_us() - 1_000);
+    let r = supersede(&state, G, "A", "B", &eff).await;
+    assert_eq!(r["result"]["superseded_count"], 1, "{r}");
+
+    let all = found_facts(&state, G, json!({})).await;
+    assert_eq!(
+        all,
+        vec!["decision fact new hosting", "decision fact old hosting"]
+    );
+    let believed = found_facts(&state, G, json!({"believed_only": true})).await;
+    assert_eq!(believed, vec!["decision fact new hosting"]);
+
+    // Annotation-only (`believed_only: false`): the superseded fact is reported as such.
+    let r = call(
+        "knowledge_find_relationships",
+        json!({"query": "decision fact", "group_ids": [G], "num_results": 50,
+               "believed_only": false}),
+        &state,
+    )
+    .await;
+    let old = r["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["fact"] == "decision fact old hosting")
+        .unwrap();
+    assert_eq!(old["belief"]["believed"], false, "{old}");
+    assert_eq!(
+        old["belief"]["supersession"]["cause"],
+        "document_superseded"
+    );
+}
+
+/// A fact asserted by both documents stays believed through the successor's live episode.
+#[tokio::test]
+async fn find_relationships_believed_only_keeps_fact_with_a_live_producer() {
+    let (state, _db, _d) = state_with(
+        vec![
+            extraction(&[
+                ("x", "y", "decision fact shared"),
+                ("x", "z", "decision fact only old"),
+            ]),
+            extraction(&[("x", "y", "decision fact shared")]),
+        ],
+        None,
+    );
+    ingest(&state, G, "b1", Some("B")).await;
+    ingest(&state, G, "a1", Some("A")).await;
+    let eff = rfc3339(now_us() - 1_000);
+    assert!(supersede(&state, G, "A", "B", &eff)
+        .await
+        .get("error")
+        .is_none());
+    let believed = found_facts(&state, G, json!({"believed_only": true})).await;
+    assert_eq!(believed, vec!["decision fact shared"]);
+    let all = found_facts(&state, G, json!({})).await;
+    assert!(
+        all.contains(&"decision fact only old".to_string()),
+        "{all:?}"
+    );
+}
+
+/// A future-dated supersession keeps the old document's facts believed until then, and every
+/// chunk of a multi-chunk superseded document is dropped once it takes effect.
+#[tokio::test]
+async fn find_relationships_believed_only_respects_effective_date_and_all_chunks() {
+    let (state, _db, _d) = state_with(
+        vec![
+            one("b1", "decision fact old one"),
+            one("b2", "decision fact old two"),
+            one("a", "decision fact new"),
+        ],
+        None,
+    );
+    ingest(&state, G, "b1", Some("B")).await;
+    ingest(&state, G, "b2", Some("B")).await;
+    ingest(&state, G, "a1", Some("A")).await;
+    let future = rfc3339(now_us() + 3_600_000_000);
+    assert!(supersede(&state, G, "A", "B", &future)
+        .await
+        .get("error")
+        .is_none());
+    let before = found_facts(&state, G, json!({"believed_only": true})).await;
+    assert_eq!(before.len(), 3, "{before:?}");
+
+    // Read as of a time after the effective date: both of B's chunks are no longer believed.
+    let after_us = now_us() + 2 * 3_600_000_000;
+    let after = found_facts(
+        &state,
+        G,
+        json!({"believed_only": true, "as_of": rfc3339(after_us)}),
+    )
+    .await;
+    assert_eq!(after, vec!["decision fact new"]);
+}
+
 /// Edge cases: B ingested after the recording is untouched; another group's same `doc_id` is
 /// untouched; a B with no live episodes can still be recorded.
 #[tokio::test]

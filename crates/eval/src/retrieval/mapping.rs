@@ -69,6 +69,24 @@ pub struct MappedEdges {
     pub unmapped: Vec<String>,
 }
 
+/// Episodes that produced an edge. `knowledge_find_relationships` and
+/// `knowledge_get_edges_by_uuids` do not return an `episodes` field (their `episode_uuids` is the
+/// either-endpoint inference of ADR-0012, empty on these reads); the real provenance is
+/// `belief.producing_episode_uuids`, present whenever the read carries a belief parameter
+/// (ADR-0705; `believed_only: false` annotates without filtering). `episodes` is still honoured
+/// when present. Issue #787: reading only `episodes` mapped every fact to no note at all.
+pub fn edge_producers(e: &Value) -> Vec<&str> {
+    for v in [&e["episodes"], &e["belief"]["producing_episode_uuids"]] {
+        if let Some(a) = v.as_array() {
+            let eps: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
+            if !eps.is_empty() {
+                return eps;
+            }
+        }
+    }
+    Vec::new()
+}
+
 pub fn map_edges(edges: &[Value], episode_note: &HashMap<String, String>) -> MappedEdges {
     let mut out = MappedEdges {
         notes: Vec::new(),
@@ -78,10 +96,7 @@ pub fn map_edges(edges: &[Value], episode_note: &HashMap<String, String>) -> Map
     for e in edges {
         out.evidence
             .push(e["fact"].as_str().unwrap_or("").to_string());
-        let eps: Vec<&str> = e["episodes"]
-            .as_array()
-            .map(|a| a.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
+        let eps = edge_producers(e);
         if eps.is_empty() {
             if let Some(u) = e["uuid"].as_str() {
                 out.unmapped.push(u.to_string());
@@ -121,10 +136,7 @@ pub fn edge_groups(edges: &[Value], episode_note: &HashMap<String, String>) -> V
     edges
         .iter()
         .map(|e| {
-            let set: BTreeSet<String> = e["episodes"]
-                .as_array()
-                .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>())
-                .unwrap_or_default()
+            let set: BTreeSet<String> = edge_producers(e)
                 .into_iter()
                 .filter_map(|ep| episode_note.get(ep).cloned())
                 .collect();
@@ -200,6 +212,16 @@ fn hard_split(s: &str, max_chars: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn edge_producers_prefer_episodes_then_belief_provenance() {
+        let both = json!({"episodes":["ep1"],"belief":{"producing_episode_uuids":["ep2"]}});
+        assert_eq!(edge_producers(&both), vec!["ep1"]);
+        let belief_only = json!({"episodes":null,"episode_uuids":["ep9"],
+            "belief":{"producing_episode_uuids":["ep2","ep3"]}});
+        assert_eq!(edge_producers(&belief_only), vec!["ep2", "ep3"]);
+        assert!(edge_producers(&json!({"episode_uuids":["ep9"]})).is_empty());
+    }
 
     #[test]
     fn source_description_maps_to_note() {

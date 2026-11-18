@@ -416,6 +416,8 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
         ingest_cost.lcg_extraction_requests = map.extraction_requests;
         ingest_cost.lcg_rpc_calls = map.rpc_calls;
         ingest_cost.lcg_unconfirmed_entity_links = map.unconfirmed_entity_links;
+        ingest_cost.lcg_supersessions = map.supersessions;
+        ingest_cost.lcg_superseded_episodes = map.superseded_episodes;
         for id in a.configs.iter().filter(|c| c.starts_with("lcg-")) {
             let r: Box<dyn Retriever> = match id.as_str() {
                 "lcg-passages" => Box::new(lcg::LcgPassages {
