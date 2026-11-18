@@ -662,7 +662,7 @@ mod tests {
     fn same_text_different_role_does_not_collide() {
         let cache = EmbeddingCache::new();
         let calls = AtomicUsize::new(0);
-        let mut get = |role: EmbedRole, v: f32| {
+        let get = |role: EmbedRole, v: f32| {
             cache
                 .get_or_compute(MODEL_A, DIM_A, role, "search_x: ", "same", || {
                     calls.fetch_add(1, Ordering::SeqCst);

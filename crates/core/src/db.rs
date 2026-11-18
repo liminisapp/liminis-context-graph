@@ -4354,11 +4354,20 @@ impl<'db> Conn<'db> {
     /// compared against another group's row (FR-008 of #378) — this always reads exactly one
     /// group's `WalPosition` row, selected by its primary key.
     pub fn get_wal_position(&self, group_id: &str) -> Result<WalPositionRecord, Error> {
-        let rows = self.query_params(
+        const Q: &str =
             "MATCH (w:WalPosition {id: $group_id}) RETURN w.applied_seq, w.generation, \
-             w.embedding_model, w.embedding_dim, w.embedding_doc_prefix",
-            serde_json::json!({ "group_id": group_id }),
-        )?;
+             w.embedding_model, w.embedding_dim, w.embedding_doc_prefix";
+        let params = serde_json::json!({ "group_id": group_id });
+        let rows = match self.query_params(Q, params.clone()) {
+            Ok(rows) => rows,
+            // A database opened without `init_schema` (a legacy file reached by a path that
+            // bypasses the open-time migration) lacks the #790 column: add it and retry once.
+            Err(e) if e.to_string().contains("embedding_doc_prefix") => {
+                self.ensure_wal_position_doc_prefix_column();
+                self.query_params(Q, params)?
+            }
+            Err(e) => return Err(e),
+        };
         Ok(rows
             .into_iter()
             .next()
@@ -4395,11 +4404,18 @@ impl<'db> Conn<'db> {
         generation: Option<&str>,
         embedding_identity: Option<&crate::embedding_cache::EmbeddingIdentity>,
     ) -> Result<(), Error> {
-        let mut prepared = self.inner.prepare(
-            "MERGE (w:WalPosition {id: $group_id}) SET w.applied_seq = $seq, \
+        const SET_Q: &str = "MERGE (w:WalPosition {id: $group_id}) SET w.applied_seq = $seq, \
              w.generation = $generation, w.embedding_model = $embedding_model, \
-             w.embedding_dim = $embedding_dim, w.embedding_doc_prefix = $embedding_doc_prefix",
-        )?;
+             w.embedding_dim = $embedding_dim, w.embedding_doc_prefix = $embedding_doc_prefix";
+        let mut prepared = match self.inner.prepare(SET_Q) {
+            Ok(p) => p,
+            // See `get_wal_position`: self-heal a pre-#790 schema, then retry once.
+            Err(e) if e.to_string().contains("embedding_doc_prefix") => {
+                self.ensure_wal_position_doc_prefix_column();
+                self.inner.prepare(SET_Q)?
+            }
+            Err(e) => return Err(e.into()),
+        };
         let (embedding_model, embedding_dim, embedding_doc_prefix) = match embedding_identity {
             Some(id) => (
                 Value::String(id.model.clone()),
@@ -4428,6 +4444,21 @@ impl<'db> Conn<'db> {
         ];
         self.inner.execute(&mut prepared, bound)?;
         Ok(())
+    }
+
+    /// Adds `WalPosition.embedding_doc_prefix` if a legacy schema lacks it (issue #790). Goes
+    /// through `inner.query` directly so the DDL is never recorded into `executed_mutations` and
+    /// re-logged to the WAL. Best-effort: a failure surfaces on the retried statement.
+    fn ensure_wal_position_doc_prefix_column(&self) {
+        if self
+            .inner
+            .query("MATCH (n:WalPosition) WHERE n.id = '_probe_' RETURN n.embedding_doc_prefix LIMIT 0")
+            .is_err()
+        {
+            let _ = self
+                .inner
+                .query("ALTER TABLE WalPosition ADD embedding_doc_prefix STRING");
+        }
     }
 
     /// The live-write variant of [`Self::set_wal_position`] (issue #790, SC-004): stamps
@@ -6183,6 +6214,30 @@ mod applied_seq_tests {
             conn.get_wal_position("g").unwrap().embedding_doc_prefix,
             None
         );
+    }
+
+    /// A legacy `WalPosition` table without `embedding_doc_prefix` (reached by a path that bypasses
+    /// the open-time migration) self-heals on first use instead of failing every position read.
+    #[test]
+    fn wal_position_self_heals_a_pre_790_schema() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.raw_query(
+            "CREATE NODE TABLE WalPosition (id STRING PRIMARY KEY, applied_seq INT64, \
+             generation STRING, embedding_model STRING, embedding_dim INT64)",
+        )
+        .unwrap();
+        // Read on the legacy schema works (adds the column), and a write then round-trips.
+        assert_eq!(
+            conn.get_wal_position("g").unwrap(),
+            WalPositionRecord::default()
+        );
+        conn.set_wal_position("g", 3, None, Some(&ident("m", 4, "p: ")))
+            .unwrap();
+        let rec = conn.get_wal_position("g").unwrap();
+        assert_eq!(rec.applied_seq, Some(3));
+        assert_eq!(rec.embedding_doc_prefix.as_deref(), Some("p: "));
     }
 
     /// #790 SC-004: a live write must not silently re-stamp a recorded, different document
