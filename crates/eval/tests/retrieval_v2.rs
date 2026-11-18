@@ -1606,13 +1606,88 @@ fn partial_render_runs_keep_the_recorded_model_and_prompt() {
     let prev = meta_for(&g.skeleton, &text, "model-a");
     // Same model and prompt version: fine. Different model: refused, naming both.
     let same = prev;
-    assert!(render::check_partial_run_provenance(&same, "model-a").is_ok());
-    let e = render::check_partial_run_provenance(&same, "model-b").unwrap_err();
+    let h = same.skeleton_hash.clone();
+    assert!(render::check_partial_run_provenance(&same, "model-a", &h).is_ok());
+    let e = render::check_partial_run_provenance(&same, "model-b", &h).unwrap_err();
     assert!(e.contains("model-a") && e.contains("model-b"), "{e}");
     let old_prompt = RenderMeta {
         prompt_version: "old-prompt".into(),
-        ..same
+        ..same.clone()
     };
-    let e = render::check_partial_run_provenance(&old_prompt, "model-a").unwrap_err();
+    let e = render::check_partial_run_provenance(&old_prompt, "model-a", &h).unwrap_err();
     assert!(e.contains("old-prompt"), "{e}");
+    // A regenerated skeleton: the notes a partial run keeps would come from the old one.
+    let e = render::check_partial_run_provenance(&same, "model-a", "0123456789abcdef").unwrap_err();
+    assert!(
+        e.contains("skeleton") && e.contains("without --resume"),
+        "{e}"
+    );
+}
+
+#[test]
+fn resume_skips_questions_already_worded_and_only_rejects_unknown_ids() {
+    let g = generator::generate(&scenario()).unwrap();
+    // A resume with everything already rendered has nothing left, questions included.
+    let (nc, qc) = render::plan_calls(
+        &g.skeleton,
+        &g.template,
+        &render::Options {
+            resume: true,
+            ..opts()
+        },
+    );
+    assert_eq!((nc, qc), (0, 0));
+    // With only the notes present (a crash before questions were written) the question calls remain.
+    let notes_only = Rendered {
+        notes: g.template.notes.clone(),
+        questions: Default::default(),
+    };
+    let (nc, qc) = render::plan_calls(
+        &g.skeleton,
+        &notes_only,
+        &render::Options {
+            resume: true,
+            ..opts()
+        },
+    );
+    assert_eq!(nc, 0);
+    assert!(qc > 0);
+    // --only: a known id is fine, a typo is an error naming it.
+    let ok: BTreeSet<String> = [g.skeleton.notes[0].id.clone()].into_iter().collect();
+    assert!(render::check_only_ids(&g.skeleton, &ok).is_ok());
+    let bad: BTreeSet<String> = ["no-such-note".to_string()].into_iter().collect();
+    let e = render::check_only_ids(&g.skeleton, &bad).unwrap_err();
+    assert!(e.contains("no-such-note"), "{e}");
+}
+
+#[test]
+fn a_decimal_value_stays_in_one_sentence_for_the_paraphrase_check() {
+    // A rendered note that copies a decimal-valued fact sentence must still be caught.
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    let Some((q, n, x)) = sk.questions.iter().find_map(|q| {
+        if q.category != "paraphrase" {
+            return None;
+        }
+        let rel = q.relevant_notes.first()?;
+        let n = sk.note(&rel.note)?;
+        let x = q
+            .basis
+            .first()
+            .and_then(|b| n.facts.iter().find(|x| &x.statement == b))?;
+        x.value.contains('.').then_some((q, n, x))
+    }) else {
+        return; // no decimal-valued paraphrase fact in this scenario
+    };
+    let mut r = check::load_rendered(template_dir()).unwrap();
+    let body = r.notes.get(&n.id).unwrap().clone();
+    r.notes
+        .insert(n.id.clone(), format!("{body}\n\n{}\n", x.statement));
+    r.questions.insert(q.id.clone(), x.statement.clone());
+    let f = check::check_rendered(&sk, &r);
+    assert!(
+        f.errors.iter().any(|e| e.contains(&q.id)
+            && (e.contains("sentence carrying the fact") || e.contains("content words"))),
+        "{}",
+        check::describe(&f)
+    );
 }

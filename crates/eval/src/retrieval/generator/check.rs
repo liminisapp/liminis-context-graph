@@ -47,11 +47,13 @@ fn words(s: &str) -> usize {
     s.split_whitespace().count()
 }
 
-/// Sentences of `text` (split after `.`, `!`, `?` and at line breaks).
+/// Sentences of `text`: split after `.`, `!` or `?` only when followed by whitespace or the end of
+/// the text (so a decimal such as `7.4` stays whole), and at line breaks.
 fn sentences(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
-    for ch in text.chars() {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
         if ch == '\n' {
             if !cur.trim().is_empty() {
                 out.push(std::mem::take(&mut cur));
@@ -60,7 +62,7 @@ fn sentences(text: &str) -> Vec<String> {
             continue;
         }
         cur.push(ch);
-        if matches!(ch, '.' | '!' | '?') {
+        if matches!(ch, '.' | '!' | '?') && chars.peek().is_none_or(|n| n.is_whitespace()) {
             out.push(std::mem::take(&mut cur));
         }
     }
@@ -397,6 +399,12 @@ fn check_paraphrase(sk: &Skeleton, r: &Rendered, q: &SkQuestion, text: &str, f: 
             .into_iter()
             .filter(|s| has(s, &x.value))
             .collect();
+        if carrying.is_empty() {
+            f.errors.push(format!(
+                "question '{}': no sentence of note '{}' carries the fact value '{}', so the paraphrase overlap cannot be checked",
+                q.id, rel.note, x.value
+            ));
+        }
         let worst = carrying
             .iter()
             .map(|s| overlap(text, s))

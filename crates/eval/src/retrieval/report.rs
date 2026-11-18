@@ -362,13 +362,20 @@ impl Report {
         cat: Option<Category>,
         metric: (&str, QGet),
     ) -> Option<PairedDiff> {
-        let label = format!("{}|{}|{}|{}", a.0, b.0, Self::cat_label(cat), metric.0);
-        paired_diff_ci(
-            &Self::series(a.1, cat, metric.1),
-            &Self::series(b.1, cat, metric.1),
+        // Every route to a pair (the comparison table, the headline verdict, H1/H2) must read the
+        // same interval, so the bootstrap always runs in configuration order and the result is
+        // flipped for display when the caller asked for the opposite orientation.
+        let pos = |id: &str| self.configs.iter().position(|c| c.id == id);
+        let flipped = pos(a.0) > pos(b.0);
+        let (x, y) = if flipped { (b, a) } else { (a, b) };
+        let label = format!("{}|{}|{}|{}", x.0, y.0, Self::cat_label(cat), metric.0);
+        let d = paired_diff_ci(
+            &Self::series(x.1, cat, metric.1),
+            &Self::series(y.1, cat, metric.1),
             seed_for(self.meta.bootstrap.seed, &label),
             self.meta.bootstrap.resamples,
-        )
+        )?;
+        Some(if flipped { d.flipped() } else { d })
     }
 
     /// Paired comparison of every ordered-by-config pair of ran configurations on one metric.
@@ -1363,6 +1370,29 @@ mod tests {
         assert!(!md.contains(secret) && !js.contains(secret), "{md}\n{js}");
         assert!(md.contains("all 3 queries failed; detail withheld"), "{md}");
         assert!(js.contains("all 3 queries failed; detail withheld"), "{js}");
+    }
+
+    #[test]
+    fn a_pair_reads_the_same_interval_from_either_side() {
+        let r = report();
+        let ran = r.ran();
+        assert!(ran.len() >= 2);
+        let (a, b) = (
+            (ran[0].0.id.as_str(), ran[0].1),
+            (ran[1].0.id.as_str(), ran[1].1),
+        );
+        for cat in [None, Some(Category::Temporal)] {
+            let ab = r.paired(a, b, cat, ("ndcg", NDCG));
+            let ba = r.paired(b, a, cat, ("ndcg", NDCG));
+            match (ab, ba) {
+                (Some(x), Some(y)) => {
+                    assert_eq!(x.flipped(), y, "{cat:?}");
+                    assert_eq!(x.verdict, y.flipped().verdict);
+                }
+                (None, None) => {}
+                other => panic!("one orientation read a pair the other could not: {other:?}"),
+            }
+        }
     }
 
     #[test]

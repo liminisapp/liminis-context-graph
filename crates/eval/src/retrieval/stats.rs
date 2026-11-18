@@ -146,6 +146,23 @@ pub struct PairedDiff {
     pub verdict: Verdict,
 }
 
+impl PairedDiff {
+    /// The same comparison seen from the other side: `b − a`.
+    pub fn flipped(self) -> Self {
+        Self {
+            n: self.n,
+            mean_diff: -self.mean_diff,
+            lo: -self.hi,
+            hi: -self.lo,
+            verdict: match self.verdict {
+                Verdict::AHigher => Verdict::BHigher,
+                Verdict::BHigher => Verdict::AHigher,
+                Verdict::Noise => Verdict::Noise,
+            },
+        }
+    }
+}
+
 /// Paired per-question bootstrap on `a − b`. The two series are **joined by question id** (a
 /// configuration with failed queries has fewer entries, so positional pairing would be wrong); only
 /// ids present in both count. `None` when fewer than 2 questions are shared.

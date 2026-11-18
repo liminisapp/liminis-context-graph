@@ -367,7 +367,7 @@ pub fn plan_calls(sk: &Skeleton, existing: &Rendered, o: &Options) -> (usize, us
     }
     let mut by_cat: BTreeMap<&str, usize> = BTreeMap::new();
     for q in &sk.questions {
-        if wanted(&q.id, false) {
+        if wanted(&q.id, existing.questions.contains_key(&q.id)) {
             *by_cat.entry(q.category.as_str()).or_default() += 1;
         }
     }
@@ -445,7 +445,7 @@ pub async fn render_all(
     // Questions, batched per category.
     let mut by_cat: BTreeMap<&str, Vec<&SkQuestion>> = BTreeMap::new();
     for q in &sk.questions {
-        if wanted(&q.id, false) {
+        if wanted(&q.id, out.questions.contains_key(&q.id)) {
             by_cat.entry(q.category.as_str()).or_default().push(q);
         }
     }
@@ -554,7 +554,17 @@ pub fn update_review(dir: &Path, questions_text: &str) -> Result<(), String> {
 /// A partial run (`--resume` / `--only`) keeps most of the previously rendered prose, so it must use
 /// the model and prompt version `render.json` already records; otherwise the untouched notes would
 /// be mislabelled.
-pub fn check_partial_run_provenance(prev: &RenderMeta, model: &str) -> Result<(), String> {
+pub fn check_partial_run_provenance(
+    prev: &RenderMeta,
+    model: &str,
+    skeleton_hash: &str,
+) -> Result<(), String> {
+    if prev.skeleton_hash != skeleton_hash {
+        return Err(format!(
+            "render.json was rendered from skeleton {} but skeleton.json is now {skeleton_hash}; the notes this partial run (--resume/--only) keeps would come from the old skeleton. Render the whole corpus again without --resume/--only",
+            prev.skeleton_hash
+        ));
+    }
     if prev.render_model == model && prev.prompt_version == PROMPT_VERSION {
         return Ok(());
     }
@@ -562,6 +572,33 @@ pub fn check_partial_run_provenance(prev: &RenderMeta, model: &str) -> Result<()
         "render.json records model '{}' with prompt '{}', but this partial run (--resume/--only) would use '{model}' with '{PROMPT_VERSION}'; the untouched notes would be mislabelled. Re-run with --model {} (and the matching prompt version), or render the whole corpus again without --resume/--only",
         prev.render_model, prev.prompt_version, prev.render_model
     ))
+}
+
+/// Every `--only` id must be a note or question of the skeleton; a typo would otherwise make a
+/// zero-call run that still rewrites `render.json`.
+pub fn check_only_ids(sk: &Skeleton, only: &BTreeSet<String>) -> Result<(), String> {
+    let known: BTreeSet<&str> = sk
+        .notes
+        .iter()
+        .map(|n| n.id.as_str())
+        .chain(sk.questions.iter().map(|q| q.id.as_str()))
+        .collect();
+    let unknown: Vec<&str> = only
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !known.contains(id))
+        .collect();
+    if only.is_empty() {
+        return Err("--only needs at least one note or question id".into());
+    }
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "--only names ids that are not in the skeleton: {}",
+            unknown.join(", ")
+        ))
+    }
 }
 
 pub async fn run_cli(args: &[String]) -> i32 {
@@ -635,6 +672,9 @@ async fn run(args: &[String]) -> Result<i32, String> {
         )
     })?;
     let sk = Skeleton::from_json(&skeleton_text)?;
+    if let Some(only) = &o.only {
+        check_only_ids(&sk, only)?;
+    }
     let existing = if o.resume || o.only.is_some() {
         check::load_rendered_partial(dir)
     } else {
@@ -653,7 +693,7 @@ async fn run(args: &[String]) -> Result<i32, String> {
         None
     };
     if let Some(prev) = &previous {
-        check_partial_run_provenance(prev, &model)?;
+        check_partial_run_provenance(prev, &model, &skeleton_hash(&skeleton_text))?;
     }
     let prior_calls = previous.as_ref().map_or(0, |p| p.model_calls);
     let (nc, qc) = plan_calls(&sk, &existing, &o);
