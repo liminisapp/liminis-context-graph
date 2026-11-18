@@ -790,6 +790,7 @@ mod tests {
             questions_version: "q".into(),
             questions_hash: "qh".into(),
             notes: 0,
+            stats: CorpusStats::default(),
             category_counts: BTreeMap::new(),
             qmd_index: "i".into(),
             needs_lcg: true,
