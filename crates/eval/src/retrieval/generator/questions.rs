@@ -127,6 +127,58 @@ pub fn build(
     Ok(c.out)
 }
 
+/// Every non-negative question's relevant set is completed from the skeleton's note facts: any note
+/// that states one of the question's `basis` facts (any hop, for a multi-hop question) is relevant
+/// at gain 1 unless the question already lists it. Without this a system that returns a correct
+/// near-duplicate (a recap, a digest, a filed answer) is scored wrong for it.
+///
+/// A note "states" a basis fact when one of its facts has the identical statement, or the same
+/// entity, attribute and value (a restatement carries the same fact in other words). Never added:
+/// `derived` notes (restating pages, scored separately per ADR-0788), a temporal question's `stale`
+/// notes, and notes whose fact is an earlier value of a revised decision. The last needs no extra
+/// rule: such a note carries a different value, so it cannot match the basis fact's value.
+/// New notes are appended in manifest order, so the output is deterministic.
+pub fn complete_relevance(questions: &mut [SkQuestion], notes: &[SkNote]) {
+    for q in questions.iter_mut().filter(|q| !q.negative) {
+        // The facts the basis statements name, resolved against any note that carries them.
+        let mut targets: Vec<(&str, &str, &str)> = Vec::new();
+        for b in &q.basis {
+            if let Some(f) = notes
+                .iter()
+                .flat_map(|n| n.facts.iter())
+                .find(|f| &f.statement == b)
+            {
+                targets.push((&f.entity, &f.attribute, &f.value));
+            }
+        }
+        if targets.is_empty() {
+            continue;
+        }
+        let mut add: Vec<SkRel> = Vec::new();
+        for n in notes {
+            if n.origin == "derived"
+                || q.stale.contains(&n.id)
+                || q.relevant_notes.iter().any(|r| r.note == n.id)
+            {
+                continue;
+            }
+            let states = n.facts.iter().any(|f| {
+                q.basis.contains(&f.statement)
+                    || targets
+                        .iter()
+                        .any(|(e, a, v)| f.entity == *e && f.attribute == *a && f.value == *v)
+            });
+            if states {
+                add.push(SkRel {
+                    note: n.id.clone(),
+                    gain: 1,
+                });
+            }
+        }
+        q.relevant_notes.extend(add);
+    }
+}
+
 fn direct(c: &mut Ctx, sc: &Scenario, root: &Rng) -> Result<(), String> {
     let mut r = root.fork("q-direct");
     let n_internal = sc.questions.direct.saturating_sub(sc.external_direct);

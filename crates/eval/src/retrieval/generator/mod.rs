@@ -110,12 +110,14 @@ pub fn generate(sc: &Scenario) -> Result<Generated, String> {
     let root = Rng::new(sc.seed);
     let mut w = World::build(sc, &root)?;
     let corpus = notes::build(sc, &mut w, &root)?;
-    let qs = questions::build(sc, &w, &corpus, &root)?;
+    let mut qs = questions::build(sc, &w, &corpus, &root)?;
 
     // Manifest order = ingest order: by recording date, creation order breaking ties. A derived
     // or answer note is always dated after the notes it cites, so citations always point earlier.
     let mut ordered: Vec<&notes::GenNote> = corpus.notes.iter().collect();
     ordered.sort_by_key(|n| (n.day, n.seq));
+    let sk_notes: Vec<SkNote> = ordered.iter().map(|n| n.sk.clone()).collect();
+    questions::complete_relevance(&mut qs, &sk_notes);
     let skeleton = Skeleton {
         skeleton_version: SKELETON_VERSION,
         corpus_version: sc.corpus_version.clone(),
@@ -124,7 +126,7 @@ pub fn generate(sc: &Scenario) -> Result<Generated, String> {
         seed: sc.seed,
         chunk_max_tokens: sc.chunk_max_tokens,
         entities: w.entities.iter().map(notes::entity_sk).collect(),
-        notes: ordered.iter().map(|n| n.sk.clone()).collect(),
+        notes: sk_notes,
         supersedes: corpus
             .supersedes
             .iter()

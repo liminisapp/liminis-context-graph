@@ -244,6 +244,176 @@ fn render_checks_enforce_the_negative_and_paraphrase_floors_the_tests_assert() {
     );
 }
 
+// ── relevance labels are complete (#788 maintainer review) ─────────────────────────
+
+/// Skeleton notes that carry one of `q`'s basis facts, by identical statement or by the same
+/// entity, attribute and value, other than `derived` and stale notes and those already relevant.
+fn unmarked_fact_carriers(
+    sk: &Skeleton,
+    q: &lcg_eval::retrieval::generator::skeleton::SkQuestion,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for b in &q.basis {
+        let Some(t) = sk
+            .notes
+            .iter()
+            .flat_map(|n| n.facts.iter())
+            .find(|f| &f.statement == b)
+        else {
+            continue;
+        };
+        for n in &sk.notes {
+            if n.origin == "derived"
+                || q.stale.contains(&n.id)
+                || q.relevant_notes.iter().any(|r| r.note == n.id)
+            {
+                continue;
+            }
+            if n.facts.iter().any(|f| {
+                &f.statement == b
+                    || (f.entity == t.entity && f.attribute == t.attribute && f.value == t.value)
+            }) {
+                out.push(format!("{} <- {}", q.id, n.id));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn every_note_stating_a_basis_fact_is_relevant_except_derived_and_stale_notes() {
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    let mut missing = Vec::new();
+    for q in sk.questions.iter().filter(|q| !q.negative) {
+        missing.extend(unmarked_fact_carriers(&sk, q));
+        for r in &q.relevant_notes {
+            let n = sk.note(&r.note).unwrap();
+            assert_ne!(n.origin, "derived", "{}: '{}' is derived", q.id, r.note);
+            assert!(!q.stale.contains(&r.note), "{}: stale note relevant", q.id);
+        }
+    }
+    assert!(missing.is_empty(), "unmarked carriers: {missing:?}");
+    // The maintainer's multi-hop findings: a filed answer or recap stating a hop fact is gain 1
+    // beside the gain-2 hop notes, and a gain-2 note is never downgraded.
+    let q = sk.questions.iter().find(|q| q.id == "multihop-22").unwrap();
+    let gain = |id: &str| {
+        q.relevant_notes
+            .iter()
+            .find(|r| r.note == id)
+            .map(|r| r.gain)
+    };
+    assert_eq!(gain("recap-04-orbit-core"), Some(1));
+    assert_eq!(gain("project-tern-core-1"), Some(2));
+    let q = sk.questions.iter().find(|q| q.id == "multihop-25").unwrap();
+    assert!(q
+        .relevant_notes
+        .iter()
+        .any(|r| r.note == "answer-13-cedar-core-budget" && r.gain == 1));
+}
+
+#[test]
+fn the_relevance_check_flags_an_unlisted_note_that_states_a_basis_fact() {
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    let mut r = check::load_rendered(template_dir()).unwrap();
+    let base = check::check_rendered(&sk, &r);
+    assert!(base.errors.is_empty(), "{}", check::describe(&base));
+    // A direct question whose basis fact we then also state in an unrelated primary note that
+    // names the same entity.
+    let q = sk.questions.iter().find(|q| q.id == "direct-01").unwrap();
+    let statement = &q.basis[0];
+    let fact = sk
+        .notes
+        .iter()
+        .flat_map(|n| n.facts.iter())
+        .find(|f| &f.statement == statement)
+        .unwrap();
+    let carrier = sk
+        .notes
+        .iter()
+        .find(|n| {
+            n.origin == "primary"
+                && n.kind == "journal"
+                && !q.relevant_notes.iter().any(|x| x.note == n.id)
+                && n.entities.iter().any(|e| e.name == fact.entity)
+        })
+        .or_else(|| {
+            sk.notes.iter().find(|n| {
+                n.origin == "primary"
+                    && !q.relevant_notes.iter().any(|x| x.note == n.id)
+                    && n.entities.iter().any(|e| e.name == fact.entity)
+            })
+        })
+        .expect("a primary note about the same entity outside the relevant set");
+    let derived = sk
+        .notes
+        .iter()
+        .find(|n| n.origin == "derived" && n.entities.iter().any(|e| e.name == fact.entity));
+    let original = r.notes.get(&carrier.id).unwrap().clone();
+    r.notes
+        .insert(carrier.id.clone(), format!("{original}\n\n{statement}\n"));
+    let f = check::check_rendered(&sk, &r);
+    assert!(
+        f.errors
+            .iter()
+            .any(|e| e.contains(&q.id) && e.contains(&carrier.id) && e.contains("relevant_notes")),
+        "{}",
+        check::describe(&f)
+    );
+    // The same sentence in a derived note is a restatement, which is scored separately.
+    r.notes.insert(carrier.id.clone(), original);
+    if let Some(d) = derived {
+        let body = r.notes.get(&d.id).unwrap().clone();
+        r.notes
+            .insert(d.id.clone(), format!("{body}\n\n{statement}\n"));
+        let f = check::check_rendered(&sk, &r);
+        assert!(
+            !f.errors.iter().any(|e| e.contains("not in relevant_notes")),
+            "{}",
+            check::describe(&f)
+        );
+    }
+}
+
+#[test]
+fn a_shared_value_in_another_context_is_not_a_stated_fact() {
+    // `9` in "9 December 2027" must not make a note that mentions the entity and the word "team"
+    // state "The Helix Core team consists of 9 engineers."
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    let mut r = check::load_rendered(template_dir()).unwrap();
+    let q = sk.questions.iter().find(|q| q.id == "direct-05").unwrap();
+    let carrier = sk
+        .notes
+        .iter()
+        .find(|n| {
+            n.origin == "primary"
+                && !q.relevant_notes.iter().any(|x| x.note == n.id)
+                && n.entities.iter().any(|e| e.name == "Helix Core")
+        })
+        .unwrap();
+    let body = r.notes.get(&carrier.id).unwrap().clone();
+    r.notes.insert(
+        carrier.id.clone(),
+        format!("{body}\n\nHelix Core held its quarterly retrospective on 9 December 2027, and the notes are in the team folder.\n"),
+    );
+    let f = check::check_rendered(&sk, &r);
+    assert!(
+        !f.errors.iter().any(|e| e.contains("not in relevant_notes")),
+        "{}",
+        check::describe(&f)
+    );
+}
+
+#[test]
+fn completing_relevance_leaves_the_corpus_hash_and_so_the_cassette_alone() {
+    if !rendered_exists() {
+        return;
+    }
+    // Only questions changed: the notes and manifest, and so the extraction cassette's inputs, are
+    // the ones it was recorded against (README: corpus hash da41ea92487ba4fc).
+    let fx = fixture::load(&v2_dir()).unwrap();
+    assert_eq!(fx.corpus_hash, "da41ea92487ba4fc");
+}
+
 // ── SC-001: shape (checked on every fixture under test) ──────────────────────────
 
 #[test]
@@ -284,7 +454,7 @@ fn v2_loads_and_has_the_required_scale_and_mix() {
             );
         }
         assert_eq!(fx.manifest.corpus_version, "meridian-notebook-2");
-        assert_eq!(fx.questions_version, "meridian-questions-2");
+        assert_eq!(fx.questions_version, "meridian-questions-3");
     }
 }
 
@@ -777,12 +947,14 @@ fn update_review_fills_a_pending_record_and_never_touches_a_reviewed_one() {
     let qs = "{\"id\":\"direct-01\",\"category\":\"direct\",\"text\":\"Who owns X?\"}\n";
     let pending = json!({"status": "pending", "questions_hash": null, "sample": [{"id": "direct-01", "text": null, "ground_truth_correct": null}]});
     std::fs::write(d.path().join("review.json"), pending.to_string()).unwrap();
-    render::update_review(d.path(), qs).unwrap();
+    render::update_review(d.path(), qs, "abc123", "q-9").unwrap();
     let r: Value =
         serde_json::from_str(&std::fs::read_to_string(d.path().join("review.json")).unwrap())
             .unwrap();
     assert_eq!(r["questions_hash"], fixture::questions_hash_of(qs).as_str());
     assert_eq!(r["sample"][0]["text"], "Who owns X?");
+    assert_eq!(r["skeleton_hash"], "abc123");
+    assert_eq!(r["questions_version"], "q-9");
     assert!(
         r["sample"][0]["ground_truth_correct"].is_null(),
         "verdicts stay a human's"
@@ -791,7 +963,7 @@ fn update_review_fills_a_pending_record_and_never_touches_a_reviewed_one() {
     let reviewed = json!({"status": "reviewed", "questions_hash": "0000000000000000", "sample": [{"id": "direct-01", "ground_truth_correct": true}]});
     std::fs::write(d.path().join("review.json"), reviewed.to_string()).unwrap();
     let before = std::fs::read_to_string(d.path().join("review.json")).unwrap();
-    let e = render::update_review(d.path(), qs).unwrap_err();
+    let e = render::update_review(d.path(), qs, "abc123", "q-9").unwrap_err();
     assert!(e.contains("re-review"), "{e}");
     assert_eq!(
         std::fs::read_to_string(d.path().join("review.json")).unwrap(),

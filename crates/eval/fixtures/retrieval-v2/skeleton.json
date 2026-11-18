@@ -1,7 +1,7 @@
 {
   "skeleton_version": 1,
   "corpus_version": "meridian-notebook-2",
-  "questions_version": "meridian-questions-2",
+  "questions_version": "meridian-questions-3",
   "description": "Synthetic notebook (fictional 'Meridian' cooperative) shaped like a Liminis workspace: human notes, clipped articles, agent-maintained pages that restate them, filed answers, near-duplicates, and decisions revised several times (some by explicit supersession, some by plain later notes). Generated deterministically from scenario.json by `lcg-eval retrieval-gen`; contains no real or private data.",
   "seed": 788,
   "chunk_max_tokens": 900,
@@ -18433,6 +18433,10 @@
         {
           "note": "vendor-lumen-supply-2",
           "gain": 2
+        },
+        {
+          "note": "answer-21-lumen-supply-uptime",
+          "gain": 1
         }
       ],
       "names": [
@@ -18525,6 +18529,10 @@
         {
           "note": "vendor-fable-supply-1",
           "gain": 2
+        },
+        {
+          "note": "answer-29-fable-supply-price",
+          "gain": 1
         }
       ],
       "names": [
@@ -18571,6 +18579,10 @@
         {
           "note": "vendor-nimbus-supply-2",
           "gain": 2
+        },
+        {
+          "note": "answer-08-nimbus-supply-contact",
+          "gain": 1
         }
       ],
       "names": [
@@ -18594,6 +18606,10 @@
         {
           "note": "vendor-nimbus-supply-2",
           "gain": 2
+        },
+        {
+          "note": "answer-14-nimbus-supply-uptime",
+          "gain": 1
         }
       ],
       "names": [
@@ -18804,6 +18820,10 @@
         {
           "note": "project-tern-core-1",
           "gain": 2
+        },
+        {
+          "note": "answer-13-cedar-core-budget",
+          "gain": 1
         }
       ],
       "names": [
@@ -18828,6 +18848,10 @@
         {
           "note": "project-nimbus-core-1",
           "gain": 2
+        },
+        {
+          "note": "recap-04-orbit-core",
+          "gain": 1
         }
       ],
       "names": [
@@ -18852,6 +18876,10 @@
         {
           "note": "project-lumen-core-1",
           "gain": 2
+        },
+        {
+          "note": "answer-13-cedar-core-budget",
+          "gain": 1
         }
       ],
       "names": [
@@ -18876,6 +18904,10 @@
         {
           "note": "project-orbit-core-1",
           "gain": 2
+        },
+        {
+          "note": "recap-04-orbit-core",
+          "gain": 1
         }
       ],
       "names": [
@@ -18948,6 +18980,14 @@
         {
           "note": "project-juniper-core-1",
           "gain": 2
+        },
+        {
+          "note": "answer-13-cedar-core-budget",
+          "gain": 1
+        },
+        {
+          "note": "answer-22-juniper-core-budget",
+          "gain": 1
         }
       ],
       "names": [
@@ -18972,6 +19012,10 @@
         {
           "note": "project-sable-core-1",
           "gain": 2
+        },
+        {
+          "note": "answer-22-juniper-core-budget",
+          "gain": 1
         }
       ],
       "names": [
@@ -19020,6 +19064,10 @@
         {
           "note": "project-sable-core-1",
           "gain": 2
+        },
+        {
+          "note": "answer-13-cedar-core-budget",
+          "gain": 1
         }
       ],
       "names": [

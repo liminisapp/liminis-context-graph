@@ -406,8 +406,71 @@ pub fn check_rendered(sk: &Skeleton, r: &Rendered) -> Findings {
         if q.negative {
             check_negative(sk, r, q, text, &mut f);
         }
+        check_relevance_complete(sk, r, q, &mut f);
     }
     f
+}
+
+/// Share of a basis statement's content words a rendered sentence must carry to count as stating
+/// that fact (the same floor as an evidence key fact).
+const STATES_FACT_MIN_OVERLAP: f64 = 0.6;
+
+/// No note outside a question's `relevant_notes` may state one of the question's basis facts, or a
+/// system returning it is scored wrong for a correct result. Exempt: `derived` notes (restating
+/// pages, scored separately per ADR-0788) and a temporal question's `stale` notes. "States" means a
+/// sentence of the rendered note names the fact's entity, carries its value as a whole token and
+/// shares at least [`STATES_FACT_MIN_OVERLAP`] of the basis statement's content words other than the
+/// entity's own name.
+fn check_relevance_complete(sk: &Skeleton, r: &Rendered, q: &SkQuestion, f: &mut Findings) {
+    if q.negative {
+        return;
+    }
+    for b in &q.basis {
+        let Some(fact) = sk
+            .notes
+            .iter()
+            .flat_map(|n| n.facts.iter())
+            .find(|x| &x.statement == b)
+        else {
+            continue; // a basis that is not a note fact (temporal) has nothing to look up
+        };
+        for n in &sk.notes {
+            if n.origin == "derived"
+                || q.stale.contains(&n.id)
+                || q.relevant_notes.iter().any(|x| x.note == n.id)
+                || !(n.entities.iter().any(|e| e.name == fact.entity)
+                    || n.facts.iter().any(|x| x.entity == fact.entity))
+            {
+                continue;
+            }
+            let Some(body) = r.notes.get(&n.id) else {
+                continue;
+            };
+            // The entity's own name words match any sentence about it, so the wording overlap is
+            // measured on the rest of the statement ("team consists engineers" for "The Helix Core
+            // team consists of 9 engineers."); with nothing left, the entity and value decide.
+            let entity_words = content_words(&fact.entity);
+            let rest: Vec<String> = content_words(b)
+                .into_iter()
+                .filter(|w| !entity_words.contains(w))
+                .collect();
+            let states = sentences(body).iter().any(|s| {
+                if !(has(s, &fact.entity) && has_value(s, &fact.value)) {
+                    return false;
+                }
+                let sw = content_words(s);
+                rest.is_empty()
+                    || rest.iter().filter(|w| sw.contains(*w)).count() as f64 / rest.len() as f64
+                        >= STATES_FACT_MIN_OVERLAP
+            });
+            if states {
+                f.errors.push(format!(
+                    "question '{}': note '{}' states the basis fact '{b}' but is not in relevant_notes",
+                    q.id, n.id
+                ));
+            }
+        }
+    }
 }
 
 fn check_paraphrase(sk: &Skeleton, r: &Rendered, q: &SkQuestion, text: &str, f: &mut Findings) {

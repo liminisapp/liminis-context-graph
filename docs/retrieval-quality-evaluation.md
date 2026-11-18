@@ -216,7 +216,11 @@ question is 0.025 of recall. Its content and hashes never change.
 - **Near-duplicates:** each entity's facts are restated by its derived page and, for 16 facts, by a
   primary standup recap. Ground truth lists the recap at gain 1 beside the source at gain 2; the
   derived restatements are never relevant (the per-origin report shows how often they outrank the
-  source).
+  source). The generator completes every non-negative question's relevant set from the skeleton: any
+  other non-derived, non-stale note that states one of the question's basis facts (any hop, for
+  multi-hop) is added at gain 1, so a system returning a correct near-duplicate (a recap, a digest, a
+  filed answer) is not scored wrong for it. The check step fails a rendered fixture in which such a
+  note is left out.
 - **Time:** 26 decisions, each revised 2–4 times (3–5 notes), with explicit
   `knowledge_supersede_document` revisions (45 supersessions) and plain later notes that contradict
   the earlier one without superseding it. Several effective dates differ from the recording date.

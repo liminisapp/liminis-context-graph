@@ -593,9 +593,16 @@ Re-rendering changes the corpus: bump corpus_version and questions_version in sc
 regenerate the skeleton, then render. review.json is only ever updated while it is still pending.
 ";
 
-/// Fills `questions_hash` and the sample's question text in a **pending** review record. A
-/// reviewed record is a human's and is never modified; if the questions changed under it, say so.
-pub fn update_review(dir: &Path, questions_text: &str) -> Result<(), String> {
+/// Fills `questions_hash`, `skeleton_hash`, `questions_version` and the sample's question text in a
+/// **pending** review record, so a pending template always names the question set it was written
+/// for. Verdicts are never touched. A reviewed record is a human's and is never modified; if the
+/// questions changed under it, say so.
+pub fn update_review(
+    dir: &Path,
+    questions_text: &str,
+    sk_hash: &str,
+    q_version: &str,
+) -> Result<(), String> {
     let p = dir.join("review.json");
     let Ok(text) = std::fs::read_to_string(&p) else {
         return Ok(());
@@ -609,6 +616,8 @@ pub fn update_review(dir: &Path, questions_text: &str) -> Result<(), String> {
         return Ok(());
     }
     v["questions_hash"] = json!(hash);
+    v["skeleton_hash"] = json!(sk_hash);
+    v["questions_version"] = json!(q_version);
     let texts: BTreeMap<String, String> = questions_text
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
@@ -905,7 +914,12 @@ async fn run(args: &[String]) -> Result<i32, String> {
     let _ = std::fs::remove_file(&progress_path);
     let questions_text =
         std::fs::read_to_string(dir.join("questions.jsonl")).map_err(|e| e.to_string())?;
-    if let Err(e) = update_review(dir, &questions_text) {
+    if let Err(e) = update_review(
+        dir,
+        &questions_text,
+        &meta.skeleton_hash,
+        &meta.questions_version,
+    ) {
         eprintln!("lcg-eval retrieval-render: WARNING {e}");
     }
     let findings = check_dir(dir, &sk, &skeleton_text)?;

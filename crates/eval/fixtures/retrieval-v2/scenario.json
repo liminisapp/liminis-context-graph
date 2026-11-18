@@ -1,7 +1,7 @@
 {
   "seed": 788,
   "corpus_version": "meridian-notebook-2",
-  "questions_version": "meridian-questions-2",
+  "questions_version": "meridian-questions-3",
   "description": "Synthetic notebook (fictional 'Meridian' cooperative) shaped like a Liminis workspace: human notes, clipped articles, agent-maintained pages that restate them, filed answers, near-duplicates, and decisions revised several times (some by explicit supersession, some by plain later notes). Generated deterministically from scenario.json by `lcg-eval retrieval-gen`; contains no real or private data.",
   "chunk_max_tokens": 900,
   "chains": 26,
