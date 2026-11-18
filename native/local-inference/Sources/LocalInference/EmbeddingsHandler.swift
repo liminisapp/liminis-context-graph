@@ -35,6 +35,14 @@ actor CoreMLEmbeddingActor {
     private let model: MLModel
     private let tokenizer: any Tokenizer
 
+    /// The model id reported in every response (issue #790) — the real loaded model, not a
+    /// hard-coded name. See `EmbeddingModelId.reportedId`.
+    nonisolated let modelId: String
+
+    /// The instructions this model applies per `input_type`, advertised in every response; `nil`
+    /// for a model with none. Derived purely from `modelId` (see `InstructionTable`).
+    nonisolated let instructionRoles: InstructionRoles?
+
     /// Human-readable name for an `MLMultiArrayDataType`, used in startup error messages.
     static func dtypeName(_ dtype: MLMultiArrayDataType) -> String {
         switch dtype {
@@ -97,8 +105,11 @@ actor CoreMLEmbeddingActor {
         modelURL: URL,
         tokenizerModelId: String,
         hubCachePath: String? = nil,
-        mlmodelcCacheDir: URL? = nil
+        mlmodelcCacheDir: URL? = nil,
+        modelIdOverride: String? = nil
     ) async throws {
+        self.modelId = EmbeddingModelId.reportedId(modelURL: modelURL, override: modelIdOverride)
+        self.instructionRoles = InstructionTable.roles(forModelId: self.modelId)
         let config = MLModelConfiguration()
         config.computeUnits = .cpuAndNeuralEngine
 
@@ -132,6 +143,7 @@ actor CoreMLEmbeddingActor {
         print("local-inference: CoreML embedding model loaded from \(modelURL.lastPathComponent)")
         print("local-inference: Embedding compute units: .cpuAndNeuralEngine (ANE if available)")
         print("local-inference: Embedding tokenizer: \(tokenizerModelId)\(hubCachePath != nil ? " (local cache)" : "")")
+        print("local-inference: Embedding model id: \(modelId) (role instructions: \(instructionRoles != nil ? "query/document" : "none"))")
     }
 
     /// Resolve the URL CoreML should load from, performing first-launch compile-and-cache
@@ -194,7 +206,10 @@ actor CoreMLEmbeddingActor {
 
     /// Embed a batch of texts. Returns one EmbeddingData per input (sequential calls,
     /// fixed batch=1 MLModel). Empty strings return a zero vector (REQ-12).
-    func embed(texts: [String]) throws -> [EmbeddingData] {
+    ///
+    /// `inputType` (issue #790) selects the model's own query/document instruction, applied to
+    /// non-empty text before tokenization; `nil` (the default) embeds the text exactly as given.
+    func embed(texts: [String], inputType: EmbeddingInputType? = nil) throws -> [EmbeddingData] {
         var results: [EmbeddingData] = []
 
         for (index, text) in texts.enumerated() {
@@ -209,7 +224,8 @@ actor CoreMLEmbeddingActor {
             }
 
             // encode() adds [CLS]=101 at position 0 and [SEP]=102 at the end.
-            var inputIds = tokenizer.encode(text: text)
+            let instructed = InstructionTable.apply(to: text, inputType: inputType, roles: instructionRoles)
+            var inputIds = tokenizer.encode(text: instructed)
 
             // Truncate to maxSequenceLength (keep [CLS] at 0, replace last token with [SEP]=102)
             let sepTokenId = 102
@@ -355,17 +371,30 @@ func handleEmbeddings(
         return makeErrorResponse(status: .badRequest, message: "input must not be empty")
     }
 
-    let results = try await actor.embed(texts: texts)
+    // Optional role (issue #790). Absent -> unchanged behaviour; unknown value -> 400.
+    var inputType: EmbeddingInputType? = nil
+    if let raw = body.inputType {
+        guard let parsed = EmbeddingInputType(rawValue: raw) else {
+            return makeErrorResponse(
+                status: .badRequest,
+                message: "input_type must be \"query\" or \"document\""
+            )
+        }
+        inputType = parsed
+    }
+
+    let results = try await actor.embed(texts: texts, inputType: inputType)
     let totalTokenEstimate = texts.reduce(0) { $0 + max(1, $1.split(separator: " ").count) }
 
     let response = EmbeddingResponse(
         object: "list",
         data: results,
-        model: "coreml-bge-base-en-v1.5",
+        model: actor.modelId,
         usage: EmbeddingUsage(
             promptTokens: totalTokenEstimate,
             totalTokens: totalTokenEstimate
-        )
+        ),
+        instructionRoles: actor.instructionRoles
     )
 
     let encoder = JSONEncoder()

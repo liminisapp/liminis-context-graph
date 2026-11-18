@@ -49,6 +49,11 @@ let hubCachePath: String? = ProcessInfo.processInfo.environment["LOCAL_INFERENCE
 let tokenizerModelId = ProcessInfo.processInfo.environment["LOCAL_INFERENCE_TOKENIZER_ID"]
     ?? "BAAI/bge-base-en-v1.5"
 
+// Optional explicit model id reported to clients (issue #790). Defaults to
+// `coreml-<model file stem>`; set this to pin the id if the model file is renamed, so an
+// existing workspace's recorded embedding identity keeps matching.
+let embeddingModelIdOverride: String? = ProcessInfo.processInfo.environment["LOCAL_INFERENCE_EMBEDDING_MODEL_ID"]
+
 // First-launch cache for the compiled `.mlmodelc`. When set, the sidecar compiles
 // the bundled `.mlpackage` once, persists the result under this directory, and
 // loads from cache on subsequent launches. Owned by Electron; the sidecar creates
@@ -99,7 +104,8 @@ if mode.includesEmbeddings {
             modelURL: modelURL,
             tokenizerModelId: tokenizerModelId,
             hubCachePath: hubCachePath,
-            mlmodelcCacheDir: mlmodelcCacheDir
+            mlmodelcCacheDir: mlmodelcCacheDir,
+            modelIdOverride: embeddingModelIdOverride
         )
     } catch {
         // Surface the failure on the [setup] channel so the onboarding wizard can
