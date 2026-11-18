@@ -47,12 +47,15 @@ fn lexical_rank(query: &str, docs: &[(String, String)], k: usize) -> Vec<(String
 struct FakeLcg {
     chunks: Mutex<Vec<(String, String)>>, // (source_description, text)
     n: Mutex<usize>,
+    /// note id → episode uuids handed out for it, so supersede can answer like the service.
+    episodes: Mutex<std::collections::HashMap<String, Vec<String>>>,
 }
 impl FakeLcg {
     fn new() -> Self {
         Self {
             chunks: Mutex::new(vec![]),
             n: Mutex::new(0),
+            episodes: Mutex::new(Default::default()),
         }
     }
 }
@@ -70,9 +73,29 @@ impl RpcTransport for FakeLcg {
                     ),
                     p["chunk_text"].as_str().unwrap().to_string(),
                 ));
+                self.episodes
+                    .lock()
+                    .unwrap()
+                    .entry(p["source_file"].as_str().unwrap().to_string())
+                    .or_default()
+                    .push(format!("ep-{n}"));
                 Ok(json!({"episode_uuid": format!("ep-{n}")}))
             }
-            "knowledge_supersede_document" | "knowledge_build_indices" => Ok(json!({})),
+            "knowledge_supersede_document" => {
+                let old = p["superseded_doc_id"].as_str().unwrap();
+                let uuids = self
+                    .episodes
+                    .lock()
+                    .unwrap()
+                    .get(old)
+                    .cloned()
+                    .unwrap_or_default();
+                Ok(json!({
+                    "success": true, "already_recorded": false,
+                    "superseded_count": uuids.len(), "superseded_uuids": uuids,
+                }))
+            }
+            "knowledge_build_indices" => Ok(json!({})),
             "knowledge_get_entities_by_source" => Ok(json!({"nodes": []})),
             "knowledge_search_passages" => {
                 assert_eq!(
@@ -215,6 +238,8 @@ async fn full_run(
             lcg_extraction_requests: map.extraction_requests,
             lcg_rpc_calls: map.rpc_calls,
             lcg_unconfirmed_entity_links: map.unconfirmed_entity_links,
+            lcg_supersessions: map.supersessions,
+            lcg_superseded_episodes: map.superseded_episodes,
             qmd_seconds,
         },
         configs,

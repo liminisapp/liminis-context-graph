@@ -72,6 +72,10 @@ pub struct IngestCost {
     pub lcg_extraction_requests: usize,
     pub lcg_rpc_calls: usize,
     pub lcg_unconfirmed_entity_links: usize,
+    /// `knowledge_supersede_document` calls made, and the episodes whose belief they ended
+    /// (issue #787). Both zero when no LCG configuration ran.
+    pub lcg_supersessions: usize,
+    pub lcg_superseded_episodes: usize,
     pub qmd_seconds: Option<f64>,
 }
 
@@ -359,6 +363,13 @@ impl Report {
             i.lcg_extraction_requests,
             i.lcg_rpc_calls
         );
+        if i.lcg_supersessions > 0 {
+            let _ = writeln!(
+                o,
+                "- Belief ended for {} episode(s) across {} document supersession(s).",
+                i.lcg_superseded_episodes, i.lcg_supersessions
+            );
+        }
         if i.lcg_unconfirmed_entity_links > 0 {
             let _ = writeln!(
                 o,
@@ -537,6 +548,8 @@ impl Report {
                 "lcg_extraction_requests": self.ingest.lcg_extraction_requests,
                 "lcg_rpc_calls": self.ingest.lcg_rpc_calls,
                 "lcg_unconfirmed_entity_links": self.ingest.lcg_unconfirmed_entity_links,
+                "lcg_supersessions": self.ingest.lcg_supersessions,
+                "lcg_superseded_episodes": self.ingest.lcg_superseded_episodes,
                 "qmd_seconds": self.ingest.qmd_seconds,
             },
             "configs": configs,
@@ -727,6 +740,18 @@ mod tests {
         let md = r.render_markdown();
         assert!(md.contains("4 entity→note link(s) were accepted without `episode_uuids`"));
         assert_eq!(r.to_json()["ingest"]["lcg_unconfirmed_entity_links"], 4);
+    }
+
+    #[test]
+    fn supersession_effect_is_reported_when_supersessions_ran() {
+        let mut r = report();
+        assert!(!r.render_markdown().contains("Belief ended for"));
+        r.ingest.lcg_supersessions = 8;
+        r.ingest.lcg_superseded_episodes = 9;
+        assert!(r
+            .render_markdown()
+            .contains("Belief ended for 9 episode(s) across 8 document supersession(s)."));
+        assert_eq!(r.to_json()["ingest"]["lcg_superseded_episodes"], 9);
     }
 
     #[test]
