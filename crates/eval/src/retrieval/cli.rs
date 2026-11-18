@@ -262,7 +262,7 @@ pub fn inside_git_tree(path: &Path) -> bool {
     start.ancestors().any(|d| d.join(".git").exists())
 }
 
-/// `--private` safety guard: outputs (`--out`, and `--judge-cache` unless `--no-grounded`) must not
+/// `--private` safety guard: outputs (`--out`, `--record-cassette`, and `--judge-cache` unless `--no-grounded`) must not
 /// resolve inside a git working tree, so private note text cannot end up in a commit.
 pub fn private_guard(a: &RetrievalArgs) -> Result<(), String> {
     let mut paths: Vec<(&str, &Path)> = Vec::new();
@@ -271,6 +271,11 @@ pub fn private_guard(a: &RetrievalArgs) -> Result<(), String> {
     }
     if !a.no_grounded {
         paths.push(("--judge-cache", &a.judge_cache));
+    }
+    // A recorded cassette holds the extraction exchanges for the private chunks.
+    let record = a.record_cassette.as_deref().map(Path::new);
+    if let Some(r) = record {
+        paths.push(("--record-cassette", r));
     }
     for (flag, p) in paths {
         if inside_git_tree(p) {
@@ -380,6 +385,33 @@ mod tests {
         assert!(e.contains("--judge-cache"), "{e}");
         assert!(p(&["--private", "--out", "/x", "--judge-cache", "/y"]).is_ok());
         assert!(p(&["--private", "--out", "/x", "--no-grounded"]).is_ok());
+    }
+
+    #[test]
+    fn private_guard_refuses_a_cassette_recorded_inside_a_git_tree() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tree.path().join(".git")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let args = |cassette: &Path| {
+            let RetrievalMode::Run(a) = p(&[
+                "--private",
+                "--out",
+                outside.path().join("out").to_str().unwrap(),
+                "--no-grounded",
+                "--record-cassette",
+                cassette.to_str().unwrap(),
+            ])
+            .unwrap() else {
+                panic!()
+            };
+            *a
+        };
+        let e = private_guard(&args(&tree.path().join("cassette.jsonl"))).unwrap_err();
+        assert!(
+            e.contains("--record-cassette") && e.contains("git working tree"),
+            "{e}"
+        );
+        assert!(private_guard(&args(&outside.path().join("cassette.jsonl"))).is_ok());
     }
 
     #[test]

@@ -1509,3 +1509,21 @@ fn check_dir_pins_the_structure_to_the_skeleton_and_flags_a_stale_render() {
     let f = generator::check_dir(d.path(), &g.skeleton, &text).unwrap();
     assert!(f.errors.iter().any(|e| e.contains("manifest.json differs")));
 }
+
+#[test]
+fn partial_render_runs_keep_the_recorded_model_and_prompt() {
+    let g = generator::generate(&scenario()).unwrap();
+    let text = g.skeleton.to_json();
+    let prev = meta_for(&g.skeleton, &text, "model-a");
+    // Same model and prompt version: fine. Different model: refused, naming both.
+    let same = prev;
+    assert!(render::check_partial_run_provenance(&same, "model-a").is_ok());
+    let e = render::check_partial_run_provenance(&same, "model-b").unwrap_err();
+    assert!(e.contains("model-a") && e.contains("model-b"), "{e}");
+    let old_prompt = RenderMeta {
+        prompt_version: "old-prompt".into(),
+        ..same
+    };
+    let e = render::check_partial_run_provenance(&old_prompt, "model-a").unwrap_err();
+    assert!(e.contains("old-prompt"), "{e}");
+}

@@ -551,6 +551,19 @@ pub fn update_review(dir: &Path, questions_text: &str) -> Result<(), String> {
     std::fs::write(&p, out).map_err(|e| format!("review.json: {e}"))
 }
 
+/// A partial run (`--resume` / `--only`) keeps most of the previously rendered prose, so it must use
+/// the model and prompt version `render.json` already records; otherwise the untouched notes would
+/// be mislabelled.
+pub fn check_partial_run_provenance(prev: &RenderMeta, model: &str) -> Result<(), String> {
+    if prev.render_model == model && prev.prompt_version == PROMPT_VERSION {
+        return Ok(());
+    }
+    Err(format!(
+        "render.json records model '{}' with prompt '{}', but this partial run (--resume/--only) would use '{model}' with '{PROMPT_VERSION}'; the untouched notes would be mislabelled. Re-run with --model {} (and the matching prompt version), or render the whole corpus again without --resume/--only",
+        prev.render_model, prev.prompt_version, prev.render_model
+    ))
+}
+
 pub async fn run_cli(args: &[String]) -> i32 {
     match run(args).await {
         Ok(c) => c,
@@ -627,6 +640,22 @@ async fn run(args: &[String]) -> Result<i32, String> {
     } else {
         Rendered::default()
     };
+    // A partial run (--resume / --only) keeps most of the previously rendered prose, so render.json
+    // must keep describing it: refuse a different model or prompt version, and accumulate calls.
+    let previous: Option<RenderMeta> = if o.resume || o.only.is_some() {
+        match std::fs::read_to_string(dir.join("render.json")) {
+            Ok(t) => Some(
+                serde_json::from_str(&t).map_err(|e| format!("render.json is unreadable: {e}"))?,
+            ),
+            Err(_) => None,
+        }
+    } else {
+        None
+    };
+    if let Some(prev) = &previous {
+        check_partial_run_provenance(prev, &model)?;
+    }
+    let prior_calls = previous.as_ref().map_or(0, |p| p.model_calls);
     let (nc, qc) = plan_calls(&sk, &existing, &o);
     println!(
         "retrieval-render: {} notes and {} questions; this run makes {nc} note calls + {qc} question calls with {model}",
@@ -656,7 +685,7 @@ async fn run(args: &[String]) -> Result<i32, String> {
         skeleton_hash: skeleton_hash(&skeleton_text),
         corpus_version: sk.corpus_version.clone(),
         questions_version: sk.questions_version.clone(),
-        model_calls: calls,
+        model_calls: prior_calls + calls,
     };
     write_fixture(dir, &sk, &rendered, &meta)?;
     let questions_text =
@@ -667,8 +696,9 @@ async fn run(args: &[String]) -> Result<i32, String> {
     let findings = check_dir(dir, &sk, &skeleton_text)?;
     eprint!("{}", check::describe(&findings));
     println!(
-        "retrieval-render: wrote the fixture to {} ({calls} model calls, {} error(s), {} warning(s))",
+        "retrieval-render: wrote the fixture to {} ({calls} model calls this run, {} in total, {} error(s), {} warning(s))",
         dir.display(),
+        meta.model_calls,
         findings.errors.len(),
         findings.warnings.len()
     );

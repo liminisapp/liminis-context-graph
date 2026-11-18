@@ -2,7 +2,7 @@
 
 **Feature Branch**: `fabrik/issue-788`
 **Created**: 2026-11-18
-**Status**: Specified
+**Status**: Specified (scope change 2026-11-18: LLM-rendered prose over a deterministic skeleton)
 **Input**: User description: "## Problem
 
 The #754 Fernhill fixture is too small to separate LCG from qmd or to steer the retrieval work:
@@ -40,6 +40,19 @@ A second fixture, `fixtures/retrieval-v2`, kept beside the first, which stays as
 ## Related
 #754 (harness), #786, #787 (believed_only), and the retrieval improvement issue that measures itself on this corpus."
 
+## Scope change (2026-11-18, Brett): LLM-written prose, generated once and checked in
+
+This replaces FR-014's "no paid model calls" for the text itself. Purely templated notes and template paraphrase questions read formulaically, which flatters BM25 and under-tests embeddings and paraphrase — the areas this corpus exists to measure (#789, #790).
+
+1. **Structure stays deterministic.** A seeded generator, checked in with its scenario spec, produces the **skeleton**: entities, facts, decisions and their revision timeline (explicit supersessions, implicit contradictions, effective vs recorded dates); which note carries which facts, each note's origin and target length; derived pages and their citations, near-duplicates and negative distractors; and the question ground truth (relevant notes, gains, evidence key facts, current/stale). Same spec + seed ⇒ the same skeleton, byte for byte.
+2. **Prose is rendered once by an LLM.** A separate, explicitly invoked render step turns each skeleton note into natural markdown in the voice its origin implies, and writes each question's wording (paraphrases included). The rendered output is **checked in**. CI and normal eval runs never call a model.
+3. **Checks, not regeneration.** The drift check verifies that the checked-in notes and questions match the checked-in skeleton; every skeleton fact must appear in its note's text and the evidence key facts must be findable; the paraphrase lexical-overlap threshold (FR-012) is checked on the rendered text. Re-rendering is a deliberate maintainer action that bumps the corpus version. The render model and prompt version are recorded in the fixture metadata.
+4. **Who renders.** The implementer may run the render step if an Anthropic key is available; otherwise it ships the skeleton generator, the render step and the checks, and rendering is a maintainer step stated in the PR. **No template-prose fallback for the checked-in fixture.**
+5. **The human-review record (FR-016) is a real human's.** The implementer checks in the review template with a stratified sample and empty verdict columns; Brett fills it in. The item is `fabrik:cruise`, so it cannot merge before that.
+6. **The v2 extraction cassette** is recorded by a maintainer run with a local extractor, not in CI.
+
+The rest of the spec (sizes, categories, CIs, origin breakdown, `--corpus`) is unchanged.
+
 ## Background
 
 `lcg-eval retrieval` (#754, ADR-0754) compares LCG's read side with qmd over a checked-in synthetic notebook, the 31-note "Fernhill" fixture. The first live run (#786) showed that fixture cannot do the job it was built for:
@@ -63,7 +76,7 @@ A maintainer evaluating a retrieval change selects the v2 fixture and gets a rep
 
 **Acceptance Scenarios**:
 
-1. **Given** the v2 fixture directory, **When** the retrieval eval resolves the plan with `--dry-run`, **Then** it prints v2's corpus version, question-set version, content hashes, note count and per-category question counts, and spends nothing.
+1. **Given** the (rendered) v2 fixture directory, **When** the retrieval eval resolves the plan with `--dry-run`, **Then** it prints v2's corpus version, question-set version, content hashes, note count and per-category question counts, and spends nothing.
 2. **Given** v2, **When** its notes are measured, **Then** there are 300–500 notes, with many short notes, a substantial group of 500–2,000-word notes, and at least a few over 5,000 words.
 3. **Given** v2's questions, **When** counted by category, **Then** there are at least 200 in total, covering direct, paraphrase, temporal, answer, multi-hop and within-note-passage categories, with at least 30 negatives that have near-miss distractors in the corpus.
 4. **Given** the long notes in v2, **When** the corpus is chunked at the manifest's chunking setting, **Then** many notes span multiple chunks, so passage choice within a note is exercised.
@@ -137,21 +150,21 @@ A reader of the report sees bootstrap 95% confidence intervals on the headline m
 
 ---
 
-### User Story 6 - Regenerate the corpus reproducibly and have it checked (Priority: P2)
+### User Story 6 - Regenerate the skeleton reproducibly, render the prose once, and have it checked (Priority: P2)
 
-A maintainer can regenerate notes and questions from a scenario spec and a seed, and a human has checked a sample of questions; the fixture records versions and hashes so changes are visible.
+A maintainer can regenerate the skeleton from a scenario spec and a seed, render the prose with an LLM as a deliberate step, and a human has checked a sample of questions; the fixture records versions, hashes, and the render model and prompt version so changes are visible.
 
 **Why this priority**: Reproducibility and human validation make the corpus trustworthy, but the corpus itself (Story 1) has more immediate value.
 
-**Independent Test**: Run the generator twice with the same spec and seed and compare outputs byte-for-byte; run the fixture's checks and confirm the review record is present and consistent with the question set.
+**Independent Test**: Run the skeleton generator twice with the same spec and seed and compare outputs byte-for-byte; run the fixture's checks and confirm the review record is present and consistent with the question set.
 
 **Acceptance Scenarios**:
 
-1. **Given** the checked-in scenario spec and seed, **When** the generator runs twice, **Then** the notes, manifest and questions are identical to each other and to the checked-in fixture.
-2. **Given** a different seed, **When** the generator runs, **Then** it produces a different, equally valid fixture without hand editing.
-3. **Given** the generated paraphrase questions, **When** checked automatically, **Then** each shares less than a stated lexical-overlap threshold with its relevant note(s).
-4. **Given** the fixture, **When** it is inspected, **Then** a human-review record is present listing the sampled questions, the reviewer's verdict per question, and the overall error rate, and the question-set version/hash recorded in the report matches the reviewed set.
-5. **Given** any inconsistency (a question referencing a missing note, evidence not in the relevant notes, a temporal question with an unspecified stale note), **When** the fixture is loaded, **Then** loading fails naming the question.
+1. **Given** the checked-in scenario spec and seed, **When** the generator runs twice, **Then** the skeleton is identical to itself and to the checked-in `skeleton.json`; the rendered notes and questions are checked against it, not regenerated.
+2. **Given** a different seed, **When** the generator runs, **Then** it produces a different, equally valid skeleton without hand editing.
+3. **Given** the rendered paraphrase questions, **When** checked automatically, **Then** each shares less than a stated lexical-overlap threshold with its relevant note(s) (measured on the rendered text).
+4. **Given** the fixture, **When** it is inspected, **Then** a human-review record is present listing the sampled questions with the reviewer's verdict per question and the overall error rate (empty and `pending` until the maintainer fills them in), and the question-set version/hash recorded in the report matches the reviewed set.
+5. **Given** any inconsistency (a question referencing a missing note, evidence not in the relevant notes, a temporal question with an unspecified stale note, a skeleton fact missing from its rendered note), **When** the fixture is loaded or checked, **Then** the failure names the question or note.
 
 ---
 
@@ -193,13 +206,14 @@ The v2 run records an ingest cassette so that subsequent runs replay at no extra
 - Near-duplicate pages (a primary note and several derived restatements): the corpus must state which is the relevant note for each question and the report must not credit a restatement as the primary source unless the question's ground truth says it is relevant.
 - A question whose relevant notes are all `derived`: allowed; ground truth must name the cited sources too where they are also acceptable.
 - Multi-hop questions need both notes; partial coverage (only one of the two) must score below full coverage under graded gain.
-- A negative question's near-miss distractors must really be near-misses (same entities or vocabulary, different fact), or the negative tests nothing; a negative must never be answerable by a note that exists in the corpus.
+- A negative question's near-miss distractors must really be near-misses (same entities or vocabulary, different fact), or the negative tests nothing; a negative must never be answerable by a note that exists in the corpus (checked on the rendered text).
 - An implicitly contradicted decision with no supersession: the "current" note can only be determined by the question's declared ground truth, not by LCG's supersession state.
 - Notes over 5,000 words must still ingest within the eval's request limits; if extraction cannot handle a note, that must surface as a visible ingest failure, not a silent skip.
 - Bootstrap CIs on a metric with very few eligible questions (e.g. a category with a handful of items) must not crash or report a degenerate zero-width interval as meaningful.
 - A configuration that is skipped or has failed queries must still produce a coherent report (CIs only over scored questions; failed questions listed, per ADR-0754).
 - Note ids remain lowercase slugs so they can serve as qmd file stems; any generated id must obey that rule and be unique.
 - Private-notebook mode must refuse to write note content into the report even when a question errors.
+- A skeleton that has not been rendered yet: the loader must say so and name the render step rather than fail with a missing-file error.
 
 ## Requirements *(mandatory)*
 
@@ -216,22 +230,22 @@ The v2 run records an ingest cassette so that subsequent runs replay at no extra
 - **FR-009**: v2 MUST contain at least 30 negative questions, each with near-miss distractor notes in the corpus, and no note in the corpus may answer a negative question.
 - **FR-010**: Every v2 question MUST carry `relevant_notes` (with graded gain), and answer questions MUST carry `evidence` key facts that fall within their relevant notes; the loader MUST reject any question that violates the existing question rules.
 - **FR-011**: Multi-hop questions MUST name at least two relevant notes whose facts are both required; within-note-passage questions MUST target a single paragraph of a note long enough to span multiple chunks, with the key fact recorded as evidence.
-- **FR-012**: Paraphrase questions MUST share less than a documented lexical-overlap threshold with their relevant notes, and the generator MUST check and enforce this automatically.
+- **FR-012**: Paraphrase questions MUST share less than a documented lexical-overlap threshold with their relevant notes, and the checks MUST enforce this automatically on the rendered text.
 - **FR-013**: Temporal questions over implicitly contradicted decisions MUST declare their `current` and `stale` notes in the question itself, and the loader MUST accept them without requiring a recorded supersession for that pair.
-- **FR-014**: A generation script, checked in with its scenario spec and seed, MUST produce v2's notes, manifest and questions deterministically (same spec + seed ⇒ byte-identical output), without network access or paid model calls.
-- **FR-015**: The checked-in v2 fixture MUST equal the generator's output for the checked-in spec and seed, and a check MUST detect drift between them.
-- **FR-016**: A human-review record MUST be checked in listing a stratified sample of questions (covering every category), the reviewer's verdict on each (ground truth correct / note relevance correct / key fact correct), and the resulting error rate; the question-set version and hash MUST identify the reviewed set.
+- **FR-014**: A generation script, checked in with its scenario spec and seed, MUST produce v2's **skeleton** deterministically (same spec + seed ⇒ byte-identical skeleton), without network access or model calls. The prose of the notes and the wording of the questions MUST be rendered once by an LLM in a separate, explicitly invoked step and checked in; CI and normal eval runs never call a model. The render model and prompt version MUST be recorded in the fixture metadata. There is no template-prose fallback for the checked-in fixture.
+- **FR-015**: The checked-in skeleton MUST equal the generator's output for the checked-in spec and seed, and the checked-in notes and questions MUST be checked against the skeleton: every skeleton fact appears in its note, evidence key facts are findable, and the manifest and question ground truth equal what the skeleton generates. A check MUST detect drift.
+- **FR-016**: A human-review record MUST be checked in listing a stratified sample of questions (covering every category) with empty verdict columns for the reviewer to fill in (ground truth correct / note relevance correct / key fact correct) and the resulting error rate; the question-set version and hash MUST identify the reviewed set. The implementer MUST NOT write the verdicts; the maintainer does.
 - **FR-017**: v2 MUST carry corpus and question-set versions and content hashes, printed by the report and the dry-run plan exactly as v1's are.
 - **FR-018**: `07-retrieval-eval.sh` MUST accept `--corpus <DIR>` to select a fixture, default to v1 when omitted, and fail with a clear message on an invalid path; both fixtures MUST run through it.
 - **FR-019**: The report MUST give a bootstrap 95% confidence interval for each headline metric per configuration (recall@k, MRR, nDCG@k, grounded-recall@k, stale-above-current, false-positive rate), using per-question resampling with a fixed, recorded seed and resample count so output is reproducible.
 - **FR-020**: The report MUST compare configurations with a paired per-question bootstrap on the difference and label any difference whose 95% interval includes zero as not distinguishable from noise, never as a winner. The existing hypothesis readings (H1/H2) MUST use the same rule.
 - **FR-021**: The report MUST present metrics per category with intervals, flag categories whose sample is below a stated minimum, and state when a category is at the ceiling (with its CI) rather than implying a ranking.
 - **FR-022**: The report MUST break results down by the origin of the returned notes (at least the share of top-k results that are `derived` restatements of a primary source and how often a derived restatement outranks its primary source), for fixtures that declare origins.
-- **FR-023**: Recording an ingest cassette for v2 MUST be supported using the existing record/replay mechanism, and replaying it MUST make zero extraction requests; a v2 whose corpus hash differs from the cassette's MUST fail loudly rather than fall back to a live call.
-- **FR-024**: Documentation MUST describe the v2 fixture (shape, size mix, origins, question categories and counts, how to regenerate, how it was reviewed), and MUST replace v1-only statements in the retrieval-evaluation docs that no longer hold (e.g. "31 notes", "four categories").
+- **FR-023**: Recording an ingest cassette for v2 MUST be supported using the existing record/replay mechanism, and replaying it MUST make zero extraction requests; a v2 whose corpus hash differs from the cassette's MUST fail loudly rather than fall back to a live call. The recording is a maintainer run with a local extractor, not in CI.
+- **FR-024**: Documentation MUST describe the v2 fixture (shape, size mix, origins, question categories and counts, how to regenerate the skeleton and render the prose, how it was reviewed), and MUST replace v1-only statements in the retrieval-evaluation docs that no longer hold (e.g. "31 notes", "four categories").
 - **FR-025**: Documentation MUST describe how a maintainer runs the eval against a private real notebook with a local question set in the same format, such that only results are reported, no note or question text is written into the report by default, and nothing is checked in.
 - **FR-026**: v1 MUST remain unchanged in content, hashes and behaviour, and its existing tests MUST continue to pass.
-- **FR-027**: Network-free tests MUST cover: v2 loading and validation, origin submission at ingest, un-superseded temporal ground truth, the generator's determinism and paraphrase-overlap check, bootstrap CI computation and the noise label, and per-origin reporting.
+- **FR-027**: Network-free tests MUST cover: v2 loading and validation, origin submission at ingest, un-superseded temporal ground truth, the skeleton generator's determinism, the checks (including the paraphrase-overlap check on rendered text), the render step with a model double, bootstrap CI computation and the noise label, and per-origin reporting.
 - **FR-028**: The existing metric definitions of ADR-0754 (deduplication, nDCG gain, negatives excluded from relevance means, failed queries listed not scored) MUST be unchanged; any new metric or label is additive.
 
 ### Key Entities *(if applicable)*
@@ -239,8 +253,10 @@ The v2 run records an ingest cassette so that subsequent runs replay at no extra
 - **Note**: a markdown file with an id (lowercase slug), a reference time, and (v2) an origin and, for derived notes, a list of cited source notes.
 - **Manifest**: ordered note list, chunking setting, supersession relations (explicit only), and corpus version.
 - **Question**: id, category, text, graded relevant notes, evidence key facts (answer, within-note), declared current/stale notes (temporal), negative flag.
-- **Scenario spec**: the checked-in description (entities, decision chains, note-type mix, size targets, question quotas) plus seed from which the generator produces the corpus.
-- **Review record**: the checked-in human verdicts on a stratified question sample.
+- **Scenario spec**: the checked-in description (entities, decision chains, note-type mix, size targets, question quotas) plus seed from which the generator produces the skeleton.
+- **Skeleton**: the deterministic structure of the corpus (facts, note–fact assignment, origins, citations, sizes, supersessions, question ground truth) without prose.
+- **Render record**: `render.json`, the render model, prompt version and skeleton hash the checked-in prose was produced from.
+- **Review record**: the checked-in human verdicts on a stratified question sample (a pending template until a maintainer fills it).
 - **Cassette**: recorded ingest extraction for v2, keyed to a corpus hash.
 
 ## Success Criteria *(mandatory)*
@@ -248,8 +264,8 @@ The v2 run records an ingest cassette so that subsequent runs replay at no extra
 ### Measurable Outcomes
 
 - **SC-001**: v2 loads with zero validation errors; it has 300–500 notes, ≥ 200 questions, ≥ 30 negatives, all four origins, ≥ 3 notes over 5,000 words, and every question category present.
-- **SC-002**: Running the generator twice with the same spec and seed yields byte-identical output equal to the checked-in fixture; the drift check passes.
-- **SC-003**: A human-review record exists covering every question category, with the error rate on the sampled questions stated; if the rate exceeds a maintainer-set threshold (default 5%) the affected categories are regenerated or corrected before the fixture is called reviewed.
+- **SC-002**: Running the generator twice with the same spec and seed yields a byte-identical skeleton equal to the checked-in one, and the checks pass on the checked-in notes and questions.
+- **SC-003**: A human-review record exists covering every question category; the maintainer fills the verdicts and the error rate on the sampled questions is stated. If the rate exceeds a maintainer-set threshold (default 5%) the affected categories are re-rendered or corrected before the fixture is called reviewed.
 - **SC-004**: Every headline metric in a v2 report carries a 95% bootstrap CI; two runs with the same seed produce identical reports; a pairwise comparison with a CI spanning zero is labelled "not distinguishable from noise".
 - **SC-005**: On a v2 run, the report either shows direct-question scores below the ceiling for at least one configuration or states that direct questions are at the ceiling for both, in either case with CIs. With ≥ 200 questions, the per-question granularity is at most half of v1's (a single question moves recall by ≤ 0.0125 in aggregate).
 - **SC-006**: `07-retrieval-eval.sh --corpus` resolves both fixtures in dry-run mode, and omitting `--corpus` behaves as today.
@@ -259,11 +275,12 @@ The v2 run records an ingest cassette so that subsequent runs replay at no extra
 
 ## Assumptions
 
-- The corpus is generated from templates and scenario data by a deterministic script (no LLM calls), so the same seed always reproduces it and generation costs nothing. Prose will be more regular than real notes; the scenario spec compensates with varied phrasings, filler paragraphs and distractors, and the limitation is stated in the docs.
+- The structure of the corpus is generated from scenario data by a deterministic script (no LLM calls), so the same seed always reproduces the skeleton at no cost. The prose is rendered once by an LLM (scope change above) so it reads naturally; it is still one model with one prompt, so it is more uniform than a real notebook, and that limitation is stated in the docs.
 - The default bootstrap is 10,000 per-question resamples at a fixed seed with a 95% percentile interval; these are recorded in the report so they can be changed explicitly.
 - The paraphrase lexical-overlap threshold and the per-category minimum sample size are set during planning and documented; they must be numeric and checked automatically.
-- The human review is performed by a maintainer on a stratified sample (default at least 10% of questions and at least 5 per category). The implementing change ships the review-record format and, where a human review has not yet happened, marks it as pending rather than claiming it has been done; the fixture is "reviewed" only once a maintainer fills the record.
-- The v2 cassette needs a live extraction endpoint to record. If the implementing agent cannot make live calls, the recording is a documented maintainer step with the exact command, and the acceptance for that item is met once the cassette is committed (or its storage location documented if it is too large for the repository).
+- The human review is performed by a maintainer on a stratified sample (default at least 10% of questions and at least 5 per category). The implementing change ships the review-record template with empty verdicts and marks it as pending; the fixture is "reviewed" only once the maintainer fills the record.
+- Rendering needs a model key. If the implementing agent has none, rendering is a documented maintainer step with the exact command; the v2 acceptance items that need rendered prose (dry-run, loading, run, cassette) are met once the rendered fixture is committed.
+- The v2 cassette needs an extraction endpoint (a local extractor is fine) and a rendered corpus to record. It is a documented maintainer step with the exact command; the acceptance for that item is met once the cassette is committed (or its storage location documented if it is too large for the repository).
 - Sizes in the 300–500-note range are targeted; the exact count and per-category quotas are set in the scenario spec.
 - `answer`-origin notes are filed answers in the Liminis sense: their content is derived from the notebook, not independent evidence; they are relevant to questions only where the ground truth says so.
 - Retrieval changes themselves (ranking, expansion, reranking) are not part of this issue; v2 measures them.
@@ -273,7 +290,7 @@ The v2 run records an ingest cassette so that subsequent runs replay at no extra
 
 - Any change to LCG retrieval, ranking or the qmd configurations; this issue only builds the corpus and the reporting.
 - Using real or private notebook content in any checked-in file.
-- LLM-generated corpus content or LLM-generated questions (a possible follow-up if template prose proves too regular).
+- Template prose in the checked-in fixture (the prose is LLM-rendered; template prose exists only as a test double).
 - Publishing comparison numbers; running the comparison is a maintainer step after merge.
 - Replacing v1 or removing it from the smoke path.
 - Changing the metric definitions or the evidence-judge prompt.
@@ -281,6 +298,6 @@ The v2 run records an ingest cassette so that subsequent runs replay at no extra
 
 ## Source References
 
-- #754 (retrieval eval harness), #786 (first run), #787 (`believed_only`)
-- `docs/adr/0754-retrieval-eval-architecture.md`, `docs/adr/0752-episode-origin-and-corroboration.md`, `docs/adr/0705-belief-time-separate-from-validity.md`, `docs/adr/0707` (document supersession), ADR-0044 (cassettes)
+- #754 (retrieval eval harness), #786 (first run), #787 (`believed_only`), #789, #790
+- `docs/adr/0754-retrieval-eval-architecture.md`, `docs/adr/0752-episode-origin-and-corroboration.md`, `docs/adr/0705-belief-time-separate-from-validity.md`, `docs/adr/0707` (document supersession), ADR-0044 (cassettes), `docs/adr/0788-retrieval-corpus-v2-and-bootstrap-reporting.md`
 - `docs/retrieval-quality-evaluation.md`, `crates/eval/fixtures/retrieval/`, `crates/eval/scripts/07-retrieval-eval.sh`

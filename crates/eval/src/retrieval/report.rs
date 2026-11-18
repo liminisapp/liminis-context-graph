@@ -515,7 +515,9 @@ impl Report {
     }
 
     fn disclaimer(&self) -> String {
-        let corpus = if self.total_questions() >= 100 {
+        let corpus = if self.meta.private {
+            "The corpus is a private notebook: these results describe that notebook and its question set only, not retrieval in general"
+        } else if self.total_questions() >= 100 {
             "The corpus is synthetic (generated structure, LLM-written prose) and more uniform than a real notebook, so direct questions may sit near the ceiling. Treat results as a controlled comparison, not a forecast"
         } else {
             "The corpus is small and hand-built: results are indicative, not general"
@@ -1316,6 +1318,17 @@ mod tests {
         assert!(re.contains("] |") || re.contains("] "), "{re}");
         // v2-scale corpus gets the synthetic-corpus caveat; this fixture (60 questions) keeps v1's.
         assert!(md.contains("small and hand-built"));
+    }
+
+    #[test]
+    fn private_run_never_claims_the_corpus_is_synthetic() {
+        let mut r = report();
+        r.meta.category_counts.insert(Category::Direct, 200);
+        r.meta.private = true;
+        let md = r.render_markdown();
+        assert!(md.contains("private notebook"), "{md}");
+        assert!(!md.contains("synthetic"), "{md}");
+        assert!(!md.contains("hand-built"), "{md}");
     }
 
     #[test]
