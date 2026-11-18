@@ -467,25 +467,38 @@ pub async fn process_document(
     };
     // Unchanged chunks' episodes are carried forward, not rewritten, but their position and
     // heading path belong to this revision now: re-stamp them so every live episode's span
-    // slices *this* revision's content (FR-013, SC-006). The text is identical (same hash), so
-    // every unit shifts by the same delta — which also holds if the unit split itself changed.
-    let carried: Vec<(String, i64, i64, Vec<String>)> = d
-        .matches
-        .iter()
-        .zip(&chunked.chunks)
-        .filter(|(m, _)| m.classification == Classification::Unchanged)
-        .filter_map(|(m, c)| m.previous.map(|j| (&baseline.chunks[j], c)))
-        .flat_map(|(b, c)| {
-            let old_start = b.episode_spans.iter().flatten().map(|s| s.0).min();
-            let delta = old_start.map(|o| c.byte_start as i64 - o).unwrap_or(0);
-            b.episode_uuids
-                .iter()
-                .zip(&b.episode_spans)
-                .filter_map(move |(u, span)| {
-                    span.map(|(s, e)| (u.clone(), s + delta, e + delta, c.heading_path.clone()))
-                })
-        })
-        .collect();
+    // slices *this* revision's content (FR-013, SC-006). The chunk's text is identical (same
+    // hash) and its episodes' texts tiled it exactly when they were written, so each episode is
+    // re-located by tiling those texts across the chunk again. That needs no stored offset, so it
+    // stays exact when the episodes carry spans from different revisions (a torn tail that cut a
+    // previous re-stamp part-way) and when the unit split itself has changed.
+    let mut carried: Vec<(String, i64, i64, Vec<String>)> = Vec::new();
+    for (m, c) in d.matches.iter().zip(&chunked.chunks) {
+        let (Classification::Unchanged, Some(j)) = (m.classification, m.previous) else {
+            continue;
+        };
+        let b = &baseline.chunks[j];
+        match tile(&c.text, &b.episode_texts) {
+            Some(offsets) => {
+                for ((uuid, text), off) in b.episode_uuids.iter().zip(&b.episode_texts).zip(offsets)
+                {
+                    let s = (c.byte_start + off) as i64;
+                    carried.push((
+                        uuid.clone(),
+                        s,
+                        s + text.len() as i64,
+                        c.heading_path.clone(),
+                    ));
+                }
+            }
+            // Unreachable for rows this code wrote; never write a span that might not slice.
+            None => eprintln!(
+                "liminis-context-graph: process_document: episodes of chunk {:?} do not tile its \
+                 text; their spans are left as they were",
+                b.name
+            ),
+        }
+    }
     let stale = baseline.stale_uuids.clone();
     let transition = baseline.mode_transition_uuids.clone();
     let db_c = load_db(&state)?;
@@ -612,6 +625,39 @@ pub async fn process_document(
     }))
 }
 
+/// Where each of `parts` sits in `text` when they tile it exactly (concatenated in some order,
+/// each used once), as byte offsets in `parts` order; `None` if they do not. A depth-first search
+/// that tries each distinct part once per position, so identical parts (repeated boilerplate
+/// units) never multiply the work and any assignment among them is equally exact.
+fn tile(text: &str, parts: &[String]) -> Option<Vec<usize>> {
+    fn go(text: &str, pos: usize, parts: &[String], out: &mut [Option<usize>]) -> bool {
+        if pos == text.len() {
+            return out.iter().all(Option::is_some);
+        }
+        let mut tried: Vec<&str> = Vec::new();
+        for i in 0..parts.len() {
+            let p = parts[i].as_str();
+            if out[i].is_some() || p.is_empty() || tried.contains(&p) {
+                continue;
+            }
+            if text[pos..].starts_with(p) {
+                tried.push(p);
+                out[i] = Some(pos);
+                if go(text, pos + p.len(), parts, out) {
+                    return true;
+                }
+                out[i] = None;
+            }
+        }
+        false
+    }
+    if parts.iter().map(String::len).sum::<usize>() != text.len() {
+        return None;
+    }
+    let mut out = vec![None; parts.len()];
+    go(text, 0, parts, &mut out).then(|| out.into_iter().flatten().collect())
+}
+
 fn chunk_json(
     c: &super::chunker::LogicalChunk,
     name: &str,
@@ -661,4 +707,29 @@ pub fn preview(content: &str) -> Result<Value, Error> {
         "chunks": chunks,
         "document_map": chunked.map,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tile;
+
+    fn v(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|p| p.to_string()).collect()
+    }
+
+    #[test]
+    fn tile_relocates_parts_in_any_stored_order() {
+        // Parts stored in any order are placed where they belong.
+        assert_eq!(
+            tile("aaabbbcc", &v(&["cc", "aaa", "bbb"])),
+            Some(vec![6, 0, 3])
+        );
+        // Identical parts (repeated boilerplate units) each take a distinct occurrence.
+        assert_eq!(tile("abcabc", &v(&["abc", "abc"])), Some(vec![0, 3]));
+        // A first choice that dead-ends is backtracked: "a" fits at 0 but strands "ab".
+        assert_eq!(tile("aba", &v(&["a", "ab"])), Some(vec![2, 0]));
+        // Lengths that do not sum to the text, or a part that is not in it, do not tile.
+        assert_eq!(tile("abc", &v(&["ab", "a", "bc"])), None);
+        assert_eq!(tile("xyz", &v(&["xy", "q"])), None);
+    }
 }

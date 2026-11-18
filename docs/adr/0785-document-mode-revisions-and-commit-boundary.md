@@ -111,9 +111,13 @@ never belief time.
 **Unchanged chunks are carried forward and re-stamped.** An unchanged chunk is never re-extracted,
 but an edit elsewhere shifts its byte offsets and a parent heading rename changes its heading path.
 So the commit step sets each of its live episodes' `revision_id` to the committing revision, its
-`byte_start`/`byte_end` to its span in the new content (the text is identical, so every unit shifts
-by one delta, which stays exact even if the unit split changed), and its `heading_path` to the
-current one. Invariant: **every live document-mode episode slices the latest committed revision's
+`byte_start`/`byte_end` to its span in the new content, and its `heading_path` to the current one.
+The span is found by **re-locating, not shifting**: the chunk's text is byte-identical and its
+episodes' texts tiled it exactly when written, so tiling those texts across the chunk again gives
+each one's offset. No stored offset is trusted, so this stays exact when a chunk's episodes carry
+spans from different revisions (a torn tail cut an earlier re-stamp part-way) and when the unit
+split itself changed; a chunk whose episodes somehow do not tile is left as it was, never given a
+span that might not slice. Invariant: **every live document-mode episode slices the latest committed revision's
 content at its span** (FR-013, SC-006), so a client holding only the current document can resolve
 any believed fact to its passage, and the next diff pairs against current heading paths, not stale
 ones. `revision_committed_at` is deliberately not moved, because the episode has been believed since

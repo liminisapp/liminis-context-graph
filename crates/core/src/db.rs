@@ -1983,7 +1983,7 @@ impl<'db> Conn<'db> {
             "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
              AND ep.superseded_at IS NULL \
              RETURN ep.uuid, ep.name, ep.write_path, ep.revision_id, ep.revision_committed_at, \
-             ep.heading_path, ep.chunk_hash, ep.byte_start, ep.byte_end",
+             ep.heading_path, ep.chunk_hash, ep.byte_start, ep.content",
             serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
         )?;
         Ok(rows
@@ -2000,7 +2000,7 @@ impl<'db> Conn<'db> {
                 heading_path: value_as_str_list(&r[5]),
                 chunk_hash: value_as_optional_string(&r[6]),
                 byte_start: value_as_optional_i64(&r[7]),
-                byte_end: value_as_optional_i64(&r[8]),
+                content: value_as_string(&r[8]),
             })
             .collect())
     }

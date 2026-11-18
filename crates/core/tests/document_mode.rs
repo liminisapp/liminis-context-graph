@@ -1141,6 +1141,58 @@ fn cypher(v: &Value) -> &str {
     v["cypher"].as_str().unwrap_or("")
 }
 
+/// SC-006 after a torn re-stamp: a WAL tail cut between the re-stamp statements of a split
+/// chunk leaves its units carrying spans from two different revisions. The next commit must
+/// still place every unit exactly in the new content — it re-locates episodes by their text,
+/// not by shifting a stored offset — and nothing is re-extracted.
+#[tokio::test]
+async fn torn_restamp_of_a_split_chunk_is_relocated_exactly_on_next_ingest() {
+    let f = fx();
+    let para = "A sentence about the cache layer and how it behaves under load. ".repeat(30);
+    let doc = |intro: &str| {
+        format!(
+            "# Plan\n\n{intro}\n\n## Detail\n\n{p}\n\n{p}\n\n{p}\n\n{p}\n\n## Later\n\nFollow up.\n",
+            p = para.trim()
+        )
+    };
+    let r1 = ingest(&f.state, "d", &doc("Intro.")).await;
+    let units = r1["chunks"][1]["units"].as_u64().unwrap();
+    assert!(units > 1, "the Detail section is split: {r1}");
+    let r2 = ingest(&f.state, "d", &doc("A longer introduction.")).await;
+    assert_eq!(classes(&r2), vec!["changed", "unchanged", "unchanged"]);
+
+    // Cut the WAL at the second re-stamp statement: the Detail chunk's first unit carries the
+    // second revision's span, the rest still carry the first revision's.
+    let seen = AtomicUsize::new(0);
+    let wal = truncated_wal(f.wal.path(), |v| {
+        cypher(v).contains("SET ep.revision_id = $revision_id")
+            && seen.fetch_add(1, Ordering::SeqCst) == 1
+    });
+    let (s2, _db2, _d, ex) = replayed(wal.path()).await;
+    let live: Vec<Value> = episodes(&s2)
+        .await
+        .into_values()
+        .filter(|e| e["superseded_at"].is_null() && e["heading_path"] == json!(["Plan", "Detail"]))
+        .collect();
+    let revs: BTreeSet<String> = live
+        .iter()
+        .map(|e| e["revision_id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(revs.len(), 2, "the torn tail left mixed stamps: {live:?}");
+
+    let v3 = doc("An even longer introduction than both earlier ones.");
+    let r3 = call("knowledge_process_document", doc_params("d", &v3), &s2).await;
+    assert_eq!(r3["status"], "committed", "{r3}");
+    assert_eq!(r3["extraction_calls"], 1, "only the intro");
+    assert_eq!(ex.call_count(), 1);
+    assert!(
+        uuids(&r3["stale_superseded_episode_uuids"]).is_empty(),
+        "{r3}"
+    );
+    let rev3 = r3["revision_id"].as_str().unwrap().to_string();
+    assert_live_episodes_match(&s2, &v3, &rev3).await;
+}
+
 /// US3 AC2, SC-004: a crash before the second revision's commit chunk rebuilds to the fully
 /// "before" state — its pending episodes exist but nothing of them is believed.
 #[tokio::test]

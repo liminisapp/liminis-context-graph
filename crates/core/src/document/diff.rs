@@ -55,7 +55,8 @@ pub struct BaselineEpisode {
     pub heading_path: Vec<String>,
     pub chunk_hash: Option<String>,
     pub byte_start: Option<i64>,
-    pub byte_end: Option<i64>,
+    /// The episode's text, an exact slice of the revision that stamped it.
+    pub content: String,
 }
 
 /// One logical chunk of the previous committed state: every live episode (split units included)
@@ -68,9 +69,9 @@ pub struct BaselineChunk {
     pub revision_id: String,
     /// Ordered by `byte_start`.
     pub episode_uuids: Vec<String>,
-    /// `(byte_start, byte_end)` of each episode in `episode_uuids`, in the same order: where the
-    /// episode sits in the revision named by its `revision_id`.
-    pub episode_spans: Vec<Option<(i64, i64)>>,
+    /// The text of each episode in `episode_uuids`, in the same order. An unchanged chunk's
+    /// episodes tile its (identical) text, which is how the commit step re-locates them.
+    pub episode_texts: Vec<String>,
 }
 
 /// The previous committed state of a document.
@@ -161,7 +162,7 @@ impl Baseline {
                 heading_path: eps[0].heading_path.clone(),
                 chunk_hash: eps[0].chunk_hash.clone().unwrap_or_default(),
                 revision_id: rev,
-                episode_spans: eps.iter().map(|e| e.byte_start.zip(e.byte_end)).collect(),
+                episode_texts: eps.iter().map(|e| e.content.clone()).collect(),
                 episode_uuids: eps.into_iter().map(|e| e.uuid).collect(),
             });
         }
@@ -305,7 +306,7 @@ pub fn measure_pair(old: &str, new: &str, max_chars: usize) -> PairMeasure {
                 chunk_hash: c.chunk_hash.clone(),
                 revision_id: "old".into(),
                 episode_uuids: vec![format!("ep-{}", c.index)],
-                episode_spans: vec![Some((c.byte_start as i64, c.byte_end as i64))],
+                episode_texts: vec![c.text.clone()],
             })
             .collect(),
         ..Default::default()
@@ -364,7 +365,7 @@ mod tests {
                 heading_path: c.heading_path.clone(),
                 chunk_hash: Some(c.chunk_hash.clone()),
                 byte_start: Some(c.byte_start as i64),
-                byte_end: Some(c.byte_end as i64),
+                content: c.text.clone(),
             })
             .collect();
         let manifest: Vec<String> = (0..d.chunks.len()).map(|i| format!("n-{i}")).collect();
