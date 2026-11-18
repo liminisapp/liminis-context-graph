@@ -137,13 +137,12 @@ the lint snapshot use the same predicate.
 
 **Self-heal.** The baseline groups live committed episodes by `name`, then by commit instant
 (`revision_committed_at`), not by revision id. For a name with episodes from more than one commit,
-all but the latest are *stale* and superseded at the next commit. Grouping by instant matters for
-the re-stamp: a torn tail that re-stamped only some of a split chunk's units leaves them with two
+all but the latest are *stale* and superseded at the next commit, and a removal whose
+`chunk_removed` was torn away is simply re-classified `removed`. Grouping by instant matters for the
+re-stamp: a torn tail that re-stamped only some of a split chunk's units leaves them with two
 revision ids but one commit instant, so they stay one chunk, never a stale half, and the next commit
-re-stamps the rest.
-and a removal whose `chunk_removed` was torn away is simply re-classified `removed`. So the torn-tail
-overlap — the same class every multi-line `with_chunk` already has — is repaired by the next ingest of
-the document, without extraction. It is not prevented.
+re-stamps the rest. So the torn-tail overlap — the same class every multi-line `with_chunk` already
+has — is repaired by the next ingest of the document, without extraction. It is not prevented.
 
 **Abandoned attempts are not cleaned up.** Their pending episodes are never believed and stay visible
 to default (non-belief) reads, like superseded episodes (ADR-0705 "Reads"); readers see
