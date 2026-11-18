@@ -13,6 +13,7 @@ pub mod fixture;
 pub mod lcg;
 pub mod mapping;
 pub mod metrics;
+pub mod origin;
 pub mod qmd;
 pub mod report;
 pub mod stats;

@@ -587,6 +587,7 @@ mod tests {
             stale_in_top_k: stale,
             grounded_recall: None,
             grounded_mrr: None,
+            ranked: vec![],
         }
     }
 

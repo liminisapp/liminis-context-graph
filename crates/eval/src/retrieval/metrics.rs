@@ -132,6 +132,9 @@ pub struct QuestionScore {
     pub stale_in_top_k: Option<bool>,
     pub grounded_recall: Option<f64>,
     pub grounded_mrr: Option<f64>,
+    /// The de-duplicated top-k note list this score was computed from (not written to the JSON
+    /// report; the per-origin analysis reads it).
+    pub ranked: Vec<String>,
 }
 
 /// Scores one question. `grounded_ranks` is `None` when grounded judging was not run (no judge
@@ -159,6 +162,7 @@ pub fn score_question(
         stale_in_top_k: temporal.then(|| stale_in_top_k(&ranked, &q.stale)),
         grounded_recall: g_recall,
         grounded_mrr: g_mrr,
+        ranked,
     }
 }
 
