@@ -165,8 +165,9 @@ pub fn merge_stored_kinds(
 
 /// Restores a missing stamp from the group's WAL ontology sidecar (#776 after a
 /// rebuild-from-WAL; #778 on every first resolve of the group). Never overwrites: any existing
-/// stamp file — even an unparseable one — is left untouched. Restores nothing (and raises nothing) when the sidecar is missing, predates the
-/// `identity_types` field, or records an empty set (a flagless group has no stamp file).
+/// stamp file — even an unparseable one — is left untouched. Restores nothing (and raises
+/// nothing) when the sidecar is missing, predates the `identity_types` field, or records an
+/// empty set (a flagless group has no stamp file).
 /// Returns `true` only when a stamp was written.
 pub fn restore_stamp_if_absent(workspace_root: &Path, wal_dir: &Path, group_id: &str) -> bool {
     let Ok(path) = stamp_path(workspace_root, group_id) else {

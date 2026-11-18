@@ -233,7 +233,8 @@ pub fn write_wal_ontology_sidecar(
 
 /// Reads the published-ontology sidecar from a group's WAL directory, if present. Besides
 /// external tooling and tests, its only in-tree consumer is the stamp restore (#776 after a
-/// rebuild-from-WAL; #778 on the first resolve of a group with no stamp); no extraction/validation/reprocessing path consults it.
+/// rebuild-from-WAL; #778 on the first resolve of a group with no stamp); no
+/// extraction/validation/reprocessing path consults it.
 pub fn read_wal_ontology_sidecar(wal_dir: &Path) -> Option<OntologySidecar> {
     let path = wal_ontology_path(wal_dir);
     let text = std::fs::read_to_string(&path).ok()?;
