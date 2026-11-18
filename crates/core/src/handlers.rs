@@ -1218,6 +1218,7 @@ async fn handle_knowledge_process_chunk(
         // Issue #292: only this handler stamps `chunk`, which is what makes its own prior
         // writes recognisable to a later revise.
         write_path: episode::WritePath::Chunk,
+        document: None,
     };
     let result = episode::add_episode_with_opts(
         Arc::clone(&state),

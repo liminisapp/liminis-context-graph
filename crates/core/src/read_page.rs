@@ -33,6 +33,13 @@ pub const EPISODE_FIELDS: &[&str] = &[
     "supersession_reason",
     "doc_id",
     "origin",
+    // Document mode (issue #785, FR-013): present only on document-mode episodes.
+    "revision_id",
+    "revision_committed_at",
+    "byte_start",
+    "byte_end",
+    "heading_path",
+    "chunk_hash",
 ];
 
 /// Serialized keys of an entity item (embeddings are `#[serde(skip)]`, never projectable).

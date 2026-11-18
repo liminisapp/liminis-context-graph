@@ -1408,7 +1408,8 @@ impl<'db> Conn<'db> {
              RETURN ep.uuid, ep.name, ep.group_id, ep.created_at, ep.source, \
              ep.source_description, ep.content, ep.valid_at, ep.entity_edges, ep.attributes, \
              ep.ingested_at, ep.superseded_at, ep.superseded_by, ep.superseded_by_kind, \
-             ep.supersession_reason, ep.doc_id, ep.origin \
+             ep.supersession_reason, ep.doc_id, ep.origin, ep.revision_id, \
+             ep.revision_committed_at, ep.byte_start, ep.byte_end, ep.heading_path, ep.chunk_hash \
              ORDER BY ep.created_at DESC, ep.uuid DESC LIMIT $limit"
         );
         let result = self.query_params(&cypher, params)?;
@@ -1434,6 +1435,17 @@ impl<'db> Conn<'db> {
                     supersession_reason: value_as_optional_string(&row[14]),
                     doc_id: value_as_optional_string(&row[15]),
                     origin: value_as_optional_string(&row[16]),
+                    // Document mode (issue #785): NULL — and so absent from the read — on every
+                    // other episode, so a chunk-mode read's shape is unchanged (SC-008).
+                    revision_id: value_as_optional_string(&row[17]),
+                    revision_committed_at: value_as_optional_timestamp_str(&row[18]),
+                    byte_start: value_as_optional_i64(&row[19]),
+                    byte_end: value_as_optional_i64(&row[20]),
+                    heading_path: match &row[21] {
+                        lbug::Value::Null(_) => None,
+                        v => Some(value_as_str_list(v)),
+                    },
+                    chunk_hash: value_as_optional_string(&row[22]),
                     ..Default::default()
                 },
                 created_us,
