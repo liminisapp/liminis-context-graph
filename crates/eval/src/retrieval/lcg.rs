@@ -1167,8 +1167,15 @@ mod tests {
             assert!(by_note("plain").get("origin").is_none());
         }
         // v1-style fixture: no origin key anywhere.
-        let t2 = FakeTransport::new(|m, _| match m {
-            "knowledge_process_chunk" => Ok(json!({"episode_uuid": "ep"})),
+        let n2 = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let t2 = FakeTransport::new(move |m, _| match m {
+            "knowledge_process_chunk" => {
+                let n = n2.fetch_add(1, Ordering::Relaxed);
+                Ok(json!({"episode_uuid": format!("ep{n}")}))
+            }
+            "knowledge_supersede_document" => Ok(
+                json!({"success": true, "already_recorded": false, "superseded_count": 1, "superseded_uuids": ["ep0"]}),
+            ),
             _ => Ok(json!({"nodes": []})),
         });
         ingest(&t2, &fixture()).await.unwrap();

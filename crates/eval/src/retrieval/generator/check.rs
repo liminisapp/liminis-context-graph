@@ -43,6 +43,42 @@ fn has(text: &str, needle: &str) -> bool {
     text.to_lowercase().contains(&needle.to_lowercase())
 }
 
+/// Whether `value` appears in `text` as a whole token (any case). A bare number such as `7` must
+/// not be satisfied by `2027`, `7.4` or `1,700`: the value is rejected when it is glued to a letter
+/// or digit, or, for a value that starts or ends with a digit, when a `.`, `,`, `-`, `/` or `:`
+/// joins it to another digit.
+pub fn has_value(text: &str, value: &str) -> bool {
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    let v: Vec<char> = value.to_lowercase().chars().collect();
+    if v.is_empty() || v.len() > t.len() {
+        return false;
+    }
+    let joiner = |c: char| matches!(c, '.' | ',' | '-' | '/' | ':');
+    let starts_digit = v[0].is_ascii_digit();
+    let ends_digit = v[v.len() - 1].is_ascii_digit();
+    for i in 0..=(t.len() - v.len()) {
+        if t[i..i + v.len()] != v[..] {
+            continue;
+        }
+        let left_ok = i == 0 || {
+            let p = t[i - 1];
+            let joined = starts_digit && joiner(p) && i >= 2 && t[i - 2].is_ascii_digit();
+            !(p.is_alphanumeric() || joined)
+        };
+        let end = i + v.len();
+        let right_ok = end == t.len() || {
+            let n = t[end];
+            let joined =
+                ends_digit && joiner(n) && end + 1 < t.len() && t[end + 1].is_ascii_digit();
+            !(n.is_alphanumeric() || joined)
+        };
+        if left_ok && right_ok {
+            return true;
+        }
+    }
+    false
+}
+
 fn words(s: &str) -> usize {
     s.split_whitespace().count()
 }
@@ -210,7 +246,7 @@ pub fn check_rendered(sk: &Skeleton, r: &Rendered) -> Findings {
                     n.id, fact.entity
                 ));
             }
-            if !has(body, &fact.value) {
+            if !has_value(body, &fact.value) {
                 f.errors.push(format!(
                     "note '{}': the value '{}' ({} of {}) does not appear",
                     n.id, fact.value, fact.attribute, fact.entity
@@ -250,7 +286,7 @@ pub fn check_rendered(sk: &Skeleton, r: &Rendered) -> Findings {
             for v in &n.earlier_values {
                 // Generic one-word values ("weekly") appear innocently; check named things only.
                 let named = v.chars().any(|c| c.is_uppercase() || c.is_ascii_digit());
-                if named && has(body, v) {
+                if named && has_value(body, v) {
                     f.errors.push(format!(
                         "note '{}': an implicit revision must not mention the earlier value '{v}'",
                         n.id
@@ -335,8 +371,8 @@ pub fn check_rendered(sk: &Skeleton, r: &Rendered) -> Findings {
         for e in &q.evidence {
             if let (Some(n), Some(body)) = (sk.note(&e.note), r.notes.get(&e.note)) {
                 let fact = n.facts.iter().find(|x| x.statement == e.key_fact);
-                let findable = fact.is_some_and(|x| has(body, &x.entity) && has(body, &x.value))
-                    && {
+                let findable =
+                    fact.is_some_and(|x| has(body, &x.entity) && has_value(body, &x.value)) && {
                         let kw = content_words(&e.key_fact);
                         kw.is_empty() || overlap(&e.key_fact, body) >= 0.6
                     };
@@ -349,7 +385,7 @@ pub fn check_rendered(sk: &Skeleton, r: &Rendered) -> Findings {
                 if q.category == "passage" {
                     if let Some(x) = fact {
                         let chunks = chunk_markdown(body, sk.chunk_max_tokens);
-                        match chunks.iter().position(|c| has(c, &x.value) && has(c, &x.entity)) {
+                        match chunks.iter().position(|c| has_value(c, &x.value) && has(c, &x.entity)) {
                             Some(i) if i >= 1 && chunks.len() >= 2 => {}
                             _ => f.errors.push(format!(
                                 "question '{}': the passage fact is not in a later chunk of a multi-chunk note '{}'",
@@ -397,7 +433,7 @@ fn check_paraphrase(sk: &Skeleton, r: &Rendered, q: &SkQuestion, text: &str, f: 
     if let Some(x) = fact {
         let carrying: Vec<String> = sentences(body)
             .into_iter()
-            .filter(|s| has(s, &x.value))
+            .filter(|s| has_value(s, &x.value))
             .collect();
         if carrying.is_empty() {
             f.errors.push(format!(

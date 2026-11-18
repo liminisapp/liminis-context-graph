@@ -601,6 +601,16 @@ pub fn check_only_ids(sk: &Skeleton, only: &BTreeSet<String>) -> Result<(), Stri
     }
 }
 
+/// Written next to the notes while a render is unfinished; see `run`.
+pub const PROGRESS_FILE: &str = "render.progress.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Progress {
+    render_model: String,
+    prompt_version: String,
+    skeleton_hash: String,
+}
+
 pub async fn run_cli(args: &[String]) -> i32 {
     match run(args).await {
         Ok(c) => c,
@@ -680,22 +690,56 @@ async fn run(args: &[String]) -> Result<i32, String> {
     } else {
         Rendered::default()
     };
-    // A partial run (--resume / --only) keeps most of the previously rendered prose, so render.json
-    // must keep describing it: refuse a different model or prompt version, and accumulate calls.
-    let previous: Option<RenderMeta> = if o.resume || o.only.is_some() {
-        match std::fs::read_to_string(dir.join("render.json")) {
-            Ok(t) => Some(
-                serde_json::from_str(&t).map_err(|e| format!("render.json is unreadable: {e}"))?,
-            ),
-            Err(_) => None,
+    // A partial run (--resume / --only) keeps most of the previously rendered prose, so what
+    // describes that prose must be checked: render.progress.json while a run is unfinished (it is
+    // written before the first model call, so a crash leaves it behind), else render.json. With
+    // neither, kept notes have no recorded origin and the partial run is refused.
+    let progress_path = dir.join(PROGRESS_FILE);
+    let partial = o.resume || o.only.is_some();
+    let new_hash = skeleton_hash(&skeleton_text);
+    let previous: Option<RenderMeta> = if partial {
+        if let Ok(t) = std::fs::read_to_string(&progress_path) {
+            let p: Progress = serde_json::from_str(&t)
+                .map_err(|e| format!("{PROGRESS_FILE} is unreadable: {e}"))?;
+            Some(RenderMeta {
+                render_model: p.render_model,
+                prompt_version: p.prompt_version,
+                rendered_on: String::new(),
+                skeleton_hash: p.skeleton_hash,
+                corpus_version: sk.corpus_version.clone(),
+                questions_version: sk.questions_version.clone(),
+                model_calls: 0,
+            })
+        } else {
+            match std::fs::read_to_string(dir.join("render.json")) {
+                Ok(t) => Some(
+                    serde_json::from_str(&t)
+                        .map_err(|e| format!("render.json is unreadable: {e}"))?,
+                ),
+                Err(_) if !existing.notes.is_empty() => {
+                    return Err(format!(
+                        "{} note(s) are already in notes/ but neither render.json nor {PROGRESS_FILE} records the model and skeleton that produced them; a partial run (--resume/--only) cannot vouch for them. Delete notes/ and render the whole corpus without --resume/--only",
+                        existing.notes.len()
+                    ));
+                }
+                Err(_) => None,
+            }
         }
     } else {
         None
     };
     if let Some(prev) = &previous {
-        check_partial_run_provenance(prev, &model, &skeleton_hash(&skeleton_text))?;
+        check_partial_run_provenance(prev, &model, &new_hash)?;
     }
-    let prior_calls = previous.as_ref().map_or(0, |p| p.model_calls);
+    // Calls already recorded by an earlier finished run; a crashed run's calls are not counted.
+    let prior_calls = if partial {
+        std::fs::read_to_string(dir.join("render.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str::<RenderMeta>(&t).ok())
+            .map_or(0, |m| m.model_calls)
+    } else {
+        0
+    };
     let (nc, qc) = plan_calls(&sk, &existing, &o);
     println!(
         "retrieval-render: {} notes and {} questions; this run makes {nc} note calls + {qc} question calls with {model}",
@@ -710,6 +754,18 @@ async fn run(args: &[String]) -> Result<i32, String> {
     })?;
     let client = AnthropicText::new(key, model.clone());
     std::fs::create_dir_all(dir.join("notes")).map_err(|e| e.to_string())?;
+    // Recorded before the first model call so a crashed run can be resumed only by the same
+    // model, prompt and skeleton. Removed once render.json takes over.
+    let progress = Progress {
+        render_model: model.clone(),
+        prompt_version: PROMPT_VERSION.to_string(),
+        skeleton_hash: new_hash.clone(),
+    };
+    std::fs::write(
+        &progress_path,
+        serde_json::to_string_pretty(&progress).expect("serializable") + "\n",
+    )
+    .map_err(|e| format!("{PROGRESS_FILE}: {e}"))?;
     let notes_dir = dir.join("notes");
     let on_note = move |id: &str, body: &str| {
         let _ = std::fs::write(
@@ -728,6 +784,7 @@ async fn run(args: &[String]) -> Result<i32, String> {
         model_calls: prior_calls + calls,
     };
     write_fixture(dir, &sk, &rendered, &meta)?;
+    let _ = std::fs::remove_file(&progress_path);
     let questions_text =
         std::fs::read_to_string(dir.join("questions.jsonl")).map_err(|e| e.to_string())?;
     if let Err(e) = update_review(dir, &questions_text) {

@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use lcg_eval::retrieval::evidence_judge::{CachedEvidenceJudge, EvidenceJudge};
 use lcg_eval::retrieval::fixture::{self, Category, Fixture};
-use lcg_eval::retrieval::generator::check::{self, Rendered};
+use lcg_eval::retrieval::generator::check::{self, has_value, Rendered};
 use lcg_eval::retrieval::generator::questions::{
     content_words, overlap, PARAPHRASE_MAX_NOTE_OVERLAP,
 };
@@ -799,15 +799,39 @@ fn update_review_fills_a_pending_record_and_never_touches_a_reviewed_one() {
 struct LogTransport {
     log: Mutex<Vec<(String, Value)>>,
     n: Mutex<usize>,
+    episodes: Mutex<HashMap<String, Vec<String>>>,
 }
 impl RpcTransport for LogTransport {
     fn call<'a>(&'a self, method: &'a str, p: Value) -> BoxFuture<'a, Result<Value, String>> {
-        self.log.lock().unwrap().push((method.to_string(), p));
+        self.log
+            .lock()
+            .unwrap()
+            .push((method.to_string(), p.clone()));
         let out = match method {
             "knowledge_process_chunk" => {
                 let mut n = self.n.lock().unwrap();
                 *n += 1;
+                self.episodes
+                    .lock()
+                    .unwrap()
+                    .entry(p["source_file"].as_str().unwrap().to_string())
+                    .or_default()
+                    .push(format!("ep-{n}"));
                 Ok(json!({"episode_uuid": format!("ep-{n}")}))
+            }
+            "knowledge_supersede_document" => {
+                let old = p["superseded_doc_id"].as_str().unwrap();
+                let uuids = self
+                    .episodes
+                    .lock()
+                    .unwrap()
+                    .get(old)
+                    .cloned()
+                    .unwrap_or_default();
+                Ok(json!({
+                    "success": true, "already_recorded": false,
+                    "superseded_count": uuids.len(), "superseded_uuids": uuids,
+                }))
             }
             "knowledge_get_entities_by_source" => Ok(json!({"nodes": []})),
             _ => Ok(json!({})),
@@ -822,6 +846,7 @@ async fn ingest_submits_every_note_with_its_declared_origin_and_every_supersessi
     let t = LogTransport {
         log: Mutex::new(vec![]),
         n: Mutex::new(0),
+        episodes: Mutex::new(HashMap::new()),
     };
     let map = lcg::ingest(&t, &fx).await.unwrap();
     let declared: HashMap<&str, &str> = fx
@@ -871,6 +896,7 @@ fn words(s: &str) -> BTreeSet<String> {
 struct FakeLcg {
     chunks: Mutex<Vec<Doc>>,
     n: Mutex<usize>,
+    episodes: Mutex<HashMap<String, Vec<String>>>,
 }
 impl RpcTransport for FakeLcg {
     fn call<'a>(&'a self, method: &'a str, p: Value) -> BoxFuture<'a, Result<Value, String>> {
@@ -888,7 +914,27 @@ impl RpcTransport for FakeLcg {
                     text.clone(),
                     words(&text),
                 ));
+                self.episodes
+                    .lock()
+                    .unwrap()
+                    .entry(p["source_file"].as_str().unwrap().to_string())
+                    .or_default()
+                    .push(format!("ep-{n}"));
                 Ok(json!({"episode_uuid": format!("ep-{n}")}))
+            }
+            "knowledge_supersede_document" => {
+                let old = p["superseded_doc_id"].as_str().unwrap();
+                let uuids = self
+                    .episodes
+                    .lock()
+                    .unwrap()
+                    .get(old)
+                    .cloned()
+                    .unwrap_or_default();
+                Ok(json!({
+                    "success": true, "already_recorded": false,
+                    "superseded_count": uuids.len(), "superseded_uuids": uuids,
+                }))
             }
             "knowledge_get_entities_by_source" => Ok(json!({"nodes": []})),
             "knowledge_search_passages" => {
@@ -962,6 +1008,7 @@ async fn run_report(fx: &Fixture, judge_path: &Path) -> Report {
     let transport: Arc<FakeLcg> = Arc::new(FakeLcg {
         chunks: Mutex::new(vec![]),
         n: Mutex::new(0),
+        episodes: Mutex::new(HashMap::new()),
     });
     let dynt: Arc<dyn RpcTransport> = transport.clone();
     let map = lcg::ingest(dynt.as_ref(), fx).await.unwrap();
@@ -1690,4 +1737,88 @@ fn a_decimal_value_stays_in_one_sentence_for_the_paraphrase_check() {
         "{}",
         check::describe(&f)
     );
+}
+
+#[test]
+fn a_bare_number_value_is_not_satisfied_by_an_unrelated_number() {
+    // 7 is not in 2027, 7.4, 1,700, 17 or 3-7 style joins; it is in "7 engineers" and "(7)."
+    assert!(!has_value("The budget year is 2027.", "7"));
+    assert!(!has_value("It scored 7.4 overall.", "7"));
+    assert!(!has_value("About 1,700 requests.", "7"));
+    assert!(!has_value("Room 17 is booked.", "7"));
+    assert!(!has_value("Tickets 3-7 are open.", "7"));
+    assert!(has_value("The team has 7 engineers.", "7"));
+    assert!(has_value("Rota size (7).", "7"));
+    assert!(has_value("Ends with 7.", "7"));
+    assert!(has_value("Score: 7.4 out of 10", "7.4"));
+    assert!(has_value("A budget of $1,200 a month", "$1,200"));
+    assert!(!has_value("A budget of $1,2000 a month", "$1,200"));
+    assert!(has_value("Cadence is Weekly.", "weekly"));
+    // The fact check uses it: a note that drops the value but carries 2027 is flagged.
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    let mut r = check::load_rendered(template_dir()).unwrap();
+    let (n, f) = sk
+        .notes
+        .iter()
+        .find_map(|n| {
+            n.facts
+                .iter()
+                .find(|f| f.value.len() == 1 && f.value.chars().all(|c| c.is_ascii_digit()))
+                .map(|f| (n, f))
+        })
+        .expect("the skeleton has a single-digit value");
+    let body = r.notes[&n.id].clone();
+    let tweaked: String = body.replace(&f.value, "#");
+    r.notes.insert(
+        n.id.clone(),
+        format!("{tweaked}\n\nThe plan runs into 2027 and 2037.\n"),
+    );
+    let found = check::check_rendered(&sk, &r);
+    assert!(
+        found
+            .errors
+            .iter()
+            .any(|e| e.contains(&n.id) && e.contains("does not appear")),
+        "{}",
+        check::describe(&found)
+    );
+}
+
+#[tokio::test]
+async fn resume_after_a_crash_needs_the_recorded_model_and_skeleton_not_just_notes() {
+    let g = generator::generate(&scenario()).unwrap();
+    let text = g.skeleton.to_json();
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("skeleton.json"), &text).unwrap();
+    std::fs::create_dir(d.path().join("notes")).unwrap();
+    let id = &g.skeleton.notes[0].id;
+    std::fs::write(d.path().join(format!("notes/{id}.md")), "# kept\n").unwrap();
+    let dir = d.path().to_str().unwrap().to_string();
+    let args = |model: &str| -> Vec<String> {
+        ["--dir", &dir, "--resume", "--dry-run", "--model", model]
+            .map(String::from)
+            .to_vec()
+    };
+    // Notes exist but nothing records what produced them: refused.
+    assert_eq!(render::run_cli(&args("model-a")).await, 1);
+    // A crashed run leaves render.progress.json behind; the same model may resume...
+    let progress = |model: &str, hash: &str| {
+        json!({"render_model": model, "prompt_version": render::PROMPT_VERSION, "skeleton_hash": hash})
+            .to_string()
+    };
+    let hash = skeleton_hash(&text);
+    std::fs::write(
+        d.path().join(render::PROGRESS_FILE),
+        progress("model-a", &hash),
+    )
+    .unwrap();
+    assert_eq!(render::run_cli(&args("model-a")).await, 0);
+    // ...a different model may not, nor may a resume against a changed skeleton.
+    assert_eq!(render::run_cli(&args("model-b")).await, 1);
+    std::fs::write(
+        d.path().join(render::PROGRESS_FILE),
+        progress("model-a", "0123456789abcdef"),
+    )
+    .unwrap();
+    assert_eq!(render::run_cli(&args("model-a")).await, 1);
 }
