@@ -1,349 +1,349 @@
 {
-  "status": "pending",
+  "status": "reviewed",
   "skeleton_hash": "22459bab8ca899de",
   "questions_version": "meridian-questions-3",
   "questions_hash": "c110fc2cb5090cea",
   "sample_policy": "stratified: 6 questions per category (seeded sample, at least 10% of all questions). A maintainer fills every verdict (true/false) after reading the rendered question, its relevant notes and its key fact, then sets status to \"reviewed\" and records reviewer, reviewed_on and error_rate. Nobody else writes verdicts.",
-  "reviewer": null,
-  "reviewed_on": null,
+  "reviewer": "Brett Adam",
+  "reviewed_on": "2026-11-18",
   "error_rate_threshold": 0.05,
-  "error_rate": null,
+  "error_rate": 0,
   "sample": [
     {
       "id": "answer-01",
       "category": "answer",
       "text": "When is Marlin Core scheduled to go live?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "answer-11",
       "category": "answer",
       "text": "What was Lena Moreau's start date?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "answer-13",
       "category": "answer",
       "text": "How much monthly budget does Cedar Core have?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "answer-17",
       "category": "answer",
       "text": "Under the Nimbus Policy, how many days do you have to submit a request?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "answer-21",
       "category": "answer",
       "text": "What uptime SLA does Lumen Supply guarantee?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "answer-23",
       "category": "answer",
       "text": "What is the launch date for Fable Core?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "direct-07",
       "category": "direct",
       "text": "When is Nimbus Core due to launch?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "direct-12",
       "category": "direct",
       "text": "What level of uptime does Helix Supply promise?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "direct-24",
       "category": "direct",
       "text": "Aiko Osei pager rota frequency",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "direct-30",
       "category": "direct",
       "text": "How often is Callum Brennan on pager duty?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "direct-31",
       "category": "direct",
       "text": "Who owns Tern Core?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "direct-35",
       "category": "direct",
       "text": "According to the trade press, what is the standard rate for Tern Supply?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "multihop-07",
       "category": "multi-hop",
       "text": "How much per unit does Cedar Core's supplier charge?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "multihop-10",
       "category": "multi-hop",
       "text": "What uptime guarantee does the supplier that Nimbus Core relies on give?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "multihop-18",
       "category": "multi-hop",
       "text": "Comparing Quill Core with Fable Core, which one has the higher monthly budget?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "multihop-22",
       "category": "multi-hop",
       "text": "Who has more monthly budget, Tern Core or Orbit Core?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "multihop-23",
       "category": "multi-hop",
       "text": "Of Marlin Core and Lumen Core, which is allotted the larger monthly budget?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "multihop-25",
       "category": "multi-hop",
       "text": "Which has a higher monthly budget, Cedar Core or Juniper Core?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "negative-09",
       "category": "negative",
       "text": "Which person does Orbit Holdings report to?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "negative-13",
       "category": "negative",
       "text": "Who is our account manager at Marlin Labs?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "negative-23",
       "category": "negative",
       "text": "What is Callum Brennan's uptime SLA?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "negative-30",
       "category": "negative",
       "text": "What is the join date for Juniper Core?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "negative-31",
       "category": "negative",
       "text": "What is the review cadence for Fable Supply?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "negative-33",
       "category": "negative",
       "text": "How many engineers are on the Quill Policy team?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "paraphrase-11",
       "category": "paraphrase",
       "text": "How many 24-hour periods ahead must a request be raised for the rule on shift rostering?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "paraphrase-14",
       "category": "paraphrase",
       "text": "What date did the person working on new-hire induction start?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "paraphrase-16",
       "category": "paraphrase",
       "text": "What is the maximum spend set for the initiative covering shift rostering?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "paraphrase-23",
       "category": "paraphrase",
       "text": "Who do we contact at the external vendor covering shift rostering?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "paraphrase-24",
       "category": "paraphrase",
       "text": "How big is the team behind the project covering access control?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "paraphrase-28",
       "category": "paraphrase",
       "text": "How often is the rule covering vehicle path planning looked at again?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "passage-04",
       "category": "passage",
       "text": "How big was the audience for the Orbit Core demo?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "passage-11",
       "category": "passage",
       "text": "What is the location of the Tomas Kowalski offsite?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "passage-13",
       "category": "passage",
       "text": "How many tickets were still open in Priya Varga's backlog when the sprint ended?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "passage-14",
       "category": "passage",
       "text": "Where is the Bram Tanaka offsite going to be?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "passage-24",
       "category": "passage",
       "text": "What satisfaction score out of 10 was given to Tern Core?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "passage-25",
       "category": "passage",
       "text": "Priya Varga satisfaction rating out of 10",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "temporal-03",
       "category": "temporal",
       "text": "What cloud region is Tern Core running in these days?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "temporal-08",
       "category": "temporal",
       "text": "Where is Sable Core's office currently located?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "temporal-09",
       "category": "temporal",
       "text": "What is Sable Core's primary database at present?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "temporal-14",
       "category": "temporal",
       "text": "Which cloud region is Sable Core currently deployed in?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "temporal-23",
       "category": "temporal",
       "text": "What is Basalt Core's primary database these days?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     },
     {
       "id": "temporal-27",
       "category": "temporal",
       "text": "According to the newest notes, what design tool does Sable Core use?",
-      "ground_truth_correct": null,
-      "note_relevance_correct": null,
-      "key_fact_correct": null
+      "ground_truth_correct": true,
+      "note_relevance_correct": true,
+      "key_fact_correct": true
     }
   ]
 }
