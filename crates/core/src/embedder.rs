@@ -677,6 +677,34 @@ impl Embedder for InstructedEmbedder {
     }
 }
 
+/// Assembles the production embedder stack from a transport embedder, the operator's instruction
+/// settings and the probe's advertisement (#790). This is the single place that decides *who*
+/// applies the instruction, so the "a text never receives two instructions" guarantee (FR-022)
+/// holds by construction and is testable without the service binary:
+///
+/// - `InstructionSource::Lcg`: wrap in [`InstructedEmbedder`]; the transport never sends
+///   `input_type`.
+/// - `InstructionSource::Embedder`: no decorator; the transport sends `input_type`.
+/// - `InstructionSource::None`: the transport embedder as-is (byte-identical to pre-#790).
+pub fn build_embedder_stack(
+    oai: OaiEmbedder,
+    config: &InstructionConfig,
+    advert: Option<&EmbedderAdvert>,
+) -> Result<(std::sync::Arc<dyn Embedder>, EffectiveInstructions), Error> {
+    let instructions = config.resolve(advert)?;
+    let embedder: std::sync::Arc<dyn Embedder> = match (instructions.source, advert) {
+        (InstructionSource::Embedder, Some(advert)) => {
+            std::sync::Arc::new(oai.with_embedder_instructions(advert))
+        }
+        (InstructionSource::Lcg, _) => std::sync::Arc::new(InstructedEmbedder::new(
+            std::sync::Arc::new(oai),
+            instructions.clone(),
+        )),
+        _ => std::sync::Arc::new(oai),
+    };
+    Ok((embedder, instructions))
+}
+
 // ── OaiEmbedder ───────────────────────────────────────────────────────────────
 
 /// Out-of-process embedding adapter (Principle V).
@@ -1761,5 +1789,318 @@ mod tests {
             .unwrap();
         assert!(result.is_empty());
         assert_eq!(counting.call_count(), 0);
+    }
+
+    // ── #790: roles, profiles, instructions ──────────────────────────────────────────────────
+
+    /// Records the exact (text, role) pairs it receives, so tests can assert what the embedder
+    /// actually sees.
+    #[derive(Default)]
+    pub(crate) struct RecordingEmbedder {
+        pub(crate) seen: std::sync::Mutex<Vec<(String, EmbedRole)>>,
+    }
+
+    impl Embedder for RecordingEmbedder {
+        fn embed<'a>(
+            &'a self,
+            text: &'a str,
+            role: EmbedRole,
+        ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+            self.seen.lock().unwrap().push((text.to_string(), role));
+            Box::pin(async { Ok(vec![0.0; 4]) })
+        }
+
+        fn dim(&self) -> usize {
+            4
+        }
+    }
+
+    fn instructed(
+        profile: InstructionProfile,
+    ) -> (InstructedEmbedder, std::sync::Arc<RecordingEmbedder>) {
+        let rec = std::sync::Arc::new(RecordingEmbedder::default());
+        let eff = InstructionConfig {
+            profile,
+            ..Default::default()
+        }
+        .resolve(None)
+        .unwrap();
+        (InstructedEmbedder::new(rec.clone(), eff), rec)
+    }
+
+    async fn strings_for(profile: InstructionProfile) -> (String, String) {
+        let (e, rec) = instructed(profile);
+        e.embed("hello", EmbedRole::Query).await.unwrap();
+        e.embed("hello", EmbedRole::Document).await.unwrap();
+        let seen = rec.seen.lock().unwrap();
+        (seen[0].0.clone(), seen[1].0.clone())
+    }
+
+    // SC-002: the exact string sent for a Query and a Document matches FR-003's definition.
+    #[tokio::test]
+    async fn profile_strings_match_definition() {
+        assert_eq!(
+            strings_for(InstructionProfile::None).await,
+            ("hello".to_string(), "hello".to_string())
+        );
+        assert_eq!(
+            strings_for(InstructionProfile::BgeV15).await,
+            (
+                "Represent this sentence for searching relevant passages: hello".to_string(),
+                "hello".to_string()
+            )
+        );
+        assert_eq!(
+            strings_for(InstructionProfile::NomicV15).await,
+            (
+                "search_query: hello".to_string(),
+                "search_document: hello".to_string()
+            )
+        );
+        assert_eq!(
+            strings_for(InstructionProfile::E5).await,
+            ("query: hello".to_string(), "passage: hello".to_string())
+        );
+    }
+
+    // SC-001: under `none` the decorator is a byte-for-byte passthrough, single and batch.
+    #[tokio::test]
+    async fn profile_none_is_byte_identical_passthrough() {
+        let (e, rec) = instructed(InstructionProfile::None);
+        let texts = ["a", "  padded  ", "", "Ünïcode ✓"];
+        e.embed_batch(&texts, EmbedRole::Query).await.unwrap();
+        e.embed_batch(&texts, EmbedRole::Document).await.unwrap();
+        let seen = rec.seen.lock().unwrap();
+        let got: Vec<&str> = seen.iter().map(|(t, _)| t.as_str()).collect();
+        let want: Vec<&str> = texts.iter().chain(texts.iter()).copied().collect();
+        assert_eq!(got, want);
+    }
+
+    // FR-013: a batch prefixes every element with the batch's role and preserves order.
+    #[tokio::test]
+    async fn batch_prefixes_every_element_in_order() {
+        let (e, rec) = instructed(InstructionProfile::NomicV15);
+        let out = e
+            .embed_batch(&["x", "y", "z"], EmbedRole::Document)
+            .await
+            .unwrap();
+        assert_eq!(out.len(), 3);
+        let seen = rec.seen.lock().unwrap();
+        let got: Vec<&str> = seen.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            got,
+            [
+                "search_document: x",
+                "search_document: y",
+                "search_document: z"
+            ]
+        );
+        assert!(seen.iter().all(|(_, r)| *r == EmbedRole::Document));
+    }
+
+    // FR-014: a prefix never turns skipped/blank text into a real embed request payload.
+    #[tokio::test]
+    async fn blank_text_is_never_prefixed() {
+        let (e, rec) = instructed(InstructionProfile::E5);
+        e.embed("", EmbedRole::Query).await.unwrap();
+        e.embed("   \n", EmbedRole::Document).await.unwrap();
+        let seen = rec.seen.lock().unwrap();
+        assert_eq!(seen[0].0, "");
+        assert_eq!(seen[1].0, "   \n");
+    }
+
+    #[tokio::test]
+    async fn empty_batch_issues_no_calls() {
+        let (e, rec) = instructed(InstructionProfile::E5);
+        let none: [&str; 0] = [];
+        assert!(e
+            .embed_batch(&none, EmbedRole::Query)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(rec.seen.lock().unwrap().is_empty());
+    }
+
+    // Edge case: no de-duplication heuristics — text already starting with the prefix is still
+    // prefixed.
+    #[tokio::test]
+    async fn text_already_starting_with_prefix_is_still_prefixed() {
+        let (e, rec) = instructed(InstructionProfile::E5);
+        e.embed("query: already", EmbedRole::Query).await.unwrap();
+        assert_eq!(rec.seen.lock().unwrap()[0].0, "query: query: already");
+    }
+
+    #[test]
+    fn unknown_profile_lists_valid_names() {
+        let err = "bogus"
+            .parse::<InstructionProfile>()
+            .unwrap_err()
+            .to_string();
+        for name in INSTRUCTION_PROFILE_NAMES {
+            assert!(err.contains(name), "{err} should list {name}");
+        }
+        assert!(err.contains("bogus"));
+    }
+
+    #[test]
+    fn profile_round_trips_through_name() {
+        for name in INSTRUCTION_PROFILE_NAMES {
+            assert_eq!(name.parse::<InstructionProfile>().unwrap().as_str(), *name);
+        }
+    }
+
+    #[test]
+    fn default_config_resolves_to_none() {
+        let eff = InstructionConfig::default().resolve(None).unwrap();
+        assert_eq!(eff, EffectiveInstructions::none());
+        assert_eq!(eff.source, InstructionSource::None);
+    }
+
+    // FR-005: an explicit override wins for that side only; an explicit empty string disables it.
+    #[test]
+    fn override_wins_for_its_side_only() {
+        let eff = InstructionConfig {
+            profile: InstructionProfile::BgeV15,
+            query_override: None,
+            document_override: Some("DOC: ".to_string()),
+        }
+        .resolve(None)
+        .unwrap();
+        assert_eq!(eff.query_prefix, BGE_V15_QUERY_PREFIX);
+        assert_eq!(eff.document_prefix, "DOC: ");
+        assert_eq!(eff.source, InstructionSource::Lcg);
+    }
+
+    #[test]
+    fn explicit_empty_override_disables_profile_prefix() {
+        let eff = InstructionConfig {
+            profile: InstructionProfile::NomicV15,
+            query_override: Some(String::new()),
+            document_override: None,
+        }
+        .resolve(None)
+        .unwrap();
+        assert_eq!(eff.query_prefix, "");
+        assert_eq!(eff.document_prefix, "search_document: ");
+    }
+
+    #[test]
+    fn override_alone_without_profile_is_lcg_applied() {
+        let eff = InstructionConfig {
+            profile: InstructionProfile::None,
+            query_override: Some("q: ".to_string()),
+            document_override: None,
+        }
+        .resolve(None)
+        .unwrap();
+        assert_eq!(eff.source, InstructionSource::Lcg);
+        assert_eq!(eff.query_prefix, "q: ");
+    }
+
+    fn advert() -> EmbedderAdvert {
+        EmbedderAdvert {
+            query: BGE_V15_QUERY_PREFIX.to_string(),
+            document: String::new(),
+        }
+    }
+
+    #[test]
+    fn embedder_profile_reports_advertised_instructions_and_lcg_applies_nothing() {
+        let eff = InstructionConfig {
+            profile: InstructionProfile::Embedder,
+            ..Default::default()
+        }
+        .resolve(Some(&advert()))
+        .unwrap();
+        assert_eq!(eff.source, InstructionSource::Embedder);
+        assert_eq!(eff.query_prefix, BGE_V15_QUERY_PREFIX);
+        assert_eq!(eff.document_prefix, "");
+    }
+
+    #[test]
+    fn embedder_profile_without_advertisement_falls_back_to_none() {
+        let eff = InstructionConfig {
+            profile: InstructionProfile::Embedder,
+            ..Default::default()
+        }
+        .resolve(None)
+        .unwrap();
+        assert_eq!(eff, EffectiveInstructions::none());
+    }
+
+    #[test]
+    fn embedder_profile_with_override_is_a_config_error() {
+        let err = InstructionConfig {
+            profile: InstructionProfile::Embedder,
+            query_override: Some("x".to_string()),
+            document_override: None,
+        }
+        .resolve(Some(&advert()))
+        .unwrap_err();
+        assert!(matches!(err, Error::Config(_)), "{err}");
+    }
+
+    // An advertisement alone never changes behaviour: with a named profile (LCG is the applier)
+    // the advertisement is ignored, so exactly one applier is active (FR-022).
+    #[test]
+    fn advertisement_is_ignored_when_lcg_profile_is_selected() {
+        let eff = InstructionConfig {
+            profile: InstructionProfile::BgeV15,
+            ..Default::default()
+        }
+        .resolve(Some(&advert()))
+        .unwrap();
+        assert_eq!(eff.source, InstructionSource::Lcg);
+    }
+
+    #[test]
+    fn oai_embedder_input_type_only_in_embedder_mode() {
+        let plain = OaiEmbedder::new_http("http://127.0.0.1:1/v1/embeddings", "m", 4).unwrap();
+        assert_eq!(plain.input_type_for(EmbedRole::Query), None);
+        assert_eq!(plain.instructions(), EffectiveInstructions::none());
+        let opted = OaiEmbedder::new_http("http://127.0.0.1:1/v1/embeddings", "m", 4)
+            .unwrap()
+            .with_embedder_instructions(&advert());
+        assert_eq!(opted.input_type_for(EmbedRole::Query), Some("query"));
+        assert_eq!(opted.input_type_for(EmbedRole::Document), Some("document"));
+        assert_eq!(opted.instructions().source, InstructionSource::Embedder);
+    }
+
+    #[test]
+    fn request_omits_input_type_when_none_and_includes_it_when_set() {
+        let none = serde_json::to_string(&OaiEmbedRequest {
+            input: OaiEmbedInput::Single("hi"),
+            model: "m",
+            input_type: None,
+        })
+        .unwrap();
+        assert_eq!(none, r#"{"input":"hi","model":"m"}"#);
+        let some = serde_json::to_string(&OaiEmbedRequest {
+            input: OaiEmbedInput::Single("hi"),
+            model: "m",
+            input_type: Some("query"),
+        })
+        .unwrap();
+        assert_eq!(some, r#"{"input":"hi","model":"m","input_type":"query"}"#);
+    }
+
+    #[test]
+    fn response_parses_with_and_without_advertisement() {
+        let plain: OaiEmbedResponse =
+            serde_json::from_str(r#"{"data":[{"embedding":[0.1],"index":0}],"model":"m"}"#)
+                .unwrap();
+        assert!(plain.instruction_roles.is_none());
+        let adv: OaiEmbedResponse = serde_json::from_str(
+            r#"{"data":[{"embedding":[0.1],"index":0}],"model":"m",
+                "instruction_roles":{"query":"Q: ","document":""}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            adv.instruction_roles,
+            Some(EmbedderAdvert {
+                query: "Q: ".to_string(),
+                document: String::new()
+            })
+        );
     }
 }

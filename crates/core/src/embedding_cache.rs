@@ -653,4 +653,108 @@ mod tests {
             .unwrap();
         assert_eq!(result, vec![vec![6.0], vec![9.0], vec![6.0]]);
     }
+
+    // ── #790 FR-012: role and effective prefix are part of the key ──────────────────────────
+
+    /// SC-005: the same text as Query and as Document never shares a vector; each is cached
+    /// independently and repeating either is a hit.
+    #[test]
+    fn same_text_different_role_does_not_collide() {
+        let cache = EmbeddingCache::new();
+        let calls = AtomicUsize::new(0);
+        let mut get = |role: EmbedRole, v: f32| {
+            cache
+                .get_or_compute(MODEL_A, DIM_A, role, "search_x: ", "same", || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(vec![v])
+                })
+                .unwrap()
+        };
+        assert_eq!(get(EmbedRole::Query, 1.0), vec![1.0]);
+        assert_eq!(get(EmbedRole::Document, 2.0), vec![2.0]);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "two embedder calls");
+        // Repeats are hits: no extra calls, same independent values.
+        assert_eq!(get(EmbedRole::Query, 9.0), vec![1.0]);
+        assert_eq!(get(EmbedRole::Document, 9.0), vec![2.0]);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn same_text_and_role_different_prefix_does_not_collide() {
+        let cache = EmbeddingCache::new();
+        let a = cache
+            .get_or_compute(MODEL_A, DIM_A, EmbedRole::Document, "", "t", || {
+                Ok(vec![1.0])
+            })
+            .unwrap();
+        let b = cache
+            .get_or_compute(
+                MODEL_A,
+                DIM_A,
+                EmbedRole::Document,
+                "search_document: ",
+                "t",
+                || Ok(vec![2.0]),
+            )
+            .unwrap();
+        assert_eq!(a, vec![1.0]);
+        assert_eq!(b, vec![2.0]);
+    }
+
+    #[test]
+    fn batch_cache_separates_roles_and_prefixes() {
+        let cache = EmbeddingCache::new();
+        let q = cache
+            .get_or_compute_batch(MODEL_A, DIM_A, EmbedRole::Query, "q: ", &["t"], |_| {
+                Ok(vec![vec![1.0]])
+            })
+            .unwrap();
+        let d = cache
+            .get_or_compute_batch(MODEL_A, DIM_A, EmbedRole::Document, "p: ", &["t"], |_| {
+                Ok(vec![vec![2.0]])
+            })
+            .unwrap();
+        assert_eq!(q, vec![vec![1.0]]);
+        assert_eq!(d, vec![vec![2.0]]);
+        let hit = cache
+            .get_or_compute_batch(MODEL_A, DIM_A, EmbedRole::Query, "q: ", &["t"], |_| {
+                panic!("must be a cache hit")
+            })
+            .unwrap();
+        assert_eq!(hit, vec![vec![1.0]]);
+    }
+
+    /// The recompute closure always embeds as Document and keys the cache on the document prefix.
+    #[tokio::test]
+    async fn context_identity_reports_effective_document_prefix() {
+        use crate::embedder::{
+            InstructedEmbedder, InstructionConfig, InstructionProfile, MockEmbedder,
+        };
+        let eff = InstructionConfig {
+            profile: InstructionProfile::NomicV15,
+            ..Default::default()
+        }
+        .resolve(None)
+        .unwrap();
+        let ctx = EmbedderContext {
+            embedder: Arc::new(InstructedEmbedder::new(Arc::new(MockEmbedder::new(4)), eff)),
+            model: "m".to_string(),
+            cache: Arc::new(EmbeddingCache::new()),
+        };
+        assert_eq!(
+            ctx.identity(),
+            EmbeddingIdentity {
+                model: "m".to_string(),
+                dim: 4,
+                doc_prefix: "search_document: ".to_string()
+            }
+        );
+        let plain = EmbedderContext {
+            embedder: Arc::new(MockEmbedder::new(4)),
+            model: "m".to_string(),
+            cache: Arc::new(EmbeddingCache::new()),
+        };
+        assert_eq!(plain.identity().doc_prefix, "");
+    }
 }

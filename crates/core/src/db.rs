@@ -6151,6 +6151,126 @@ mod applied_seq_tests {
         );
     }
 
+    fn ident(model: &str, dim: i64, prefix: &str) -> crate::embedding_cache::EmbeddingIdentity {
+        crate::embedding_cache::EmbeddingIdentity {
+            model: model.to_string(),
+            dim,
+            doc_prefix: prefix.to_string(),
+        }
+    }
+
+    /// #790 FR-008: the document prefix round-trips through the WalPosition row.
+    #[test]
+    fn wal_position_round_trips_doc_prefix() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        conn.set_wal_position("g", 1, None, Some(&ident("m", 4, "search_document: ")))
+            .unwrap();
+        let rec = conn.get_wal_position("g").unwrap();
+        assert_eq!(rec.embedding_model.as_deref(), Some("m"));
+        assert_eq!(rec.embedding_dim, Some(4));
+        assert_eq!(
+            rec.embedding_doc_prefix.as_deref(),
+            Some("search_document: ")
+        );
+
+        // Explicit-clear semantics: None identity clears the prefix too.
+        conn.set_wal_position("g", 2, None, None).unwrap();
+        assert_eq!(
+            conn.get_wal_position("g").unwrap().embedding_doc_prefix,
+            None
+        );
+    }
+
+    /// #790 SC-004: a live write must not silently re-stamp a recorded, different document
+    /// prefix; a rebuild (plain `set_wal_position`) is what claims the new prefix.
+    #[test]
+    fn live_stamp_preserves_a_differing_recorded_doc_prefix() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        // Recorded under profile `none` (empty prefix).
+        conn.set_wal_position("g", 1, None, Some(&ident("m", 4, "")))
+            .unwrap();
+        // Process now runs nomic-v1.5; an ordinary write advances the position.
+        let running = ident("m", 4, "search_document: ");
+        conn.set_wal_position_live("g", 2, None, &running).unwrap();
+        let rec = conn.get_wal_position("g").unwrap();
+        assert_eq!(
+            rec.applied_seq,
+            Some(2),
+            "the position itself still advances"
+        );
+        // (An empty string reads back as `None` via `value_as_optional_string`; both mean "".)
+        assert_eq!(
+            rec.embedding_doc_prefix.as_deref().unwrap_or(""),
+            "",
+            "recorded (old) prefix must survive a live write so the mismatch stays surfaced"
+        );
+        // A rebuild stamps the running identity and clears the mismatch.
+        conn.set_wal_position("g", 3, None, Some(&running)).unwrap();
+        assert_eq!(
+            conn.get_wal_position("g")
+                .unwrap()
+                .embedding_doc_prefix
+                .as_deref(),
+            Some("search_document: ")
+        );
+    }
+
+    /// Live stamping is unchanged when nothing is recorded yet, when the prefix already matches,
+    /// and treats a NULL (pre-#790) recorded prefix as empty.
+    #[test]
+    fn live_stamp_stamps_normally_when_no_conflict() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+
+        // Fresh group: no recorded identity -> stamp the running one.
+        let running = ident("m", 4, "search_document: ");
+        conn.set_wal_position_live("fresh", 1, None, &running)
+            .unwrap();
+        assert_eq!(
+            conn.get_wal_position("fresh")
+                .unwrap()
+                .embedding_doc_prefix
+                .as_deref(),
+            Some("search_document: ")
+        );
+
+        // Pre-#790 row: model/dim recorded, prefix NULL (simulated via raw SET), running `none`.
+        conn.set_wal_position("legacy", 1, None, Some(&ident("m", 4, "")))
+            .unwrap();
+        conn.raw_query("MATCH (w:WalPosition {id: 'legacy'}) SET w.embedding_doc_prefix = NULL")
+            .unwrap();
+        conn.set_wal_position_live("legacy", 2, None, &ident("m", 4, ""))
+            .unwrap();
+        assert_eq!(
+            conn.get_wal_position("legacy")
+                .unwrap()
+                .embedding_doc_prefix
+                .as_deref()
+                .unwrap_or(""),
+            ""
+        );
+        // A model change still restamps (best-effort marker behaviour is unchanged).
+        conn.set_wal_position_live("legacy", 3, None, &ident("other", 4, ""))
+            .unwrap();
+        assert_eq!(
+            conn.get_wal_position("legacy")
+                .unwrap()
+                .embedding_model
+                .as_deref(),
+            Some("other")
+        );
+    }
+
     /// An explicit reset to `0` (FR-005: `knowledge_clear_all` / fresh rebuild) must read back
     /// as `Some(0)`, distinct from row-absence (`None`) — "known, nothing applied" vs. "unknown".
     #[test]

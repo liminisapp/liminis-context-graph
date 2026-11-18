@@ -22,8 +22,7 @@ use lcg_core::{
     db::Db,
     embedder::{
         is_auth_error, is_transport_error, redact_url_userinfo, resolve_embedding_api_key,
-        Embedder, InstructionConfig, OaiEmbedder, UnconfiguredEmbedder,
-        EMBEDDER_UNREACHABLE_DEGRADED_REASON,
+        InstructionConfig, OaiEmbedder, UnconfiguredEmbedder, EMBEDDER_UNREACHABLE_DEGRADED_REASON,
     },
     env::lcg_env_var,
     error::Error as CoreError,
@@ -562,23 +561,6 @@ async fn bootstrap_app_state(
     // Resolve who applies the instruction, once (#790): LCG (decorator installed, `input_type`
     // never sent), the embedder (`input_type` sent, no decorator), or nobody. Exactly one
     // applier is ever active, so a text can never receive two instructions.
-    let instructions = instruction_config.resolve(embedder_advert.as_ref())?;
-    if instruction_config.profile == lcg_core::InstructionProfile::Embedder
-        && instructions.source == lcg_core::InstructionSource::None
-    {
-        eprintln!(
-            "liminis-context-graph: LCG_EMBEDDING_PROFILE=embedder but the embedder did not              advertise role support (no `instruction_roles` in its response); falling back to              profile `none`."
-        );
-    }
-    eprintln!(
-        "embedder instructions: profile={}, applied_by={}, query_prefix={:?}, document_prefix={:?}",
-        instructions.profile.as_str(),
-        instructions.source.as_str(),
-        instructions.query_prefix,
-        instructions.document_prefix
-    );
-
-    // Build the final embedder with the correct probed dim
     let oai = match &resolved {
         ResolvedTransport::Http(url) => {
             OaiEmbedder::new_http(url.clone(), embedding_model_probed.clone(), embedding_dim)?
@@ -589,16 +571,27 @@ async fn bootstrap_app_state(
             OaiEmbedder::new_uds(path.clone(), embedding_model_probed.clone(), embedding_dim)?
         }
     };
-    let embedder: Arc<dyn Embedder> = match (instructions.source, embedder_advert.as_ref()) {
-        (lcg_core::InstructionSource::Embedder, Some(advert)) => {
-            Arc::new(oai.with_embedder_instructions(advert))
-        }
-        (lcg_core::InstructionSource::Lcg, _) => Arc::new(lcg_core::InstructedEmbedder::new(
-            Arc::new(oai),
-            instructions,
-        )),
-        _ => Arc::new(oai),
-    };
+    let (embedder, instructions) = lcg_core::embedder::build_embedder_stack(
+        oai,
+        &instruction_config,
+        embedder_advert.as_ref(),
+    )?;
+    if instruction_config.profile == lcg_core::InstructionProfile::Embedder
+        && instructions.source == lcg_core::InstructionSource::None
+    {
+        eprintln!(
+            "liminis-context-graph: LCG_EMBEDDING_PROFILE=embedder but the embedder did not \
+             advertise role support (no `instruction_roles` in its response); falling back to \
+             profile `none`."
+        );
+    }
+    eprintln!(
+        "embedder instructions: profile={}, applied_by={}, query_prefix={:?}, document_prefix={:?}",
+        instructions.profile.as_str(),
+        instructions.source.as_str(),
+        instructions.query_prefix,
+        instructions.document_prefix
+    );
 
     // Content-addressed embedding cache (issue #440, FR-003) — constructed once, right after the
     // embedder is resolved/probed, and threaded into both the startup recovery call below and
