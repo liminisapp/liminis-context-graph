@@ -1,0 +1,306 @@
+{
+  "status": "pending",
+  "questions_version": "meridian-questions-2",
+  "questions_hash": "7d7234f689e982c7",
+  "sample_policy": "stratified: 6 questions per category (seeded sample, at least 10% of all questions); a maintainer fills every verdict and sets status to \"reviewed\"",
+  "reviewer": null,
+  "reviewed_on": null,
+  "error_rate_threshold": 0.05,
+  "error_rate": null,
+  "sample": [
+    {
+      "id": "answer-01",
+      "category": "answer",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "answer-11",
+      "category": "answer",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "answer-13",
+      "category": "answer",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "answer-17",
+      "category": "answer",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "answer-21",
+      "category": "answer",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "answer-23",
+      "category": "answer",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "direct-07",
+      "category": "direct",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "direct-12",
+      "category": "direct",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "direct-24",
+      "category": "direct",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "direct-30",
+      "category": "direct",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "direct-31",
+      "category": "direct",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "direct-35",
+      "category": "direct",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "multihop-07",
+      "category": "multi-hop",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "multihop-10",
+      "category": "multi-hop",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "multihop-18",
+      "category": "multi-hop",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "multihop-22",
+      "category": "multi-hop",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "multihop-23",
+      "category": "multi-hop",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "multihop-25",
+      "category": "multi-hop",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "negative-09",
+      "category": "negative",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "negative-13",
+      "category": "negative",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "negative-23",
+      "category": "negative",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "negative-30",
+      "category": "negative",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "negative-31",
+      "category": "negative",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "negative-33",
+      "category": "negative",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "paraphrase-11",
+      "category": "paraphrase",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "paraphrase-14",
+      "category": "paraphrase",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "paraphrase-16",
+      "category": "paraphrase",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "paraphrase-23",
+      "category": "paraphrase",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "paraphrase-24",
+      "category": "paraphrase",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "paraphrase-28",
+      "category": "paraphrase",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "passage-04",
+      "category": "passage",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "passage-11",
+      "category": "passage",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "passage-13",
+      "category": "passage",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "passage-14",
+      "category": "passage",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "passage-24",
+      "category": "passage",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "passage-25",
+      "category": "passage",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "temporal-03",
+      "category": "temporal",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "temporal-08",
+      "category": "temporal",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "temporal-09",
+      "category": "temporal",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "temporal-14",
+      "category": "temporal",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "temporal-23",
+      "category": "temporal",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    },
+    {
+      "id": "temporal-27",
+      "category": "temporal",
+      "ground_truth_correct": null,
+      "note_relevance_correct": null,
+      "key_fact_correct": null
+    }
+  ]
+}

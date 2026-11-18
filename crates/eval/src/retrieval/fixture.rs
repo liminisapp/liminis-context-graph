@@ -249,6 +249,11 @@ fn sha_hex(parts: &[&[u8]]) -> String {
     lcg_core::sha256_hex::sha256_hex(&buf)[..16].to_string()
 }
 
+/// Hash of a `questions.jsonl` text, as printed in reports (first 16 hex of sha256).
+pub fn questions_hash_of(text: &str) -> String {
+    sha_hex(&[text.as_bytes()])
+}
+
 /// Loads `dir` and validates everything. `Err` messages name the offending question or note.
 pub fn load(dir: &Path) -> Result<Fixture, String> {
     let manifest_path = dir.join("manifest.json");
@@ -273,7 +278,7 @@ pub fn load(dir: &Path) -> Result<Fixture, String> {
         .map_err(|e| format!("cannot read {}: {e}", qpath.display()))?;
     let known: HashSet<&str> = manifest.notes.iter().map(|n| n.id.as_str()).collect();
     let questions = parse_questions(&qtext, &known)?;
-    let questions_hash = sha_hex(&[qtext.as_bytes()]);
+    let questions_hash = questions_hash_of(&qtext);
 
     let questions_version = match std::fs::read_to_string(dir.join("questions.meta.json")) {
         Ok(s) => serde_json::from_str::<Value>(&s)
