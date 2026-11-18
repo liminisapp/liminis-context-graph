@@ -602,7 +602,11 @@ canonicalization) embed both sides as documents.
 `LCG_EMBEDDING_QUERY_PREFIX` and `LCG_EMBEDDING_DOCUMENT_PREFIX` override the profile's value for
 that side only, for a model or fine-tune no profile covers. An explicitly empty value
 (`LCG_EMBEDDING_DOCUMENT_PREFIX=`) disables that side's prefix and is different from leaving the
-variable unset (which uses the profile's value).
+variable unset (which uses the profile's value). An empty value only matters where it changes
+something: on a side where the profile's prefix is already empty (always the case under `none`
+and `embedder`) it is ignored, so a blank `LCG_EMBEDDING_QUERY_PREFIX=` left in a compose or
+`.env` file does not switch the status `source` to `lcg` and does not conflict with
+`embedder`. A non-empty override combined with the `embedder` profile is a startup error.
 
 ### When you need to re-embed
 

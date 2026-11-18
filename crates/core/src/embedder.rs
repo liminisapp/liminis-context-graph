@@ -494,19 +494,33 @@ impl InstructionConfig {
     ///
     /// - Named profile and/or overrides: `source = Lcg`, override wins per side (an explicit
     ///   empty string disables that side). With nothing set, `source = None`.
+    /// - An override only counts when it *changes* that side's profile prefix. A set-but-empty
+    ///   variable (say `LCG_EMBEDDING_QUERY_PREFIX=` left in a compose or `.env` file) under a
+    ///   profile whose prefix on that side is already empty is a no-op: it neither flips
+    ///   `source` to `Lcg` under profile `none` nor conflicts with `embedder`.
     /// - `embedder` profile: requires an advertisement; the advertised strings are reported as
     ///   the effective prefixes (so the document one lands in the identity record, FR-024) but
     ///   LCG applies nothing itself. Without an advertisement this falls back to `none` (the
-    ///   caller logs a warning). Combining `embedder` with an explicit prefix override is
-    ///   ambiguous and rejected.
+    ///   caller logs a warning). Combining `embedder` with an override that sets a non-empty
+    ///   prefix is ambiguous and rejected.
     pub fn resolve(&self, advert: Option<&EmbedderAdvert>) -> Result<EffectiveInstructions, Error> {
+        let (profile_query, profile_document) = self.profile.prefixes();
+        let query_override = self
+            .query_override
+            .as_deref()
+            .filter(|o| *o != profile_query);
+        let document_override = self
+            .document_override
+            .as_deref()
+            .filter(|o| *o != profile_document);
         if self.profile == InstructionProfile::Embedder {
-            if self.query_override.is_some() || self.document_override.is_some() {
+            if query_override.is_some() || document_override.is_some() {
                 return Err(Error::Config(
-                    "LCG_EMBEDDING_PROFILE=embedder cannot be combined with \
+                    "LCG_EMBEDDING_PROFILE=embedder cannot be combined with a non-empty \
                      LCG_EMBEDDING_QUERY_PREFIX / LCG_EMBEDDING_DOCUMENT_PREFIX: with `embedder` \
                      the embedder applies its own instructions, so an explicit prefix would be \
-                     ambiguous. Use a named profile (e.g. bge-v1.5) instead, or drop the overrides."
+                     ambiguous. Use a named profile (e.g. bge-v1.5) instead, or drop the overrides \
+                     (an empty value is ignored)."
                         .to_string(),
                 ));
             }
@@ -520,18 +534,9 @@ impl InstructionConfig {
                 None => EffectiveInstructions::none(),
             });
         }
-        let (profile_query, profile_document) = self.profile.prefixes();
-        let query_prefix = self
-            .query_override
-            .clone()
-            .unwrap_or_else(|| profile_query.to_string());
-        let document_prefix = self
-            .document_override
-            .clone()
-            .unwrap_or_else(|| profile_document.to_string());
         let source = if self.profile == InstructionProfile::None
-            && self.query_override.is_none()
-            && self.document_override.is_none()
+            && query_override.is_none()
+            && document_override.is_none()
         {
             InstructionSource::None
         } else {
@@ -540,8 +545,8 @@ impl InstructionConfig {
         Ok(EffectiveInstructions {
             profile: self.profile,
             source,
-            query_prefix,
-            document_prefix,
+            query_prefix: query_override.unwrap_or(profile_query).to_string(),
+            document_prefix: document_override.unwrap_or(profile_document).to_string(),
         })
     }
 }
@@ -2031,6 +2036,43 @@ mod tests {
         .resolve(Some(&advert()))
         .unwrap_err();
         assert!(matches!(err, Error::Config(_)), "{err}");
+    }
+
+    /// A set-but-empty prefix variable (e.g. a blank line left in a compose/.env file) that does
+    /// not change the profile's prefix on that side is a no-op: it does not flip `source` to
+    /// `lcg` under `none`, and does not conflict with `embedder`. Where it *does* change a side
+    /// (disabling a profile prefix) it stays an explicit override.
+    #[test]
+    fn empty_override_that_changes_nothing_is_a_no_op() {
+        let blank = || Some(String::new());
+        let eff = InstructionConfig {
+            profile: InstructionProfile::None,
+            query_override: blank(),
+            document_override: blank(),
+        }
+        .resolve(None)
+        .unwrap();
+        assert_eq!(eff, EffectiveInstructions::none());
+
+        let eff = InstructionConfig {
+            profile: InstructionProfile::Embedder,
+            query_override: blank(),
+            document_override: blank(),
+        }
+        .resolve(Some(&advert()))
+        .unwrap();
+        assert_eq!(eff.source, InstructionSource::Embedder);
+
+        // Still an explicit disable where the profile has a prefix on that side.
+        let eff = InstructionConfig {
+            profile: InstructionProfile::BgeV15,
+            query_override: blank(),
+            document_override: blank(),
+        }
+        .resolve(None)
+        .unwrap();
+        assert_eq!(eff.source, InstructionSource::Lcg);
+        assert_eq!(eff.query_prefix, "");
     }
 
     // An advertisement alone never changes behaviour: with a named profile (LCG is the applier)
