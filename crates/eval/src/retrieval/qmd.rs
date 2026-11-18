@@ -130,6 +130,10 @@ pub struct QmdHit {
 
 /// Normalises a qmd result path (`qmd://collection/dir/Some Note.md`) to a note slug.
 pub fn note_of_path(path: &str) -> Option<String> {
+    // qmd 2.x appends `?index=<name>` to the path when a named `--index` is used; drop the
+    // query string before taking the file stem. Only `?` is stripped: `#` can be part of a real
+    // filename (`C# Notes.md`).
+    let path = path.split('?').next().unwrap_or(path);
     let last = path.rsplit('/').next()?;
     let stem = last.strip_suffix(".md").unwrap_or(last);
     let mut slug = String::new();
@@ -457,6 +461,16 @@ mod tests {
             note_of_path("qmd://nb/Old Pricing Note.md").as_deref(),
             Some("old-pricing-note")
         );
+        assert_eq!(
+            note_of_path("qmd://nb/decision-hosting-tern.md?index=lcg-eval-x").as_deref(),
+            Some("decision-hosting-tern")
+        );
+        // `#` belongs to the filename, not to the query string.
+        assert_eq!(
+            note_of_path("qmd://nb/C# Notes.md?index=lcg-eval-x"),
+            note_of_path("qmd://nb/C# Notes.md")
+        );
+        assert_ne!(note_of_path("qmd://nb/C# Notes.md").as_deref(), Some("c"));
         assert_eq!(
             note_of_path("docs/Guide_v2.md").as_deref(),
             Some("guide-v2")
