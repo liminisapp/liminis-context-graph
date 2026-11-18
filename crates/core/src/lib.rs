@@ -13,6 +13,7 @@ pub mod cross_group;
 pub mod db;
 pub mod dedup_adapter;
 pub mod dedup_judge;
+pub mod document;
 pub(crate) mod dump;
 pub mod embedder;
 pub mod embedding_cache;
