@@ -160,6 +160,7 @@ OPTIONS:
 
 RETRIEVAL EVAL:
     lcg-eval retrieval --help    Retrieval-quality eval (LCG vs qmd) — a separate mode.
+    lcg-eval retrieval-gen --help  Regenerate or drift-check the retrieval-v2 fixture (#788).
 
 Documentation: https://github.com/liminisapp/liminis-context-graph — see README.md's
 'Extraction-quality eval harness' section for cost implications before running.

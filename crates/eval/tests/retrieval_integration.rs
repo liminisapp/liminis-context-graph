@@ -13,7 +13,7 @@ use lcg_eval::retrieval::evidence_judge::{CachedEvidenceJudge, EvidenceJudge};
 use lcg_eval::retrieval::fixture::{self, Category, Fixture};
 use lcg_eval::retrieval::lcg::{self, IngestMap, LcgEntitiesFacts, LcgPassages, RpcTransport};
 use lcg_eval::retrieval::qmd::{self, ProcessRunner, QmdOutput, QmdRetriever, QmdRunner, Skipped};
-use lcg_eval::retrieval::report::{IngestCost, Report, RunMeta, Status};
+use lcg_eval::retrieval::report::{IngestCost, Reading, Report, RunMeta, Status};
 use lcg_eval::retrieval::{evaluate, resolve, Slot};
 
 const K: usize = 10;
@@ -373,9 +373,10 @@ async fn full_comparison_produces_one_table_with_every_configuration_at_one_k() 
             cat.label()
         );
     }
-    // The hypotheses section gives a yes/no reading when both sides ran.
+    // The hypotheses section gives a reading when both sides ran (never "cannot be read"); with
+    // 10-12 questions per category it is usually "not distinguishable from noise".
     let (h1, h2) = r.hypotheses();
-    assert!(h1.is_some() && h2.is_some());
+    assert!(h1 != Reading::CannotRead && h2 != Reading::CannotRead);
     // Lexical fakes answer direct lookups, so the lexical systems must score well above zero.
     let Status::Ran(passages) = &r.configs[0].status else {
         panic!()
@@ -523,4 +524,21 @@ fn extraction_cli_is_unchanged() {
     // And the extraction parser still demands a backend rather than treating `retrieval` specially.
     let owned = vec!["--limit".to_string(), "3".to_string()];
     assert!(lcg_eval::cli::parse_args(&owned).is_err());
+}
+
+// ── v1 is frozen (#788 FR-026 / SC-009) ──────────────────────────────────────────
+
+#[test]
+fn v1_fixture_hashes_and_shape_are_unchanged() {
+    let fx = fixture::load(&fixture_dir()).unwrap();
+    assert_eq!(fx.corpus_hash, "26b9c77bff672642");
+    assert_eq!(fx.questions_hash, "9a7c6129bf1afbd8");
+    assert_eq!(fx.manifest.notes.len(), 31);
+    assert!(
+        fx.manifest
+            .notes
+            .iter()
+            .all(|n| n.origin.is_none() && n.cites.is_empty()),
+        "v1 declares no origins"
+    );
 }

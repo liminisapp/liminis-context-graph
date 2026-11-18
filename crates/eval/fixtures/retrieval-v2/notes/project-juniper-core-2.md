@@ -1,0 +1,3 @@
+# Juniper Core — what we know
+
+Juniper Core is the project responsible for support, and I wanted its basics in one place after getting the same questions twice this week. It has 12 engineers assigned, which feels about right for the queue it handles, though people do get pulled onto other things when it is busy. The supplier relationship for Juniper Core is with Sable Supply, so anything about service terms goes through that route first. I will add more as I learn it; for now this saves a round of messages, and I will link it from the planning page so it is easy to find next time someone asks.

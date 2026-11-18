@@ -301,6 +301,76 @@ assert_not_contains "--embedder-http" "$argv" "07 DRY_RUN never starts anything 
 out="$(env LCG_EVAL_REPO="$WORKROOT/nobin" "$HERE/07-retrieval-eval.sh" 2>&1)"; rc=$?
 assert_rc 1 "$rc" "07 refuses when the lcg-eval binary is absent"
 
+# --corpus selects a fixture (#788): v1 stays the default, v2 and any explicit directory work,
+# an invalid path fails with exit 2 naming it, and nothing reaches the binary in that case.
+for fx in retrieval retrieval-v2; do
+  mkdir -p "$REPO_R7/crates/eval/fixtures/$fx"
+  : > "$REPO_R7/crates/eval/fixtures/$fx/manifest.json"
+  : > "$REPO_R7/crates/eval/fixtures/$fx/questions.jsonl"
+done
+: > "$REPO_R7/retr-argv.log"
+out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" 2>&1)"; rc=$?
+assert_rc 0 "$rc" "07 default corpus run succeeds"
+argv="$(cat "$REPO_R7/retr-argv.log")"
+assert_contains "--corpus $REPO_R7/crates/eval/fixtures/retrieval " "$argv" "07 without --corpus uses v1 (unchanged behaviour)"
+
+: > "$REPO_R7/retr-argv.log"
+out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus "$REPO_R7/crates/eval/fixtures/retrieval-v2" 2>&1)"; rc=$?
+assert_rc 0 "$rc" "07 --corpus <v2> dry run succeeds"
+argv="$(cat "$REPO_R7/retr-argv.log")"
+assert_contains "--corpus $REPO_R7/crates/eval/fixtures/retrieval-v2 " "$argv" "07 --corpus selects v2"
+assert_contains "--dry-run" "$argv" "07 --corpus keeps the dry-run switch"
+
+: > "$REPO_R7/retr-argv.log"
+out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus="$REPO_R7/crates/eval/fixtures/retrieval-v2" 2>&1)"; rc=$?
+assert_rc 0 "$rc" "07 --corpus=DIR form works"
+: > "$REPO_R7/retr-argv.log"
+out="$(env LCG_EVAL_REPO="$REPO_R7" LCG_EVAL_CORPUS="$REPO_R7/crates/eval/fixtures/retrieval-v2" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" 2>&1)"; rc=$?
+assert_rc 0 "$rc" "07 LCG_EVAL_CORPUS works"
+assert_contains "fixtures/retrieval-v2 " "$(cat "$REPO_R7/retr-argv.log")" "07 LCG_EVAL_CORPUS selects v2"
+: > "$REPO_R7/retr-argv.log"
+out="$(env LCG_EVAL_REPO="$REPO_R7" LCG_EVAL_CORPUS="$REPO_R7/nope" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus "$REPO_R7/crates/eval/fixtures/retrieval" 2>&1)"; rc=$?
+assert_rc 0 "$rc" "07 the --corpus flag wins over LCG_EVAL_CORPUS"
+
+: > "$REPO_R7/retr-argv.log"
+out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus "$REPO_R7/no/such/dir" 2>&1)"; rc=$?
+assert_rc 2 "$rc" "07 invalid --corpus fails with exit 2"
+assert_contains "$REPO_R7/no/such/dir" "$out" "07 invalid --corpus names the path"
+assert_not_contains "STUB-INVOKED" "$(cat "$REPO_R7/retr-argv.log")" "07 invalid --corpus spends nothing"
+out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus 2>&1)"; rc=$?
+assert_rc 2 "$rc" "07 --corpus without a value fails"
+out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus "" 2>&1)"; rc=$?
+assert_rc 2 "$rc" "07 --corpus with an empty value fails instead of selecting v1"
+out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus= 2>&1)"; rc=$?
+assert_rc 2 "$rc" "07 --corpus= (empty) fails instead of selecting v1"
+out="$(env LCG_EVAL_REPO="$REPO_R7" LCG_EVAL_CORPUS="" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" 2>&1)"; rc=$?
+assert_rc 2 "$rc" "07 an empty LCG_EVAL_CORPUS fails instead of selecting v1"
+out="$(env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --bogus 2>&1)"; rc=$?
+assert_rc 2 "$rc" "07 unknown argument fails"
+assert_contains "--bogus" "$out" "07 unknown argument is named"
+
+# A corpus that ships cassette.jsonl replays it by default; recording is opt-in; the two never mix.
+: > "$REPO_R7/crates/eval/fixtures/retrieval-v2/cassette.jsonl"
+: > "$REPO_R7/retr-argv.log"
+env LCG_EVAL_REPO="$REPO_R7" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus "$REPO_R7/crates/eval/fixtures/retrieval-v2" >/dev/null 2>&1
+assert_contains "--replay-cassette $REPO_R7/crates/eval/fixtures/retrieval-v2/cassette.jsonl" "$(cat "$REPO_R7/retr-argv.log")" "07 replays the corpus's cassette sidecar by default"
+: > "$REPO_R7/retr-argv.log"
+env LCG_EVAL_REPO="$REPO_R7" LCG_EVAL_RECORD_CASSETTE="$WORKROOT/rec.jsonl" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" --corpus "$REPO_R7/crates/eval/fixtures/retrieval-v2" >/dev/null 2>&1
+argv="$(cat "$REPO_R7/retr-argv.log")"
+assert_contains "--record-cassette $WORKROOT/rec.jsonl" "$argv" "07 LCG_EVAL_RECORD_CASSETTE records"
+assert_not_contains "--replay-cassette" "$argv" "07 recording never also replays the sidecar"
+rm -f "$REPO_R7/crates/eval/fixtures/retrieval-v2/cassette.jsonl"
+
+# Private mode needs an explicit output directory.
+out="$(env LCG_EVAL_REPO="$REPO_R7" LCG_EVAL_PRIVATE=1 DRY_RUN=1 "$HERE/07-retrieval-eval.sh" 2>&1)"; rc=$?
+assert_rc 2 "$rc" "07 LCG_EVAL_PRIVATE=1 requires LCG_EVAL_OUT"
+assert_contains "LCG_EVAL_OUT" "$out" "07 private mode names the missing variable"
+: > "$REPO_R7/retr-argv.log"
+env LCG_EVAL_REPO="$REPO_R7" LCG_EVAL_PRIVATE=1 LCG_EVAL_OUT="$WORKROOT/priv-out" LCG_EVAL_JUDGE_CACHE="$WORKROOT/priv-cache.jsonl" DRY_RUN=1 "$HERE/07-retrieval-eval.sh" >/dev/null 2>&1
+argv="$(cat "$REPO_R7/retr-argv.log")"
+assert_contains "--private" "$argv" "07 private mode passes --private"
+assert_contains "--judge-cache $WORKROOT/priv-cache.jsonl" "$argv" "07 private mode passes the judge cache"
+
 # The identity/duplicate-key-under-LIMIT guard cases formerly tested here, and the
 # validate_report.py report-accounting cases, both moved to lcg-eval itself (#279
 # FR-002..FR-006) — see crates/eval/src/plan.rs's and crates/eval/src/report.rs's test

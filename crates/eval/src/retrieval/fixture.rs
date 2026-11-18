@@ -17,21 +17,40 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
-/// The four question categories (FR-010).
+/// Question categories (FR-010; #788 adds `multi-hop`, `passage` and `negative`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Category {
     Direct,
     Paraphrase,
     Temporal,
     Answer,
+    /// Needs facts from two or more notes (≥ 2 relevant notes).
+    MultiHop,
+    /// The answer is one paragraph of a long note; carries one `evidence` key fact.
+    Passage,
+    /// No relevant note (must carry `"negative": true`); scored on false-positive rate.
+    Negative,
 }
 
 impl Category {
+    /// The four original (v1) categories. These are always listed in plans and reports, even with
+    /// zero questions, so v1 output is unchanged.
     pub const ALL: [Category; 4] = [
         Category::Direct,
         Category::Paraphrase,
         Category::Temporal,
         Category::Answer,
+    ];
+
+    /// Every category, in display order. The three added by #788 are listed only when present.
+    pub const EVERY: [Category; 7] = [
+        Category::Direct,
+        Category::Paraphrase,
+        Category::Temporal,
+        Category::Answer,
+        Category::MultiHop,
+        Category::Passage,
+        Category::Negative,
     ];
 
     pub fn parse(s: &str) -> Option<Category> {
@@ -40,6 +59,9 @@ impl Category {
             "paraphrase" => Some(Category::Paraphrase),
             "temporal" => Some(Category::Temporal),
             "answer" => Some(Category::Answer),
+            "multi-hop" => Some(Category::MultiHop),
+            "passage" => Some(Category::Passage),
+            "negative" => Some(Category::Negative),
             _ => None,
         }
     }
@@ -50,8 +72,23 @@ impl Category {
             Category::Paraphrase => "paraphrase",
             Category::Temporal => "temporal",
             Category::Answer => "answer",
+            Category::MultiHop => "multi-hop",
+            Category::Passage => "passage",
+            Category::Negative => "negative",
         }
     }
+
+    /// True for the four original categories.
+    pub fn is_legacy(self) -> bool {
+        Category::ALL.contains(&self)
+    }
+}
+
+/// Episode origins a note may declare (ADR-0752). Mirrors the service's `origin` vocabulary.
+pub const ORIGINS: [&str; 4] = ["primary", "external", "derived", "answer"];
+
+fn is_derived_kind(origin: &str) -> bool {
+    origin == "derived" || origin == "answer"
 }
 
 /// One graded-relevant note.
@@ -87,6 +124,11 @@ pub struct NoteEntry {
     pub id: String,
     /// Optional RFC 3339 event time used as the episode `reference_time` at ingest.
     pub reference_time: Option<String>,
+    /// Declared episode origin (`primary|external|derived|answer`); `None` ingests exactly as
+    /// before (all of v1). When set it is sent as `origin` on every chunk of the note.
+    pub origin: Option<String>,
+    /// For `derived` (required) and `answer` (optional) notes: the earlier notes this one restates.
+    pub cites: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +185,10 @@ struct RawNote {
     id: String,
     #[serde(default)]
     reference_time: Option<String>,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    cites: Vec<String>,
 }
 #[derive(Deserialize)]
 struct RawSupersession {
@@ -203,11 +249,26 @@ fn sha_hex(parts: &[&[u8]]) -> String {
     lcg_core::sha256_hex::sha256_hex(&buf)[..16].to_string()
 }
 
+/// Hash of a `questions.jsonl` text, as printed in reports (first 16 hex of sha256).
+pub fn questions_hash_of(text: &str) -> String {
+    sha_hex(&[text.as_bytes()])
+}
+
 /// Loads `dir` and validates everything. `Err` messages name the offending question or note.
 pub fn load(dir: &Path) -> Result<Fixture, String> {
     let manifest_path = dir.join("manifest.json");
-    let manifest_bytes = std::fs::read(&manifest_path)
-        .map_err(|e| format!("cannot read {}: {e}", manifest_path.display()))?;
+    let manifest_bytes = std::fs::read(&manifest_path).map_err(|e| {
+        if dir.join("skeleton.json").exists() {
+            format!(
+                "{} has a skeleton but has not been rendered yet ({} is missing). The notes and questions are written by an LLM in a deliberate maintainer step: run `lcg-eval retrieval-render --dir {}` (needs ANTHROPIC_API_KEY; see docs/retrieval-quality-evaluation.md)",
+                dir.display(),
+                manifest_path.display(),
+                dir.display()
+            )
+        } else {
+            format!("cannot read {}: {e}", manifest_path.display())
+        }
+    })?;
     let manifest =
         parse_manifest(&manifest_bytes).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
 
@@ -227,7 +288,7 @@ pub fn load(dir: &Path) -> Result<Fixture, String> {
         .map_err(|e| format!("cannot read {}: {e}", qpath.display()))?;
     let known: HashSet<&str> = manifest.notes.iter().map(|n| n.id.as_str()).collect();
     let questions = parse_questions(&qtext, &known)?;
-    let questions_hash = sha_hex(&[qtext.as_bytes()]);
+    let questions_hash = questions_hash_of(&qtext);
 
     let questions_version = match std::fs::read_to_string(dir.join("questions.meta.json")) {
         Ok(s) => serde_json::from_str::<Value>(&s)
@@ -269,10 +330,77 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, String> {
                 .map_err(|_| format!("note '{}': reference_time is not RFC 3339: {t}", n.id))?;
         }
     }
+    // Origin and citation rules (checked only for notes that declare an origin, so v1 and
+    // private notebooks without origins load unchanged).
+    let mut position: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut origin_of: BTreeMap<&str, &str> = BTreeMap::new();
+    for (i, n) in raw.notes.iter().enumerate() {
+        position.insert(n.id.as_str(), i);
+        if let Some(o) = &n.origin {
+            origin_of.insert(n.id.as_str(), o.as_str());
+        }
+    }
+    for (i, n) in raw.notes.iter().enumerate() {
+        if let Some(o) = &n.origin {
+            if !ORIGINS.contains(&o.as_str()) {
+                return Err(format!(
+                    "note '{}': unknown origin '{o}' (expected primary|external|derived|answer)",
+                    n.id
+                ));
+            }
+            if o == "derived" && n.cites.is_empty() {
+                return Err(format!(
+                    "note '{}': a derived note must cite the notes it restates (\"cites\")",
+                    n.id
+                ));
+            }
+            if !n.cites.is_empty() && !is_derived_kind(o) {
+                return Err(format!(
+                    "note '{}': \"cites\" is only valid on derived or answer notes, not {o}",
+                    n.id
+                ));
+            }
+        } else if !n.cites.is_empty() {
+            return Err(format!(
+                "note '{}': \"cites\" requires a declared origin",
+                n.id
+            ));
+        }
+        for c in &n.cites {
+            match position.get(c.as_str()) {
+                None => {
+                    return Err(format!(
+                        "note '{}': cites '{c}' which is not a manifest note",
+                        n.id
+                    ))
+                }
+                Some(p) if *p >= i => {
+                    return Err(format!(
+                        "note '{}': cites '{c}' which does not appear earlier in the manifest",
+                        n.id
+                    ))
+                }
+                _ => {}
+            }
+        }
+    }
     for s in &raw.supersedes {
         for (label, id) in [("old_note", &s.old_note), ("new_note", &s.new_note)] {
             if !seen.contains(id) {
                 return Err(format!("supersedes {label} '{id}' is not a manifest note"));
+            }
+        }
+        // ADR-0752: derived/answer content may not supersede primary/external content. The
+        // service would refuse this at ingest; failing at load saves a paid, aborted ingest.
+        if let (Some(old_o), Some(new_o)) = (
+            origin_of.get(s.old_note.as_str()),
+            origin_of.get(s.new_note.as_str()),
+        ) {
+            if is_derived_kind(new_o) && !is_derived_kind(old_o) {
+                return Err(format!(
+                    "supersedes {}→{}: a {new_o} note cannot supersede a {old_o} note (ADR-0752)",
+                    s.old_note, s.new_note
+                ));
             }
         }
         chrono::DateTime::parse_from_rfc3339(&s.effective_at).map_err(|_| {
@@ -294,6 +422,8 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, String> {
             .map(|n| NoteEntry {
                 id: n.id,
                 reference_time: n.reference_time,
+                origin: n.origin,
+                cites: n.cites,
             })
             .collect(),
         supersedes: raw
@@ -342,7 +472,7 @@ fn build_question(id: &str, v: Value, known: &HashSet<&str>) -> Result<Question,
         serde_json::from_value(v).map_err(|e| format!("malformed entry: {e}"))?;
     let cat_s = raw.category.ok_or("missing \"category\"")?;
     let category = Category::parse(&cat_s).ok_or_else(|| {
-        format!("unknown category '{cat_s}' (expected direct|paraphrase|temporal|answer)")
+        format!("unknown category '{cat_s}' (expected direct|paraphrase|temporal|answer|multi-hop|passage|negative)")
     })?;
     let text = raw
         .text
@@ -375,6 +505,9 @@ fn build_question(id: &str, v: Value, known: &HashSet<&str>) -> Result<Question,
             note: r.note.clone(),
             gain: r.gain,
         });
+    }
+    if category == Category::Negative && !raw.negative {
+        return Err("category 'negative' requires \"negative\": true".into());
     }
     if raw.negative {
         if !relevant.is_empty() {
@@ -414,6 +547,18 @@ fn build_question(id: &str, v: Value, known: &HashSet<&str>) -> Result<Question,
         Category::Answer if evidence.is_empty() => {
             return Err("answer question needs a non-empty \"evidence\" list".into());
         }
+        Category::MultiHop if relevant.len() < 2 => {
+            return Err(format!(
+                "multi-hop question needs at least 2 relevant_notes, has {}",
+                relevant.len()
+            ));
+        }
+        Category::Passage if evidence.len() != 1 => {
+            return Err(format!(
+                "passage question needs exactly one \"evidence\" entry, has {}",
+                evidence.len()
+            ));
+        }
         Category::Temporal => {
             if raw.current.is_empty() {
                 return Err("temporal question needs a non-empty \"current\" list".into());
@@ -442,8 +587,8 @@ fn build_question(id: &str, v: Value, known: &HashSet<&str>) -> Result<Question,
     if category != Category::Temporal && (!raw.current.is_empty() || !raw.stale.is_empty()) {
         return Err("current/stale are only valid on temporal questions".into());
     }
-    if category != Category::Answer && !evidence.is_empty() {
-        return Err("evidence is only valid on answer questions".into());
+    if !matches!(category, Category::Answer | Category::Passage) && !evidence.is_empty() {
+        return Err("evidence is only valid on answer and passage questions".into());
     }
 
     Ok(Question {
@@ -456,6 +601,119 @@ fn build_question(id: &str, v: Value, known: &HashSet<&str>) -> Result<Question,
         stale: raw.stale,
         negative: raw.negative,
     })
+}
+
+/// Word count used for size bands (whitespace-separated tokens).
+pub fn word_count(body: &str) -> usize {
+    body.split_whitespace().count()
+}
+
+/// Size bands, as `(label, inclusive lower bound, exclusive upper bound)` in words.
+pub const SIZE_BANDS: [(&str, usize, usize); 5] = [
+    ("<250 words", 0, 250),
+    ("250-500 words", 250, 500),
+    ("500-2000 words", 500, 2000),
+    ("2000-5000 words", 2000, 5000),
+    (">=5000 words", 5000, usize::MAX),
+];
+
+/// Shape of a loaded corpus, printed by the dry-run plan (ADR-0052: one resolution path).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CorpusStats {
+    pub notes: usize,
+    pub words: usize,
+    /// Notes per [`SIZE_BANDS`] entry, in order.
+    pub size_bands: [usize; 5],
+    /// Notes over 5,000 words.
+    pub over_5000_words: usize,
+    /// Declared origins (empty for a fixture that declares none, e.g. v1).
+    pub origins: BTreeMap<String, usize>,
+    pub derived_citing_primary: usize,
+    pub supersessions: usize,
+    /// Notes whose body spans more than one chunk at the manifest's chunk size.
+    pub multi_chunk_notes: usize,
+    pub chunks: usize,
+}
+
+impl Fixture {
+    /// The corpus-shape minimums retrieval-v2 promises (FR-002, SC-001). The render checks apply
+    /// them as errors so a maintainer learns of a prose-length shortfall during `retrieval-render`,
+    /// and the v2 integration tests assert the same numbers.
+    pub fn v2_shape_errors(&self) -> Vec<String> {
+        let st = self.stats();
+        let mut e = Vec::new();
+        if !(300..=500).contains(&st.notes) {
+            e.push(format!("{} notes; expected 300-500", st.notes));
+        }
+        if st.size_bands[0] < 150 {
+            e.push(format!(
+                "only {} short notes (< 250 words); expected >= 150",
+                st.size_bands[0]
+            ));
+        }
+        if st.size_bands[2] < 50 {
+            e.push(format!(
+                "only {} notes of 500-2,000 words; expected >= 50",
+                st.size_bands[2]
+            ));
+        }
+        if st.over_5000_words < 3 {
+            e.push(format!(
+                "only {} notes over 5,000 words; expected >= 3",
+                st.over_5000_words
+            ));
+        }
+        if st.multi_chunk_notes < 50 {
+            e.push(format!(
+                "only {} multi-chunk notes; expected >= 50",
+                st.multi_chunk_notes
+            ));
+        }
+        e
+    }
+
+    pub fn stats(&self) -> CorpusStats {
+        let mut st = CorpusStats {
+            notes: self.manifest.notes.len(),
+            supersessions: self.manifest.supersedes.len(),
+            ..Default::default()
+        };
+        let origin_of: BTreeMap<&str, &str> = self
+            .manifest
+            .notes
+            .iter()
+            .filter_map(|n| n.origin.as_deref().map(|o| (n.id.as_str(), o)))
+            .collect();
+        for n in &self.manifest.notes {
+            let body = &self.notes[&n.id];
+            let w = word_count(body);
+            st.words += w;
+            for (i, (_, lo, hi)) in SIZE_BANDS.iter().enumerate() {
+                if w >= *lo && w < *hi {
+                    st.size_bands[i] += 1;
+                }
+            }
+            if w > 5000 {
+                st.over_5000_words += 1;
+            }
+            let c = super::mapping::chunk_markdown(body, self.manifest.max_chunk_tokens).len();
+            st.chunks += c;
+            if c > 1 {
+                st.multi_chunk_notes += 1;
+            }
+            if let Some(o) = &n.origin {
+                *st.origins.entry(o.clone()).or_default() += 1;
+                if o == "derived"
+                    && n.cites
+                        .iter()
+                        .any(|c| origin_of.get(c.as_str()) == Some(&"primary"))
+                {
+                    st.derived_citing_primary += 1;
+                }
+            }
+        }
+        st
+    }
 }
 
 #[cfg(test)]
@@ -596,5 +854,146 @@ mod tests {
         )
         .unwrap();
         assert!(load(d.path()).unwrap_err().contains("'a'"));
+    }
+
+    fn man(notes: &str, sup: &str) -> Result<Manifest, String> {
+        parse_manifest(
+            format!(r#"{{"corpus_version":"v","notes":[{notes}],"supersedes":[{sup}]}}"#)
+                .as_bytes(),
+        )
+    }
+
+    #[test]
+    fn origins_and_cites_load_and_v1_style_notes_still_do() {
+        let m = man(
+            r#"{"id":"a","origin":"primary"},{"id":"b","origin":"external"},{"id":"c","origin":"derived","cites":["a"]},{"id":"d","origin":"answer","cites":["a","c"]},{"id":"e"}"#,
+            "",
+        )
+        .unwrap();
+        assert_eq!(m.notes[2].origin.as_deref(), Some("derived"));
+        assert_eq!(m.notes[2].cites, vec!["a"]);
+        assert_eq!(m.notes[4].origin, None);
+        assert!(m.notes[4].cites.is_empty());
+    }
+
+    #[test]
+    fn origin_rules_reject_with_the_note_named() {
+        let e = man(r#"{"id":"a","origin":"bogus"}"#, "").unwrap_err();
+        assert!(e.contains("'a'") && e.contains("bogus"), "{e}");
+        let e = man(
+            r#"{"id":"a","origin":"primary"},{"id":"d","origin":"derived"}"#,
+            "",
+        )
+        .unwrap_err();
+        assert!(e.contains("'d'") && e.contains("cite"), "{e}");
+        let e = man(
+            r#"{"id":"a","origin":"primary","cites":["b"]},{"id":"b"}"#,
+            "",
+        )
+        .unwrap_err();
+        assert!(
+            e.contains("'a'") && e.contains("only valid on derived"),
+            "{e}"
+        );
+        let e = man(r#"{"id":"a"},{"id":"d","cites":["a"]}"#, "").unwrap_err();
+        assert!(
+            e.contains("'d'") && e.contains("requires a declared origin"),
+            "{e}"
+        );
+        let e = man(r#"{"id":"d","origin":"derived","cites":["zz"]}"#, "").unwrap_err();
+        assert!(e.contains("'d'") && e.contains("zz"), "{e}");
+        // A page cannot cite a note recorded after it.
+        let e = man(
+            r#"{"id":"d","origin":"derived","cites":["a"]},{"id":"a","origin":"primary"}"#,
+            "",
+        )
+        .unwrap_err();
+        assert!(e.contains("earlier"), "{e}");
+        let e = man(r#"{"id":"d","origin":"derived","cites":["d"]}"#, "").unwrap_err();
+        assert!(e.contains("earlier"), "{e}");
+    }
+
+    #[test]
+    fn derived_may_not_supersede_primary_adr_0752() {
+        let notes = r#"{"id":"a","origin":"primary"},{"id":"b","origin":"derived","cites":["a"]},{"id":"c","origin":"primary"}"#;
+        let bad = r#"{"old_note":"a","new_note":"b","effective_at":"2026-01-01T00:00:00Z"}"#;
+        let e = man(notes, bad).unwrap_err();
+        assert!(e.contains("ADR-0752") && e.contains("a→b"), "{e}");
+        // primary→primary and derived→derived are fine; so is an undeclared pair.
+        let ok = r#"{"old_note":"a","new_note":"c","effective_at":"2026-01-01T00:00:00Z"}"#;
+        assert!(man(notes, ok).is_ok());
+        let undeclared = r#"{"id":"x"},{"id":"y"}"#;
+        let ok = r#"{"old_note":"x","new_note":"y","effective_at":"2026-01-01T00:00:00Z"}"#;
+        assert!(man(undeclared, ok).is_ok());
+    }
+
+    #[test]
+    fn new_categories_and_rules() {
+        let t = r#"{"id":"m1","category":"multi-hop","text":"t","relevant_notes":[{"note":"a"},{"note":"b"}]}
+{"id":"p1","category":"passage","text":"t","relevant_notes":[{"note":"a"}],"evidence":[{"note":"a","key_fact":"f"}]}
+{"id":"n1","category":"negative","text":"t","negative":true}"#;
+        let qs = parse_questions(t, &known()).unwrap();
+        assert_eq!(qs[0].category, Category::MultiHop);
+        assert_eq!(qs[1].category, Category::Passage);
+        assert_eq!(qs[2].category, Category::Negative);
+        assert!(qs[2].negative);
+
+        let e = err_of(
+            r#"{"id":"m2","category":"multi-hop","text":"t","relevant_notes":[{"note":"a"}]}"#,
+        );
+        assert!(e.contains("m2") && e.contains("at least 2"), "{e}");
+        let e = err_of(
+            r#"{"id":"p2","category":"passage","text":"t","relevant_notes":[{"note":"a"}]}"#,
+        );
+        assert!(e.contains("p2") && e.contains("exactly one"), "{e}");
+        let e = err_of(r#"{"id":"n2","category":"negative","text":"t"}"#);
+        assert!(e.contains("n2") && e.contains("negative"), "{e}");
+        let e = err_of(
+            r#"{"id":"d2","category":"direct","text":"t","relevant_notes":[{"note":"a"}],"evidence":[{"note":"a","key_fact":"f"}]}"#,
+        );
+        assert!(e.contains("d2") && e.contains("answer and passage"), "{e}");
+    }
+
+    #[test]
+    fn implicit_contradiction_needs_no_recorded_supersession() {
+        // FR-013: current/stale are declared on the question; the manifest need not record the pair.
+        let t = r#"{"id":"t9","category":"temporal","text":"t","relevant_notes":[{"note":"b"}],"current":["b"],"stale":["a"]}"#;
+        assert!(parse_questions(t, &known()).is_ok());
+    }
+
+    #[test]
+    fn category_vocabulary_is_consistent() {
+        for c in Category::EVERY {
+            assert_eq!(Category::parse(c.label()), Some(c));
+        }
+        assert_eq!(Category::ALL.len(), 4);
+        assert!(Category::ALL.iter().all(|c| c.is_legacy()));
+        assert!(!Category::MultiHop.is_legacy());
+    }
+
+    #[test]
+    fn corpus_stats_count_bands_origins_and_chunks() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("notes")).unwrap();
+        std::fs::write(
+            d.path().join("manifest.json"),
+            r#"{"corpus_version":"v","chunking":{"max_tokens":50},"notes":[{"id":"a","origin":"primary"},{"id":"b","origin":"derived","cites":["a"]},{"id":"c"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(d.path().join("notes/a.md"), "# A\nshort").unwrap();
+        std::fs::write(d.path().join("notes/b.md"), "word ".repeat(600)).unwrap();
+        std::fs::write(d.path().join("notes/c.md"), "# C\nx").unwrap();
+        std::fs::write(
+            d.path().join("questions.jsonl"),
+            r#"{"id":"q1","category":"direct","text":"hi","relevant_notes":[{"note":"a"}]}"#,
+        )
+        .unwrap();
+        let st = load(d.path()).unwrap().stats();
+        assert_eq!(st.notes, 3);
+        assert_eq!(st.size_bands, [2, 0, 1, 0, 0]);
+        assert_eq!(st.origins["primary"], 1);
+        assert_eq!(st.origins["derived"], 1);
+        assert_eq!(st.derived_citing_primary, 1);
+        assert!(st.multi_chunk_notes >= 1 && st.chunks >= 4);
     }
 }

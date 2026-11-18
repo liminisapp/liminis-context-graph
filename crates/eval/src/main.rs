@@ -36,6 +36,14 @@ async fn main() {
     if args.first().map(String::as_str) == Some("retrieval") {
         std::process::exit(lcg_eval::retrieval::run_cli(&args[1..]).await);
     }
+    // `lcg-eval retrieval-gen …` (#788): deterministic generator / drift check for retrieval-v2.
+    if args.first().map(String::as_str) == Some("retrieval-gen") {
+        std::process::exit(lcg_eval::retrieval::generator::run_cli(&args[1..]));
+    }
+    // `lcg-eval retrieval-render …` (#788): the explicit, paid LLM step that writes the v2 prose.
+    if args.first().map(String::as_str) == Some("retrieval-render") {
+        std::process::exit(lcg_eval::retrieval::generator::render::run_cli(&args[1..]).await);
+    }
     let cli = match parse_args(&args) {
         Ok(cli) => cli,
         Err(e) => {

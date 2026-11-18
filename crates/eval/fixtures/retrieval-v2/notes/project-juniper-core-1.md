@@ -1,0 +1,3 @@
+# Juniper Core: working notes
+
+Juniper Core is the project that looks after support, and I have been meaning to jot down where it stands before the week gets away from me. Money first: Finance capped the Juniper Core budget at $6,400 per month, which is tight but workable if we keep the extras out. Ownership is clear, since Juniper Core is owned by Ines Lindqvist, so questions about scope should go to her rather than to whoever happens to be nearby. On timing, Juniper Core is scheduled to launch in September 2027, which sounds far off but will come quickly. I will check in again after the next planning meeting. Someone should also tidy the shared folder, which is a mess.

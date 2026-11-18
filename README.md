@@ -236,7 +236,7 @@ Full reference documentation is published at **[docs.liminis.app/liminis-context
 - [Ontology](https://docs.liminis.app/liminis-context-graph/ontology) — the optional entity/relation type vocabulary.
 - [Operations](https://docs.liminis.app/liminis-context-graph/operations) — WAL administration, degraded mode, and self-healing recovery.
 - [Testing & Evaluation](https://docs.liminis.app/liminis-context-graph/testing-and-evaluation) — LLM cassettes and the extraction-quality eval harness.
-- [Retrieval-Quality Evaluation](https://docs.liminis.app/liminis-context-graph/retrieval-quality-evaluation) — `lcg-eval retrieval`: LCG vs qmd on a notebook corpus.
+- [Retrieval-Quality Evaluation](https://docs.liminis.app/liminis-context-graph/retrieval-quality-evaluation) — `lcg-eval retrieval`: LCG vs qmd on a notebook corpus (a fast 31-note smoke fixture and a realistic 408-note one), with confidence intervals so noise is labelled as noise.
 - [ADR Index](https://docs.liminis.app/liminis-context-graph/adr/index) — architecture decision records (historical, not current-state, documentation).
 
 The site documents the version stated on its home page and may lag `main` between releases; this README's quickstart always works against `main`.

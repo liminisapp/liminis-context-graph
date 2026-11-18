@@ -1,0 +1,3 @@
+# Notes on Lumen Core
+
+Quick jottings after this morning's catch-up. Lumen Core is the project responsible for security, and it came up twice before we had even finished the coffee. The agreed budget is $2,900 a month, which people seem comfortable with for now. Bram Tanaka is the accountable owner, so questions about priorities should go to him first and not get lost in the group chat. The launch is scheduled for August 2027, a comfortable distance away, though nobody should treat that as a reason to leave the early groundwork until later. I will add a line here once the next planning session has settled the first milestones.

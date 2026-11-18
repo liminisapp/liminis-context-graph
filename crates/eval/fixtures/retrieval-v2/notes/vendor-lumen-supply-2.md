@@ -1,0 +1,3 @@
+# Lumen Supply — what we know
+
+Jotting this down before it slips out of my head. Lumen Supply is the supplier responsible for inventory, so most stock questions eventually lead back to them. Our account manager at Lumen Supply is Aiko Osei, which is worth knowing when something needs chasing and the general support line goes quiet. On the service side, the Lumen Supply service level promises 99.9% uptime, and that is the figure to quote if anyone asks what we can expect. I will add more once I have gone through the paperwork properly. For now this should answer the two questions people ask most often.
