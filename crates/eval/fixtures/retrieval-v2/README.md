@@ -13,6 +13,13 @@ then `--replies`), so no API key was used; the prompts are byte-identical to an 
 incidental sentences were reworded by hand after the first check run because they tripped the
 negative-question rule ("renewed the certificate", "people joined" ×2). Template prose is never checked in.
 
+**Cassette:** recorded 2026-11-18 with lcg's default production extractor, `claude-haiku-4-5-20251001`
+(what Liminis Notes ships), and the BGE-base-en-v1.5 sidecar embedder. It took 3,350 extraction calls
+and had zero failures. The calls were served through a local Messages API → `claude -p` bridge on a
+Claude subscription. Replay makes zero extraction requests. The cassette is keyed by prompt, so a run
+with a different embedder can see different dedup prompts and miss the cassette; record a new one for
+that embedder.
+
 | | |
 |---|---|
 | Corpus | `meridian-notebook-2`: 408 notes (about 155,000 target words) |
@@ -29,7 +36,8 @@ skeleton.json         generated: facts, origins, citations, sizes, supersessions
 review.json           human-review template (pending, empty verdicts)
 --- written by `retrieval-render` ---
 manifest.json  notes/*.md  questions.jsonl  questions.meta.json  render.json
-cassette.jsonl        (optional, maintainer-recorded) ingest extraction cassette
+cassette.jsonl        maintainer-recorded ingest extraction (claude-haiku-4-5-20251001, BGE-base-en-v1.5
+                      embedder; corpus hash da41ea92487ba4fc); replayed by default
 ```
 
 ## Maintainer steps
