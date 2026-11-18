@@ -1,4 +1,9 @@
 //! Report rendering (`report.md` / `report.json`) for the retrieval eval (FR-015, FR-016, SC-007).
+//!
+//! #788 adds, all additive: bootstrap 95% confidence intervals on the headline metrics, paired
+//! per-question comparisons that label a gap whose interval includes zero "not distinguishable
+//! from noise", ceiling and low-n labels per category, and a per-origin section for fixtures that
+//! declare origins. Metric *definitions* are unchanged (ADR-0754); only how they are read changes.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -7,6 +12,27 @@ use serde_json::{json, Value};
 
 use super::fixture::Category;
 use super::metrics::{QuestionScore, Summary};
+use super::origin::OriginData;
+use super::stats::{
+    at_ceiling, bootstrap_ci, low_n, paired_diff_ci, seed_for, Interval, PairedDiff, Verdict,
+    CEILING, DEFAULT_RESAMPLES, DEFAULT_SEED, LEVEL, MIN_CATEGORY_N,
+};
+
+/// Bootstrap settings, recorded in the report so a run can be reproduced or changed explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bootstrap {
+    pub seed: u64,
+    pub resamples: usize,
+}
+
+impl Default for Bootstrap {
+    fn default() -> Self {
+        Self {
+            seed: DEFAULT_SEED,
+            resamples: DEFAULT_RESAMPLES,
+        }
+    }
+}
 
 /// Reproduction metadata (FR-016).
 #[derive(Debug, Clone, Default)]
@@ -24,6 +50,10 @@ pub struct RunMeta {
     pub qmd_models: String,
     pub judge_model: String,
     pub category_counts: BTreeMap<Category, usize>,
+    pub bootstrap: Bootstrap,
+    /// Private-notebook run (`--private`): the report carries metrics, counts and hashes only and
+    /// withholds the detail of failed queries (a service error can echo query text).
+    pub private: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -49,6 +79,8 @@ pub struct ConfigRun {
     pub evidence_gaps: u64,
     pub query_errors: Vec<String>,
     pub grounded: Grounded,
+    /// Per-origin reading; `None` when the fixture declares no origins.
+    pub origin: Option<OriginData>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,57 +135,91 @@ fn f3(x: Option<f64>) -> String {
 fn ms(x: Option<f64>) -> String {
     x.map_or("n/a".to_string(), |v| format!("{v:.0}"))
 }
+fn ci_txt(iv: Option<Interval>) -> String {
+    iv.map_or("[n/a]".to_string(), |i| {
+        format!("[{:.3}, {:.3}]", i.lo, i.hi)
+    })
+}
+/// Rounds to 6 decimals so JSON output is stable and short.
+fn r6(x: f64) -> Value {
+    json!((x * 1e6).round() / 1e6)
+}
 
-/// Which metric a "best" mark is for, and whether higher or lower is better.
+type QGet = fn(&QuestionScore) -> Option<f64>;
+
+/// Which metric a column is, whether higher or lower is better, and (for the six headline
+/// metrics) how to read it off one question for bootstrapping.
 #[derive(Clone, Copy)]
 struct Col {
     name: &'static str,
+    key: &'static str,
     get: fn(&Summary) -> Option<f64>,
     higher_better: bool,
+    /// `Some` for headline metrics, which carry a bootstrap CI.
+    per_question: Option<QGet>,
 }
 
 const COLS: [Col; 8] = [
     Col {
         name: "recall@k",
+        key: "recall",
         get: |s| s.recall,
         higher_better: true,
+        per_question: Some(|q| q.recall),
     },
     Col {
         name: "MRR",
+        key: "mrr",
         get: |s| s.mrr,
         higher_better: true,
+        per_question: Some(|q| q.mrr),
     },
     Col {
         name: "nDCG@k",
+        key: "ndcg",
         get: |s| s.ndcg,
         higher_better: true,
+        per_question: Some(|q| q.ndcg),
     },
     Col {
         name: "grounded-recall@k",
+        key: "grounded_recall",
         get: |s| s.grounded_recall,
         higher_better: true,
+        per_question: Some(|q| q.grounded_recall),
     },
     Col {
         name: "grounded-MRR",
+        key: "grounded_mrr",
         get: |s| s.grounded_mrr,
         higher_better: true,
+        per_question: None,
     },
     Col {
         name: "stale>current",
+        key: "stale_above_current",
         get: |s| s.stale_above_current_rate,
         higher_better: false,
+        per_question: Some(|q| q.stale_above_current.map(|b| b as u8 as f64)),
     },
     Col {
         name: "stale-in-top-k",
+        key: "stale_in_top_k",
         get: |s| s.stale_in_top_k_rate,
         higher_better: false,
+        per_question: None,
     },
     Col {
         name: "false-pos@k",
+        key: "false_positive",
         get: |s| s.false_positive_rate,
         higher_better: false,
+        per_question: Some(|q| q.false_positive),
     },
 ];
+
+const NDCG: QGet = |q| q.ndcg;
+const RECALL: QGet = |q| q.recall;
 
 fn best_value(vals: &[Option<f64>], higher: bool) -> Option<f64> {
     let present: Vec<f64> = vals.iter().flatten().copied().collect();
@@ -173,6 +239,56 @@ fn best_value(vals: &[Option<f64>], higher: bool) -> Option<f64> {
     }
 }
 
+/// How a hypothesis reads once sampling noise is accounted for (FR-020).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    /// The hypothesis holds: the paired 95% interval is wholly on the stated side.
+    Yes,
+    /// The opposite holds: the interval is wholly on the other side.
+    No,
+    /// The paired interval includes zero (or too few shared questions): no difference shown.
+    Noise,
+    /// A side is missing or skipped.
+    CannotRead,
+}
+
+impl Reading {
+    fn md(self) -> &'static str {
+        match self {
+            Reading::Yes => "**YES**",
+            Reading::No => "**NO** (the opposite holds, 95% interval wholly on the other side)",
+            Reading::Noise => {
+                "**not distinguishable from noise** (95% paired interval includes zero)"
+            }
+            Reading::CannotRead => "**cannot be read** (a side is missing or skipped)",
+        }
+    }
+    fn key(self) -> &'static str {
+        match self {
+            Reading::Yes => "yes",
+            Reading::No => "no",
+            Reading::Noise => "noise",
+            Reading::CannotRead => "cannot_read",
+        }
+    }
+    /// Legacy tri-state for the JSON booleans: true = yes, false = no, null = noise/unreadable.
+    fn legacy(self) -> Option<bool> {
+        match self {
+            Reading::Yes => Some(true),
+            Reading::No => Some(false),
+            _ => None,
+        }
+    }
+}
+
+/// One paired comparison row.
+#[derive(Debug, Clone)]
+pub struct Comparison {
+    pub a: String,
+    pub b: String,
+    pub diff: Option<PairedDiff>,
+}
+
 impl Report {
     fn ran(&self) -> Vec<(&ConfigOutcome, &ConfigRun)> {
         self.configs
@@ -184,7 +300,88 @@ impl Report {
             .collect()
     }
 
-    /// Configuration(s) with the best nDCG@k in a category (ties all returned).
+    /// Categories shown in the report: the four original ones always, the rest only when present.
+    fn listed_categories(&self) -> Vec<Category> {
+        Category::EVERY
+            .iter()
+            .copied()
+            .filter(|c| c.is_legacy() || self.meta.category_counts.get(c).copied().unwrap_or(0) > 0)
+            .collect()
+    }
+
+    fn cat_label(cat: Option<Category>) -> &'static str {
+        cat.map_or("overall", Category::label)
+    }
+
+    /// `(question id, value)` series of one metric for a configuration, over scored questions.
+    fn series(run: &ConfigRun, cat: Option<Category>, get: QGet) -> Vec<(String, f64)> {
+        run.scores
+            .iter()
+            .filter(|s| cat.is_none_or(|c| s.category == c))
+            .filter_map(|s| get(s).map(|v| (s.id.clone(), v)))
+            .collect()
+    }
+
+    fn interval(
+        &self,
+        config: &str,
+        run: &ConfigRun,
+        cat: Option<Category>,
+        col: &Col,
+    ) -> Option<Interval> {
+        let get = col.per_question?;
+        let vals: Vec<f64> = Self::series(run, cat, get)
+            .into_iter()
+            .map(|(_, v)| v)
+            .collect();
+        let label = format!("{config}|{}|{}", Self::cat_label(cat), col.key);
+        bootstrap_ci(
+            &vals,
+            seed_for(self.meta.bootstrap.seed, &label),
+            self.meta.bootstrap.resamples,
+        )
+    }
+
+    fn paired(
+        &self,
+        a: (&str, &ConfigRun),
+        b: (&str, &ConfigRun),
+        cat: Option<Category>,
+        metric: (&str, QGet),
+    ) -> Option<PairedDiff> {
+        let label = format!("{}|{}|{}|{}", a.0, b.0, Self::cat_label(cat), metric.0);
+        paired_diff_ci(
+            &Self::series(a.1, cat, metric.1),
+            &Self::series(b.1, cat, metric.1),
+            seed_for(self.meta.bootstrap.seed, &label),
+            self.meta.bootstrap.resamples,
+        )
+    }
+
+    /// Paired comparison of every ordered-by-config pair of ran configurations on one metric.
+    pub fn comparisons(&self, cat: Option<Category>, metric: &str) -> Vec<Comparison> {
+        let get: QGet = if metric == "recall" { RECALL } else { NDCG };
+        let ran = self.ran();
+        let mut out = Vec::new();
+        for i in 0..ran.len() {
+            for j in (i + 1)..ran.len() {
+                out.push(Comparison {
+                    a: ran[i].0.id.clone(),
+                    b: ran[j].0.id.clone(),
+                    diff: self.paired(
+                        (&ran[i].0.id, ran[i].1),
+                        (&ran[j].0.id, ran[j].1),
+                        cat,
+                        (metric, get),
+                    ),
+                });
+            }
+        }
+        out
+    }
+
+    /// Configuration(s) with the best nDCG@k *point estimate* in a category (ties all returned).
+    /// A point estimate is not a win; see [`Report::verdict_line`].
     pub fn winners(&self, cat: Option<Category>) -> Vec<String> {
         let ran = self.ran();
         let pick = |r: &ConfigRun| match cat {
@@ -205,6 +402,51 @@ impl Report {
         }
     }
 
+    /// Names a winner only when the top nDCG@k point estimate is distinguishable from every other
+    /// configuration; otherwise says which ones it cannot be told apart from (FR-020).
+    pub fn verdict_line(&self, cat: Option<Category>) -> String {
+        let w = self.winners(cat);
+        let Some(top) = w.first() else {
+            return "Winner by nDCG@k: none (no configuration produced a score).".to_string();
+        };
+        if w.len() > 1 {
+            return format!(
+                "Tie by nDCG@k: {} (identical point estimates); no winner is named.",
+                fmt_winners(&w)
+            );
+        }
+        let ran = self.ran();
+        let Some((_, top_run)) = ran.iter().find(|(c, _)| &c.id == top) else {
+            return String::new();
+        };
+        let mut indistinct = Vec::new();
+        let mut compared = 0;
+        for (c, r) in ran.iter().filter(|(c, _)| &c.id != top) {
+            let has = match cat {
+                Some(k) => r.by_category.get(&k).and_then(|s| s.ndcg).is_some(),
+                None => r.overall.ndcg.is_some(),
+            };
+            if !has {
+                continue;
+            }
+            compared += 1;
+            let d = self.paired((top, top_run), (&c.id, r), cat, ("ndcg", NDCG));
+            if !matches!(d.map(|d| d.verdict), Some(Verdict::AHigher)) {
+                indistinct.push(format!("`{}`", c.id));
+            }
+        }
+        if compared == 0 {
+            format!("Winner by nDCG@k: `{top}` (the only configuration with a score).")
+        } else if indistinct.is_empty() {
+            format!("Winner by nDCG@k: `{top}` (distinguishable from every other configuration; paired 95% interval above zero).")
+        } else {
+            format!(
+                "Highest nDCG@k: `{top}` — **not distinguishable from noise** against {}; no winner is named.",
+                indistinct.join(", ")
+            )
+        }
+    }
+
     fn best_nd(&self, cat: Category, prefix: &str) -> Option<(String, f64, Option<f64>)> {
         self.ran()
             .into_iter()
@@ -219,23 +461,37 @@ impl Report {
             })
     }
 
-    /// Yes/no reading of the two stated hypotheses (SC-007). `None` = cannot be read.
-    pub fn hypotheses(&self) -> (Option<bool>, Option<bool>) {
-        let h1 = match (
-            self.best_nd(Category::Temporal, "lcg"),
-            self.best_nd(Category::Temporal, "qmd"),
-        ) {
-            (Some(l), Some(q)) => Some(l.1 > q.1),
-            _ => None,
+    fn read_pair(&self, cat: Category, a_prefix: &str, b_prefix: &str) -> Reading {
+        let (Some(a), Some(b)) = (self.best_nd(cat, a_prefix), self.best_nd(cat, b_prefix)) else {
+            return Reading::CannotRead;
         };
-        let h2 = match (
-            self.best_nd(Category::Paraphrase, "qmd"),
-            self.best_nd(Category::Paraphrase, "lcg"),
-        ) {
-            (Some(q), Some(l)) => Some(q.1 > l.1),
-            _ => None,
+        let ran = self.ran();
+        let find = |id: &str| {
+            ran.iter()
+                .find(|(c, _)| c.id == id)
+                .map(|(c, r)| (c.id.as_str(), *r))
         };
-        (h1, h2)
+        let (Some(ra), Some(rb)) = (find(&a.0), find(&b.0)) else {
+            return Reading::CannotRead;
+        };
+        match self
+            .paired(ra, rb, Some(cat), ("ndcg", NDCG))
+            .map(|d| d.verdict)
+        {
+            Some(Verdict::AHigher) => Reading::Yes,
+            Some(Verdict::BHigher) => Reading::No,
+            _ => Reading::Noise,
+        }
+    }
+
+    /// Reading of the two stated hypotheses (SC-007), using the same 95% paired-interval rule as
+    /// every other comparison (FR-020). The best configuration on each side is picked by point
+    /// estimate.
+    pub fn hypotheses(&self) -> (Reading, Reading) {
+        (
+            self.read_pair(Category::Temporal, "lcg", "qmd"),
+            self.read_pair(Category::Paraphrase, "qmd", "lcg"),
+        )
     }
 
     /// `false-pos@k` is 1 whenever anything is returned, and every configuration runs with its score
@@ -254,6 +510,37 @@ impl Report {
         }
     }
 
+    fn total_questions(&self) -> usize {
+        self.meta.category_counts.values().sum()
+    }
+
+    fn disclaimer(&self) -> String {
+        let corpus = if self.total_questions() >= 100 {
+            "The corpus is synthetic and template-generated: its prose is more regular than a real notebook's, so lexical systems may look better here than on real notes. Treat results as a controlled comparison, not a forecast"
+        } else {
+            "The corpus is small and hand-built: results are indicative, not general"
+        };
+        format!("> **Read with care.** LCG and qmd use different embedding (and reranker) models, so this compares *systems*, not retrieval algorithms. {corpus}. `lcg-passages` is vector-only (`knowledge_search_passages` does no FTS or RRF).\n")
+    }
+
+    /// `nDCG@k` ceiling statement for a scope: every ran configuration at or above [`CEILING`].
+    fn ceiling_note(&self, cat: Option<Category>) -> Option<String> {
+        let pts: Vec<f64> = self
+            .ran()
+            .iter()
+            .filter_map(|(_, r)| match cat {
+                Some(c) => r.by_category.get(&c).and_then(|s| s.ndcg),
+                None => r.overall.ndcg,
+            })
+            .collect();
+        if !at_ceiling(&pts) {
+            return None;
+        }
+        Some(format!(
+            "> **At the ceiling:** every configuration scores nDCG@k ≥ {CEILING:.2} here (intervals above). This scope cannot rank them; do not read the point estimates as a difference."
+        ))
+    }
+
     pub fn render_markdown(&self) -> String {
         let m = &self.meta;
         let mut o = String::new();
@@ -263,9 +550,14 @@ impl Report {
             "Corpus `{}` (hash `{}`), questions `{}` (hash `{}`), shared k = {}.\n",
             m.corpus_version, m.corpus_hash, m.questions_version, m.questions_hash, m.k
         );
+        let _ = writeln!(o, "{}", self.disclaimer());
         let _ = writeln!(
             o,
-            "> **Read with care.** LCG and qmd use different embedding (and reranker) models, so this compares *systems*, not retrieval algorithms. The corpus is small and hand-built: results are indicative, not general. `lcg-passages` is vector-only (`knowledge_search_passages` does no FTS or RRF).\n"
+            "> **Reading the intervals.** `[lo, hi]` is a {:.0}% percentile bootstrap interval over questions ({} resamples, seed {}). A difference between two configurations whose paired {:.0}% interval includes zero is labelled *not distinguishable from noise*, never a winner. No multiplicity correction is applied across the many pairs shown. Bold marks the best point estimate, which is not by itself a finding.\n",
+            LEVEL * 100.0,
+            m.bootstrap.resamples,
+            m.bootstrap.seed,
+            LEVEL * 100.0
         );
 
         let _ = writeln!(o, "## Configurations\n");
@@ -282,45 +574,53 @@ impl Report {
 
         let _ = writeln!(o, "\n## Overall\n");
         self.table(&mut o, None);
-        let w = self.winners(None);
-        let _ = writeln!(o, "\nBest overall by nDCG@k: {}.", fmt_winners(&w));
+        let _ = writeln!(o, "\n{}", self.verdict_line(None));
+        self.comparison_table(&mut o, None);
+        if let Some(n) = self.ceiling_note(None) {
+            let _ = writeln!(o, "\n{n}");
+        }
 
         if let Some(note) = self.false_positive_note() {
             let _ = writeln!(o, "\n{note}");
         }
 
         let _ = writeln!(o, "\n## Per category\n");
-        for cat in Category::ALL {
+        for cat in self.listed_categories() {
             let n = m.category_counts.get(&cat).copied().unwrap_or(0);
-            let _ = writeln!(o, "### {} (n = {n})\n", cat.label());
+            let flag = if n > 0 && low_n(n) {
+                format!(" — **low n** (< {MIN_CATEGORY_N}): intervals are wide")
+            } else {
+                String::new()
+            };
+            let _ = writeln!(o, "### {} (n = {n}){flag}\n", cat.label());
             if n == 0 {
                 let _ = writeln!(o, "_No questions in this category._\n");
                 continue;
             }
             self.table(&mut o, Some(cat));
-            let _ = writeln!(
-                o,
-                "\nWinner by nDCG@k: {}.\n",
-                fmt_winners(&self.winners(Some(cat)))
-            );
+            let _ = writeln!(o, "\n{}", self.verdict_line(Some(cat)));
+            self.comparison_table(&mut o, Some(cat));
+            if let Some(note) = self.ceiling_note(Some(cat)) {
+                let _ = writeln!(o, "\n{note}");
+            }
+            let _ = writeln!(o);
         }
+
+        self.origin_section(&mut o);
 
         let _ = writeln!(o, "## Hypotheses\n");
         let (h1, h2) = self.hypotheses();
-        let yn = |h: Option<bool>| match h {
-            Some(true) => "**YES**",
-            Some(false) => "**NO**",
-            None => "**cannot be read** (a side is missing or skipped)",
-        };
         let _ = writeln!(
             o,
-            "- H1 — LCG beats qmd on temporal/superseded questions: {} (best `lcg-*` vs best `qmd*` by temporal nDCG@k; see the stale>current column — the belief-aware facts variant is the only one that can filter superseded content, ADR-0705).",
-            yn(h1)
+            "- H1 — LCG beats qmd on temporal/superseded questions: {} (best `lcg-*` vs best `qmd*` by temporal nDCG@k, paired {:.0}% interval; see the stale>current column — the belief-aware facts variant is the only one that can filter superseded content, ADR-0705).",
+            h1.md(),
+            LEVEL * 100.0
         );
         let _ = writeln!(
             o,
-            "- H2 — qmd beats LCG on paraphrase questions: {} (best `qmd*` vs best `lcg-*` by paraphrase nDCG@k).",
-            yn(h2)
+            "- H2 — qmd beats LCG on paraphrase questions: {} (best `qmd*` vs best `lcg-*` by paraphrase nDCG@k, paired {:.0}% interval).",
+            h2.md(),
+            LEVEL * 100.0
         );
 
         let _ = writeln!(o, "\n## Cost\n");
@@ -391,7 +691,12 @@ impl Report {
                 );
             }
             for e in r.query_errors.iter().take(3) {
-                let _ = writeln!(o, "- `{}` query error: {e}", c.id);
+                if m.private {
+                    let id = e.split(':').next().unwrap_or("?");
+                    let _ = writeln!(o, "- `{}` query error: {id}: error (detail withheld)", c.id);
+                } else {
+                    let _ = writeln!(o, "- `{}` query error: {e}", c.id);
+                }
             }
         }
 
@@ -412,25 +717,167 @@ impl Report {
         let _ = writeln!(o, "- Grounded-evidence judge: {}", m.judge_model);
         let _ = writeln!(
             o,
+            "- Bootstrap: percentile, {:.0}% level, {} resamples over questions, base seed {} (each interval's seed is the base seed XOR an FNV-1a hash of its label, so adding a configuration changes no other interval).",
+            LEVEL * 100.0,
+            m.bootstrap.resamples,
+            m.bootstrap.seed
+        );
+        let _ = writeln!(
+            o,
             "- Latency convention: warm, per query, p50/p95 over one measured pass."
         );
-        let _ = writeln!(o, "- Determinism: relevance metrics are exactly reproducible for a fixed LCG graph and embedder. LCG ingest is deterministic only with a replayed cassette; qmd query expansion and reranking are model-dependent; the grounded judge is cached by (model, key fact, text).");
+        let _ = writeln!(o, "- Determinism: relevance metrics are exactly reproducible for a fixed LCG graph and embedder; the intervals are exactly reproducible from the per-question scores, seed and resample count. LCG ingest is deterministic only with a replayed cassette; qmd query expansion and reranking are model-dependent; the grounded judge is cached by (model, key fact, text).");
         o
     }
 
+    /// Paired nDCG@k comparison table for a scope; skipped when fewer than two configs ran.
+    fn comparison_table(&self, o: &mut String, cat: Option<Category>) {
+        let rows = self.comparisons(cat, "ndcg");
+        if rows.is_empty() {
+            return;
+        }
+        let _ = writeln!(
+            o,
+            "\nPaired nDCG@k comparison (difference a − b, {:.0}% bootstrap interval):\n",
+            LEVEL * 100.0
+        );
+        let _ = writeln!(o, "| a | b | n | Δ nDCG@k | interval | reading |");
+        let _ = writeln!(o, "|---|---|---|---|---|---|");
+        for c in rows {
+            match c.diff {
+                None => {
+                    let _ = writeln!(
+                        o,
+                        "| `{}` | `{}` | <2 | n/a | n/a | not distinguishable from noise (too few shared questions) |",
+                        c.a, c.b
+                    );
+                }
+                Some(d) => {
+                    let reading = match d.verdict {
+                        Verdict::AHigher => format!("`{}` higher", c.a),
+                        Verdict::BHigher => format!("`{}` higher", c.b),
+                        Verdict::Noise => Verdict::Noise.label().to_string(),
+                    };
+                    let _ = writeln!(
+                        o,
+                        "| `{}` | `{}` | {} | {:+.3} | [{:+.3}, {:+.3}] | {reading} |",
+                        c.a, c.b, d.n, d.mean_diff, d.lo, d.hi
+                    );
+                }
+            }
+        }
+    }
+
+    fn origin_values(run: &ConfigRun) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let od = run.origin.as_ref()?;
+        let share = od
+            .per_question
+            .iter()
+            .map(|(_, q)| q.restating_share)
+            .collect();
+        let outrank = od
+            .per_question
+            .iter()
+            .filter_map(|(_, q)| q.outranks_primary.map(|b| b as u8 as f64))
+            .collect();
+        let only = od
+            .per_question
+            .iter()
+            .map(|(_, q)| q.derived_only as u8 as f64)
+            .collect();
+        Some((share, outrank, only))
+    }
+
+    fn origin_ci(&self, cfg: &str, name: &str, vals: &[f64]) -> Option<Interval> {
+        bootstrap_ci(
+            vals,
+            seed_for(self.meta.bootstrap.seed, &format!("{cfg}|origin|{name}")),
+            self.meta.bootstrap.resamples,
+        )
+    }
+
+    fn mean_txt(vals: &[f64]) -> String {
+        if vals.is_empty() {
+            "n/a".to_string()
+        } else {
+            format!("{:.3}", vals.iter().sum::<f64>() / vals.len() as f64)
+        }
+    }
+
+    /// Per-origin section (FR-022); only when some configuration carries origin data.
+    fn origin_section(&self, o: &mut String) {
+        let ran = self.ran();
+        if !ran.iter().any(|(_, r)| r.origin.is_some()) {
+            return;
+        }
+        let _ = writeln!(o, "## By origin of returned notes\n");
+        let _ = writeln!(
+            o,
+            "Eligible questions are non-negative ones whose relevant `primary` note is restated by at least one `derived` page (a *restating* note: it cites that primary note and is not itself relevant). *Restating share@k* is the fraction of the returned top-k that are restating notes. *Outrank rate* is, over eligible questions where both the primary note and a restating note were returned, how often the best restating note sits above the primary one. *Derived-only* is how often a restating note was returned and no relevant primary note was. ADR-0752: derived pages are ingested as `derived`, so they cannot corroborate themselves.\n"
+        );
+        let _ = writeln!(
+            o,
+            "| config | eligible n | restating share@k | outrank rate (pairs) | derived-only rate |"
+        );
+        let _ = writeln!(o, "|---|---|---|---|---|");
+        for (c, r) in &ran {
+            let Some((share, outrank, only)) = Self::origin_values(r) else {
+                continue;
+            };
+            let _ = writeln!(
+                o,
+                "| `{}` | {} | {} {} | {} {} ({}) | {} {} |",
+                c.id,
+                share.len(),
+                Self::mean_txt(&share),
+                ci_txt(self.origin_ci(&c.id, "share", &share)),
+                Self::mean_txt(&outrank),
+                ci_txt(self.origin_ci(&c.id, "outrank", &outrank)),
+                outrank.len(),
+                Self::mean_txt(&only),
+                ci_txt(self.origin_ci(&c.id, "derived_only", &only)),
+            );
+        }
+        let _ = writeln!(
+            o,
+            "\nReturned top-k by origin (share of all returned results over non-negative questions):\n"
+        );
+        let origins = ["primary", "external", "derived", "answer", "undeclared"];
+        let _ = writeln!(o, "| config | {} |", origins.join(" | "));
+        let _ = writeln!(o, "|---|{}", "---|".repeat(origins.len()));
+        for (c, r) in &ran {
+            let Some(od) = &r.origin else { continue };
+            let cells: Vec<String> = origins
+                .iter()
+                .map(|k| {
+                    if od.returned == 0 {
+                        "n/a".to_string()
+                    } else {
+                        format!(
+                            "{:.3}",
+                            od.mix.get(*k).copied().unwrap_or(0) as f64 / od.returned as f64
+                        )
+                    }
+                })
+                .collect();
+            let _ = writeln!(o, "| `{}` | {} |", c.id, cells.join(" | "));
+        }
+        let _ = writeln!(o);
+    }
+
     fn table(&self, o: &mut String, cat: Option<Category>) {
-        let rows: Vec<(&str, Option<&Summary>)> = self
+        let rows: Vec<(&ConfigOutcome, Option<(&ConfigRun, &Summary)>)> = self
             .configs
             .iter()
             .map(|c| {
                 let s = match &c.status {
                     Status::Ran(r) => match cat {
-                        Some(cat) => r.by_category.get(&cat),
-                        None => Some(&r.overall),
+                        Some(cat) => r.by_category.get(&cat).map(|s| (r.as_ref(), s)),
+                        None => Some((r.as_ref(), &r.overall)),
                     },
                     Status::Skipped(_) => None,
                 };
-                (c.id.as_str(), s)
+                (c, s)
             })
             .collect();
         let _ = write!(o, "| config |");
@@ -444,39 +891,90 @@ impl Report {
             .map(|c| {
                 let vals: Vec<Option<f64>> = rows
                     .iter()
-                    .map(|(_, s)| s.and_then(|s| (c.get)(s)))
+                    .map(|(_, s)| s.and_then(|(_, s)| (c.get)(s)))
                     .collect();
                 best_value(&vals, c.higher_better)
             })
             .collect();
-        for ((id, s), _) in rows.iter().zip(0..) {
+        for (c, s) in &rows {
+            let id = &c.id;
             let _ = write!(o, "| `{id}` |");
             match s {
                 None => {
                     let _ = write!(o, " skipped |{}", " |".repeat(COLS.len() - 1));
                 }
-                Some(s) => {
-                    for (ci, c) in COLS.iter().enumerate() {
-                        let v = (c.get)(s);
+                Some((run, s)) => {
+                    for (ci, col) in COLS.iter().enumerate() {
+                        let v = (col.get)(s);
                         let txt = f3(v);
                         let marked = match (v, bests[ci]) {
                             (Some(v), Some(b)) if (v - b).abs() < 1e-12 => format!("**{txt}**"),
                             _ => txt,
                         };
-                        let _ = write!(o, " {marked} |");
+                        let cell = if col.per_question.is_some() && v.is_some() {
+                            format!("{marked} {}", ci_txt(self.interval(id, run, cat, col)))
+                        } else {
+                            marked
+                        };
+                        let _ = write!(o, " {cell} |");
                     }
                 }
             }
             let _ = writeln!(o);
         }
         // Sample sizes behind the means (negatives, temporal and grounded subsets differ).
-        if let Some((_, Some(s))) = rows.iter().find(|(_, s)| s.is_some()) {
+        if let Some((_, Some((_, s)))) = rows.iter().find(|(_, s)| s.is_some()) {
             let _ = writeln!(
                 o,
                 "\n_n: {} questions; {} with relevance judgements; {} negative; {} temporal; {} grounded._",
                 s.questions, s.n_relevance, s.n_negative, s.n_temporal, s.n_grounded
             );
         }
+    }
+
+    fn ci_json(&self, cfg: &str, run: &ConfigRun, cat: Option<Category>) -> Value {
+        let mut m = serde_json::Map::new();
+        for col in COLS.iter().filter(|c| c.per_question.is_some()) {
+            let v = match self.interval(cfg, run, cat, col) {
+                Some(i) => json!({"n": i.n, "mean": r6(i.mean), "lo": r6(i.lo), "hi": r6(i.hi)}),
+                None => Value::Null,
+            };
+            m.insert(col.key.to_string(), v);
+        }
+        Value::Object(m)
+    }
+
+    fn comparisons_json(&self) -> Vec<Value> {
+        let mut out = Vec::new();
+        let mut scopes: Vec<Option<Category>> = vec![None];
+        scopes.extend(self.listed_categories().into_iter().map(Some));
+        for scope in scopes {
+            if let Some(c) = scope {
+                if self.meta.category_counts.get(&c).copied().unwrap_or(0) == 0 {
+                    continue;
+                }
+            }
+            for metric in ["ndcg", "recall"] {
+                for c in self.comparisons(scope, metric) {
+                    out.push(match c.diff {
+                        Some(d) => json!({
+                            "scope": Self::cat_label(scope), "metric": metric, "a": c.a, "b": c.b,
+                            "n": d.n, "mean_diff": r6(d.mean_diff), "lo": r6(d.lo), "hi": r6(d.hi),
+                            "reading": match d.verdict {
+                                Verdict::AHigher => "a_higher",
+                                Verdict::BHigher => "b_higher",
+                                Verdict::Noise => "not_distinguishable_from_noise",
+                            },
+                        }),
+                        None => json!({
+                            "scope": Self::cat_label(scope), "metric": metric, "a": c.a, "b": c.b,
+                            "n": null, "reading": "not_distinguishable_from_noise",
+                        }),
+                    });
+                }
+            }
+        }
+        out
     }
 
     pub fn to_json(&self) -> Value {
@@ -509,14 +1007,45 @@ impl Report {
                         .iter()
                         .map(|(k, s)| (k.label().to_string(), summ(s)))
                         .collect();
+                    let ci_by: serde_json::Map<String, Value> = r
+                        .by_category
+                        .keys()
+                        .map(|k| (k.label().to_string(), self.ci_json(&c.id, r, Some(*k))))
+                        .collect();
+                    let origins = match (&r.origin, Self::origin_values(r)) {
+                        (Some(od), Some((share, outrank, only))) => {
+                            let part = |name: &str, v: &[f64]| {
+                                json!({
+                                    "n": v.len(),
+                                    "mean": if v.is_empty() { Value::Null } else { r6(v.iter().sum::<f64>() / v.len() as f64) },
+                                    "ci": self.origin_ci(&c.id, name, v).map(|i| json!({"lo": r6(i.lo), "hi": r6(i.hi)})),
+                                })
+                            };
+                            json!({
+                                "eligible_questions": share.len(),
+                                "restating_share": part("share", &share),
+                                "outrank_rate": part("outrank", &outrank),
+                                "derived_only_rate": part("derived_only", &only),
+                                "returned": od.returned,
+                                "returned_by_origin": od.mix,
+                            })
+                        }
+                        _ => Value::Null,
+                    };
                     json!({
                         "id": c.id, "description": c.description,
                         "overall": summ(&r.overall), "by_category": by,
+                        "ci": {"overall": self.ci_json(&c.id, r, None), "by_category": ci_by},
+                        "origins": origins,
                         "latency_p50_ms": r.latency_p50_ms, "latency_p95_ms": r.latency_p95_ms,
                         "model_calls_per_query": r.model_calls_per_query,
                         "lookup_calls": r.lookup_calls,
                         "evidence_gaps": r.evidence_gaps,
-                        "query_errors": r.query_errors,
+                        "query_errors": if m.private {
+                            r.query_errors.iter().map(|e| json!(format!("{}: error (detail withheld)", e.split(':').next().unwrap_or("?")))).collect::<Vec<_>>()
+                        } else {
+                            r.query_errors.iter().map(|e| json!(e)).collect::<Vec<_>>()
+                        },
                         "grounded": match &r.grounded {
                             Grounded::Judged { paid_calls, cache_hits } => json!({"paid_calls": paid_calls, "cache_hits": cache_hits}),
                             Grounded::Skipped(w) => json!({"skipped": w}),
@@ -534,6 +1063,11 @@ impl Report {
             })
             .collect();
         let (h1, h2) = self.hypotheses();
+        let winners: BTreeMap<String, Vec<String>> = self
+            .listed_categories()
+            .iter()
+            .map(|c| (c.label().to_string(), self.winners(Some(*c))))
+            .collect();
         json!({
             "meta": {
                 "corpus_version": m.corpus_version, "corpus_hash": m.corpus_hash,
@@ -542,6 +1076,11 @@ impl Report {
                 "qmd_index": m.qmd_index, "embedder": m.embedder, "extractor": m.extractor,
                 "qmd_models": m.qmd_models, "judge_model": m.judge_model,
                 "category_counts": cat_counts, "latency_convention": "warm",
+            },
+            "bootstrap": {
+                "method": "percentile bootstrap over questions",
+                "level": LEVEL, "seed": m.bootstrap.seed, "resamples": m.bootstrap.resamples,
+                "min_category_n": MIN_CATEGORY_N, "ceiling_ndcg": CEILING,
             },
             "ingest": {
                 "lcg_seconds": self.ingest.lcg_seconds, "lcg_chunks": self.ingest.lcg_chunks,
@@ -553,8 +1092,14 @@ impl Report {
                 "qmd_seconds": self.ingest.qmd_seconds,
             },
             "configs": configs,
-            "winners": Category::ALL.iter().map(|c| (c.label().to_string(), self.winners(Some(*c)))).collect::<BTreeMap<_, _>>(),
-            "hypotheses": {"h1_lcg_beats_qmd_on_temporal": h1, "h2_qmd_beats_lcg_on_paraphrase": h2},
+            "comparisons": self.comparisons_json(),
+            "winners": winners,
+            "hypotheses": {
+                "h1_lcg_beats_qmd_on_temporal": h1.legacy(),
+                "h2_qmd_beats_lcg_on_paraphrase": h2.legacy(),
+                "h1_reading": h1.key(),
+                "h2_reading": h2.key(),
+            },
         })
     }
 }
@@ -574,10 +1119,13 @@ fn fmt_winners(w: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::retrieval::metrics::summarize_by_category;
+    use crate::retrieval::origin::{OriginData, OriginQuestion};
 
-    fn score(cat: Category, ndcg: f64, stale: Option<bool>) -> QuestionScore {
+    const N: usize = 30;
+
+    fn score(cat: Category, i: usize, ndcg: f64, stale: Option<bool>) -> QuestionScore {
         QuestionScore {
-            id: format!("{}-{ndcg}", cat.label()),
+            id: format!("{}-{i:02}", cat.label()),
             category: cat,
             recall: Some(ndcg),
             mrr: Some(ndcg),
@@ -589,6 +1137,16 @@ mod tests {
             grounded_mrr: None,
             ranked: vec![],
         }
+    }
+
+    /// `n` questions of one category around `base` with deterministic spread.
+    fn cat_scores(cat: Category, n: usize, base: f64, stale: Option<bool>) -> Vec<QuestionScore> {
+        (0..n)
+            .map(|i| {
+                let v = (base + ((i * 7) % 5) as f64 * 0.02 - 0.04).clamp(0.0, 1.0);
+                score(cat, i, v, stale)
+            })
+            .collect()
     }
 
     fn run(scores: Vec<QuestionScore>) -> Status {
@@ -604,17 +1162,31 @@ mod tests {
             evidence_gaps: 0,
             query_errors: vec![],
             grounded: Grounded::Skipped("no judge".into()),
+            origin: None,
         }))
     }
 
-    fn report() -> Report {
+    fn two(a: (f64, f64), b: (f64, f64)) -> (Vec<QuestionScore>, Vec<QuestionScore>) {
+        let mk = |t: f64, p: f64, stale: bool| {
+            let mut v = cat_scores(Category::Temporal, N, t, Some(stale));
+            v.extend(cat_scores(Category::Paraphrase, N, p, None));
+            v
+        };
+        (mk(a.0, a.1, false), mk(b.0, b.1, true))
+    }
+
+    fn report_with(lcg: Vec<QuestionScore>, qmd: Vec<QuestionScore>) -> Report {
         let mut meta = RunMeta {
             corpus_version: "nb-1".into(),
             k: 10,
+            bootstrap: Bootstrap {
+                seed: 788,
+                resamples: 300,
+            },
             ..Default::default()
         };
-        meta.category_counts.insert(Category::Temporal, 1);
-        meta.category_counts.insert(Category::Paraphrase, 1);
+        meta.category_counts.insert(Category::Temporal, N);
+        meta.category_counts.insert(Category::Paraphrase, N);
         Report {
             meta,
             ingest: IngestCost::default(),
@@ -622,18 +1194,12 @@ mod tests {
                 ConfigOutcome {
                     id: "lcg-entities-facts-belief".into(),
                     description: "d".into(),
-                    status: run(vec![
-                        score(Category::Temporal, 0.9, Some(false)),
-                        score(Category::Paraphrase, 0.4, None),
-                    ]),
+                    status: run(lcg),
                 },
                 ConfigOutcome {
                     id: "qmd".into(),
                     description: "d".into(),
-                    status: run(vec![
-                        score(Category::Temporal, 0.5, Some(true)),
-                        score(Category::Paraphrase, 0.8, None),
-                    ]),
+                    status: run(qmd),
                 },
                 ConfigOutcome {
                     id: "qmd-rerank".into(),
@@ -642,6 +1208,12 @@ mod tests {
                 },
             ],
         }
+    }
+
+    /// LCG clearly better on temporal, qmd clearly better on paraphrase.
+    fn report() -> Report {
+        let (l, q) = two((0.9, 0.4), (0.5, 0.8));
+        report_with(l, q)
     }
 
     #[test]
@@ -655,7 +1227,7 @@ mod tests {
     }
 
     #[test]
-    fn winners_per_category_and_hypotheses() {
+    fn winners_per_category_and_hypotheses_with_clear_gaps() {
         let r = report();
         assert_eq!(
             r.winners(Some(Category::Temporal)),
@@ -663,24 +1235,64 @@ mod tests {
         );
         assert_eq!(r.winners(Some(Category::Paraphrase)), vec!["qmd"]);
         assert!(r.winners(Some(Category::Direct)).is_empty());
-        assert_eq!(r.hypotheses(), (Some(true), Some(true)));
+        assert_eq!(r.hypotheses(), (Reading::Yes, Reading::Yes));
+        assert!(r
+            .verdict_line(Some(Category::Paraphrase))
+            .starts_with("Winner by nDCG@k: `qmd`"));
+    }
+
+    #[test]
+    fn a_gap_within_noise_is_not_a_winner_and_not_a_hypothesis_yes() {
+        // Same multiset of per-question scores, permuted: equal means, varied paired differences.
+        let (l, mut q) = two((0.62, 0.62), (0.62, 0.62));
+        let vals: Vec<Option<f64>> = q.iter().map(|s| s.ndcg).collect();
+        for (i, s) in q.iter_mut().enumerate() {
+            let v = vals[(i + 1) % vals.len()];
+            s.ndcg = v;
+            s.recall = v;
+            s.mrr = v;
+        }
+        let r = report_with(l, q);
+        assert_eq!(r.hypotheses(), (Reading::Noise, Reading::Noise));
+        let md = r.render_markdown();
+        assert!(md.contains("not distinguishable from noise"), "{md}");
+        assert!(md.contains("no winner is named"), "{md}");
+        assert!(
+            !md.contains("Winner by nDCG@k: `lcg-entities-facts-belief`"),
+            "{md}"
+        );
+        let j = r.to_json();
+        assert_eq!(j["hypotheses"]["h1_reading"], "noise");
+        assert!(j["hypotheses"]["h1_lcg_beats_qmd_on_temporal"].is_null());
+        assert!(j["comparisons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["reading"] == "not_distinguishable_from_noise"));
+    }
+
+    #[test]
+    fn reversed_hypothesis_reads_no() {
+        // qmd clearly better on temporal: H1 is NO, not "cannot tell".
+        let (l, q) = two((0.4, 0.4), (0.9, 0.9));
+        assert_eq!(report_with(l, q).hypotheses(), (Reading::No, Reading::Yes));
     }
 
     #[test]
     fn hypotheses_unreadable_when_a_side_is_skipped() {
         let mut r = report();
         r.configs[1].status = Status::Skipped("qmd not installed".into());
-        assert_eq!(r.hypotheses(), (None, None));
+        assert_eq!(r.hypotheses(), (Reading::CannotRead, Reading::CannotRead));
         assert!(r.render_markdown().contains("cannot be read"));
     }
 
     #[test]
-    fn markdown_has_required_sections_and_marks_best_and_skips() {
+    fn markdown_has_required_sections_intervals_and_marks_best_and_skips() {
         let md = report().render_markdown();
         for s in [
             "## Overall",
             "## Per category",
-            "### temporal (n = 1)",
+            "### temporal (n = 30)",
             "### direct (n = 0)",
             "## Hypotheses",
             "## Cost",
@@ -688,26 +1300,121 @@ mod tests {
             "Winner by nDCG@k: `qmd`",
             "**skipped** — model download unavailable",
             "n/a (not exposed)",
+            "percentile bootstrap interval over questions (300 resamples, seed 788)",
+            "Paired nDCG@k comparison",
+            "- Bootstrap: percentile",
         ] {
             assert!(md.contains(s), "missing {s:?} in:\n{md}");
         }
-        assert!(md.contains("**0.900**"), "{md}");
         assert!(md.contains("different embedding"), "caveat must be printed");
         assert!(md.contains("vector-only"));
+        // Point estimate is bolded and followed by its interval.
+        let re = md
+            .lines()
+            .find(|l| l.starts_with("| `qmd` |") && l.contains("**"))
+            .unwrap();
+        assert!(re.contains("] |") || re.contains("] "), "{re}");
+        // v2-scale corpus gets the synthetic-corpus caveat; this fixture (60 questions) keeps v1's.
+        assert!(md.contains("small and hand-built"));
     }
 
     #[test]
-    fn json_is_well_formed_and_carries_winners() {
+    fn large_corpus_gets_the_synthetic_disclaimer() {
+        let mut r = report();
+        r.meta.category_counts.insert(Category::Direct, 200);
+        let md = r.render_markdown();
+        assert!(md.contains("synthetic and template-generated"), "{md}");
+        assert!(!md.contains("small and hand-built"));
+    }
+
+    #[test]
+    fn json_is_well_formed_carries_winners_bootstrap_and_intervals() {
         let j = report().to_json();
         assert_eq!(j["winners"]["paraphrase"][0], "qmd");
         assert_eq!(j["hypotheses"]["h1_lcg_beats_qmd_on_temporal"], true);
+        assert_eq!(j["hypotheses"]["h1_reading"], "yes");
         assert_eq!(j["configs"][2]["skipped"], "model download unavailable");
         assert_eq!(j["meta"]["latency_convention"], "warm");
+        assert_eq!(j["bootstrap"]["seed"], 788);
+        assert_eq!(j["bootstrap"]["resamples"], 300);
+        let ci = &j["configs"][0]["ci"]["overall"]["ndcg"];
+        let (lo, mean, hi) = (
+            ci["lo"].as_f64().unwrap(),
+            ci["mean"].as_f64().unwrap(),
+            ci["hi"].as_f64().unwrap(),
+        );
+        assert!(lo <= mean && mean <= hi, "{ci}");
+        assert!(j["configs"][0]["ci"]["by_category"]["temporal"]["recall"].is_object());
+        assert!(j["configs"][0]["origins"].is_null());
+        // The new categories are absent from a v1-shaped report.
+        assert!(j["winners"].get("multi-hop").is_none());
+        // Pre-existing consumers' keys are all still there.
+        for k in [
+            "overall",
+            "by_category",
+            "latency_p50_ms",
+            "questions",
+            "grounded",
+        ] {
+            assert!(j["configs"][0].get(k).is_some(), "missing {k}");
+        }
     }
 
     #[test]
-    fn rendering_is_deterministic() {
+    fn rendering_is_deterministic_and_seed_sensitive() {
         assert_eq!(report().render_markdown(), report().render_markdown());
+        assert_eq!(
+            serde_json::to_string(&report().to_json()).unwrap(),
+            serde_json::to_string(&report().to_json()).unwrap()
+        );
+        let mut other = report();
+        other.meta.bootstrap.seed = 7;
+        assert_ne!(report().render_markdown(), other.render_markdown());
+    }
+
+    #[test]
+    fn an_interval_does_not_change_when_another_configuration_is_added() {
+        let (l, q) = two((0.9, 0.4), (0.5, 0.8));
+        let base = report_with(l.clone(), q.clone());
+        let mut more = report_with(l.clone(), q);
+        more.configs.push(ConfigOutcome {
+            id: "lcg-passages".into(),
+            description: "d".into(),
+            status: run(l),
+        });
+        let get = |r: &Report| r.to_json()["configs"][1]["ci"]["overall"]["ndcg"].clone();
+        assert_eq!(get(&base), get(&more));
+    }
+
+    #[test]
+    fn ceiling_scope_is_stated_not_ranked() {
+        let mk = |cat| (0..N).map(|i| score(cat, i, 1.0, None)).collect::<Vec<_>>();
+        let mut r = report_with(mk(Category::Direct), mk(Category::Direct));
+        r.meta.category_counts.insert(Category::Direct, N);
+        let md = r.render_markdown();
+        assert!(md.contains("At the ceiling"), "{md}");
+        assert!(r.ceiling_note(Some(Category::Direct)).is_some());
+        assert!(r.ceiling_note(Some(Category::Temporal)).is_none());
+    }
+
+    #[test]
+    fn small_categories_are_flagged_low_n_with_a_visibly_wide_interval() {
+        let mut r = report();
+        r.meta.category_counts.insert(Category::Temporal, 5);
+        let md = r.render_markdown();
+        assert!(md.contains("### temporal (n = 5) — **low n**"), "{md}");
+        assert!(md.contains("### paraphrase (n = 30)\n"), "{md}");
+    }
+
+    #[test]
+    fn a_category_with_one_question_gets_na_not_a_zero_width_interval() {
+        let mut scores = cat_scores(Category::Temporal, 1, 0.9, Some(false));
+        scores.extend(cat_scores(Category::Paraphrase, N, 0.5, None));
+        let mut r = report_with(scores.clone(), scores);
+        r.meta.category_counts.insert(Category::Temporal, 1);
+        let md = r.render_markdown();
+        assert!(md.contains("[n/a]"), "{md}");
+        assert!(r.to_json()["configs"][0]["ci"]["by_category"]["temporal"]["ndcg"].is_null());
     }
 
     #[test]
@@ -766,5 +1473,75 @@ mod tests {
         assert!(md.contains("3 returned hit(s) carried no snippet"), "{md}");
         assert!(md.contains("lower bound"));
         assert_eq!(r.to_json()["configs"][0]["evidence_gaps"], 3);
+    }
+
+    #[test]
+    fn failed_queries_are_listed_and_private_mode_withholds_their_detail() {
+        let mut r = report();
+        if let Status::Ran(run) = &mut r.configs[0].status {
+            run.query_errors = vec!["temporal-03: no such passage for 'my secret query'".into()];
+        }
+        let md = r.render_markdown();
+        assert!(md.contains("my secret query"));
+        r.meta.private = true;
+        let md = r.render_markdown();
+        assert!(md.contains("temporal-03: error (detail withheld)"), "{md}");
+        assert!(!md.contains("secret"), "{md}");
+        assert!(!serde_json::to_string(&r.to_json())
+            .unwrap()
+            .contains("secret"));
+    }
+
+    #[test]
+    fn origin_section_appears_only_with_origin_data() {
+        let mut r = report();
+        assert!(!r.render_markdown().contains("By origin of returned notes"));
+        let od = OriginData {
+            per_question: vec![
+                (
+                    "a".into(),
+                    OriginQuestion {
+                        restating_share: 0.25,
+                        outranks_primary: Some(true),
+                        derived_only: false,
+                    },
+                ),
+                (
+                    "b".into(),
+                    OriginQuestion {
+                        restating_share: 0.0,
+                        outranks_primary: None,
+                        derived_only: true,
+                    },
+                ),
+            ],
+            mix: [("primary".to_string(), 6), ("derived".to_string(), 2)]
+                .into_iter()
+                .collect(),
+            returned: 8,
+        };
+        if let Status::Ran(run) = &mut r.configs[0].status {
+            run.origin = Some(od);
+        }
+        let md = r.render_markdown();
+        assert!(md.contains("## By origin of returned notes"), "{md}");
+        assert!(md.contains("| `lcg-entities-facts-belief` | 2 |"), "{md}");
+        assert!(md.contains("0.750"), "primary share 6/8: {md}");
+        let j = r.to_json();
+        let o = &j["configs"][0]["origins"];
+        assert_eq!(o["eligible_questions"], 2);
+        assert_eq!(o["outrank_rate"]["n"], 1);
+        assert_eq!(o["returned_by_origin"]["derived"], 2);
+        assert_eq!(o["derived_only_rate"]["mean"], 0.5);
+    }
+
+    #[test]
+    fn new_categories_are_listed_only_when_present() {
+        let mut r = report();
+        assert!(!r.render_markdown().contains("multi-hop"));
+        r.meta.category_counts.insert(Category::MultiHop, 30);
+        let md = r.render_markdown();
+        assert!(md.contains("### multi-hop (n = 30)"), "{md}");
+        assert!(r.to_json()["winners"].get("multi-hop").is_some());
     }
 }

@@ -1,6 +1,8 @@
 //! Argument parsing for `lcg-eval retrieval …`. Hand-rolled to match the extraction CLI's style.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use super::stats::{DEFAULT_RESAMPLES, DEFAULT_SEED};
 
 use crate::cli::DEFAULT_JUDGE_MODEL;
 
@@ -42,6 +44,12 @@ pub struct RetrievalArgs {
     pub no_grounded: bool,
     pub out: Option<PathBuf>,
     pub dry_run: bool,
+    /// Base seed for the bootstrap confidence intervals (default 788).
+    pub bootstrap_seed: u64,
+    /// Per-question resamples for every interval (default 10,000).
+    pub bootstrap_resamples: usize,
+    /// Private-notebook run: results only, outputs must live outside any git tree.
+    pub private: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -82,7 +90,13 @@ OPTIONS:
     --judge-cache <PATH>       JSONL verdict cache (default: retrieval_evidence_cache.jsonl).
     --no-grounded              Skip grounded-evidence judging (reported as skipped).
     --out <DIR>                Write report.json and report.md here.
-    --dry-run                  Print the resolved plan (configs, k, hashes) and exit.
+    --bootstrap-seed <N>       Base seed for the 95% bootstrap intervals (default 788).
+    --bootstrap-resamples <N>  Per-question resamples per interval (default 10000, 100..=1000000).
+    --private                  Private-notebook run: the report carries metrics, counts and hashes
+                               only (failed-query detail withheld). Requires --out, and
+                               --judge-cache unless --no-grounded, and refuses any output path
+                               inside a git working tree so nothing private can be committed.
+    --dry-run                  Print the resolved plan (configs, k, hashes, corpus shape) and exit.
     -h, --help                 Print this help.
 "
 }
@@ -107,7 +121,11 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
         no_grounded: false,
         out: None,
         dry_run: false,
+        bootstrap_seed: DEFAULT_SEED,
+        bootstrap_resamples: DEFAULT_RESAMPLES,
+        private: false,
     };
+    let mut judge_cache_explicit = false;
     let mut i = 0;
     while i < args.len() {
         let flag = args[i].as_str();
@@ -121,6 +139,22 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
             "-h" | "--help" => return Ok(RetrievalMode::Help),
             "--dry-run" => a.dry_run = true,
             "--no-grounded" => a.no_grounded = true,
+            "--private" => a.private = true,
+            "--bootstrap-seed" => {
+                let v = val("--bootstrap-seed")?;
+                a.bootstrap_seed = v.parse().map_err(|_| {
+                    format!("--bootstrap-seed must be an unsigned integer, got '{v}'")
+                })?;
+            }
+            "--bootstrap-resamples" => {
+                let v = val("--bootstrap-resamples")?;
+                a.bootstrap_resamples = v
+                    .parse()
+                    .map_err(|_| format!("--bootstrap-resamples must be an integer, got '{v}'"))?;
+                if !(100..=1_000_000).contains(&a.bootstrap_resamples) {
+                    return Err("--bootstrap-resamples must be between 100 and 1000000".into());
+                }
+            }
             "--corpus" => a.corpus = PathBuf::from(val("--corpus")?),
             "--k" => {
                 let v = val("--k")?;
@@ -178,7 +212,10 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
             "--qmd-bin" => a.qmd_bin = PathBuf::from(val("--qmd-bin")?),
             "--qmd-index" => a.qmd_index = Some(val("--qmd-index")?),
             "--judge-model" => a.judge_model = val("--judge-model")?,
-            "--judge-cache" => a.judge_cache = PathBuf::from(val("--judge-cache")?),
+            "--judge-cache" => {
+                a.judge_cache = PathBuf::from(val("--judge-cache")?);
+                judge_cache_explicit = true;
+            }
             "--out" => a.out = Some(PathBuf::from(val("--out")?)),
             other => return Err(format!("unknown argument '{other}'")),
         }
@@ -193,7 +230,57 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
     if a.extractor_http.is_some() && a.extractor_uds.is_some() {
         return Err("--extractor-http and --extractor-uds are mutually exclusive".into());
     }
+    if a.private {
+        if a.out.is_none() {
+            return Err("--private requires an explicit --out (outside any git tree)".into());
+        }
+        if !a.no_grounded && !judge_cache_explicit {
+            return Err("--private requires an explicit --judge-cache (it stores key facts and returned note text) unless --no-grounded".into());
+        }
+    }
     Ok(RetrievalMode::Run(Box::new(a)))
+}
+
+/// True when `path` or any of its ancestors contains `.git` (a working tree or worktree). Works
+/// for paths that do not exist yet by starting from the nearest existing ancestor.
+pub fn inside_git_tree(path: &Path) -> bool {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    let mut cur: Option<&Path> = Some(abs.as_path());
+    let mut resolved: Option<PathBuf> = None;
+    while let Some(p) = cur {
+        if let Ok(c) = p.canonicalize() {
+            resolved = Some(c);
+            break;
+        }
+        cur = p.parent();
+    }
+    let Some(start) = resolved else { return false };
+    start.ancestors().any(|d| d.join(".git").exists())
+}
+
+/// `--private` safety guard: outputs (`--out`, and `--judge-cache` unless `--no-grounded`) must not
+/// resolve inside a git working tree, so private note text cannot end up in a commit.
+pub fn private_guard(a: &RetrievalArgs) -> Result<(), String> {
+    let mut paths: Vec<(&str, &Path)> = Vec::new();
+    if let Some(o) = &a.out {
+        paths.push(("--out", o));
+    }
+    if !a.no_grounded {
+        paths.push(("--judge-cache", &a.judge_cache));
+    }
+    for (flag, p) in paths {
+        if inside_git_tree(p) {
+            return Err(format!(
+                "--private refuses {flag} {}: it is inside a git working tree, where private text could be committed. Use a path outside the repository (e.g. under ~/.cache or a temp directory)",
+                p.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -255,6 +342,8 @@ mod tests {
         let e = p(&["--embedding-profile", "bogus"]).unwrap_err();
         assert!(e.contains("bogus") && e.contains("bge-v1.5"), "{e}");
         assert!(p(&["--embedding-profile", ","]).is_err());
+        assert!(p(&["--bootstrap-resamples", "5"]).is_err());
+        assert!(p(&["--bootstrap-seed", "-1"]).is_err());
     }
 
     #[test]
@@ -267,5 +356,78 @@ mod tests {
             RetrievalMode::Run(a) => assert!(a.embedding_profiles.is_empty()),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn bootstrap_flags_parse_and_default() {
+        let RetrievalMode::Run(a) = p(&[]).unwrap() else {
+            panic!()
+        };
+        assert_eq!((a.bootstrap_seed, a.bootstrap_resamples), (788, 10_000));
+        let RetrievalMode::Run(a) =
+            p(&["--bootstrap-seed", "5", "--bootstrap-resamples", "500"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((a.bootstrap_seed, a.bootstrap_resamples), (5, 500));
+    }
+
+    #[test]
+    fn private_requires_explicit_outputs() {
+        let e = p(&["--private"]).unwrap_err();
+        assert!(e.contains("--out"), "{e}");
+        let e = p(&["--private", "--out", "/x"]).unwrap_err();
+        assert!(e.contains("--judge-cache"), "{e}");
+        assert!(p(&["--private", "--out", "/x", "--judge-cache", "/y"]).is_ok());
+        assert!(p(&["--private", "--out", "/x", "--no-grounded"]).is_ok());
+    }
+
+    #[test]
+    fn private_guard_refuses_outputs_inside_a_git_tree() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tree.path().join(".git")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let mk = |out: &Path, cache: &Path, no_grounded: bool| {
+            let RetrievalMode::Run(a) = p(&[
+                "--private",
+                "--out",
+                out.to_str().unwrap(),
+                "--judge-cache",
+                cache.to_str().unwrap(),
+                if no_grounded {
+                    "--no-grounded"
+                } else {
+                    "--dry-run"
+                },
+            ])
+            .unwrap() else {
+                panic!()
+            };
+            *a
+        };
+        // A not-yet-existing output below a git tree is still inside it.
+        let in_tree = tree.path().join("reports/run1");
+        let e = private_guard(&mk(&in_tree, &outside.path().join("c.jsonl"), false)).unwrap_err();
+        assert!(e.contains("--out") && e.contains("git working tree"), "{e}");
+        let e = private_guard(&mk(
+            &outside.path().join("out"),
+            &tree.path().join("cache.jsonl"),
+            false,
+        ))
+        .unwrap_err();
+        assert!(e.contains("--judge-cache"), "{e}");
+        // The judge cache is irrelevant (and not checked) under --no-grounded.
+        assert!(private_guard(&mk(
+            &outside.path().join("out"),
+            &tree.path().join("cache.jsonl"),
+            true
+        ))
+        .is_ok());
+        assert!(private_guard(&mk(
+            &outside.path().join("out"),
+            &outside.path().join("c.jsonl"),
+            false
+        ))
+        .is_ok());
     }
 }

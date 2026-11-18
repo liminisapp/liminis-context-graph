@@ -1154,16 +1154,18 @@ mod tests {
             other => Err(format!("unexpected {other}")),
         });
         ingest(&t, &origin_fixture()).await.unwrap();
-        let log = t.log.lock().unwrap();
-        let by_note = |n: &str| {
-            log.iter()
-                .find(|(m, p)| m == "knowledge_process_chunk" && p["doc_id"] == n)
-                .map(|(_, p)| p.clone())
-                .unwrap()
-        };
-        assert_eq!(by_note("src")["origin"], "primary");
-        assert_eq!(by_note("page")["origin"], "derived");
-        assert!(by_note("plain").get("origin").is_none());
+        {
+            let log = t.log.lock().unwrap();
+            let by_note = |n: &str| {
+                log.iter()
+                    .find(|(m, p)| m == "knowledge_process_chunk" && p["doc_id"] == n)
+                    .map(|(_, p)| p.clone())
+                    .unwrap()
+            };
+            assert_eq!(by_note("src")["origin"], "primary");
+            assert_eq!(by_note("page")["origin"], "derived");
+            assert!(by_note("plain").get("origin").is_none());
+        }
         // v1-style fixture: no origin key anywhere.
         let t2 = FakeTransport::new(|m, _| match m {
             "knowledge_process_chunk" => Ok(json!({"episode_uuid": "ep"})),

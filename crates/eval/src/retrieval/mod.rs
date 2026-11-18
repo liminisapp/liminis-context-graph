@@ -27,10 +27,11 @@ use futures::future::BoxFuture;
 
 use self::cli::{parse_args, usage, RetrievalArgs, RetrievalMode};
 use self::evidence_judge::{CachedEvidenceJudge, EvidenceJudge};
-use self::fixture::{Category, Fixture, Question};
+use self::fixture::{Category, CorpusStats, Fixture, Question};
 use self::metrics::{score_question, summarize_by_category, QuestionScore};
+use self::origin::{origin_data, OriginIndex};
 use self::report::{
-    percentile, ConfigOutcome, ConfigRun, Grounded, IngestCost, Report, RunMeta, Status,
+    percentile, Bootstrap, ConfigOutcome, ConfigRun, Grounded, IngestCost, Report, RunMeta, Status,
 };
 
 /// Minimum questions per category before a plan warns that per-category figures are thin (SC-003).
@@ -81,6 +82,8 @@ pub struct Plan {
     pub questions_version: String,
     pub questions_hash: String,
     pub notes: usize,
+    /// Shape of the corpus (size bands, origins, chunk spans), printed for v2-shaped fixtures.
+    pub stats: CorpusStats,
     pub category_counts: BTreeMap<Category, usize>,
     pub qmd_index: String,
     pub needs_lcg: bool,
@@ -181,6 +184,7 @@ pub fn resolve(args: &RetrievalArgs, fx: &Fixture) -> Plan {
         questions_version: fx.questions_version.clone(),
         questions_hash: fx.questions_hash.clone(),
         notes: fx.manifest.notes.len(),
+        stats: fx.stats(),
         category_counts,
         qmd_index: args
             .qmd_index
@@ -204,6 +208,44 @@ pub fn render_plan(p: &Plan) -> String {
     );
     for (c, n) in &p.category_counts {
         s += &format!("    {:<11} {n}\n", c.label());
+    }
+    // v1 declares no origins and uses only the original categories: its plan text is unchanged.
+    // A v2-shaped fixture also prints its shape so the counts can be checked without a run.
+    let extended = !p.stats.origins.is_empty() || p.category_counts.keys().any(|c| !c.is_legacy());
+    if extended {
+        let total: usize = p.category_counts.values().sum();
+        s += &format!("  question total: {total}\n");
+        let st = &p.stats;
+        s += &format!(
+            "  size mix:   {} words total; {}; {} over 5000 words\n",
+            st.words,
+            fixture::SIZE_BANDS
+                .iter()
+                .zip(st.size_bands.iter())
+                .map(|((l, _, _), n)| format!("{n} × {l}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            st.over_5000_words
+        );
+        s += &format!(
+            "  chunks:     {} at the manifest chunk size ({} notes span more than one chunk)\n",
+            st.chunks, st.multi_chunk_notes
+        );
+        if !st.origins.is_empty() {
+            s += &format!(
+                "  origins:    {} ({} derived notes cite a primary note)\n",
+                st.origins
+                    .iter()
+                    .map(|(o, n)| format!("{o} {n}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                st.derived_citing_primary
+            );
+        }
+        s += &format!(
+            "  explicit supersessions: {} (implicit contradictions are declared by temporal questions only)\n",
+            st.supersessions
+        );
     }
     s += &format!("  k:          {} (shared by every configuration)\n", p.k);
     s += &format!("  configs:    {}\n", p.expanded_configs().join(", "));
@@ -322,6 +364,7 @@ pub async fn score_config(
         evidence_gaps,
         query_errors: errors,
         grounded,
+        origin: None,
     }))
 }
 
@@ -343,6 +386,7 @@ pub async fn evaluate(
     judge: Option<&CachedEvidenceJudge<'_>>,
     judge_skip_reason: &str,
 ) -> Vec<ConfigOutcome> {
+    let origins = OriginIndex::from_manifest(&fx.manifest);
     let mut out = Vec::new();
     for slot in slots {
         match slot {
@@ -356,8 +400,20 @@ pub async fn evaluate(
                 status: Status::Skipped(reason),
             }),
             Slot::Run(r) => {
-                let status =
+                let mut status =
                     score_config(r.as_ref(), &fx.questions, k, judge, judge_skip_reason).await;
+                // Per-origin reading (FR-022) only for fixtures that declare origins.
+                if !origins.is_empty() {
+                    if let Status::Ran(run) = &mut status {
+                        run.origin = Some(origin_data(
+                            &origins,
+                            &fx.questions,
+                            run.scores
+                                .iter()
+                                .map(|s| (s.id.as_str(), s.ranked.as_slice())),
+                        ));
+                    }
+                }
                 out.push(ConfigOutcome {
                     id: r.id().to_string(),
                     description: r.description(),
@@ -417,6 +473,10 @@ pub async fn run_cli(args: &[String]) -> i32 {
 }
 
 async fn run(a: RetrievalArgs) -> Result<(), String> {
+    // Refuse before anything is loaded, started or spent.
+    if a.private {
+        cli::private_guard(&a)?;
+    }
     let fx = fixture::load(&a.corpus)?;
     let plan = resolve(&a, &fx);
     if a.dry_run {
@@ -441,6 +501,11 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
         extractor: "not run".into(),
         judge_model: a.judge_model.clone(),
         category_counts: plan.category_counts.clone(),
+        bootstrap: Bootstrap {
+            seed: a.bootstrap_seed,
+            resamples: a.bootstrap_resamples,
+        },
+        private: a.private,
     };
     let mut ingest_cost = IngestCost::default();
     let mut lcg_slots: BTreeMap<String, Slot> = BTreeMap::new();
@@ -646,11 +711,12 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
         configs: outcomes,
     };
 
-    println!("{}", report.render_markdown());
+    let markdown = report.render_markdown();
+    println!("{markdown}");
     if let Some(dir) = &a.out {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create --out {}: {e}", dir.display()))?;
-        std::fs::write(dir.join("report.md"), report.render_markdown())
+        std::fs::write(dir.join("report.md"), &markdown)
             .map_err(|e| format!("cannot write report.md: {e}"))?;
         std::fs::write(
             dir.join("report.json"),
