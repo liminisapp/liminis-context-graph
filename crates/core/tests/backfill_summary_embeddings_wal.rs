@@ -269,10 +269,11 @@ impl Embedder for SlowEmbedder {
     fn embed<'a>(
         &'a self,
         text: &'a str,
+        role: lcg_core::EmbedRole,
     ) -> futures::future::BoxFuture<'a, Result<Vec<f32>, lcg_core::error::Error>> {
         Box::pin(async move {
             tokio::time::sleep(self.delay).await;
-            self.inner.embed(text).await
+            self.inner.embed(text, role).await
         })
     }
 

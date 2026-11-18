@@ -29,12 +29,22 @@ enum OaiEmbedInput<'a> {
 struct OaiEmbedRequest<'a> {
     input: OaiEmbedInput<'a>,
     model: &'a str,
+    /// `"query"` / `"document"`. Omitted (not `null`) unless the embedder advertised role support
+    /// and the operator opted into profile `embedder` (#790) — real OpenAI rejects unknown
+    /// request parameters, and a `{input, model}`-only request must stay byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_type: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
 struct OaiEmbedResponse {
     data: Vec<OaiEmbedding>,
     model: String,
+    /// Role-support advertisement (#790): present only on embedders (the bundled sidecar) that
+    /// apply per-role instructions themselves when sent `input_type`. Unknown to other servers,
+    /// so absent there.
+    #[serde(default)]
+    instruction_roles: Option<EmbedderAdvert>,
 }
 
 #[derive(Deserialize)]
@@ -297,8 +307,268 @@ async fn attempt_uds_send(
 
 // ── Embedder trait ────────────────────────────────────────────────────────────
 
+/// Which side of retrieval a text is on (#790). Asymmetric embedding models (BGE, nomic, e5) were
+/// trained with role-specific instructions/prefixes, so every embed call states its role — there
+/// is deliberately no defaulted-role path (FR-001).
+///
+/// - `Query`: a user/agent search string.
+/// - `Document`: stored text (episode content, entity names/summaries, edge facts) and every
+///   symmetric text-vs-text comparison (entity resolution, ontology canonicalization).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EmbedRole {
+    Query,
+    Document,
+}
+
+impl EmbedRole {
+    /// Wire value of the optional `input_type` request field (Voyage/Cohere style) sent to an
+    /// embedder that advertised role support.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EmbedRole::Query => "query",
+            EmbedRole::Document => "document",
+        }
+    }
+}
+
+/// A named bundle of a query prefix and a document prefix for a model family (#790).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum InstructionProfile {
+    /// No prefixes. Behaviour is byte-identical to before roles existed.
+    #[default]
+    None,
+    /// BGE-base-en-v1.5: query instruction only.
+    BgeV15,
+    /// nomic-embed-text v1.5: `search_query: ` / `search_document: `.
+    NomicV15,
+    /// e5 family: `query: ` / `passage: `.
+    E5,
+    /// Opt in to the embedder's own role instructions: LCG sends plain text plus `input_type`
+    /// and the embedder (which must have advertised role support) applies the instruction.
+    Embedder,
+}
+
+/// Every accepted `LCG_EMBEDDING_PROFILE` value, for error messages and docs.
+pub const INSTRUCTION_PROFILE_NAMES: &[&str] =
+    &["none", "bge-v1.5", "nomic-v1.5", "e5", "embedder"];
+
+/// BGE-base-en-v1.5's documented query instruction (trailing space is part of the prefix).
+pub const BGE_V15_QUERY_PREFIX: &str = "Represent this sentence for searching relevant passages: ";
+
+impl InstructionProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InstructionProfile::None => "none",
+            InstructionProfile::BgeV15 => "bge-v1.5",
+            InstructionProfile::NomicV15 => "nomic-v1.5",
+            InstructionProfile::E5 => "e5",
+            InstructionProfile::Embedder => "embedder",
+        }
+    }
+
+    /// `(query_prefix, document_prefix)` LCG applies itself for this profile. `Embedder` has no
+    /// LCG-side prefixes — the embedder supplies them (see [`InstructionConfig::resolve`]).
+    pub fn prefixes(self) -> (&'static str, &'static str) {
+        match self {
+            InstructionProfile::None | InstructionProfile::Embedder => ("", ""),
+            InstructionProfile::BgeV15 => (BGE_V15_QUERY_PREFIX, ""),
+            InstructionProfile::NomicV15 => ("search_query: ", "search_document: "),
+            InstructionProfile::E5 => ("query: ", "passage: "),
+        }
+    }
+}
+
+impl std::str::FromStr for InstructionProfile {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Error> {
+        match s.trim() {
+            "none" => Ok(InstructionProfile::None),
+            "bge-v1.5" => Ok(InstructionProfile::BgeV15),
+            "nomic-v1.5" => Ok(InstructionProfile::NomicV15),
+            "e5" => Ok(InstructionProfile::E5),
+            "embedder" => Ok(InstructionProfile::Embedder),
+            other => Err(Error::Config(format!(
+                "unknown embedding instruction profile {other:?}; valid profiles: {}",
+                INSTRUCTION_PROFILE_NAMES.join(", ")
+            ))),
+        }
+    }
+}
+
+/// Who applies the instruction for a given process (#790). Chosen once at startup, which is what
+/// makes a double prefix impossible by construction: `Lcg` installs the [`InstructedEmbedder`]
+/// decorator and never sends `input_type`; `Embedder` sends `input_type` and installs no
+/// decorator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum InstructionSource {
+    #[default]
+    None,
+    Lcg,
+    Embedder,
+}
+
+impl InstructionSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InstructionSource::None => "none",
+            InstructionSource::Lcg => "lcg",
+            InstructionSource::Embedder => "embedder",
+        }
+    }
+}
+
+/// What a role-supporting embedder (the bundled sidecar) advertises in its `/v1/embeddings`
+/// response: the instruction string it applies per role when sent `input_type` (#790). The
+/// advertisement is capability-only — it never changes the vectors by itself.
+#[derive(Clone, Debug, PartialEq, Eq, Default, Deserialize)]
+pub struct EmbedderAdvert {
+    #[serde(default)]
+    pub query: String,
+    #[serde(default)]
+    pub document: String,
+}
+
+/// The instructions in effect for this process: the profile, who applies them, and the prefixes
+/// per role. `document_prefix` is part of embedding identity (FR-008/FR-024); `query_prefix` is
+/// not (FR-010).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectiveInstructions {
+    pub profile: InstructionProfile,
+    pub source: InstructionSource,
+    pub query_prefix: String,
+    pub document_prefix: String,
+}
+
+impl EffectiveInstructions {
+    /// Profile `none`: nothing applied by anyone.
+    pub fn none() -> Self {
+        Self {
+            profile: InstructionProfile::None,
+            source: InstructionSource::None,
+            query_prefix: String::new(),
+            document_prefix: String::new(),
+        }
+    }
+
+    pub fn prefix_for(&self, role: EmbedRole) -> &str {
+        match role {
+            EmbedRole::Query => &self.query_prefix,
+            EmbedRole::Document => &self.document_prefix,
+        }
+    }
+}
+
+/// Operator-supplied instruction settings, before resolution against the embedder's
+/// advertisement (#790).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InstructionConfig {
+    pub profile: InstructionProfile,
+    /// `Some("")` is an explicit "no query prefix", distinct from `None` (not set).
+    pub query_override: Option<String>,
+    pub document_override: Option<String>,
+}
+
+impl InstructionConfig {
+    /// Reads `LCG_EMBEDDING_PROFILE`, `LCG_EMBEDDING_QUERY_PREFIX` and
+    /// `LCG_EMBEDDING_DOCUMENT_PREFIX` (each with a `GRAPHITI_EMBEDDING_*` alias). An unknown
+    /// profile fails fast with the list of valid names (FR-006); an empty prefix value is an
+    /// explicit empty override.
+    pub fn from_env() -> Result<Self, Error> {
+        let profile = match lcg_env_var("LCG_EMBEDDING_PROFILE", "GRAPHITI_EMBEDDING_PROFILE") {
+            Ok(v) if !v.trim().is_empty() => v.parse()?,
+            _ => InstructionProfile::None,
+        };
+        let query_override = lcg_env_var(
+            "LCG_EMBEDDING_QUERY_PREFIX",
+            "GRAPHITI_EMBEDDING_QUERY_PREFIX",
+        )
+        .ok();
+        let document_override = lcg_env_var(
+            "LCG_EMBEDDING_DOCUMENT_PREFIX",
+            "GRAPHITI_EMBEDDING_DOCUMENT_PREFIX",
+        )
+        .ok();
+        Ok(Self {
+            profile,
+            query_override,
+            document_override,
+        })
+    }
+
+    /// Resolves the effective instructions against the embedder's advertisement (`None` = it
+    /// advertised nothing).
+    ///
+    /// - Named profile and/or overrides: `source = Lcg`, override wins per side (an explicit
+    ///   empty string disables that side). With nothing set, `source = None`.
+    /// - `embedder` profile: requires an advertisement; the advertised strings are reported as
+    ///   the effective prefixes (so the document one lands in the identity record, FR-024) but
+    ///   LCG applies nothing itself. Without an advertisement this falls back to `none` (the
+    ///   caller logs a warning). Combining `embedder` with an explicit prefix override is
+    ///   ambiguous and rejected.
+    pub fn resolve(&self, advert: Option<&EmbedderAdvert>) -> Result<EffectiveInstructions, Error> {
+        if self.profile == InstructionProfile::Embedder {
+            if self.query_override.is_some() || self.document_override.is_some() {
+                return Err(Error::Config(
+                    "LCG_EMBEDDING_PROFILE=embedder cannot be combined with \
+                     LCG_EMBEDDING_QUERY_PREFIX / LCG_EMBEDDING_DOCUMENT_PREFIX: with `embedder` \
+                     the embedder applies its own instructions, so an explicit prefix would be \
+                     ambiguous. Use a named profile (e.g. bge-v1.5) instead, or drop the overrides."
+                        .to_string(),
+                ));
+            }
+            return Ok(match advert {
+                Some(a) => EffectiveInstructions {
+                    profile: InstructionProfile::Embedder,
+                    source: InstructionSource::Embedder,
+                    query_prefix: a.query.clone(),
+                    document_prefix: a.document.clone(),
+                },
+                None => EffectiveInstructions::none(),
+            });
+        }
+        let (profile_query, profile_document) = self.profile.prefixes();
+        let query_prefix = self
+            .query_override
+            .clone()
+            .unwrap_or_else(|| profile_query.to_string());
+        let document_prefix = self
+            .document_override
+            .clone()
+            .unwrap_or_else(|| profile_document.to_string());
+        let source = if self.profile == InstructionProfile::None
+            && self.query_override.is_none()
+            && self.document_override.is_none()
+        {
+            InstructionSource::None
+        } else {
+            InstructionSource::Lcg
+        };
+        Ok(EffectiveInstructions {
+            profile: self.profile,
+            source,
+            query_prefix,
+            document_prefix,
+        })
+    }
+}
+
+/// What the startup probe learns about the embedder (#790).
+#[derive(Clone, Debug)]
+pub struct EmbedderInfo {
+    pub dim: usize,
+    pub model: String,
+    /// `Some` iff the embedder advertised role support (`instruction_roles` in the response).
+    pub advert: Option<EmbedderAdvert>,
+}
+
 pub trait Embedder: Send + Sync {
-    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>>;
+    /// Embeds one text. `role` states which side of retrieval the text is on (#790).
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+        role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>>;
 
     /// Embeds multiple texts in one logical call, returning one vector per input text in the
     /// same order as `texts` (FR-001). The default implementation is expressed in terms of
@@ -308,22 +578,102 @@ pub trait Embedder: Send + Sync {
     /// this method degrades to no wire-level batching (still N round-trips) rather than silently
     /// serializing what looks like a batching improvement. Returns an error if any input fails
     /// to embed, rather than a partial result (FR-005). Empty input returns an empty vector
-    /// without calling `embed` at all (FR-006).
+    /// without calling `embed` at all (FR-006). Every element carries the same `role`.
     fn embed_batch<'a>(
         &'a self,
         texts: &'a [&'a str],
+        role: EmbedRole,
     ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
         Box::pin(async move {
             if texts.is_empty() {
                 return Ok(Vec::new());
             }
-            futures::future::try_join_all(texts.iter().map(|t| self.embed(t))).await
+            futures::future::try_join_all(texts.iter().map(|t| self.embed(t, role))).await
         })
     }
 
     /// Embedding dimension. Used when pre-populating DB rows in tests/benches.
     fn dim(&self) -> usize {
         768
+    }
+
+    /// The instructions this embedder stack applies (or that its backend applies on its
+    /// behalf), reported so the workspace identity can record the effective document prefix and
+    /// the status surface can show what is in effect (#790). The default is profile `none`;
+    /// the [`InstructedEmbedder`] decorator and [`OaiEmbedder`] (in `embedder` mode) override
+    /// it, and wrappers delegate to their inner embedder.
+    fn instructions(&self) -> EffectiveInstructions {
+        EffectiveInstructions::none()
+    }
+}
+
+// ── InstructedEmbedder ────────────────────────────────────────────────────────
+
+/// Decorator that prepends the role's configured prefix to every non-blank text before handing it
+/// to the inner embedder (#790). Installed only when LCG itself is the single applier
+/// (`InstructionSource::Lcg`); in that mode the inner embedder is never sent `input_type`, so a
+/// text cannot receive two instructions.
+///
+/// Whitespace-only text passes through unchanged: call sites skip or zero-vector empty text
+/// ahead of the embedder, and a prefix must never turn a skipped empty text into a real embed
+/// request (FR-014).
+pub struct InstructedEmbedder {
+    inner: std::sync::Arc<dyn Embedder>,
+    instructions: EffectiveInstructions,
+}
+
+impl InstructedEmbedder {
+    pub fn new(inner: std::sync::Arc<dyn Embedder>, instructions: EffectiveInstructions) -> Self {
+        Self {
+            inner,
+            instructions,
+        }
+    }
+
+    fn apply<'t>(&self, text: &'t str, role: EmbedRole) -> std::borrow::Cow<'t, str> {
+        let prefix = self.instructions.prefix_for(role);
+        if prefix.is_empty() || text.trim().is_empty() {
+            std::borrow::Cow::Borrowed(text)
+        } else {
+            std::borrow::Cow::Owned(format!("{prefix}{text}"))
+        }
+    }
+}
+
+impl Embedder for InstructedEmbedder {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+        role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        Box::pin(async move {
+            let applied = self.apply(text, role);
+            self.inner.embed(&applied, role).await
+        })
+    }
+
+    fn embed_batch<'a>(
+        &'a self,
+        texts: &'a [&'a str],
+        role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
+        Box::pin(async move {
+            if texts.is_empty() {
+                return Ok(Vec::new());
+            }
+            let applied: Vec<std::borrow::Cow<'_, str>> =
+                texts.iter().map(|t| self.apply(t, role)).collect();
+            let refs: Vec<&str> = applied.iter().map(|c| c.as_ref()).collect();
+            self.inner.embed_batch(&refs, role).await
+        })
+    }
+
+    fn dim(&self) -> usize {
+        self.inner.dim()
+    }
+
+    fn instructions(&self) -> EffectiveInstructions {
+        self.instructions.clone()
     }
 }
 
@@ -337,6 +687,9 @@ pub struct OaiEmbedder {
     transport: EmbedTransport,
     model: String,
     pub dim: usize,
+    /// `Some` only in `embedder` instruction mode (#790): the advertised instructions the
+    /// embedder applies itself. When set, every request carries `input_type`.
+    embedder_instructions: Option<EffectiveInstructions>,
 }
 
 impl OaiEmbedder {
@@ -372,6 +725,7 @@ impl OaiEmbedder {
             },
             model: model.into(),
             dim,
+            embedder_instructions: None,
         })
     }
 
@@ -387,6 +741,25 @@ impl OaiEmbedder {
             EmbedTransport::Uds { .. } => {}
         }
         self
+    }
+
+    /// Opts into the embedder's own role instructions (#790, profile `embedder`): every request
+    /// then carries `input_type`, and [`Embedder::instructions`] reports the advertised strings
+    /// (source `embedder`). Must only be called after a probe saw an advertisement — never send
+    /// `input_type` to a server that did not advertise support.
+    pub fn with_embedder_instructions(mut self, advert: &EmbedderAdvert) -> Self {
+        self.embedder_instructions = Some(EffectiveInstructions {
+            profile: InstructionProfile::Embedder,
+            source: InstructionSource::Embedder,
+            query_prefix: advert.query.clone(),
+            document_prefix: advert.document.clone(),
+        });
+        self
+    }
+
+    /// `Some(role.as_str())` only in `embedder` mode.
+    fn input_type_for(&self, role: EmbedRole) -> Option<&'static str> {
+        self.embedder_instructions.as_ref().map(|_| role.as_str())
     }
 
     /// Constructs a UDS-transport embedder pointing at the given socket path.
@@ -417,6 +790,7 @@ impl OaiEmbedder {
             },
             model: model.into(),
             dim,
+            embedder_instructions: None,
         })
     }
 
@@ -452,18 +826,29 @@ impl OaiEmbedder {
         }
     }
 
-    /// Sends a probe request and returns `(dim, model_name)` from the response.
+    /// Sends a probe request and returns the embedder's dimension, reported model name and (if it
+    /// advertised role support) its instruction advertisement.
     ///
     /// Used at startup to auto-detect embedding dimension and confirm the embedder is reachable.
-    pub async fn probe(&self) -> Result<(usize, String), Error> {
-        let resp = self.do_embed_raw(OaiEmbedInput::Single("probe")).await?;
+    /// The probe never sends `input_type`, so it is always a plain `{input, model}` request.
+    pub async fn probe(&self) -> Result<EmbedderInfo, Error> {
+        let resp = self
+            .do_embed_raw(OaiEmbedInput::Single("probe"), None)
+            .await?;
         let model = resp.model.clone();
+        let advert = resp.instruction_roles.clone();
         let vec = extract_embedding(resp)?;
-        Ok((vec.len(), model))
+        Ok(EmbedderInfo {
+            dim: vec.len(),
+            model,
+            advert,
+        })
     }
 
-    async fn do_embed(&self, text: &str) -> Result<Vec<f32>, Error> {
-        let resp = self.do_embed_raw(OaiEmbedInput::Single(text)).await?;
+    async fn do_embed(&self, text: &str, role: EmbedRole) -> Result<Vec<f32>, Error> {
+        let resp = self
+            .do_embed_raw(OaiEmbedInput::Single(text), self.input_type_for(role))
+            .await?;
         let vec = extract_embedding(resp)?;
         if vec.len() != self.dim {
             return Err(Error::Ipc(format!(
@@ -481,14 +866,21 @@ impl OaiEmbedder {
     /// response is independently ordered via `extract_embeddings_ordered`, so running them
     /// concurrently and reassembling by chunk position afterwards is safe. Any chunk's failure
     /// fails the whole call (FR-005). Empty input issues no request (FR-006).
-    async fn do_embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, Error> {
+    async fn do_embed_batch(
+        &self,
+        texts: &[&str],
+        role: EmbedRole,
+    ) -> Result<Vec<Vec<f32>>, Error> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
         let chunk_size = resolve_embed_batch_size()?;
+        let input_type = self.input_type_for(role);
         let chunk_results =
             futures::future::try_join_all(texts.chunks(chunk_size).map(|chunk| async move {
-                let resp = self.do_embed_raw(OaiEmbedInput::Batch(chunk)).await?;
+                let resp = self
+                    .do_embed_raw(OaiEmbedInput::Batch(chunk), input_type)
+                    .await?;
                 let vecs = extract_embeddings_ordered(resp, chunk.len())?;
                 for v in &vecs {
                     if v.len() != self.dim {
@@ -505,14 +897,18 @@ impl OaiEmbedder {
         Ok(chunk_results.into_iter().flatten().collect())
     }
 
-    async fn do_embed_raw(&self, input: OaiEmbedInput<'_>) -> Result<OaiEmbedResponse, Error> {
+    async fn do_embed_raw(
+        &self,
+        input: OaiEmbedInput<'_>,
+        input_type: Option<&str>,
+    ) -> Result<OaiEmbedResponse, Error> {
         match &self.transport {
             EmbedTransport::Http {
                 client,
                 url,
                 api_key,
             } => {
-                self.do_embed_http_raw(client, url, api_key.as_deref(), input)
+                self.do_embed_http_raw(client, url, api_key.as_deref(), input, input_type)
                     .await
             }
             #[cfg(unix)]
@@ -522,8 +918,15 @@ impl OaiEmbedder {
                 request_timeout,
                 connect_timeout,
             } => {
-                self.do_embed_uds_raw(path, pool, *request_timeout, *connect_timeout, input)
-                    .await
+                self.do_embed_uds_raw(
+                    path,
+                    pool,
+                    *request_timeout,
+                    *connect_timeout,
+                    input,
+                    input_type,
+                )
+                .await
             }
         }
     }
@@ -534,10 +937,12 @@ impl OaiEmbedder {
         url: &str,
         api_key: Option<&str>,
         input: OaiEmbedInput<'_>,
+        input_type: Option<&str>,
     ) -> Result<OaiEmbedResponse, Error> {
         let body = OaiEmbedRequest {
             input,
             model: &self.model,
+            input_type,
         };
         let mut req = client.post(url).json(&body);
         if let Some(key) = api_key {
@@ -565,6 +970,7 @@ impl OaiEmbedder {
         request_timeout: std::time::Duration,
         connect_timeout: std::time::Duration,
         input: OaiEmbedInput<'_>,
+        input_type: Option<&str>,
     ) -> Result<OaiEmbedResponse, Error> {
         let idx = pool
             .cursor
@@ -575,6 +981,7 @@ impl OaiEmbedder {
             serde_json::to_vec(&OaiEmbedRequest {
                 input,
                 model: &self.model,
+                input_type,
             })
             .map_err(|e| Error::Ipc(format!("serialize embed request: {e}")))?,
         );
@@ -855,19 +1262,30 @@ fn resolve_embed_batch_size() -> Result<usize, Error> {
 }
 
 impl Embedder for OaiEmbedder {
-    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
-        Box::pin(self.do_embed(text))
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+        role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+        Box::pin(self.do_embed(text, role))
     }
 
     fn embed_batch<'a>(
         &'a self,
         texts: &'a [&'a str],
+        role: EmbedRole,
     ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
-        Box::pin(self.do_embed_batch(texts))
+        Box::pin(self.do_embed_batch(texts, role))
     }
 
     fn dim(&self) -> usize {
         self.dim
+    }
+
+    fn instructions(&self) -> EffectiveInstructions {
+        self.embedder_instructions
+            .clone()
+            .unwrap_or_else(EffectiveInstructions::none)
     }
 }
 
@@ -885,7 +1303,11 @@ impl MockEmbedder {
 }
 
 impl Embedder for MockEmbedder {
-    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+    fn embed<'a>(
+        &'a self,
+        _text: &'a str,
+        _role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         let v = vec![0.0f32; self.dim];
         Box::pin(async move { Ok(v) })
     }
@@ -918,7 +1340,11 @@ impl HashEmbedder {
 }
 
 impl Embedder for HashEmbedder {
-    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+        _role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         use std::hash::{Hash, Hasher};
         let dim = self.dim;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -956,7 +1382,11 @@ impl NameMapEmbedder {
 }
 
 impl Embedder for NameMapEmbedder {
-    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+        _role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         let v = self
             .map
             .get(text)
@@ -1007,9 +1437,13 @@ impl CountingEmbedder {
 }
 
 impl Embedder for CountingEmbedder {
-    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+        role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.embed(text)
+        self.inner.embed(text, role)
     }
 
     // Overridden explicitly (rather than relying on the trait's default `embed_batch`, which
@@ -1018,14 +1452,19 @@ impl Embedder for CountingEmbedder {
     fn embed_batch<'a>(
         &'a self,
         texts: &'a [&'a str],
+        role: EmbedRole,
     ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
         self.batch_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.inner.embed_batch(texts)
+        self.inner.embed_batch(texts, role)
     }
 
     fn dim(&self) -> usize {
         self.inner.dim()
+    }
+
+    fn instructions(&self) -> EffectiveInstructions {
+        self.inner.instructions()
     }
 }
 
@@ -1053,7 +1492,11 @@ pub const EMBEDDER_UNREACHABLE_DEGRADED_REASON: &str = "embedder_unreachable_at_
 pub struct UnconfiguredEmbedder;
 
 impl Embedder for UnconfiguredEmbedder {
-    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+    fn embed<'a>(
+        &'a self,
+        _text: &'a str,
+        _role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         Box::pin(async {
             Err(Error::Ipc(
                 "embedder unreachable at startup; the process is running in degraded mode \
@@ -1276,7 +1719,9 @@ mod tests {
 
     #[tokio::test]
     async fn unconfigured_embedder_embed_always_errors() {
-        let e = UnconfiguredEmbedder.embed("hello").await;
+        let e = UnconfiguredEmbedder
+            .embed("hello", EmbedRole::Document)
+            .await;
         assert!(e.is_err());
     }
 
@@ -1291,11 +1736,14 @@ mod tests {
     async fn default_embed_batch_matches_sequential_embed_calls_in_order() {
         let embedder = HashEmbedder::new(8);
         let texts = ["alpha", "beta", "gamma"];
-        let batch_result = embedder.embed_batch(&texts).await.unwrap();
+        let batch_result = embedder
+            .embed_batch(&texts, EmbedRole::Document)
+            .await
+            .unwrap();
 
         let mut sequential = Vec::new();
         for t in &texts {
-            sequential.push(embedder.embed(t).await.unwrap());
+            sequential.push(embedder.embed(t, EmbedRole::Document).await.unwrap());
         }
 
         assert_eq!(batch_result, sequential);
@@ -1307,7 +1755,10 @@ mod tests {
         let inner = std::sync::Arc::new(HashEmbedder::new(8));
         let counting = CountingEmbedder::new(inner);
         let texts: [&str; 0] = [];
-        let result = counting.embed_batch(&texts).await.unwrap();
+        let result = counting
+            .embed_batch(&texts, EmbedRole::Document)
+            .await
+            .unwrap();
         assert!(result.is_empty());
         assert_eq!(counting.call_count(), 0);
     }

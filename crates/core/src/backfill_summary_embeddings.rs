@@ -51,7 +51,9 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{app_state::AppState, db::value_as_string, error::Error, wal_exec};
+use crate::{
+    app_state::AppState, db::value_as_string, embedder::EmbedRole, error::Error, wal_exec,
+};
 
 const PAGE_SIZE: usize = 500;
 const WRITE_BATCH_SIZE: usize = 100;
@@ -209,7 +211,10 @@ pub async fn backfill_summary_embeddings(
         // candidate — shortens the exclusive write-lock window held for this whole run
         // proportionally to WRITE_BATCH_SIZE.
         let summary_refs: Vec<&str> = batch.iter().map(|c| c.summary.as_str()).collect();
-        let embeddings = state.embedder.embed_batch(&summary_refs).await?;
+        let embeddings = state
+            .embedder
+            .embed_batch(&summary_refs, EmbedRole::Document)
+            .await?;
         let batch_data: Vec<(String, String, Vec<f32>)> = batch
             .iter()
             .zip(embeddings)

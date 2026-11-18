@@ -447,8 +447,7 @@ pub fn run_full_recovery_sequence(
             // issue #440 FR-006/FR-008: only claim the running embedder's identity for a group
             // whose replay had no failed recompute attempt — see
             // `ReplayStats::embeddings_recompute_had_no_failures`'s doc comment.
-            let group_embedding_identity =
-                fully_recomputed.then_some((embedding_identity.0.as_str(), embedding_identity.1));
+            let group_embedding_identity = fully_recomputed.then_some(&embedding_identity);
             if let Err(e) =
                 conn.set_wal_position(gid, *seq, generation.as_deref(), group_embedding_identity)
             {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::{
     db::Db,
-    embedder::Embedder,
+    embedder::{EmbedRole, Embedder},
     error::Error,
     types::{
         EdgeSearchEvidence, EntityRow, EntitySearchEvidence, PassageResult, RelatesToEdge,
@@ -137,7 +137,7 @@ pub async fn search_passages(
     min_score: f64,
     origins: Option<Vec<crate::origin::Origin>>,
 ) -> Result<Vec<PassageResult>, Error> {
-    let embedding = embedder.embed(query).await?;
+    let embedding = embedder.embed(query, EmbedRole::Query).await?;
     let overdraw = num_results * 3;
 
     let results = tokio::task::spawn_blocking(move || -> Result<Vec<PassageResult>, Error> {
@@ -215,7 +215,7 @@ pub async fn hybrid_entity_search_scored(
     min_similarity: Option<f64>,
 ) -> Result<Vec<ScoredEntity>, Error> {
     // Async: embed the query
-    let embedding = embedder.embed(query).await?;
+    let embedding = embedder.embed(query, EmbedRole::Query).await?;
 
     // Sync: DB operations in spawn_blocking
     let query_owned = query.to_string();
@@ -311,7 +311,7 @@ pub async fn hybrid_edge_search_scored(
     limit: usize,
     min_similarity: Option<f64>,
 ) -> Result<Vec<ScoredEdge>, Error> {
-    let embedding = embedder.embed(query).await?;
+    let embedding = embedder.embed(query, EmbedRole::Query).await?;
 
     let query_owned = query.to_string();
     let results = tokio::task::spawn_blocking(move || -> Result<Vec<ScoredEdge>, Error> {

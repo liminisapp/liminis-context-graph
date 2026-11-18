@@ -78,8 +78,9 @@ async fn connect_live_embedder() -> Option<OaiEmbedder> {
         return None;
     };
     match embedder.probe().await {
-        Ok((dim, _model)) if dim == embedding_dim() => Some(embedder),
-        Ok((dim, model)) => {
+        Ok(info) if info.dim == embedding_dim() => Some(embedder),
+        Ok(info) => {
+            let (dim, model) = (info.dim, info.model);
             eprintln!(
                 "[SKIP] reachable embedder reports dim={dim} model={model:?}, expected \
                  dim={} for this fixture — not a fair comparison, skipping",
@@ -412,7 +413,7 @@ async fn validate_recompute_matches_stored_vectors_for_real_corpus_wal() {
                     v.clone()
                 } else {
                     let v = embedder
-                        .embed(text)
+                        .embed(text, lcg_core::EmbedRole::Document)
                         .await
                         .unwrap_or_else(|e| panic!("embed({text:?}) failed: {e}"));
                     memo.insert(text.to_string(), v.clone());

@@ -63,8 +63,12 @@ pub use dedup_adapter::{
     build_dedup_adapter, dedup_llm_requested, dedup_mode_description, deprecated_adapter_url_set,
     effective_dedup_mode, DedupAdapter, DedupMode, ExtractorDedupAdapter, PassthroughDedupAdapter,
 };
-pub use embedder::{Embedder, MockEmbedder, NameMapEmbedder, OaiEmbedder};
-pub use embedding_cache::{EmbedderContext, EmbeddingCache};
+pub use embedder::{
+    EffectiveInstructions, EmbedRole, Embedder, EmbedderAdvert, EmbedderInfo, InstructedEmbedder,
+    InstructionConfig, InstructionProfile, InstructionSource, MockEmbedder, NameMapEmbedder,
+    OaiEmbedder,
+};
+pub use embedding_cache::{EmbedderContext, EmbeddingCache, EmbeddingIdentity};
 pub use error::Error;
 pub use extraction_failures::{
     ExtractionFailureRecord, ExtractionFailureSink, ExtractionFailureWriter,

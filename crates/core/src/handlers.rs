@@ -12,7 +12,7 @@ use crate::{
     assert, backfill, backfill_summary_embeddings, canonicalize, corrections,
     cross_group::{self, CreateCrossGroupEdgeParams, EndpointSpec},
     db::{self, Db},
-    embedder::EMBEDDER_UNREACHABLE_DEGRADED_REASON,
+    embedder::{EmbedRole, EMBEDDER_UNREACHABLE_DEGRADED_REASON},
     episode,
     error::{is_missing_index_error, is_missing_table_error, Error, MISSING_INDEX_USER_MSG},
     group_purge,
@@ -385,6 +385,8 @@ type WalGroupPosition = (
     Option<String>,
     Option<String>,
     Option<i64>,
+    // Recorded document prefix (issue #790); `None` = pre-#790 row, read as the empty prefix.
+    Option<String>,
 );
 
 struct StatusFields {
@@ -406,6 +408,8 @@ struct StatusFields {
     /// predates this feature, or was recorded with recompute disabled.
     wal_embedding_model: Option<String>,
     wal_embedding_dim: Option<i64>,
+    /// Recorded document prefix for the default group (issue #790, FR-008).
+    wal_embedding_doc_prefix: Option<String>,
     /// Per-group `(group_id, applied_seq, max_seq, generation, embedding_model, embedding_dim)`
     /// for every group that has a WAL directory (issue #378 FR-007; generation added by issue
     /// #387; embedding_model/embedding_dim added by issue #440 FR-007) — additive to the flat
@@ -436,6 +440,7 @@ enum StatusOutcome {
         wal_generation: Option<String>,
         wal_embedding_model: Option<String>,
         wal_embedding_dim: Option<i64>,
+        wal_embedding_doc_prefix: Option<String>,
         wal_group_positions: Vec<WalGroupPosition>,
         name_index_trusted: bool,
         name_index_fallback_scans: u64,
@@ -533,6 +538,10 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
     let db_path = state.db_path.clone();
     let embedding_model = state.embedding_model.clone();
     let embedding_dim = state.embedder.dim();
+    // Instructions in effect (issue #790, FR-017) and the running document prefix, the one half
+    // of the instructions that is part of the embedding identity.
+    let instructions = state.embedder.instructions();
+    let running_doc_prefix = instructions.document_prefix.clone();
     let wal_root = state.wal_root.clone();
     // The flat wal.* fields stay pinned to the default group's own WAL directory (issue #378
     // FR-007), never the root itself — an existing consumer (e.g. orac) that only reads these
@@ -593,6 +602,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             // wal_applied_seq/generation, not a separate query.
             let wal_embedding_model = default_group_position.embedding_model;
             let wal_embedding_dim = default_group_position.embedding_dim;
+            let wal_embedding_doc_prefix = default_group_position.embedding_doc_prefix;
             let wal_max_seq = default_group_dir
                 .as_deref()
                 .and_then(|d| crate::wal::wal_max_seq(d).unwrap_or(None));
@@ -622,6 +632,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                         generation,
                         position.embedding_model,
                         position.embedding_dim,
+                        position.embedding_doc_prefix,
                     )
                 })
                 .collect();
@@ -671,6 +682,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_generation,
                     wal_embedding_model,
                     wal_embedding_dim,
+                    wal_embedding_doc_prefix,
                     wal_group_positions,
                     last_index_time,
                     index_created_at,
@@ -691,6 +703,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     wal_generation,
                     wal_embedding_model,
                     wal_embedding_dim,
+                    wal_embedding_doc_prefix,
                     wal_group_positions,
                     name_index_trusted,
                     name_index_fallback_scans,
@@ -709,6 +722,10 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "database_path": db_path,
                 "embedding_model": embedding_model,
                 "embedding_dim": embedding_dim,
+                // issue #790, FR-017: the instruction profile in effect, who applies it
+                // (`none` | `lcg` | `embedder`) and the effective per-role prefixes. Only the
+                // document prefix is part of embedding identity (`wal.embedding_doc_prefix`).
+                "embedding_instructions": embedding_instructions_json(&instructions),
                 "entity_count": fields.entity_count,
                 "relationship_count": fields.edge_count,
                 // Issue #705, FR-007: edges with no producing episode and no warrant marker —
@@ -750,17 +767,19 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                     // this session (FR-007's "at query time (including startup)").
                     "embedding_model": fields.wal_embedding_model,
                     "embedding_dim": fields.wal_embedding_dim,
+                    "embedding_doc_prefix": fields.wal_embedding_doc_prefix,
                     "embedding_model_status": embedding_model_status(
                         fields.wal_applied_seq,
                         fields.wal_embedding_model.as_deref().zip(fields.wal_embedding_dim),
-                        (&embedding_model, embedding_dim as i64),
+                        fields.wal_embedding_doc_prefix.as_deref(),
+                        (&embedding_model, embedding_dim as i64, &running_doc_prefix),
                     ),
                 },
                 // Additive per-group breakdown (issue #378 FR-007): a map keyed by group_id,
                 // each shaped like the flat "wal" object above. The flat fields above remain
                 // pinned to the default group specifically, so an existing consumer that only
                 // reads them (e.g. orac) requires no change.
-                "wal_groups": wal_group_positions_json(&fields.wal_group_positions, (&embedding_model, embedding_dim as i64)),
+                "wal_groups": wal_group_positions_json(&fields.wal_group_positions, (&embedding_model, embedding_dim as i64, &running_doc_prefix)),
                 "indices_built": state.indices_built.load(Ordering::Acquire),
                 "name_index_trusted": fields.name_index_trusted,
                 "name_index_fallback_scans": fields.name_index_fallback_scans,
@@ -787,6 +806,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             wal_generation,
             wal_embedding_model,
             wal_embedding_dim,
+            wal_embedding_doc_prefix,
             wal_group_positions,
             name_index_trusted,
             name_index_fallback_scans,
@@ -794,6 +814,7 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
             "database_path": db_path,
             "embedding_model": embedding_model,
             "embedding_dim": embedding_dim,
+            "embedding_instructions": embedding_instructions_json(&instructions),
             // Counts are null, not 0, so a broken graph can never be mistaken for an empty one
             // (FR-003) — a genuinely empty graph reports 0 via the Queryable branch above.
             "entity_count": null,
@@ -823,13 +844,15 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
                 "hydration_status": wal_hydration_status(wal_applied_seq, wal_max_seq),
                 "embedding_model": wal_embedding_model,
                 "embedding_dim": wal_embedding_dim,
+                "embedding_doc_prefix": wal_embedding_doc_prefix,
                 "embedding_model_status": embedding_model_status(
                     wal_applied_seq,
                     wal_embedding_model.as_deref().zip(wal_embedding_dim),
-                    (&embedding_model, embedding_dim as i64),
+                    wal_embedding_doc_prefix.as_deref(),
+                    (&embedding_model, embedding_dim as i64, &running_doc_prefix),
                 ),
             },
-            "wal_groups": wal_group_positions_json(&wal_group_positions, (&embedding_model, embedding_dim as i64)),
+            "wal_groups": wal_group_positions_json(&wal_group_positions, (&embedding_model, embedding_dim as i64, &running_doc_prefix)),
             // Forced false rather than reading the live atomic (FR-002): if the core table is
             // missing, any index built against it is meaningless, regardless of whether a
             // `knowledge_build_indices` call has run since the table broke to store `false`
@@ -964,16 +987,25 @@ fn wal_hydration_status(applied_seq: Option<u64>, max_seq: Option<u64>) -> &'sta
 /// `"match"` (recorded identity equals the running embedder's), or `"mismatch"` (recorded
 /// identity differs by model name or dimension — FR-008's "surface it clearly and visibly"
 /// signal, evaluated independent of whether a replay happened in this session).
+///
+/// Issue #790 (FR-008/FR-011): the **document prefix** is part of identity — `recorded_doc_prefix`
+/// vs `running.2`, with an absent (NULL, pre-#790) recorded prefix read as the empty prefix so a
+/// pre-feature workspace under profile `none` stays `match`. The *query* prefix is deliberately
+/// not an input: it never affects stored vectors (FR-010).
 fn embedding_model_status(
     applied_seq: Option<u64>,
     recorded: Option<(&str, i64)>,
-    running: (&str, i64),
+    recorded_doc_prefix: Option<&str>,
+    running: (&str, i64, &str),
 ) -> &'static str {
     match (applied_seq, recorded) {
         (None, _) => "not_applicable",
         (Some(_), None) => "unknown",
         (Some(_), Some((model, dim))) => {
-            if model == running.0 && dim == running.1 {
+            if model == running.0
+                && dim == running.1
+                && recorded_doc_prefix.unwrap_or("") == running.2
+            {
                 "match"
             } else {
                 "mismatch"
@@ -990,11 +1022,11 @@ fn embedding_model_status(
 /// existing meaning so a caller that only reads those is unaffected. `running` is the process's
 /// own embedder identity, compared against every group's recorded identity (there is one embedder
 /// per process, not one per group).
-fn wal_group_positions_json(positions: &[WalGroupPosition], running: (&str, i64)) -> Value {
+fn wal_group_positions_json(positions: &[WalGroupPosition], running: (&str, i64, &str)) -> Value {
     let map: serde_json::Map<String, Value> = positions
         .iter()
         .map(
-            |(gid, applied, max, generation, embedding_model, embedding_dim)| {
+            |(gid, applied, max, generation, embedding_model, embedding_dim, doc_prefix)| {
                 (
                     gid.clone(),
                     json!({
@@ -1005,9 +1037,11 @@ fn wal_group_positions_json(positions: &[WalGroupPosition], running: (&str, i64)
                         "hydration_status": wal_hydration_status(*applied, *max),
                         "embedding_model": embedding_model,
                         "embedding_dim": embedding_dim,
+                        "embedding_doc_prefix": doc_prefix,
                         "embedding_model_status": embedding_model_status(
                             *applied,
                             embedding_model.as_deref().zip(*embedding_dim),
+                            doc_prefix.as_deref(),
                             running,
                         ),
                     }),
@@ -1016,6 +1050,16 @@ fn wal_group_positions_json(positions: &[WalGroupPosition], running: (&str, i64)
         )
         .collect();
     Value::Object(map)
+}
+
+/// Renders the effective embedding instructions for `knowledge_status` (issue #790, FR-017).
+fn embedding_instructions_json(i: &crate::embedder::EffectiveInstructions) -> Value {
+    json!({
+        "profile": i.profile.as_str(),
+        "source": i.source.as_str(),
+        "query_prefix": i.query_prefix,
+        "document_prefix": i.document_prefix,
+    })
 }
 
 fn scan_wal_dir(wal_dir: Option<&std::path::Path>) -> (bool, u64, u64) {
@@ -3955,7 +3999,7 @@ async fn handle_rebuild_from_wal(
                         // embedding_model_status silently over-claim "match".
                         let group_embedding_identity = stats
                             .embeddings_recompute_had_no_failures()
-                            .then_some((embedding_identity.0.as_str(), embedding_identity.1));
+                            .then_some(&embedding_identity);
                         match conn.set_wal_position(
                             &gid_c,
                             seq,
@@ -4422,7 +4466,7 @@ async fn handle_rebuild_from_wal(
                         // attempt failed" gate as the streaming path above.
                         let group_embedding_identity = stats
                             .embeddings_recompute_had_no_failures()
-                            .then_some((embedding_identity.0.as_str(), embedding_identity.1));
+                            .then_some(&embedding_identity);
                         match conn.set_wal_position(
                             &bg_gid,
                             seq,
@@ -4915,7 +4959,7 @@ async fn handle_add_cross_group_edge(
     let source = parse_endpoint_spec(&p["source"], opt_kind("source_kind")?)?;
     let target = parse_endpoint_spec(&p["target"], opt_kind("target_kind")?)?;
 
-    let fact_embedding = state.embedder.embed(&fact).await?;
+    let fact_embedding = state.embedder.embed(&fact, EmbedRole::Document).await?;
 
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
@@ -5185,15 +5229,16 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
         Some(uuid) => (uuid, false, None, None),
         None => {
             // Not found on Pass 1 — compute the embedding(s) with no lock held (FR-001).
-            let (name_embedding, name_embed_err) = match state.embedder.embed(&name).await {
-                Ok(v) => (v, None),
-                // `Entity.name_embedding` is a fixed-size `FLOAT[N]` column (Kuzu ARRAY, not a
-                // variable-length LIST) — a literal zero-length vector fails to bind with a
-                // Conversion exception ("Unsupported casting LIST with incorrect list entry to
-                // ARRAY"). A same-dimension zero vector is the only physically valid stand-in
-                // for "no embedding" this schema can store on create.
-                Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
-            };
+            let (name_embedding, name_embed_err) =
+                match state.embedder.embed(&name, EmbedRole::Document).await {
+                    Ok(v) => (v, None),
+                    // `Entity.name_embedding` is a fixed-size `FLOAT[N]` column (Kuzu ARRAY, not a
+                    // variable-length LIST) — a literal zero-length vector fails to bind with a
+                    // Conversion exception ("Unsupported casting LIST with incorrect list entry to
+                    // ARRAY"). A same-dimension zero vector is the only physically valid stand-in
+                    // for "no embedding" this schema can store on create.
+                    Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
+                };
 
             // `summary_embedding` (issue #470), mirroring `name_embedding`'s embed-with-fallback
             // shape exactly. Per ADR-0314, an empty `summary` is a legitimate, common state, not
@@ -5202,7 +5247,7 @@ async fn handle_assert_entity(req: &IpcRequest, state: Arc<AppState>) -> Result<
             let (summary_embedding, summary_embed_err) = if summary.trim().is_empty() {
                 (vec![0.0f32; state.embedder.dim()], None)
             } else {
-                match state.embedder.embed(&summary).await {
+                match state.embedder.embed(&summary, EmbedRole::Document).await {
                     Ok(v) => (v, None),
                     Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
                 }
@@ -5378,7 +5423,7 @@ fn resolve_and_update_edge(
 /// The create branch runs in two separately-guarded passes (issue #543), mirroring
 /// `handle_assert_entity`: `write_lock` is held only for the pre-embed endpoint
 /// resolution/edge-lookup and, symmetrically, only for the post-embed resolve-and-insert —
-/// never across the intervening `state.embedder.embed(&fact).await` call. The post-embed pass
+/// never across the intervening `state.embedder.embed(&fact, EmbedRole::Document).await` call. The post-embed pass
 /// re-runs `resolve_and_update_edge` under a freshly-acquired guard immediately before the
 /// insert, using the endpoint UUIDs resolved in Pass 1 as a starting point but re-canonicalizing
 /// them (see that function's doc comment) in case either endpoint was merged into another entity
@@ -5535,13 +5580,14 @@ async fn handle_assert_relationship(
             attributes,
         }) => {
             // Not found on Pass 1 — compute the embedding with no lock held (FR-002).
-            let (fact_embedding, embed_err) = match state.embedder.embed(&fact).await {
-                Ok(v) => (v, None),
-                // RelatesToNode_.fact_embedding is a fixed-size FLOAT[N] column, so a
-                // same-dimension zero vector — not a literal empty Vec — is the only physically
-                // valid "no embedding" stand-in on create.
-                Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
-            };
+            let (fact_embedding, embed_err) =
+                match state.embedder.embed(&fact, EmbedRole::Document).await {
+                    Ok(v) => (v, None),
+                    // RelatesToNode_.fact_embedding is a fixed-size FLOAT[N] column, so a
+                    // same-dimension zero vector — not a literal empty Vec — is the only physically
+                    // valid "no embedding" stand-in on create.
+                    Err(e) => (vec![0.0f32; state.embedder.dim()], Some(e.to_string())),
+                };
 
             // Pass 2: re-acquire the lock and re-check the edge identity tuple (FR-003) using
             // the endpoint UUIDs resolved in Pass 1 — a concurrent writer may have created this
@@ -6590,7 +6636,7 @@ async fn recover_rebuild_from_workspace_wal(
                     // `ReplayStats::embeddings_recompute_had_no_failures`'s doc comment.
                     let group_embedding_identity = stats
                         .embeddings_recompute_had_no_failures()
-                        .then_some((embedding_identity.0.as_str(), embedding_identity.1));
+                        .then_some(&embedding_identity);
                     if let Err(e) = conn.set_wal_position(
                         &gid,
                         seq,
@@ -7097,7 +7143,7 @@ mod tests {
     #[test]
     fn embedding_model_status_not_applicable_when_nothing_ever_applied() {
         assert_eq!(
-            embedding_model_status(None, None, ("bge-base-en-v1.5", 768)),
+            embedding_model_status(None, None, None, ("bge-base-en-v1.5", 768, "")),
             "not_applicable"
         );
         // Even a recorded identity can't apply if applied_seq itself is None — that combination
@@ -7107,7 +7153,8 @@ mod tests {
             embedding_model_status(
                 None,
                 Some(("bge-base-en-v1.5", 768)),
-                ("bge-base-en-v1.5", 768)
+                None,
+                ("bge-base-en-v1.5", 768, "")
             ),
             "not_applicable"
         );
@@ -7118,7 +7165,7 @@ mod tests {
         // A pre-#440 write, or one with recompute disabled: a position exists but no embedding
         // identity was ever recorded alongside it.
         assert_eq!(
-            embedding_model_status(Some(42), None, ("bge-base-en-v1.5", 768)),
+            embedding_model_status(Some(42), None, None, ("bge-base-en-v1.5", 768, "")),
             "unknown"
         );
     }
@@ -7129,7 +7176,8 @@ mod tests {
             embedding_model_status(
                 Some(42),
                 Some(("bge-base-en-v1.5", 768)),
-                ("bge-base-en-v1.5", 768)
+                None,
+                ("bge-base-en-v1.5", 768, "")
             ),
             "match"
         );
@@ -7141,7 +7189,8 @@ mod tests {
             embedding_model_status(
                 Some(42),
                 Some(("bge-base-en-v1.5", 768)),
-                ("other-model", 768)
+                None,
+                ("other-model", 768, "")
             ),
             "mismatch"
         );
@@ -7155,9 +7204,67 @@ mod tests {
             embedding_model_status(
                 Some(42),
                 Some(("bge-base-en-v1.5", 768)),
-                ("bge-base-en-v1.5", 1024)
+                None,
+                ("bge-base-en-v1.5", 1024, "")
             ),
             "mismatch"
+        );
+    }
+
+    // issue #790 FR-008/FR-009/FR-011: the document prefix is part of identity.
+    #[test]
+    fn embedding_model_status_pre_790_null_prefix_matches_profile_none() {
+        // A pre-feature row (no recorded prefix) under profile `none` must not force a re-embed.
+        assert_eq!(
+            embedding_model_status(
+                Some(42),
+                Some(("bge-base-en-v1.5", 768)),
+                None,
+                ("bge-base-en-v1.5", 768, "")
+            ),
+            "match"
+        );
+        assert_eq!(
+            embedding_model_status(
+                Some(42),
+                Some(("bge-base-en-v1.5", 768)),
+                Some(""),
+                ("bge-base-en-v1.5", 768, "")
+            ),
+            "match"
+        );
+    }
+
+    #[test]
+    fn embedding_model_status_mismatch_on_document_prefix_difference() {
+        // none -> nomic-v1.5: stored vectors were computed without the document prefix.
+        assert_eq!(
+            embedding_model_status(
+                Some(42),
+                Some(("nomic-embed-text", 768)),
+                None,
+                ("nomic-embed-text", 768, "search_document: ")
+            ),
+            "mismatch"
+        );
+        // ...and the reverse direction.
+        assert_eq!(
+            embedding_model_status(
+                Some(42),
+                Some(("nomic-embed-text", 768)),
+                Some("search_document: "),
+                ("nomic-embed-text", 768, "")
+            ),
+            "mismatch"
+        );
+        assert_eq!(
+            embedding_model_status(
+                Some(42),
+                Some(("nomic-embed-text", 768)),
+                Some("search_document: "),
+                ("nomic-embed-text", 768, "search_document: ")
+            ),
+            "match"
         );
     }
 }

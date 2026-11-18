@@ -181,7 +181,8 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          applied_seq INT64, \
          generation STRING, \
          embedding_model STRING, \
-         embedding_dim INT64\
+         embedding_dim INT64, \
+         embedding_doc_prefix STRING\
          )",
     )?;
     Ok(())
@@ -344,6 +345,18 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
     {
         if let Err(e) = conn.raw_query("ALTER TABLE WalPosition ADD embedding_dim INT64") {
             eprintln!("liminis-context-graph: schema migrate: ALTER TABLE WalPosition ADD embedding_dim INT64: {e} (non-fatal)");
+        }
+    }
+    // WalPosition gained `embedding_doc_prefix` (issue #790, FR-008): the effective document
+    // prefix is part of embedding identity. NULL (every pre-#790 row) is read as the empty prefix.
+    if conn
+        .raw_query(
+            "MATCH (n:WalPosition) WHERE n.id = '_probe_' RETURN n.embedding_doc_prefix LIMIT 0",
+        )
+        .is_err()
+    {
+        if let Err(e) = conn.raw_query("ALTER TABLE WalPosition ADD embedding_doc_prefix STRING") {
+            eprintln!("liminis-context-graph: schema migrate: ALTER TABLE WalPosition ADD embedding_doc_prefix STRING: {e} (non-fatal)");
         }
     }
     // Entity gained `summary_embedding` (issue #470) so an entity's summary is semantically

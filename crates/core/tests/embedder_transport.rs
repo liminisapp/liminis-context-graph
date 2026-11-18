@@ -686,7 +686,10 @@ async fn http_transport_embed_roundtrip() {
     let (addr, _server) = spawn_stub_http_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
     let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
-    let result = embedder.embed("hello world").await.unwrap();
+    let result = embedder
+        .embed("hello world", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
     assert_eq!(result.len(), dim, "embedding dim should match stub");
 }
 
@@ -696,7 +699,8 @@ async fn http_transport_probe_returns_dim_and_model() {
     let (addr, _server) = spawn_stub_http_server(dim).await;
     let url = format!("http://{addr}/v1/embeddings");
     let embedder = OaiEmbedder::new_http(url, "test-model", 1).expect("valid embedder config");
-    let (probed_dim, probed_model) = embedder.probe().await.unwrap();
+    let info = embedder.probe().await.unwrap();
+    let (probed_dim, probed_model) = (info.dim, info.model);
     assert_eq!(probed_dim, dim);
     assert_eq!(probed_model, STUB_MODEL);
 }
@@ -709,7 +713,10 @@ async fn uds_transport_embed_roundtrip() {
     let dim = 16;
     let _server = spawn_stub_uds_server(&sock_path, dim).await;
     let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
-    let result = embedder.embed("hello world").await.unwrap();
+    let result = embedder
+        .embed("hello world", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
     assert_eq!(result.len(), dim, "embedding dim should match stub");
 }
 
@@ -721,7 +728,8 @@ async fn uds_transport_probe_returns_dim_and_model() {
     let dim = 32;
     let _server = spawn_stub_uds_server(&sock_path, dim).await;
     let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", 1).unwrap();
-    let (probed_dim, probed_model) = embedder.probe().await.unwrap();
+    let info = embedder.probe().await.unwrap();
+    let (probed_dim, probed_model) = (info.dim, info.model);
     assert_eq!(probed_dim, dim);
     assert_eq!(probed_model, STUB_MODEL);
 }
@@ -742,7 +750,10 @@ async fn uds_transport_connection_count_bounded() {
     let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
 
     for _ in 0..20 {
-        embedder.embed("hello world").await.unwrap();
+        embedder
+            .embed("hello world", lcg_core::EmbedRole::Document)
+            .await
+            .unwrap();
     }
 
     let accepted = accept_count.load(std::sync::atomic::Ordering::SeqCst);
@@ -778,7 +789,10 @@ async fn uds_transport_reconnects_after_restart() {
 
     // Populate every pool slot with a held connection to the first server.
     for _ in 0..UDS_POOL_SIZE {
-        let v = embedder.embed("hello world").await.unwrap();
+        let v = embedder
+            .embed("hello world", lcg_core::EmbedRole::Document)
+            .await
+            .unwrap();
         assert_eq!(v.len(), dim);
     }
 
@@ -795,7 +809,10 @@ async fn uds_transport_reconnects_after_restart() {
     // once against the new server, and the call still succeeds transparently
     // with no manual retry needed by the caller.
     for _ in 0..UDS_POOL_SIZE {
-        let v = embedder.embed("hello again").await.unwrap();
+        let v = embedder
+            .embed("hello again", lcg_core::EmbedRole::Document)
+            .await
+            .unwrap();
         assert_eq!(v.len(), dim);
     }
 }
@@ -819,9 +836,10 @@ async fn uds_transport_concurrent_calls_not_fully_serialized() {
 
     let concurrent_calls = 8; // 2x pool size, so pool reuse is also exercised
     let start = std::time::Instant::now();
-    let results =
-        futures::future::join_all((0..concurrent_calls).map(|_| embedder.embed("hello world")))
-            .await;
+    let results = futures::future::join_all(
+        (0..concurrent_calls).map(|_| embedder.embed("hello world", lcg_core::EmbedRole::Document)),
+    )
+    .await;
     let elapsed = start.elapsed();
 
     for result in results {
@@ -849,7 +867,10 @@ async fn http_transport_sends_bearer_header_when_key_configured() {
         .expect("valid embedder config")
         .with_api_key(Some("sekret-key".to_string()));
 
-    embedder.embed("hello world").await.unwrap();
+    embedder
+        .embed("hello world", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
     embedder.probe().await.unwrap();
 
     let requests = captured.lock().unwrap();
@@ -872,7 +893,10 @@ async fn http_transport_no_authorization_header_when_key_unset() {
     let url = format!("http://{addr}/v1/embeddings");
     let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
-    embedder.embed("hello world").await.unwrap();
+    embedder
+        .embed("hello world", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
 
     let requests = captured.lock().unwrap();
     assert_eq!(requests.len(), 1);
@@ -902,7 +926,10 @@ async fn uds_transport_embed_roundtrip_unaffected_by_key_env() {
     // accepts one, so there is nothing for a key to attach to.
     std::env::set_var("LCG_EMBEDDING_API_KEY", "should-never-be-used");
     let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
-    let result = embedder.embed("hello world").await.unwrap();
+    let result = embedder
+        .embed("hello world", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
     std::env::remove_var("LCG_EMBEDDING_API_KEY");
 
     assert_eq!(result.len(), dim);
@@ -934,7 +961,10 @@ async fn http_transport_embed_batch_sends_bearer_header_when_key_configured() {
         .with_api_key(Some("sekret-key".to_string()));
 
     let texts = ["one", "two", "three"];
-    let results = embedder.embed_batch(&texts).await.unwrap();
+    let results = embedder
+        .embed_batch(&texts, lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
     assert_eq!(results.len(), texts.len());
 
     let requests = captured.lock().unwrap();
@@ -972,7 +1002,10 @@ async fn http_transport_embed_batch_single_request_and_correct_order() {
     let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts = ["one", "two", "three", "four", "five"];
-    let results = embedder.embed_batch(&texts).await.unwrap();
+    let results = embedder
+        .embed_batch(&texts, lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
 
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
     assert_eq!(results.len(), texts.len());
@@ -1001,7 +1034,10 @@ async fn http_transport_embed_batch_chunks_oversized_batch() {
     let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts = ["a", "b", "c", "d", "e"];
-    let results = embedder.embed_batch(&texts).await.unwrap();
+    let results = embedder
+        .embed_batch(&texts, lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
 
     assert_eq!(
         request_count.load(Ordering::SeqCst),
@@ -1021,7 +1057,10 @@ async fn http_transport_embed_batch_empty_input_issues_no_request() {
     let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts: [&str; 0] = [];
-    let results = embedder.embed_batch(&texts).await.unwrap();
+    let results = embedder
+        .embed_batch(&texts, lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
 
     assert!(results.is_empty());
     assert_eq!(request_count.load(Ordering::SeqCst), 0);
@@ -1044,7 +1083,10 @@ async fn http_transport_embed_batch_mismatched_response_errors() {
     let embedder = OaiEmbedder::new_http(url, "test-model", dim).expect("valid embedder config");
 
     let texts = ["one", "two", "three"];
-    let err = embedder.embed_batch(&texts).await.unwrap_err();
+    let err = embedder
+        .embed_batch(&texts, lcg_core::EmbedRole::Document)
+        .await
+        .unwrap_err();
     assert!(
         format!("{err}").contains("shape mismatch"),
         "expected a shape-mismatch error, got: {err}"
@@ -1065,7 +1107,10 @@ async fn uds_transport_embed_batch_roundtrip_and_order() {
     let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
 
     let texts = ["one", "two", "three"];
-    let results = embedder.embed_batch(&texts).await.unwrap();
+    let results = embedder
+        .embed_batch(&texts, lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
 
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
     assert_eq!(results.len(), texts.len());
@@ -1093,7 +1138,10 @@ async fn uds_transport_embed_batch_chunks_oversized_batch() {
     let embedder = OaiEmbedder::new_uds(sock_path.to_str().unwrap(), "test-model", dim).unwrap();
 
     let texts = ["a", "b", "c", "d", "e"];
-    let results = embedder.embed_batch(&texts).await.unwrap();
+    let results = embedder
+        .embed_batch(&texts, lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
 
     assert_eq!(request_count.load(Ordering::SeqCst), 3);
     assert_eq!(results.len(), texts.len());
@@ -1121,9 +1169,16 @@ impl RecordingEmbedder {
 }
 
 impl Embedder for RecordingEmbedder {
-    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, lcg_core::Error>> {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+        _role: lcg_core::EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, lcg_core::Error>> {
         Box::pin(async move {
-            let result = self.inner.embed(text).await?;
+            let result = self
+                .inner
+                .embed(text, lcg_core::EmbedRole::Document)
+                .await?;
             let request = serde_json::json!({ "text": text });
             // Mirrors `cassette::request_key`'s documented contract (SHA-256 of the canonical
             // serialized request value), so this test-local record stays self-consistent with
@@ -1173,7 +1228,10 @@ async fn embedder_http_cassette_never_leaks_authorization_or_key() {
     let writer = Arc::new(lcg_core::CassetteWriter::open(&cassette_path).unwrap());
     let recorder = RecordingEmbedder::new(inner, Arc::clone(&writer));
 
-    recorder.embed("some text to embed").await.unwrap();
+    recorder
+        .embed("some text to embed", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
 
     // Sanity check (FR-004): prove the sentinel key was actually transmitted over the wire,
     // so the "never leaks" assertions below are not vacuously true because the key never
@@ -1229,7 +1287,10 @@ async fn http_transport_hung_backend_times_out_on_embed() {
     };
 
     let start = std::time::Instant::now();
-    let err = embedder.embed("hello world").await.unwrap_err();
+    let err = embedder
+        .embed("hello world", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap_err();
     let elapsed = start.elapsed();
 
     assert!(
@@ -1295,7 +1356,10 @@ async fn http_transport_connect_timeout_independent_of_request_timeout() {
     };
 
     let start = std::time::Instant::now();
-    let err = embedder.embed("hello world").await.unwrap_err();
+    let err = embedder
+        .embed("hello world", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap_err();
     let elapsed = start.elapsed();
 
     assert!(
@@ -1329,7 +1393,10 @@ async fn uds_transport_hung_backend_times_out_on_embed() {
     };
 
     let start = std::time::Instant::now();
-    let err = embedder.embed("hello world").await.unwrap_err();
+    let err = embedder
+        .embed("hello world", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap_err();
     let elapsed = start.elapsed();
 
     assert!(
@@ -1397,7 +1464,7 @@ async fn uds_transport_pool_exhaustion_times_out_on_acquire() {
     for _ in 0..UDS_POOL_SIZE {
         let e = Arc::clone(&embedder);
         occupying.push(tokio::spawn(async move {
-            let _ = e.embed("hello world").await;
+            let _ = e.embed("hello world", lcg_core::EmbedRole::Document).await;
         }));
     }
 
@@ -1406,7 +1473,10 @@ async fn uds_transport_pool_exhaustion_times_out_on_acquire() {
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     let start = std::time::Instant::now();
-    let err = embedder.embed("hello world").await.unwrap_err();
+    let err = embedder
+        .embed("hello world", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap_err();
     let elapsed = start.elapsed();
 
     // Deliberately tighter than the usual 5s test-suite margin: the 5000ms request timeout
@@ -1468,7 +1538,10 @@ async fn uds_transport_dial_timeout_independent_of_request_timeout() {
     };
 
     let start = std::time::Instant::now();
-    let err = embedder.embed("hello world").await.unwrap_err();
+    let err = embedder
+        .embed("hello world", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap_err();
     let elapsed = start.elapsed();
 
     assert!(
@@ -1502,7 +1575,10 @@ async fn http_transport_default_batch_size_succeeds_under_normal_latency() {
     // 64 texts at the default LCG_EMBED_BATCH_SIZE (64) is exactly one chunk/one request.
     let texts: Vec<String> = (0..64).map(|i| format!("text-{i}")).collect();
     let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-    let results = embedder.embed_batch(&text_refs).await.unwrap();
+    let results = embedder
+        .embed_batch(&text_refs, lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
 
     assert_eq!(results.len(), text_refs.len());
 }
@@ -1587,6 +1663,9 @@ async fn new_http_accepts_distinct_valid_timeout_overrides() {
         OaiEmbedder::new_http(format!("http://{addr}/v1/embeddings"), "test-model", 4)
             .expect("valid embedder config")
     };
-    let result = embedder2.embed("hello world").await.unwrap();
+    let result = embedder2
+        .embed("hello world", lcg_core::EmbedRole::Document)
+        .await
+        .unwrap();
     assert_eq!(result.len(), 4);
 }

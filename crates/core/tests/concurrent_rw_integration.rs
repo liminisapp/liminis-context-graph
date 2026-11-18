@@ -606,7 +606,11 @@ struct BarrierEmbedder {
 }
 
 impl Embedder for BarrierEmbedder {
-    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+    fn embed<'a>(
+        &'a self,
+        _text: &'a str,
+        _role: lcg_core::EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         let barrier = Arc::clone(&self.barrier);
         let dim = self.dim;
         Box::pin(async move {
@@ -633,7 +637,11 @@ struct DelayEmbedder {
 }
 
 impl Embedder for DelayEmbedder {
-    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+    fn embed<'a>(
+        &'a self,
+        _text: &'a str,
+        _role: lcg_core::EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         let dim = self.dim;
         let delay = self.delay;
         let started = Arc::clone(&self.started);
@@ -660,7 +668,11 @@ struct PausableEmbedder {
 }
 
 impl Embedder for PausableEmbedder {
-    fn embed<'a>(&'a self, _text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+    fn embed<'a>(
+        &'a self,
+        _text: &'a str,
+        _role: lcg_core::EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         let dim = self.dim;
         let started = Arc::clone(&self.started);
         let proceed = Arc::clone(&self.proceed);

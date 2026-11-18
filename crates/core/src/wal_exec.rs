@@ -33,7 +33,7 @@ use crate::{
 /// single call site makes that a type-level pairing with the flush call's own `group_id`
 /// argument instead of a repeated, error-prone literal.
 ///
-/// `state`'s own `(embedding_model, embedder.dim())` is persisted alongside `seq`/`generation`
+/// `state`'s own `(embedding_model, embedder.dim(), document prefix)` is persisted alongside `seq`/`generation`
 /// (issue #440, FR-007) on every call, not only after a replay — any content this write actually
 /// created was embedded by `state`'s running embedder (the only embedder a process ever runs), so
 /// recording that identity here is what lets `embedding_model_status` catch a model change at the
@@ -49,13 +49,16 @@ pub(crate) fn advance_wal_position(
     state: &AppState,
 ) {
     if let Some((seq, generation)) = result {
-        let embedding_identity = (state.embedding_model.as_str(), state.embedder.dim() as i64);
-        if let Err(e) = conn.set_wal_position(
-            group_id,
-            seq,
-            generation.as_deref(),
-            Some(embedding_identity),
-        ) {
+        let embedding_identity = crate::embedding_cache::EmbeddingIdentity {
+            model: state.embedding_model.clone(),
+            dim: state.embedder.dim() as i64,
+            doc_prefix: state.embedder.instructions().document_prefix,
+        };
+        // `_live`: a recorded, different document prefix is preserved, never silently re-stamped
+        // by an ordinary write (issue #790, SC-004) — only a rebuild may claim the new prefix.
+        if let Err(e) =
+            conn.set_wal_position_live(group_id, seq, generation.as_deref(), &embedding_identity)
+        {
             eprintln!(
                 "liminis-context-graph: advance_wal_position: failed to persist applied_seq={seq} for group {group_id} (non-fatal): {e}"
             );

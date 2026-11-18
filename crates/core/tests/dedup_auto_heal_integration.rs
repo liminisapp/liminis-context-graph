@@ -108,7 +108,11 @@ impl Extractor for UniqueEntityExtractor {
 struct AxisEmbedder;
 
 impl Embedder for AxisEmbedder {
-    fn embed<'a>(&'a self, text: &'a str) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
+    fn embed<'a>(
+        &'a self,
+        text: &'a str,
+        _role: lcg_core::EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<f32>, Error>> {
         let v = if let Some(suffix) = text.strip_prefix("Entity-") {
             let n: usize = suffix.parse().unwrap_or(0);
             let axis = n % DIM;

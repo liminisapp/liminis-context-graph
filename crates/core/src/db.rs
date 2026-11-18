@@ -115,6 +115,10 @@ pub struct WalPositionRecord {
     /// The embedding vector dimension paired with `embedding_model`. Always `Some` exactly when
     /// `embedding_model` is `Some` — both are written together by `set_wal_position`.
     pub embedding_dim: Option<i64>,
+    /// The effective **document** prefix the group's stored vectors were computed under (issue
+    /// #790, FR-008). `None` — a pre-#790 row, or no identity recorded — is read as the empty
+    /// prefix by every comparison (FR-011), so upgrading under profile `none` is a `match`.
+    pub embedding_doc_prefix: Option<String>,
 }
 
 /// A chunk's live same-named episodes, partitioned by attribution (issue #292, ADR-0292).
@@ -396,9 +400,7 @@ impl Db {
                     crate::wal_group::DEFAULT_GROUP_ID,
                     seq,
                     generation.as_deref(),
-                    embedding_identity
-                        .as_ref()
-                        .map(|(model, dim)| (model.as_str(), *dim)),
+                    embedding_identity.as_ref(),
                 ) {
                     eprintln!(
                         "liminis-context-graph: open_or_rebuild: failed to persist applied_seq={seq} (non-fatal): {e}"
@@ -480,11 +482,23 @@ fn build_sync_recompute_fn(
         .map_err(|e| Error::Ipc(format!("failed to build embedding-recompute runtime: {e}")))?;
     let embedder = Arc::clone(&ctx.embedder);
     let cache = Arc::clone(&ctx.cache);
-    let (model, dim) = ctx.identity();
+    let crate::embedding_cache::EmbeddingIdentity {
+        model,
+        dim,
+        doc_prefix,
+    } = ctx.identity();
+    // Everything recomputed on replay is stored text: always the Document role (#790).
     Ok(Box::new(move |texts: &[&str]| {
-        cache.get_or_compute_batch(&model, dim, texts, |miss_texts| {
-            rt.block_on(embedder.embed_batch(miss_texts))
-        })
+        cache.get_or_compute_batch(
+            &model,
+            dim,
+            crate::embedder::EmbedRole::Document,
+            &doc_prefix,
+            texts,
+            |miss_texts| {
+                rt.block_on(embedder.embed_batch(miss_texts, crate::embedder::EmbedRole::Document))
+            },
+        )
     }))
 }
 
@@ -4342,7 +4356,7 @@ impl<'db> Conn<'db> {
     pub fn get_wal_position(&self, group_id: &str) -> Result<WalPositionRecord, Error> {
         let rows = self.query_params(
             "MATCH (w:WalPosition {id: $group_id}) RETURN w.applied_seq, w.generation, \
-             w.embedding_model, w.embedding_dim",
+             w.embedding_model, w.embedding_dim, w.embedding_doc_prefix",
             serde_json::json!({ "group_id": group_id }),
         )?;
         Ok(rows
@@ -4353,6 +4367,7 @@ impl<'db> Conn<'db> {
                 generation: value_as_optional_string(&row[1]),
                 embedding_model: value_as_optional_string(&row[2]),
                 embedding_dim: value_as_optional_u64(&row[3]).map(|d| d as i64),
+                embedding_doc_prefix: value_as_optional_string(&row[4]),
             })
             .unwrap_or_default())
     }
@@ -4378,16 +4393,24 @@ impl<'db> Conn<'db> {
         group_id: &str,
         seq: u64,
         generation: Option<&str>,
-        embedding_identity: Option<(&str, i64)>,
+        embedding_identity: Option<&crate::embedding_cache::EmbeddingIdentity>,
     ) -> Result<(), Error> {
         let mut prepared = self.inner.prepare(
             "MERGE (w:WalPosition {id: $group_id}) SET w.applied_seq = $seq, \
              w.generation = $generation, w.embedding_model = $embedding_model, \
-             w.embedding_dim = $embedding_dim",
+             w.embedding_dim = $embedding_dim, w.embedding_doc_prefix = $embedding_doc_prefix",
         )?;
-        let (embedding_model, embedding_dim) = match embedding_identity {
-            Some((model, dim)) => (Value::String(model.to_string()), Value::Int64(dim)),
-            None => (Value::Null(LogicalType::Any), Value::Null(LogicalType::Any)),
+        let (embedding_model, embedding_dim, embedding_doc_prefix) = match embedding_identity {
+            Some(id) => (
+                Value::String(id.model.clone()),
+                Value::Int64(id.dim),
+                Value::String(id.doc_prefix.clone()),
+            ),
+            None => (
+                Value::Null(LogicalType::Any),
+                Value::Null(LogicalType::Any),
+                Value::Null(LogicalType::Any),
+            ),
         };
         let bound: Vec<(&str, Value)> = vec![
             ("group_id", Value::String(group_id.to_string())),
@@ -4401,9 +4424,49 @@ impl<'db> Conn<'db> {
             ),
             ("embedding_model", embedding_model),
             ("embedding_dim", embedding_dim),
+            ("embedding_doc_prefix", embedding_doc_prefix),
         ];
         self.inner.execute(&mut prepared, bound)?;
         Ok(())
+    }
+
+    /// The live-write variant of [`Self::set_wal_position`] (issue #790, SC-004): stamps
+    /// `running` like every other write, **except** that a *recorded, different* document prefix
+    /// is preserved rather than overwritten.
+    ///
+    /// Why: after `none` → `nomic-v1.5` the workspace holds vectors computed under the old
+    /// prefix. If the first live write re-stamped the new prefix, `embedding_model_status` would
+    /// flip to `match` and old- and new-prefix vectors would be served as one consistent index
+    /// with nothing surfacing it. Only a rebuild/replay (which recomputes every vector and calls
+    /// [`Self::set_wal_position`] directly) is allowed to claim the new prefix. Model name and
+    /// dimension keep their existing best-effort restamp behaviour.
+    ///
+    /// A row with no recorded model/dim (a fresh group, or an "unknown" one) is stamped normally:
+    /// there is no recorded prefix to protect. A NULL recorded prefix on a row that does have a
+    /// model/dim is a pre-#790 row and is read as the empty prefix.
+    pub fn set_wal_position_live(
+        &self,
+        group_id: &str,
+        seq: u64,
+        generation: Option<&str>,
+        running: &crate::embedding_cache::EmbeddingIdentity,
+    ) -> Result<(), Error> {
+        let recorded = self.get_wal_position(group_id)?;
+        let to_write = if recorded.embedding_model.is_some() && recorded.embedding_dim.is_some() {
+            let recorded_prefix = recorded.embedding_doc_prefix.as_deref().unwrap_or("");
+            crate::embedding_cache::EmbeddingIdentity {
+                model: running.model.clone(),
+                dim: running.dim,
+                doc_prefix: if recorded_prefix == running.doc_prefix {
+                    running.doc_prefix.clone()
+                } else {
+                    recorded_prefix.to_string()
+                },
+            }
+        } else {
+            running.clone()
+        };
+        self.set_wal_position(group_id, seq, generation, Some(&to_write))
     }
 
     /// One-time migration (issue #378 FR-001/FR-009): carries a pre-378 database's

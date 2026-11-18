@@ -2265,10 +2265,17 @@ mod replay_tests {
         let cache_ref = Arc::clone(&cache);
         let real_calls_ref = Arc::clone(&real_calls);
         let embed_fn: RecomputeEmbedFn = Box::new(move |texts: &[&str]| {
-            cache_ref.get_or_compute_batch("test-model", 2, texts, |miss_texts| {
-                real_calls_ref.fetch_add(miss_texts.len(), Ordering::SeqCst);
-                Ok(vec![vec![1.0, 2.0]; miss_texts.len()])
-            })
+            cache_ref.get_or_compute_batch(
+                "test-model",
+                2,
+                crate::embedder::EmbedRole::Document,
+                "",
+                texts,
+                |miss_texts| {
+                    real_calls_ref.fetch_add(miss_texts.len(), Ordering::SeqCst);
+                    Ok(vec![vec![1.0, 2.0]; miss_texts.len()])
+                },
+            )
         });
 
         let mut stats = zero_stats();
