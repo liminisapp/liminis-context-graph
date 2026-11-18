@@ -738,9 +738,7 @@ async fn preview_matches_ingest_and_split_units_tile_their_section() {
     assert_eq!(prev_end, long["byte_end"].as_u64().unwrap());
 
     // Editing the long section supersedes all of its old units by the new final unit.
-    let edited = doc
-        .replacen("Intro.", "Intro.", 1)
-        .replace("## Long\n\n", "## Long\n\nNew lead. ");
+    let edited = doc.replace("## Long\n\n", "## Long\n\nNew lead. ");
     let r2 = ingest(&f.state, "big", &edited).await;
     let new_long = uuids(&r2["chunks"][1]["episode_uuids"]);
     let final_unit = new_long.last().unwrap();
