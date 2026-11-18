@@ -12,7 +12,7 @@ one of those traps has now been hit at least once.
 | `04-full-run.sh` | The real benchmark: noise floor + hosted-vs-qwen | **real money**, one live leg |
 | `05-score-only.sh` | Re-score three captured cassettes; resumes a died run | judge calls only |
 | `06-ontology-matrix.sh` | The Open/Strict ontology arms, each with its own noise floor | **real money**, ~$92 + overnight |
-| `07-retrieval-eval.sh` | Retrieval-quality eval (LCG vs qmd) on the checked-in fixture; `DRY_RUN=1` previews. See `docs/retrieval-quality-evaluation.md` | embedder calls + judge calls (cached); not part of the 01–06 sequence |
+| `07-retrieval-eval.sh [--corpus DIR]` | Retrieval-quality eval (LCG vs qmd) on a fixture: v1 smoke corpus by default, `--corpus crates/eval/fixtures/retrieval-v2` for the full one; `DRY_RUN=1` previews. See `docs/retrieval-quality-evaluation.md` | embedder calls + judge calls (cached); not part of the 01–06 sequence |
 | `test-scripts.sh` | Tests what's still shell-level — completeness thresholds, resume decisions, MODES/LIMIT/report-naming contracts | free, seconds |
 
 ```bash
