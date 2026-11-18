@@ -178,10 +178,10 @@ pub fn wal_ontology_path(wal_dir: &Path) -> PathBuf {
 ///
 /// The vocabulary fields are **documentation only** (FR-008, FR-009): they never drive a
 /// consumer's extraction, `mode: strict` validation, canonicalization, or reprocessing. The one
-/// field a rebuild consumes is `identity_types` (#776): after a rebuild-from-WAL,
-/// `identity_stamp::restore_stamp_if_absent` uses it to restore a missing identity-set stamp.
-/// Its absence never blocks replay or affects correctness — the kind-aware D1 check covers a
-/// group with no restorable stamp.
+/// field consumed is `identity_types` (#776, #778): after a rebuild-from-WAL and on the first
+/// resolve of any group with no stamp, `identity_stamp::restore_stamp_if_absent` uses it to
+/// restore a missing identity-set stamp. Its absence never blocks replay or affects correctness —
+/// the kind-aware D1 check and the stored-kind scan cover a group with no restorable stamp.
 ///
 /// Reuses [`OntologySidecar`]'s existing shape rather than a second schema, since the two sidecars
 /// (`.lcg/ontology-hash.json` for drift, `.wal-ontology.json` for publish provenance) record the
@@ -232,8 +232,9 @@ pub fn write_wal_ontology_sidecar(
 }
 
 /// Reads the published-ontology sidecar from a group's WAL directory, if present. Besides
-/// external tooling and tests, its only in-tree consumer is the stamp restore after a
-/// rebuild-from-WAL (#776); no extraction/validation/reprocessing path consults it.
+/// external tooling and tests, its only in-tree consumer is the stamp restore (#776 after a
+/// rebuild-from-WAL; #778 on the first resolve of a group with no stamp); no
+/// extraction/validation/reprocessing path consults it.
 pub fn read_wal_ontology_sidecar(wal_dir: &Path) -> Option<OntologySidecar> {
     let path = wal_ontology_path(wal_dir);
     let text = std::fs::read_to_string(&path).ok()?;

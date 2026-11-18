@@ -527,9 +527,11 @@ async fn unchecked_reload_restores_prior_state() {
     assert!(out.identity_unchecked.is_some(), "{out:?}");
     assert_eq!(state.cached_ontology_hash(G), cached);
 
-    // Never-resolved group: no marker leaks either.
+    // Never-resolved group with no stamp (#778): the stored kinds cannot be scanned without the
+    // DB, so it is unchecked (and never cached) rather than silently accepted.
     let out = state.reload_group_ontology("fresh");
-    assert!(out.identity_unchecked.is_none()); // no file for "fresh": nothing differs
+    assert!(out.identity_unchecked.is_some(), "{out:?}");
+    assert!(state.cached_ontology_hash("fresh").is_none());
     write_file(root.path(), "fresh2", PERSON_ID);
     let out = state.reload_group_ontology("fresh2");
     assert!(out.identity_unchecked.is_some());

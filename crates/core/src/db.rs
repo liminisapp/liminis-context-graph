@@ -2879,6 +2879,28 @@ impl<'db> Conn<'db> {
         Ok(0)
     }
 
+    /// The distinct stored `kind` values of `Entity` nodes in `group_id`, excluding NULL, `''`
+    /// and the default kind (`types::DEFAULT_KIND`). Used by the D1 guard (#778) to detect an
+    /// identity removal from the stored data when the group's stamp is absent. Group-scoped,
+    /// unindexed; callers run it only when the stamp file is missing.
+    pub fn distinct_non_default_kinds(&self, group_id: &str) -> Result<Vec<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (e:Entity) WHERE e.group_id = $gid AND e.kind IS NOT NULL AND e.kind <> '' \
+             AND e.kind <> $dk RETURN DISTINCT e.kind",
+            serde_json::json!({ "gid": group_id, "dk": crate::types::DEFAULT_KIND }),
+        )?;
+        let mut kinds: Vec<String> = rows
+            .into_iter()
+            .filter_map(|row| match row.first() {
+                Some(lbug::Value::String(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+        Ok(kinds)
+    }
+
     fn count_by_group_ids(&self, label: &str, var: &str, group_ids: &[&str]) -> Result<u64, Error> {
         let sql = format!("MATCH ({var}:{label}) WHERE {var}.group_id IN $gids RETURN count(*)");
         let rows = self.query_params(&sql, serde_json::json!({ "gids": group_ids }))?;

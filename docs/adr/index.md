@@ -160,6 +160,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0754](0754-retrieval-eval-architecture.md) | Retrieval-Quality Eval Architecture — Service-Spawn Driver, qmd Baseline, Metric Definitions | 2026-11-15 |
 | [0755](0755-knowledge-lint-deterministic-health.md) | `knowledge_lint` — A Deterministic, LLM-Free Notebook Health Report | 2026-11-15 |
 | [0776](0776-kind-aware-identity-set-check.md) | Kind-Aware D1 Identity-Set Check and Stamp Restore from the WAL Sidecar | 2026-11-16 |
+| [0778](0778-lazy-stamp-restore-and-data-check-when-stamp-absent.md) | Lazy Stamp Restore and Stored-Kind Check When the D1 Stamp Is Absent | 2026-11-17 |
 | [0785](0785-document-mode-revisions-and-commit-boundary.md) | Document Mode — Server-Side Chunking, Revision Diff and a Data Commit Boundary | 2026-11-18 |
 | [0790](0790-embedder-roles-and-instruction-profiles.md) | Embedder Roles and Instruction Profiles | 2026-11-18 |
 

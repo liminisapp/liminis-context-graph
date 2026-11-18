@@ -15,7 +15,9 @@
 //! cover that (#776, ADR-0776): the D1 carrier count is kind-aware, so a replayed group whose
 //! entities already carry the identity kinds is not refused; and the WAL ontology sidecar
 //! records the identity-bearing set, which [`restore_stamp_if_absent`] writes back as the stamp
-//! after a rebuild. See ADR-0616 and ADR-0776.
+//! after a rebuild. Since #778 (ADR-0778) the restore also runs on every first resolve of a
+//! group with no stamp, and the stored entity kinds are checked ([`merge_stored_kinds`]) so an
+//! absent stamp cannot hide an identity removal. See ADR-0616, ADR-0776 and ADR-0778.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -143,10 +145,29 @@ pub fn changed_labels(
     v
 }
 
-/// Restores a missing stamp from the group's WAL ontology sidecar after a rebuild-from-WAL
-/// (#776). Never overwrites: any existing stamp file — even an unparseable one — is left
-/// untouched. Restores nothing (and raises nothing) when the sidecar is missing, predates the
-/// `identity_types` field, or records an empty set (a flagless group has no stamp file).
+/// Unions stored entity kinds into `changed` as removals (#778). Used when the stamp is absent:
+/// every stored non-default kind that is not in `current` was identity-bearing when the entity
+/// was created, so dropping it from the set is a removal, whatever the stamp says. A kind
+/// already in `changed` is not duplicated. The result is sorted.
+pub fn merge_stored_kinds(
+    mut changed: Vec<(String, bool)>,
+    stored_kinds: &[String],
+    current: &BTreeSet<String>,
+) -> Vec<(String, bool)> {
+    for kind in stored_kinds {
+        if !current.contains(kind) && !changed.iter().any(|(l, _)| l == kind) {
+            changed.push((kind.clone(), false));
+        }
+    }
+    changed.sort();
+    changed
+}
+
+/// Restores a missing stamp from the group's WAL ontology sidecar (#776 after a
+/// rebuild-from-WAL; #778 on every first resolve of the group). Never overwrites: any existing
+/// stamp file — even an unparseable one — is left untouched. Restores nothing (and raises
+/// nothing) when the sidecar is missing, predates the `identity_types` field, or records an
+/// empty set (a flagless group has no stamp file).
 /// Returns `true` only when a stamp was written.
 pub fn restore_stamp_if_absent(workspace_root: &Path, wal_dir: &Path, group_id: &str) -> bool {
     let Ok(path) = stamp_path(workspace_root, group_id) else {
@@ -226,6 +247,32 @@ mod tests {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, "not json").unwrap();
         assert!(read_stamp(d.path(), "g").is_err());
+    }
+
+    #[test]
+    fn merge_stored_kinds_unions_removals() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // Empty input leaves `changed` unchanged.
+        assert!(merge_stored_kinds(vec![], &[], &set(&["Person"])).is_empty());
+        // A kind still in `current` is skipped.
+        assert!(merge_stored_kinds(vec![], &s(&["Person"]), &set(&["Person"])).is_empty());
+        // A kind absent from `current` becomes a removal; result sorted.
+        let m = merge_stored_kinds(
+            vec![("Zeta".into(), true)],
+            &s(&["Person", "Organization"]),
+            &set(&["Zeta"]),
+        );
+        assert_eq!(
+            m,
+            vec![
+                ("Organization".to_string(), false),
+                ("Person".to_string(), false),
+                ("Zeta".to_string(), true),
+            ]
+        );
+        // A kind already in `changed` is not duplicated.
+        let m = merge_stored_kinds(vec![("Person".into(), false)], &s(&["Person"]), &set(&[]));
+        assert_eq!(m, vec![("Person".to_string(), false)]);
     }
 
     #[test]
