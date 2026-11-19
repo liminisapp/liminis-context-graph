@@ -29,8 +29,9 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   behaviour. In hybrid mode `score` is the fused rank score and a new `similarity` field carries the
   cosine where the vector retriever matched; `min_score` floors only the vector retriever.
   `group_ids` and `origins` apply to both retrievers; a missing full-text index falls back to
-  vector-only. **The default stays `vector`** (set `LCG_PASSAGE_SEARCH_MODE=hybrid` to change it)
-  until the v2/v1 retrieval eval has been run on a real embedder. New opt-in eval configurations
+  vector-only. **The default stays `vector`** (set `LCG_PASSAGE_SEARCH_MODE=hybrid` to opt in): the
+  v2/v1 retrieval eval scored hybrid below vector on v2 (overall nDCG@10 0.527 RRF / 0.531 with
+  bonus vs 0.568; paraphrase 0.150 to 0.070), so hybrid is opt-in only (see ADR-0789). New opt-in eval configurations
   `lcg-passages-hybrid-rrf` and `lcg-passages-hybrid-bonus`; `lcg-passages` now pins `mode: "vector"`.
 - **Document mode: `knowledge_process_document` (write) and `knowledge_preview_chunks` (read)
   (#785, ADR-0785, slice 1 of #733).** Send a whole document as a completeness claim; the server

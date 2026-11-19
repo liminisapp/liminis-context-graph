@@ -1,7 +1,7 @@
 # ADR-0789: Hybrid Passage Search — BM25 + Vector with RRF and a Top-Rank Bonus
 
 **Status**: Accepted — hybrid ships opt-in; the default stays `vector` because the v2 eval showed no gain (see the measurement section)
-**Date**: 2026-11-18
+**Date**: 2026-11-18 (measurement section added 2026-11-19)
 **Issue**: #789 (builds on ADR-0629's evidence and similarity floor, ADR-0752's `origins` filter, ADR-0754's eval, ADR-0790's embedder roles)
 
 ## Context
@@ -64,10 +64,16 @@ only dilute. So the change has to be measured per category, not adopted on faith
 ## Measurement and the keep-or-drop record (FR-015)
 
 The maintainer ran `lcg-passages`, `lcg-passages-hybrid-rrf` and `lcg-passages-hybrid-bonus` on head
-`b70eef75` (2026-11-19, PR #798 comment): k = 10, release build, extraction replayed from the Haiku
-4.5 cassettes, Sonnet 4.6 judge. v2 is `meridian-notebook-2` / `meridian-questions-3` (244 questions,
-BGE-base v1.5 sidecar embedder); v1 is `fernhill-notebook-1` (40 questions, `nomic-embed-text`). v2
-labels are still provisional (#788). The full reports are kept locally by the maintainer.
+`b70eef75` (2026-11-19): k = 10, release build (`lcg-build 0.19.1`), extraction replayed from the
+Haiku 4.5 cassettes, Sonnet 4.6 judge. v2 is `meridian-notebook-2` / `meridian-questions-3` (244
+questions, BGE-base v1.5 sidecar embedder); v1 is `fernhill-notebook-1` (40 questions,
+`nomic-embed-text`). v2 labels are still provisional (#788).
+
+**Provenance.** The numbers below are the maintainer's summary, posted as a comment on issue #789 on
+2026-11-19 (the ADR was first written on 2026-11-18, before the run). The underlying `report.md` /
+`report.json` are kept locally by the maintainer and are not committed to this repository, so this
+section is a transcription, not a reproducible artifact; re-run the command below to regenerate it.
+p95 latency was not part of that summary.
 
 nDCG@10 on v2:
 
