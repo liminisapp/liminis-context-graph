@@ -414,31 +414,46 @@ impl GraphSearchStats {
 // ── Pure helpers ──────────────────────────────────────────────────────────────
 
 /// Word n-grams (1..=[`MAX_NGRAM_WORDS`]) of `query`, lowercased, with surrounding punctuation
-/// and a trailing possessive `'s` stripped from each word — the exact-name candidates. Shortest
-/// first, deduplicated, at most [`MAX_NGRAMS`].
+/// stripped from each word — the exact-name candidates. Each n-gram is emitted with a trailing
+/// possessive `'s` stripped from its words ("Cedar Core's supplier" probes "cedar core") and,
+/// when that differs, also as written, so a name that itself contains a possessive ("Alice's
+/// Restaurant", "Women's Health") is still matched exactly. Shortest first, deduplicated, at most
+/// [`MAX_NGRAMS`].
 pub fn query_ngrams(query: &str) -> Vec<String> {
     let is_punct = |c: char| !c.is_alphanumeric();
-    let tokens: Vec<String> = query
+    // (possessive stripped, as written) per word.
+    let tokens: Vec<(String, String)> = query
         .split_whitespace()
         .filter_map(|t| {
-            let t = t.trim_matches(is_punct);
-            let t = t
+            let raw = t.trim_matches(is_punct);
+            let stripped = raw
                 .strip_suffix("'s")
-                .or_else(|| t.strip_suffix("\u{2019}s"))
-                .unwrap_or(t);
-            let t = t.trim_matches(is_punct);
-            (!t.is_empty()).then(|| t.to_lowercase())
+                .or_else(|| raw.strip_suffix("\u{2019}s"))
+                .unwrap_or(raw)
+                .trim_matches(is_punct);
+            (!stripped.is_empty()).then(|| (stripped.to_lowercase(), raw.to_lowercase()))
         })
         .collect();
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for n in 1..=MAX_NGRAM_WORDS {
         for w in tokens.windows(n) {
-            let gram = w.join(" ");
-            if seen.insert(gram.clone()) {
-                out.push(gram);
-                if out.len() == MAX_NGRAMS {
-                    return out;
+            let stripped = w
+                .iter()
+                .map(|(s, _)| s.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let raw = w
+                .iter()
+                .map(|(_, r)| r.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            for gram in [stripped, raw] {
+                if seen.insert(gram.clone()) {
+                    out.push(gram);
+                    if out.len() == MAX_NGRAMS {
+                        return out;
+                    }
                 }
             }
         }
@@ -1799,7 +1814,18 @@ mod tests {
         assert!(grams.contains(&"cedar".to_string()));
         assert!(grams.contains(&"charge".to_string()));
         assert!(grams.contains(&"does cedar core supplier".to_string()));
-        assert!(!grams.iter().any(|g| g.contains('?') || g.contains('\'')));
+        assert!(!grams.iter().any(|g| g.contains('?')));
+        // The possessive is also probed as written, for names that contain one.
+        assert!(grams.contains(&"cedar core's".to_string()), "{grams:?}");
+        assert!(grams.contains(&"core's".to_string()), "{grams:?}");
+        let alice = query_ngrams("Where is Alice's Restaurant?");
+        assert!(
+            alice.contains(&"alice's restaurant".to_string()),
+            "{alice:?}"
+        );
+        assert!(alice.contains(&"alice restaurant".to_string()), "{alice:?}");
+        // A query without possessives yields no extra variants.
+        assert_eq!(query_ngrams("a b"), vec!["a", "b", "a b"]);
         // Shortest first.
         assert_eq!(grams[0], "what");
         assert!(grams
@@ -1813,9 +1839,16 @@ mod tests {
         let long: String = (0..100).map(|i| format!("w{i} ")).collect();
         assert_eq!(query_ngrams(&long).len(), MAX_NGRAMS);
         assert!(query_ngrams("  ?! ").is_empty());
+        // A curly-apostrophe possessive: stripped first, then as written.
         assert_eq!(
             query_ngrams("Fable\u{2019}s price"),
-            vec!["fable", "price", "fable price"]
+            vec![
+                "fable",
+                "fable\u{2019}s",
+                "price",
+                "fable price",
+                "fable\u{2019}s price"
+            ]
         );
     }
 
