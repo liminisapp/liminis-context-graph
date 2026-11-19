@@ -131,6 +131,18 @@ impl EmbedRetryPolicy {
         Ok(p)
     }
 
+    /// One-line startup log description.
+    pub fn describe(&self) -> String {
+        if self.retries == 0 {
+            "replay embedding retry disabled (LCG_REPLAY_EMBED_RETRIES=0)".to_string()
+        } else {
+            format!(
+                "replay embedding retry: up to {} retries, backoff {}ms base, {}ms cap",
+                self.retries, self.base_ms, self.cap_ms
+            )
+        }
+    }
+
     /// Un-jittered backoff for 0-based retry number `attempt`: `min(cap, base * 2^attempt)`.
     pub fn backoff_ceiling(&self, attempt: u32) -> Duration {
         let shifted = self

@@ -1526,6 +1526,21 @@ async fn async_main(
         }
     }
 
+    // Issue #808 / ADR-0808: validate the replay embedding retry settings
+    // (LCG_REPLAY_EMBED_RETRIES / LCG_REPLAY_EMBED_BACKOFF_MS / LCG_REPLAY_EMBED_BACKOFF_MAX_MS)
+    // once at startup, same strict stance as the tuning knobs above: a bad value is fatal and
+    // names itself, never a silent fallback to the default. `replay_opts` re-reads them lazily
+    // when a replay starts, so the value validated here is the value used.
+    match lcg_core::replay_embed_retry::EmbedRetryPolicy::from_env() {
+        Ok(policy) => eprintln!("liminis-context-graph: {}", policy.describe()),
+        Err(e) => {
+            eprintln!("liminis-context-graph: FATAL {e}");
+            drop(telemetry_sink);
+            sink_drain_handle.await.ok();
+            return Err(e.to_string().into());
+        }
+    }
+
     // Issue #742 / ADR-0742: resolve, validate, log and install the per-group write allow-list
     // (`--writable-groups` / `LCG_WRITABLE_GROUPS`) once, before migration and the socket bind.
     // Same strict-env stance as the tuning knobs above: a bad value is fatal, never silently
