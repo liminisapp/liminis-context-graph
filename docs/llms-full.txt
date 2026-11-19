@@ -5176,6 +5176,14 @@ request sent with `explain: true` and its full response appended as one JSON lin
 candidate list, its similarities and why it was or was not seeded. `response.stats.timings_ms`
 gives the time per stage. Unset, requests are unchanged.
 
+**Headroom: per-question oracle.** Every report with two or more configurations, the default run
+included, has this section. For each question it takes the best nDCG@k any configuration in the run
+reached and averages that, overall and per category. It is an upper bound for a composite that
+always picked the right retriever, not a configuration you can run. For each configuration the table
+gives its nDCG@k over the same questions, its `gap` to the oracle and the share `captured`; a
+second table names the best configuration per category. A question no configuration scored
+(negatives) is not counted.
+
 **Why `lcg-entities-facts-rrf` exists (FR-019).** Measured against the graph's potential,
 `lcg-entities-facts` is unfair regardless of any new read: one entity result expands to *every* note
 that mentions it, in note-id order, before the first fact is placed (a popular entity can fill the

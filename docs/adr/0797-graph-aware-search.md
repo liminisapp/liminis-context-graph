@@ -284,11 +284,20 @@ internal.
 ### 8. Eval
 
 `lcg-eval retrieval` gains opt-in configurations, accepted by `--configs` but not in the default
-set (the pattern #789 uses), so the default report, its count tests and every existing ranking are
-unchanged: `lcg-graph`, `lcg-graph-expand`, `lcg-graph-seeds`, and `lcg-entities-facts-rrf`. Every
+set (the pattern #789 uses), so the default configuration set, its count tests and every existing
+ranking are unchanged: `lcg-graph`, `lcg-graph-expand`, `lcg-graph-seeds`, and
+`lcg-entities-facts-rrf`. Every
 `lcg-*` id now routes explicitly; an unknown one is an error rather than silently becoming
 `lcg-entities-facts-belief`. Results report service calls per query (every RPC, the main reads
 included); `lcg-graph`'s model calls come from `stats.embed_calls`, not a constant.
+
+The report gains two sections; every existing section and ranking stays as it was:
+- **Headroom: per-question oracle** (#797 steer). For each question it takes the best nDCG@k any
+  configuration in the run reached. It shows the oracle's mean overall and per category, each
+  configuration's gap to it and the share it captures, and the best configuration per category.
+  It appears in **any** run with two or more configurations, the default run included, because
+  the headroom between retrievers is the point of the measurement, not a graph-only figure.
+- **Graph-aware search**, only when a graph configuration ran.
 
 Research found `lcg-entities-facts` unfair to the graph independently of this read (hub flooding in
 note-id order, empty groups taking turns, `ceil(k/2)` per read with heavy overlap, strict
