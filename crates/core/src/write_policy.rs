@@ -172,6 +172,7 @@ pub const CLASSIFICATION: &[(&str, WriteClass)] = &[
     ("knowledge_get_affected_work", WriteClass::ReadOnly),
     ("knowledge_rebuild_status", WriteClass::ReadOnly),
     ("knowledge_search_passages", WriteClass::ReadOnly),
+    ("knowledge_graph_search", WriteClass::ReadOnly),
     ("knowledge_list_entities", WriteClass::ReadOnly),
     ("knowledge_list_relationships", WriteClass::ReadOnly),
     ("knowledge_get_entity_neighbors", WriteClass::ReadOnly),

@@ -229,6 +229,7 @@ async fn handle(
         "knowledge_recover_full" => handle_knowledge_recover_full(req, state).await,
         "knowledge_close" => Ok(json!({"status": "closed"})),
         "knowledge_search_passages" => handle_search_passages(req, state).await,
+        "knowledge_graph_search" => handle_graph_search(req, state).await,
         "knowledge_list_entities" => handle_list_entities(req, state).await,
         "knowledge_list_relationships" => handle_list_relationships(req, state).await,
         "knowledge_get_entity_neighbors" => handle_get_entity_neighbors(req, state).await,
@@ -2450,6 +2451,84 @@ fn staged_first_stage(
             }
         })
     })
+}
+
+/// Parses a `knowledge_graph_search` request (issue #797, ADR-0797). Differs from the other
+/// belief-aware reads in one deliberate respect: with neither `believed_only` nor `as_of`, it
+/// filters to what is believed now (ADR-0705's anticipated believed-by-default read).
+fn parse_graph_search_params(p: &Value) -> Result<crate::graph_search::GraphSearchParams, Error> {
+    let query = p["query"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| Error::Ipc("query is required and must be non-empty".to_string()))?
+        .to_string();
+    let num_results = match &p["num_results"] {
+        Value::Null => 10,
+        v => v
+            .as_u64()
+            .ok_or_else(|| Error::Ipc("num_results must be a positive integer".to_string()))?
+            as usize,
+    }
+    .clamp(1, crate::graph_search::MAX_NUM_RESULTS);
+    let stages = match &p["stages"] {
+        Value::Null => crate::graph_search::Stages::Full,
+        Value::String(s) => crate::graph_search::Stages::parse(s)?,
+        _ => {
+            return Err(Error::Ipc(
+                "stages must be one of seeds, expand, full".to_string(),
+            ))
+        }
+    };
+    let belief = parse_belief_query(p)?.unwrap_or_else(|| BeliefQuery {
+        filter: true,
+        as_of_us: chrono::Utc::now().timestamp_micros(),
+    });
+    Ok(crate::graph_search::GraphSearchParams {
+        query,
+        group_ids: extract_optional_group_ids_preserve_empty(&p["group_ids"]),
+        num_results,
+        origins: crate::origin::parse_origins_param(p)?,
+        believed_only: belief.filter,
+        as_of_us: belief.as_of_us,
+        stages,
+    })
+}
+
+/// `knowledge_graph_search` (issue #797): one read fusing entity linking, neighbourhood
+/// expansion, belief time, vector and FTS. Holds no lock, like the other search reads.
+async fn handle_graph_search(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let params = parse_graph_search_params(&req.params)?;
+    let result = crate::graph_search::graph_search(
+        load_db(&state)?,
+        Arc::clone(&state.embedder),
+        params.clone(),
+    )
+    .await;
+    let response = match result {
+        Ok(r) => r,
+        Err(e) if is_missing_index_error(&e) => {
+            if !state.indices_built.load(Ordering::Acquire) {
+                build_indices_once(&state).await?;
+                crate::graph_search::graph_search(
+                    load_db(&state)?,
+                    Arc::clone(&state.embedder),
+                    params,
+                )
+                .await
+                .map_err(|e2| {
+                    if is_missing_index_error(&e2) {
+                        Error::Ipc(MISSING_INDEX_USER_MSG.to_string())
+                    } else {
+                        e2
+                    }
+                })?
+            } else {
+                return Err(Error::Ipc(MISSING_INDEX_USER_MSG.to_string()));
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(serde_json::to_value(response).unwrap_or(Value::Null))
 }
 
 async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {

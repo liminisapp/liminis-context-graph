@@ -628,6 +628,57 @@ pub fn registry() -> Vec<ToolSpec> {
             },
         },
         ToolSpec {
+            name: "knowledge_graph_search",
+            description: "Graph-aware search (issue #797): one read that links the query to \
+                           seed entities (exact name, BM25 over names and summaries, name and \
+                           summary vectors), walks up to two hops of relationships scored by \
+                           each fact's relevance to the query with hop decay, and fuses \
+                           supporting passages, plain passage search and the facts themselves \
+                           with RRF. Returns one ranked list of `fact` and `passage` results, \
+                           each with an `evidence` trail (contributing lists, seed entities and \
+                           how they matched, the edge path, supporting episodes with their \
+                           source and origin) plus `seeds` and `stats`. Unlike \
+                           `knowledge_find_relationships`, it is believed-only by default: \
+                           superseded facts are neither returned nor traversed unless \
+                           `believed_only` is false. Derived and answer pages may be cited but \
+                           never corroborate. One query embedding; no LLM call. Read-only.",
+            scope: Scope::Read,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search text (required, non-empty)."},
+                        "num_results": {
+                            "type": "integer", "minimum": 1, "maximum": 100, "default": 10,
+                            "description": "Maximum number of results (clamped 1-100). Never padded."
+                        },
+                        "group_ids": group_ids_prop(),
+                        "origins": origins_prop(),
+                        "believed_only": {
+                            "type": "boolean", "default": true,
+                            "description": "Default true for this read: traverse and return only \
+                                             facts (and passages) believed at `as_of`. False \
+                                             returns no-longer-believed results too, each with \
+                                             its belief/supersession state."
+                        },
+                        "as_of": {
+                            "type": "string", "format": "date-time",
+                            "description": "Evaluate belief as of this time (RFC 3339) instead of \
+                                             now. Belief is transaction time, distinct from \
+                                             `valid_at`/`invalid_at`."
+                        },
+                        "stages": {
+                            "type": "string", "enum": ["seeds", "expand", "full"], "default": "full",
+                            "description": "Ablation switch: `seeds` (passages mentioning the seed \
+                                             entities only), `expand` (adds the walk and the fact \
+                                             list) or `full` (adds plain passage search)."
+                        }
+                    },
+                    "required": ["query"]
+                })
+            },
+        },
+        ToolSpec {
             name: "knowledge_list_entities",
             description: "List entity nodes, optionally scoped to specific group IDs, with \
                            episode provenance attached. Does not include episode `attributes` \
@@ -1943,18 +1994,18 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_54_unique_tools() {
+    fn registry_has_55_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 54);
+        assert_eq!(r.len(), 55);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 54, "tool names must be unique");
+        assert_eq!(names.len(), 55, "tool names must be unique");
     }
 
     #[test]
     fn scope_bucket_sizes_match_fr_004_table() {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
-        assert_eq!(count(Scope::Read), 19);
+        assert_eq!(count(Scope::Read), 20);
         assert_eq!(count(Scope::Write), 18);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 16);
@@ -2336,6 +2387,33 @@ mod tests {
                 "{name} description must explicitly state it does not include episode attributes, got: {desc}"
             );
         }
+    }
+
+    #[test]
+    fn graph_search_is_a_read_tool_with_belief_default_and_stages() {
+        let r = registry();
+        let t = r
+            .iter()
+            .find(|t| t.name == "knowledge_graph_search")
+            .expect("knowledge_graph_search must be registered");
+        assert_eq!(t.scope, Scope::Read);
+        let schema = (t.input_schema)();
+        let props = &schema["properties"];
+        for key in [
+            "query",
+            "num_results",
+            "group_ids",
+            "origins",
+            "believed_only",
+            "as_of",
+            "stages",
+        ] {
+            assert!(props.get(key).is_some(), "missing property {key}");
+        }
+        assert_eq!(props["believed_only"]["default"], true);
+        assert_eq!(props["stages"]["enum"], json!(["seeds", "expand", "full"]));
+        assert_eq!(schema["required"], json!(["query"]));
+        assert!(t.description.contains("believed-only by default"));
     }
 
     #[test]
