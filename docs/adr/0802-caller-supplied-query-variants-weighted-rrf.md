@@ -24,9 +24,12 @@ had nowhere to put rewrites it can write for free.
    query gets the same `mode` (`vector`, or `hybrid` with BM25 + vector fused per query, #789), `group_ids`,
    `origins`, `num_results * 3` probe size and `min_score` floor (on the vector list, as in hybrid mode),
    applied *per query before fusion*, each on its own connection (a scoped thread per query). A floor
-   applied after fusion could surface a variant-only candidate the floor would have removed for the
-   primary; applying the pipeline per query makes "variants never widen what the caller may see" true by
-   construction. The first v2 measurement (below) showed a vector-only variants path is not enough: a
+   applied after fusion could surface a variant-only vector candidate the floor would have removed for
+   the primary; applying the pipeline per query makes "variants never widen what the caller may see" true
+   by construction for `group_ids` and `origins`, and for the cosine floor on the vector list. The
+   floor does not bind BM25: in `hybrid` mode a variant's lexical-only hits (cosine below `min_score` to
+   every query) can appear, exactly as a lexical-only hit can for a single-query hybrid search. That is the
+   mechanism by which a variant's keywords help, not a leak across a scope boundary. The first v2 measurement (below) showed a vector-only variants path is not enough: a
    variant's keywords only pay off when they reach BM25.
 4. **Weighted RRF with a fixed variant budget.** `rrf_fuse_weighted`, `sum(weight / (rank + 60))` with the
    existing UUID tie-break. The primary weighs `PRIMARY_QUERY_WEIGHT = 2.0` (qmd's choice). The variants

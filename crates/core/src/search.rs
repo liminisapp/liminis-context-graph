@@ -797,8 +797,12 @@ fn retrieve_one_query(
 ///
 /// Every query (the primary and each variant) runs the request's **full retrieval pipeline**:
 /// the same `mode` (vector, or BM25 + vector fused), `group_ids`, `origins`, probe size and
-/// `min_score` floor, so a variant can never surface what the primary would not, and in hybrid
-/// mode a variant's keywords reach BM25. The per-query rankings are then fused with weighted RRF:
+/// `min_score` floor. The `group_ids` and `origins` filters therefore bind every query, so a
+/// variant can never surface a passage from a group or origin the primary would exclude. The
+/// `min_score` cosine floor binds each query's **vector** list only: in hybrid mode a variant's
+/// BM25 hits are not subject to it (exactly as in single-query hybrid), which is how a variant's
+/// keywords reach a passage the primary's vector floor would drop. The per-query rankings are
+/// then fused with weighted RRF:
 /// the primary weighs [`PRIMARY_QUERY_WEIGHT`] and the variants share [`VARIANT_BUDGET_WEIGHT`]
 /// equally ([`variant_weight`]). Belief-aware ranking (`belief_aware`) runs **once, on the fused
 /// candidates**, not per variant; the result is then truncated to `num_results`.

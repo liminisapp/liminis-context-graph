@@ -964,8 +964,10 @@ an earlier variant is dropped before searching, so repeating a phrase never boos
 **Execution.** `[query, ...queries]` are embedded in one batched query-role call. Each query then runs the
 request's **whole retrieval pipeline**, concurrently and each on its own connection: the same `mode`
 (`vector`, or `hybrid` with BM25 + vector fused per query, so a variant's keywords reach BM25), `group_ids`,
-`origins`, probe size and `min_score`. A variant therefore can never surface a passage that the filters would
-exclude for `query`. The per-query rankings are then fused with weighted Reciprocal Rank Fusion
+`origins`, probe size and `min_score`. `group_ids` and `origins` therefore bind every query: a variant can never
+surface a passage from a group or origin that would be excluded for `query`. The `min_score` cosine floor binds
+each query's **vector** list only; in `hybrid` mode a variant's BM25 hits are not subject to it (as in
+single-query hybrid), so a variant keyword can add a lexical-only passage whose cosine is below `min_score`. The per-query rankings are then fused with weighted Reciprocal Rank Fusion
 (`weight / (rank + 60)`, UUID tie-break): `query` weighs **2** (`PRIMARY_QUERY_WEIGHT`, the qmd choice) and the
 variants **share a total weight of 1** (`VARIANT_BUDGET_WEIGHT`, split equally: 1 each for one variant, 0.2
 each for five). However many variants there are, `query` keeps at least **2/3** of the weight, so variants
