@@ -158,7 +158,12 @@ RRF (k = 60) over three lists, each capped at `max(3k, 30)`, keyed `p:<episode>`
   `episode_uuids`) with the fact's path score, and MENTIONS episodes of the seeds and reached entities
   with the entity's score. Per episode the **maximum** source score is kept — never a sum, so a
   restatement adds no mass — then multiplied by the passage's own cosine to the query, so a hub
-  entity's many mentions do not flood the list. At most 300 candidates are scored.
+  entity's many mentions do not flood the list. At most 300 candidates are scored. Episodes
+  that can never enter the list — not live, outside `origins`, or derived / answer — are dropped
+  **before** that cap, so they cannot use up slots that live primary passages would fill.
+  Fact-produced episodes are checked exactly from the rows expansion already fetched. Mention
+  episodes are checked on origin and supersession, which the mention lookup returns. A pending
+  revision or a not-yet-ingested mention is only caught after the cap, and that is rare.
 
   **Known cost, open until v2 latency is measured: the mention lookup is unbounded.** The 300 cap
   applies after one `MENTIONS` lookup that returns every mention of every reached entity (up to the

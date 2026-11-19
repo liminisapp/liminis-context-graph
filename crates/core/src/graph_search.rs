@@ -527,6 +527,31 @@ struct FactHit {
 struct EpInfo {
     source_description: String,
     origin: Origin,
+    /// Whether the episode may enter list (a) ([`supports_list_a`]), known exactly because the
+    /// full row was fetched.
+    admits_support: bool,
+}
+
+/// Whether an episode may enter list (a), the supporting passages: live at `t` when filtering,
+/// within `origins`, and corroborating (derived / answer content never adds rank, ADR-0752).
+fn supports_list_a(ep: &EpisodePassage, p: &GraphSearchParams, t: i64) -> bool {
+    let live_ok = !p.believed_only || episode_live_at(ep, t);
+    let origin_ok = p.origins.as_ref().is_none_or(|f| f.contains(&ep.origin));
+    live_ok && origin_ok && ep.origin.is_corroborating()
+}
+
+/// [`supports_list_a`]'s necessary conditions, checkable from a mention row's origin info alone:
+/// origin and supersession, but not a pending revision or `ingested_at`. Used to drop mention
+/// episodes that can never enter list (a) **before** the candidate cap, so they cannot crowd out
+/// passages that would. Never rejects an episode the exact check would keep.
+fn may_support_list_a(
+    info: &crate::origin::EpisodeOriginInfo,
+    p: &GraphSearchParams,
+    t: i64,
+) -> bool {
+    let live_ok = !p.believed_only || info.is_live(t);
+    let origin_ok = p.origins.as_ref().is_none_or(|f| f.contains(&info.origin));
+    live_ok && origin_ok && info.origin.is_corroborating()
 }
 
 #[derive(Clone)]
@@ -650,7 +675,10 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
         .collect();
     if !mention_entities.is_empty() {
         st.db_queries += 1;
-        for (entity, ep, _) in conn.entity_mention_origins(&mention_entities)? {
+        for (entity, ep, info) in conn.entity_mention_origins(&mention_entities)? {
+            if !may_support_list_a(&info, p, t) {
+                continue;
+            }
             let r = &reach[&entity];
             offer(
                 &mut sources,
@@ -666,7 +694,12 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
             );
         }
     }
-    let mut cand: Vec<(&String, &Source)> = sources.iter().collect();
+    // Fact-produced episodes were fetched during expansion, so their admission is known exactly:
+    // drop the ones that cannot enter list (a) before the cap, not after it.
+    let mut cand: Vec<(&String, &Source)> = sources
+        .iter()
+        .filter(|(ep, _)| ep_info.get(*ep).is_none_or(|i| i.admits_support))
+        .collect();
     cand.sort_by(|a, b| by_score_then_key((a.1.score, a.0), (b.1.score, b.0)));
     if cand.len() > PASSAGE_CANDIDATE_CAP {
         cand.truncate(PASSAGE_CANDIDATE_CAP);
@@ -683,17 +716,17 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
     let mut passages: HashMap<String, (EpisodePassage, f64)> = HashMap::new();
     let mut list_support: Vec<(String, f64)> = Vec::new();
     for ep in fetched {
+        let admits_support = supports_list_a(&ep, p, t);
         ep_info.insert(
             ep.passage.uuid.clone(),
             EpInfo {
                 source_description: ep.passage.source_description.clone(),
                 origin: ep.origin,
+                admits_support,
             },
         );
-        let live_ok = !p.believed_only || episode_live_at(&ep, t);
-        let origin_ok = p.origins.as_ref().is_none_or(|f| f.contains(&ep.origin));
         // Derived / answer content never corroborates (ADR-0752), so it never adds rank here.
-        if !(live_ok && origin_ok && ep.origin.is_corroborating()) {
+        if !admits_support {
             continue;
         }
         let sim = relevance(emb, &ep.content_embedding);
@@ -744,6 +777,7 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
                 EpInfo {
                     source_description: h.source_description.clone(),
                     origin: ep.origin,
+                    admits_support: supports_list_a(ep, p, t),
                 },
             );
             list_plain.push((format!("p:{}", h.uuid), h.score));
@@ -1224,6 +1258,7 @@ fn expand(
                 EpInfo {
                     source_description: e.passage.source_description.clone(),
                     origin: e.origin,
+                    admits_support: supports_list_a(e, p, t),
                 },
             );
         }
@@ -1683,6 +1718,80 @@ mod tests {
         assert_eq!(b.state, "believed");
         assert!(b.believed);
         assert!(b.supersession.is_some());
+    }
+
+    #[test]
+    fn pre_cap_mention_filter_never_rejects_an_admissible_passage() {
+        let params = |believed_only: bool, origins: Option<Vec<Origin>>| GraphSearchParams {
+            query: "q".into(),
+            group_ids: None,
+            num_results: 10,
+            origins,
+            believed_only,
+            as_of_us: 0,
+            stages: Stages::Full,
+        };
+        let all = [
+            Origin::Primary,
+            Origin::External,
+            Origin::Derived,
+            Origin::Answer,
+        ];
+        let mut rejected = 0;
+        for believed_only in [true, false] {
+            for filter in [None, Some(vec![Origin::Primary])] {
+                let p = params(believed_only, filter);
+                for origin in all {
+                    for superseded in [None, Some(20)] {
+                        for ingested in [None, Some(10)] {
+                            for pending in [false, true] {
+                                for t in [5, 15, 25] {
+                                    let mut e = ep(superseded, ingested, pending);
+                                    e.origin = origin;
+                                    let info = crate::origin::EpisodeOriginInfo {
+                                        origin,
+                                        doc_id: None,
+                                        superseded_at_us: superseded,
+                                        group_id: "g".into(),
+                                    };
+                                    let exact = supports_list_a(&e, &p, t);
+                                    let pre = may_support_list_a(&info, &p, t);
+                                    assert!(
+                                        !exact || pre,
+                                        "pre-filter dropped an admissible passage: \
+                                         {origin:?} sup={superseded:?} t={t} bo={believed_only}"
+                                    );
+                                    rejected += usize::from(!pre);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(rejected > 0, "the pre-filter must actually drop something");
+        // The cases the finding names: derived, answer, out-of-filter and superseded mentions.
+        let p = params(true, Some(vec![Origin::Primary]));
+        let info = |origin, superseded_at_us| crate::origin::EpisodeOriginInfo {
+            origin,
+            doc_id: None,
+            superseded_at_us,
+            group_id: "g".into(),
+        };
+        assert!(may_support_list_a(&info(Origin::Primary, None), &p, 15));
+        assert!(!may_support_list_a(&info(Origin::Derived, None), &p, 15));
+        assert!(!may_support_list_a(&info(Origin::External, None), &p, 15));
+        assert!(!may_support_list_a(
+            &info(Origin::Primary, Some(10)),
+            &p,
+            15
+        ));
+        let unfiltered = params(true, None);
+        assert!(!may_support_list_a(
+            &info(Origin::Answer, None),
+            &unfiltered,
+            15
+        ));
     }
 
     #[test]
