@@ -519,6 +519,7 @@ embedding and **no** LLM call. It is opt-in: no existing read changes.
 | `believed_only` | **true** | **Different from `knowledge_find_relationships`, where belief is opt-in.** By default the read traverses and returns only facts believed now, and only passages live now. `false` returns no-longer-believed results too, each with its belief state. |
 | `as_of` | now | Evaluate belief at this instant (RFC 3339); same meaning as on the other belief-aware reads (ADR-0705/0707). A document superseded with a future effective date stays believed until then. |
 | `stages` | `full` | Ablation switch: `seeds`, `expand` or `full` (below). |
+| `explain` | `false` | Also return `seed_trace`: every seed candidate, its rank in each candidate list, its similarities, whether it was seeded and why. A diagnostic; the results are unchanged. |
 
 **Pipeline**
 
@@ -526,7 +527,11 @@ embedding and **no** LLM call. It is opt-in: no existing read changes.
    exact `lookup_key`), BM25 over entity names and summaries, the name vector and the summary
    vector — fused with RRF. Because a vector index always fills its top-k (#613, #629), a candidate
    is admitted only on real evidence: an exact-name hit, a top-10 BM25 hit, or a vector similarity
-   of at least 0.5 that is within 0.08 of the best candidate's. At most 5 seeds are kept. There is no
+   of at least 0.5 that is within 0.08 of the best candidate's. At most 5 seeds are kept this way.
+   Up to 3 more come from the top of the summary-vector list, which is how a description that names
+   nothing ("the rule covering new-hire induction") reaches its entity. Such a candidate must be
+   within 0.03 of the best summary similarity and at least 0.03 above that list's median. Both
+   tests are relative, so a query that matches no summary well (a flat list) adds none. There is no
    separate fuzzy matcher: near-miss names are covered by BM25 and the name vector. When nothing is
    admitted the response has `stats.no_seeds: true` and the results are plain passage search.
 2. **Expansion** (`expand`, `full`). Up to two hops from the seeds, one batched lookup per hop. Each
@@ -541,10 +546,12 @@ embedding and **no** LLM call. It is opt-in: no existing read changes.
    superseded edge. Legacy and warranted edges are believed and traversable, but have no
    supporting passage.
 3. **Fusion.** RRF over three lists: `supporting` — passages that produced the selected facts or
-   mention the seed and reached entities, scored by their path score times their own similarity to
-   the query; `passages` — plain passage search (`full` only; vector, the
-   `knowledge_search_passages` default — hybrid stays opt-in, see ADR-0789 — reported as
-   `stats.passage_mode`); and `facts` — the selected facts by path
+   mention the seed and reached entities, scored by `path_score^0.25 ×` their own similarity to
+   the query, so a passage's own relevance decides and the path only tilts it; `passages` — plain
+   passage search (`full` only): `knowledge_search_passages` with `mode: "vector"` and
+   `belief_aware: true`, evaluated at `as_of`, reported as `stats.passage_mode: "vector_belief"`. A
+   derived page ranks below the primary note it cites, and a superseded passage below its
+   successor; hybrid stays unused here, see ADR-0789. And `facts` — the selected facts by path
    score. `seeds` fuses only the `supporting` list restricted to passages mentioning a seed.
 
 **Derived content cites but never corroborates** (ADR-0752). A `derived` or `answer` passage never
@@ -576,10 +583,18 @@ search.
    }}],
  "count": 1,
  "seeds": [...],
+ "seed_trace": [...],                   // only with explain: true
  "stats": {"stages", "passage_mode", "believed_only", "as_of", "embed_calls": 1, "db_queries",
            "seed_candidates", "seeds", "expanded_edges", "hops", "truncated", "truncations": [{"cap", "limit"}],
-           "no_seeds"}}
+           "no_seeds", "timings_ms": {"embed", "seeds", "expand", "supporting", "passages", "fusion", "total"}}}
 ```
+
+`stats.timings_ms` is wall-clock time per stage, in milliseconds. It is the one part of the response
+that differs between two identical requests; the results themselves are deterministic. A
+`seed_trace` entry is `{uuid, name, kind, rrf_score, exact_name, bm25_rank?, name_vector_rank?,
+summary_vector_rank?, name_similarity?, summary_similarity?, seeded, reason}`. Ranks are 1-based.
+`reason` is `exact_name`, `bm25_rank`, `vector` or `summary_vector` for a seed, and `no_evidence`,
+`merged`, `no_row`, `origin_filter` or `seed_cap` otherwise.
 
 A result returned only by plain passage search has no `seeds`, `path` or `via`. A fact or passage
 reached several ways appears once and keeps its best path (`alternate_paths` counts the others).

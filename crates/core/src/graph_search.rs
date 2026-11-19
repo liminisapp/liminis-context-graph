@@ -1480,7 +1480,7 @@ fn fetch_frontier(
     cap: usize,
     st: &mut GraphSearchStats,
 ) -> Result<Vec<FrontierEdge>, Error> {
-    st.db_queries += 3; // two directions + one scoring query
+    st.db_queries += 2 + usize::from(!emb.is_empty()); // two directions + one scoring query
     let (rows, truncated) = conn.expand_frontier_scored(frontier, gids, cap, emb)?;
     if !truncated {
         return Ok(rows);
@@ -1492,7 +1492,7 @@ fn fetch_frontier(
     let share = (cap / frontier.len()).max(1);
     let mut out = Vec::new();
     for entity in frontier {
-        st.db_queries += 3; // two directions + one scoring query
+        st.db_queries += 2 + usize::from(!emb.is_empty()); // two directions + one scoring query
         let (r, cut) =
             conn.expand_frontier_scored(std::slice::from_ref(entity), gids, share, emb)?;
         if cut {

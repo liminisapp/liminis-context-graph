@@ -55,9 +55,12 @@ Seven additive `Conn` primitives were needed:
   used only when the caller gives no `group_ids`.
 - `expand_frontier` — every fact incident to a set of entities, both directions, as two batched
   queries per hop (O(hops), not O(seeds) like `get_entity_neighbors`), returning `episodes`,
-  `warrant`, `fact_embedding`, and the far endpoint's name, group and tombstone status.
+  `warrant`, and the far endpoint's name, group and tombstone status. Its scored form
+  (`expand_frontier_scored`) ships no embedding: one further query per hop, `fact_similarities`,
+  computes every fact's cosine in lbug (§4).
 - `get_episode_passages` — passage fields plus origin, the full supersession/revision state,
-  `ingested_at` and optionally `content_embedding`.
+  `ingested_at` and optionally `content_embedding`. Its scored form (`get_episode_passages_scored`)
+  returns the passage's cosine to the query instead of the embedding.
 - `vector_search_episodic_probed` — the passage ANN query with an explicit probe size, so list (b)
   can oversample under `group_ids` (§6).
 - `entity_mention_counts` and `entity_mentions_ranked` — the per-entity mention bound (§6): a count
@@ -93,6 +96,30 @@ There is **no fuzzy name matcher**: near-miss names are covered by BM25 and the 
 vector list is reported in a seed's `matched` only at or above the 0.5 floor, so filler is never
 presented as evidence.
 
+**Summary-vector seeds, on relative evidence (#797 steer, 2026-11-19).** The first v2 run scored
+`lcg-graph-seeds` at 0.000 on paraphrase. A seed trace (`explain: true`, below) over the 40
+paraphrase questions showed why. The entity a question describes was a candidate in 34 of them,
+usually near the top of the summary-vector list (rank ≤ 5 in 14, ≤ 10 in 21). In 3 it was seeded
+but its note still ranked low (list (a) scoring, §6). In the other 31 it was rejected:
+- **By the cap** in 19 questions. An entity matched only by its summary sits in one list, so its
+  fused score is low (≈ 1/62). Generic concept entities ("induction sessions", "billing") that also
+  match BM25 on common query words filled all five slots.
+- **By the vector margin** in 12. That margin is measured against the best similarity of *either*
+  vector list, and concept entities' *name* vectors set it.
+
+So up to **3** more seeds are taken in summary-list order, beyond the 5, when the candidate's
+summary similarity is both within **0.03** of the best summary similarity *and* at least 0.03 above
+that list's median. Both tests are relative to the list, never an absolute cosine floor, whose right
+value depends on the embedder. The median test is what keeps ANN filler out (#613): a query that
+matches no summary well gives a flat list, whose best barely clears the median, so nothing
+qualifies. Such a seed reports `summary_vector` in `matched` and in the trace.
+
+**`explain: true`** adds `seed_trace` to the response: every fused candidate with its rank in each
+list, its similarities, whether it was seeded, and why (`exact_name`, `bm25_rank`, `vector`,
+`summary_vector`; or `no_evidence`, `merged`, `no_row`, `origin_filter`, `seed_cap`). It is a
+diagnostic and changes nothing else. The eval sets it, and appends each response to a JSONL file,
+when `LCG_EVAL_GRAPH_TRACE` names one.
+
 **Known trade-off, open until v2 is measured: generic one-word names.** Every query word is probed
 as an exact name, and an exact hit is admitted unconditionally, so an entity literally named
 `Status`, `Price` or `Notes` is seeded by "what is the price status". Multi-word exact hits rank
@@ -111,9 +138,15 @@ pattern: belief is deliberately evaluated in Rust (ADR-0705), pruning between ho
 belief state, and a four-step variable-length pattern through the fact node is unverified on lbug.
 
 - **Edge relevance** = `max(0, cos(query, fact_embedding))` + `0.15 × (1 − r/100)` when the edge is at
-  rank r of one global fact BM25 list (limit 100). Cosine is computed in Rust from the fetched
-  embedding (deterministic; `array_cosine_similarity` is unverified on lbug). Relation-type priors are
-  rejected: v2 has 1,257 free-form relation types, and new stored data is out of scope.
+  rank r of one global fact BM25 list (limit 100). The cosine is computed in lbug
+  (`array_cosine_similarity`, the query vector bound and cast once per hop), not from shipped
+  embeddings. Profiling on v2 showed the cost of each frontier query was binding the 768-float
+  vector, not the rows. So the two frontier queries carry no vector, and one scoring query per hop
+  scores them all. That cut expansion from 65 ms to 39 ms at p50 with identical rankings. lbug fails
+  the whole query, rather than yielding `NULL`, on a vector of the wrong length, so on any error the
+  primitive falls back to fetching the embeddings and scoring in Rust: same rows, same scores, only
+  slower. Relation-type priors are rejected: v2 has 1,257 free-form relation types, and new stored
+  data is out of scope.
 - **Path score** = root seed score × **0.6**^(hop − 1) × relevance of the *last* edge. Multiplying
   relevances along the path was rejected: the bridging edge of a multi-hop question ("depends on") is
   usually weakly related to the question, and the beam already gates it.
@@ -167,8 +200,12 @@ RRF (k = 60) over three lists, each capped at `max(3k, 30)`, keyed `p:<episode>`
 - **(a) `supporting`** — producing episodes of the selected facts (`rn.episodes` only, never ADR-0012
   `episode_uuids`) with the fact's path score, and MENTIONS episodes of the seeds and reached entities
   with the entity's score. Per episode the **maximum** source score is kept — never a sum, so a
-  restatement adds no mass — then multiplied by the passage's own cosine to the query, so a hub
-  entity's many mentions do not flood the list. At most 300 candidates are scored. Episodes
+  restatement adds no mass. A passage scores `source^0.25 × cosine(passage, query)`, so a hub
+  entity's many mentions do not flood the list. The exponent was **1** until the #797 steer: the v2
+  trace showed a summary-matched seed (source ≈ 0.33) whose own note had the highest cosine of all
+  candidates, yet ranked 6th–15th behind a generic top seed's digest mentions. At 0.25 the
+  passage's own relevance decides and the path only tilts it. The cosine is computed in lbug
+  (`get_episode_passages_scored`). At most 300 candidates are scored. Episodes
   that can never enter the list — not live, outside `origins`, or derived / answer — are dropped
   **before** that cap, so they cannot use up slots that live primary passages would fill.
   Fact-produced episodes are checked exactly from the rows expansion already fetched. Mention
@@ -189,9 +226,13 @@ RRF (k = 60) over three lists, each capped at `max(3k, 30)`, keyed `p:<episode>`
   survives. Both cuts are reported in `stats.truncations` (`mentions_per_entity`, `mention_hubs`).
   The ranked query's supersession bound is rounded down to the millisecond, so it
   can only keep an episode the exact liveness check later drops.
-- **(b) `passages`** — plain vector passage search with the same embedding, over-drawn 3×, liveness
-  applied. Vector, `knowledge_search_passages`' default mode (`stats.passage_mode`): #789's hybrid
-  mode has landed but is opt-in, measured below vector on v2 (ADR-0789). The group
+- **(b) `passages`** — plain vector passage search with the same embedding, over-drawn 3×, then
+  #789's **belief-aware ranking** evaluated at `as_of` (`knowledge_search_passages` with
+  `mode: "vector", belief_aware: true`, the best passage list measured on v2; `stats.passage_mode`
+  is `vector_belief`): a derived page ranks below the primary note it cites, a superseded passage
+  below its successor. It runs over the whole over-drawn set before the liveness filter and the
+  cut, so a demoted passage is replaced rather than reshuffled. #789's hybrid mode stays unused here:
+  it measured below vector on v2 (ADR-0789). The group
   and origin filters run after the ANN probe. So whenever `group_ids` or `origins` is set, the
   probe is oversampled 10×: otherwise, in a multi-group database, other groups' passages crowd the
   requested group's out of the nearest neighbours and the list comes back short or empty. The
@@ -217,7 +258,10 @@ Every result carries `evidence`: the contributing lists with rank and raw score;
 results the root seed (with match kinds and raw BM25/similarities), the ordered path in traversal
 direction, supporting episodes (source and origin), `via` (fact or mention) and `warrant`. A result
 from list (b) only has no seeds or path. `stats` reports the stage, passage mode, belief settings,
-`embed_calls` (1), `db_queries`, candidate/seed/edge counts, hops, truncations and `no_seeds`.
+`embed_calls` (1), `db_queries`, candidate/seed/edge counts, hops, truncations, `no_seeds`, and
+`timings_ms` — wall-clock milliseconds for `embed`, `seeds`, `expand`, `supporting`, `passages`,
+`fusion` and `total`. Timings are reported, never ranked on, so they are the one part of the
+response that differs between two identical requests.
 
 Every sort breaks ties by key or uuid; hash-map iteration never reaches output order.
 
@@ -248,9 +292,16 @@ difference.
   cite.
 - The default differs from `knowledge_find_relationships` (believed-only); the tool description and
   the IPC reference say so.
-- Cost is one embedding plus roughly 20–25 lbug lookups, all on one connection in one blocking task;
-  the caps bound the worst case. Latency is measured by the eval, not asserted here. If p50 exceeds
-  the budget, the first levers are the frontier row cap and the supporting-candidate cap.
+- Cost is one embedding plus roughly 25–30 lbug lookups, all on one connection in one blocking task;
+  the caps bound the worst case. Measured on the v2 graph (Apple silicon, the BGE sidecar shared
+  with another run), `full` p50 went from 143 ms to 103 ms with the in-lbug scoring. That is just
+  over the 100 ms target: embed 22, seeds 10, expand 39, supporting 23, passages 7. Where the time
+  remains:
+  - every query that binds the query vector costs several milliseconds;
+  - the hub mention queries bind it once each.
+
+  The beam size barely matters (5 vs 10: 109 vs 115 ms before the scoring change). Batching the hub
+  mention queries into one is the next lever, at the cost of loading all of a hub's mention rows.
 - The success criteria (SC-001–SC-007) need a run on v2 with a real embedder; they are not provable
   in unit tests, which use hand-chosen vectors.
 - #789 has merged with hybrid passage search opt-in, because it scored below vector on v2

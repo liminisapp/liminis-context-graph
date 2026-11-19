@@ -672,6 +672,12 @@ pub fn registry() -> Vec<ToolSpec> {
                             "description": "Ablation switch: `seeds` (passages mentioning the seed \
                                              entities only), `expand` (adds the walk and the fact \
                                              list) or `full` (adds plain passage search)."
+                        },
+                        "explain": {
+                            "type": "boolean", "default": false,
+                            "description": "Also return `seed_trace`: every seed candidate, its \
+                                             rank in each candidate list and why it was or was \
+                                             not seeded. Diagnostic; does not change the results."
                         }
                     },
                     "required": ["query"]
@@ -2407,9 +2413,11 @@ mod tests {
             "believed_only",
             "as_of",
             "stages",
+            "explain",
         ] {
             assert!(props.get(key).is_some(), "missing property {key}");
         }
+        assert_eq!(props["explain"]["default"], false);
         assert_eq!(props["believed_only"]["default"], true);
         assert_eq!(props["stages"]["enum"], json!(["seeds", "expand", "full"]));
         assert_eq!(schema["required"], json!(["query"]));

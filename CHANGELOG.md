@@ -108,12 +108,16 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `knowledge_find_relationships` — with `believed_only` / `as_of` meaning what they mean elsewhere;
   `origins` applies to every stage, and derived pages cite but never corroborate. One query
   embedding, no LLM call; a `stages` parameter (`seeds` / `expand` / `full`) switches stages off for
-  ablation. The MCP registry grows to 55 tools (read scope: 20). No existing read, schema or WAL
-  format changes.
+  ablation. An entity described only by its role is seeded through its summary on relative
+  evidence. The plain passage list is #789's belief-aware vector search. `explain: true` returns a
+  `seed_trace` of every seed candidate and why it was or was not seeded, and `stats.timings_ms`
+  gives the time per stage. The MCP registry grows to 55 tools (read scope: 20). No existing read,
+  schema or WAL format changes.
 - **Retrieval eval: graph configurations (#797).** `lcg-eval retrieval --configs` accepts the opt-in
   `lcg-graph`, `lcg-graph-seeds`, `lcg-graph-expand` and `lcg-entities-facts-rrf` (a fairer merge of
   the entity and fact reads); the default run is unchanged. The cost table gains service calls per
-  query.
+  query. `LCG_EVAL_GRAPH_TRACE=<file>` appends every graph response, with its seed trace, to a JSONL
+  file.
 
 - **Document mode: `knowledge_process_document` (write) and `knowledge_preview_chunks` (read)
   (#785, ADR-0785, slice 1 of #733).** Send a whole document as a completeness claim; the server

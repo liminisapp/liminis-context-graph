@@ -75,9 +75,16 @@ configuration's ranking are unchanged.
 
 Read the three `lcg-graph*` rows together: `seeds` → `expand` is what traversal adds, `expand` →
 `full` is what fusing in plain passage search adds. The plain-passage list inside `lcg-graph` is
-**vector-only**, `knowledge_search_passages`' default mode: hybrid passage search (#789) is opt-in
-and scored below vector on v2. The report says which mode ran. The local
-reranker (#796) has not landed, so the report states it was not measured.
+`knowledge_search_passages` with `mode: "vector"` and `belief_aware: true` (#789), the best passage
+list measured on v2. Hybrid passage search scored below vector on v2 and is not used. Each response
+reports the mode as `stats.passage_mode` (`vector_belief`). The local reranker (#796) has not
+landed, so the report states it was not measured.
+
+**Diagnosing seed linking.** Set `LCG_EVAL_GRAPH_TRACE=<file.jsonl>` to have every `lcg-graph*`
+request sent with `explain: true` and its full response appended as one JSON line,
+`{config, query, response}`. `response.seed_trace` lists every seed candidate with its rank in each
+candidate list, its similarities and why it was or was not seeded. `response.stats.timings_ms`
+gives the time per stage. Unset, requests are unchanged.
 
 **Why `lcg-entities-facts-rrf` exists (FR-019).** Measured against the graph's potential,
 `lcg-entities-facts` is unfair regardless of any new read: one entity result expands to *every* note
