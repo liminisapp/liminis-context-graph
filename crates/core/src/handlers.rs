@@ -4251,6 +4251,8 @@ async fn handle_rebuild_from_wal(
                         batch_size: None,
                         log_interval_override: None,
                         progress_log_fn: None,
+                        // #808: record embedder-failure zero-vector rows for this group.
+                        group_id: Some(gid_c.clone()),
                         ..ReplayOptions::new(
                             embedder_ctx.recompute_fn_via_handle(),
                             state_c.embedder.dim(),
@@ -4725,6 +4727,8 @@ async fn handle_rebuild_from_wal(
                         batch_size: None,
                         log_interval_override: None,
                         progress_log_fn: None,
+                        // #808: record embedder-failure zero-vector rows for this group.
+                        group_id: Some(bg_gid.clone()),
                         ..ReplayOptions::new(
                             embedder_ctx.recompute_fn_via_handle(),
                             bg_state.embedder.dim(),
@@ -6967,10 +6971,15 @@ async fn recover_rebuild_from_workspace_wal(
                 // value stored in the WAL, the same way every other replay call site does.
                 let stats = crate::replay::WalReplayer::new(&dir).replay_opts(
                     &conn,
-                    crate::replay::ReplayOptions::new(
-                        embedder_ctx.recompute_fn_via_handle(),
-                        embedding_dim,
-                    ),
+                    crate::replay::ReplayOptions {
+                        // #808: the DB was just recreated, so the record starts empty and holds
+                        // only this recovery's own failures.
+                        group_id: Some(gid.clone()),
+                        ..crate::replay::ReplayOptions::new(
+                            embedder_ctx.recompute_fn_via_handle(),
+                            embedding_dim,
+                        )
+                    },
                 )?;
                 if let Some(seq) = stats.last_committed_seq {
                     let generation = crate::wal_generation::read_generation(&dir);

@@ -524,3 +524,49 @@ fn invalid_retry_env_is_a_config_error_naming_the_variable() {
     .unwrap_err();
     assert!(matches!(&err, Error::Config(m) if m.contains("LCG_REPLAY_EMBED_RETRIES")));
 }
+
+// FR-010: a full rebuild resets the group's record — the clear-for-rebuild purge drops it, so a
+// subsequent replay records only its own failures; other groups' records are untouched.
+#[test]
+fn purge_for_rebuild_resets_only_that_groups_record() {
+    let fx = Fixture::new();
+    write_wal(&fx.wal_dir, &n_rows(5, |i| format!("entity-{i}")));
+    let db = fx.open();
+    let failing: RecomputeEmbedFn = Box::new(|_t: &[&str]| Err(status_err("400 Bad Request")));
+    replay(&fx, &db, failing, fast_policy(0), 64, 0);
+    let conn = db.connect().unwrap();
+    // A different group's pre-existing record, written through the replay path itself.
+    let other: RecomputeEmbedFn = Box::new(|_t: &[&str]| Err(status_err("400 Bad Request")));
+    WalReplayer::new(&fx.wal_dir)
+        .replay_opts(
+            &conn,
+            ReplayOptions {
+                from_seq: 4,
+                embed_window_size: Some(1),
+                embed_retry: Some(fast_policy(0)),
+                group_id: Some("other".to_string()),
+                ..ReplayOptions::new(other, DIM)
+            },
+        )
+        .unwrap();
+    // (u4 was already recorded under GROUP; "other" now holds its own entry for it too.)
+    assert_eq!(conn.zero_vector_counts(GROUP).unwrap().total(), 5);
+
+    lcg_core::group_purge::purge_groups(&conn, &[GROUP], "2026-01-01T00:00:00Z", false).unwrap();
+    assert_eq!(conn.zero_vector_counts(GROUP).unwrap().total(), 0);
+    assert_eq!(conn.zero_vector_counts("other").unwrap().total(), 1);
+
+    // The rebuild's own (smaller) failure set is all that remains.
+    let one_bad: RecomputeEmbedFn = Box::new(|t: &[&str]| {
+        if t.contains(&"entity-2") {
+            Err(status_err("400 Bad Request"))
+        } else {
+            Ok(t.iter().map(|x| real_vec(x)).collect())
+        }
+    });
+    replay(&fx, &db, one_bad, fast_policy(0), 1, 0);
+    assert_eq!(
+        conn.list_zero_vector_rows(GROUP, None).unwrap(),
+        vec![(ZeroKind::Name, "u2".to_string())]
+    );
+}

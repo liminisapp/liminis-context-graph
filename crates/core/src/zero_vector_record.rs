@@ -279,6 +279,16 @@ impl Conn<'_> {
         Ok(removed)
     }
 
+    /// Whether the record table exists (probed before a transaction, where a failed statement
+    /// would abort the whole transaction).
+    pub(crate) fn has_zero_vector_table(&self) -> bool {
+        self.query_params(
+            "MATCH (z:EmbeddingZeroRow) RETURN z.id LIMIT 0",
+            serde_json::json!({}),
+        )
+        .is_ok()
+    }
+
     /// Drops every entry for `group_id` (a full rebuild/purge resets the record). Unrecorded.
     pub fn clear_zero_vector_rows(&self, group_id: &str) -> Result<(), Error> {
         match self.exec_params_unrecorded(
