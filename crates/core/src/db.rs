@@ -4605,7 +4605,8 @@ impl<'db> Conn<'db> {
     /// `group_ids: Some(gids)` keeps only facts whose `rn.group_id` **and** far endpoint are in
     /// `gids`, so traversal never leaves the requested groups through a cross-group edge.
     /// Each direction is capped at `row_cap` rows ordered by `rn.uuid`; the returned flag is
-    /// `true` when either direction hit the cap (a truncated walk).
+    /// `true` only when either direction had more than `row_cap` rows (a truncated walk). A
+    /// self-loop fact is returned once, not once per direction.
     pub fn expand_frontier(
         &self,
         frontier: &[String],
@@ -4632,20 +4633,27 @@ impl<'db> Conn<'db> {
             "MATCH (n:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(c:Entity) \
              WHERE c.uuid IN $frontier {gid_filter} {ret}"
         );
-        let mut params = serde_json::json!({ "frontier": frontier, "cap": row_cap as i64 });
+        // Fetch one row past the cap so "exactly `row_cap` rows" is not mistaken for a cut.
+        let mut params = serde_json::json!({ "frontier": frontier, "cap": row_cap as i64 + 1 });
         if let Some(gids) = group_ids {
             params["gids"] = serde_json::json!(gids);
         }
         let mut out = Vec::new();
         let mut truncated = false;
         for (sql, outgoing) in [(&out_sql, true), (&in_sql, false)] {
-            let rows = self.query_params(sql, params.clone())?;
-            if rows.len() >= row_cap {
+            let mut rows = self.query_params(sql, params.clone())?;
+            if rows.len() > row_cap {
                 truncated = true;
+                rows.truncate(row_cap);
             }
             for r in rows {
                 let from_uuid = value_as_string(&r[14]);
                 let far_uuid = value_as_string(&r[15]);
+                // A self-loop (`c` = `n`) matches both directions; keep only the outgoing row so
+                // the fact is not seen twice within one hop.
+                if !outgoing && from_uuid == far_uuid {
+                    continue;
+                }
                 let (source, target) = if outgoing {
                     (from_uuid.clone(), far_uuid.clone())
                 } else {
@@ -7728,6 +7736,34 @@ mod graph_search_primitive_tests {
         assert!(truncated);
         assert_eq!(rows.len(), 2, "one row per direction");
         assert!(c.expand_frontier(&[], None, 10).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn expand_frontier_exactly_at_the_cap_is_not_a_cut() {
+        let (_d, db) = graph();
+        let c = db.connect().unwrap();
+        // `a` has exactly three outgoing facts (e1, e3, e4) and one incoming (e2).
+        let (rows, truncated) = c.expand_frontier(&["a".into()], None, 3).unwrap();
+        assert!(
+            !truncated,
+            "three rows under a cap of three were all there was"
+        );
+        assert_eq!(rows.len(), 4);
+        let (rows, truncated) = c.expand_frontier(&["a".into()], None, 2).unwrap();
+        assert!(truncated);
+        assert_eq!(rows.len(), 3, "two outgoing (cut) plus the one incoming");
+    }
+
+    #[test]
+    fn expand_frontier_returns_a_self_loop_once() {
+        let (_d, db) = graph();
+        let c = db.connect().unwrap();
+        edge(&c, "e0", "a", "a", "g");
+        let (rows, _) = c.expand_frontier(&["a".into()], None, 100).unwrap();
+        let loops: Vec<_> = rows.iter().filter(|r| r.edge.uuid == "e0").collect();
+        assert_eq!(loops.len(), 1, "{rows:?}");
+        assert_eq!(loops[0].far_uuid, "a");
+        assert_eq!(rows.len(), 5);
     }
 
     #[test]
