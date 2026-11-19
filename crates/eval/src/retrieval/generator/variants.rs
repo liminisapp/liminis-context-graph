@@ -70,7 +70,8 @@ pub fn export_calls(fx: &Fixture, system: &str) -> Vec<Value> {
 }
 
 /// Parses one reply: a JSON array of strings, possibly inside a code fence or after a sentence.
-/// More than [`MAX_VARIANTS`] is an error, never truncated. Entries are trimmed; an empty entry is
+/// More than [`MAX_VARIANTS`] entries, or a combined length over the service's cap, is an error,
+/// never truncated. Entries are trimmed; an empty entry is
 /// an error.
 pub fn parse_reply(reply: &str) -> Result<Vec<String>, String> {
     let start = reply.find('[').ok_or("reply has no JSON array")?;
@@ -98,6 +99,7 @@ pub fn parse_reply(reply: &str) -> Result<Vec<String>, String> {
         }
         out.push(s.to_string());
     }
+    variants::check_total_len(&out)?;
     Ok(out)
 }
 
@@ -234,6 +236,14 @@ mod tests {
     use crate::retrieval::variants::testing::tiny_fixture;
 
     const SYSTEM: &str = "Write up to 5 search-query rewrites as a JSON array.";
+
+    #[test]
+    fn a_reply_over_the_services_total_length_cap_is_refused() {
+        let long = "x".repeat(401);
+        let reply = serde_json::to_string(&vec![long.as_str(); 5]).unwrap();
+        let err = parse_reply(&reply).unwrap_err();
+        assert!(err.contains("2005"), "{err}");
+    }
 
     #[test]
     fn prompts_hold_only_the_question_text_and_the_fixed_system_text() {

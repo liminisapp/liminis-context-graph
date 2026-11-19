@@ -36,6 +36,20 @@ pub const MAX_VARIANTS: usize = 5;
 /// Titles and key facts shorter than this (in chars, after normalisation) are not leak needles.
 pub const MIN_NEEDLE_CHARS: usize = 8;
 
+/// Rejects a variant set whose combined length (Unicode scalar values of the trimmed entries)
+/// exceeds the service's `queries` cap, [`lcg_core::query_variants::MAX_VARIANTS_TOTAL_CHARS`].
+/// The service would refuse such a request at run time, so the offline check must too.
+pub fn check_total_len(variants: &[String]) -> Result<(), String> {
+    let total: usize = variants.iter().map(|s| s.chars().count()).sum();
+    let max = lcg_core::query_variants::MAX_VARIANTS_TOTAL_CHARS;
+    if total > max {
+        return Err(format!(
+            "variants total {total} characters; at most {max} are allowed (the service rejects more)"
+        ));
+    }
+    Ok(())
+}
+
 /// Variants by question id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VariantsFixture {
@@ -210,6 +224,7 @@ pub fn parse_variants(text: &str, fx: &Fixture) -> Result<VariantsFixture, Strin
             }
             variants.push(s.to_string());
         }
+        check_total_len(&variants).map_err(|e| format!("{at} ('{id}'): {e}"))?;
         if by_id.insert(id.to_string(), variants).is_some() {
             return Err(format!("{at}: duplicate question id '{id}'"));
         }
@@ -409,6 +424,20 @@ mod tests {
         let fx = tiny_fixture();
         let err = parse_variants(&line("gone-9", H, &["x y"]), &fx).unwrap_err();
         assert!(err.contains("gone-9"), "{err}");
+    }
+
+    #[test]
+    fn a_fixture_over_the_services_total_length_cap_is_refused() {
+        // The service rejects `queries` over MAX_VARIANTS_TOTAL_CHARS at run time, so the offline
+        // check must catch it first. 5 x 401 chars = 2005 > 2000; counted in chars, not bytes.
+        let fx = tiny_fixture();
+        let long = "é".repeat(401);
+        let five: Vec<&str> = std::iter::repeat(long.as_str()).take(5).collect();
+        let err = parse_variants(&line("para-1", H, &five), &fx).unwrap_err();
+        assert!(err.contains("2005"), "{err}");
+        assert!(err.contains("para-1"), "{err}");
+        let ok: Vec<&str> = std::iter::repeat(&long[..2 * 400]).take(5).collect();
+        assert!(parse_variants(&line("para-1", H, &ok), &fx).is_ok());
     }
 
     #[test]

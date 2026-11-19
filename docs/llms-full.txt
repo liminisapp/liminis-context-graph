@@ -5506,7 +5506,7 @@ target/release/lcg-eval retrieval \
 |---|---|
 | `--corpus <DIR>` | Fixture directory (default `crates/eval/fixtures/retrieval`, v1; the full corpus is `crates/eval/fixtures/retrieval-v2`). |
 | `--k <N>` | Shared cut-off, 1–100 (default 10). |
-| `--configs <LIST>` | Subset of the five configuration ids. |
+| `--configs <LIST>` | Subset of the six configuration ids. |
 | `--service-bin`, `--embedder-http/--embedder-uds`, `--extractor-http/--extractor-uds` | How the spawned LCG service is configured. |
 | `--embedding-profile <LIST>` | Embedding [instruction profile(s)](configuration.md#embedding-instruction-profiles) to measure, e.g. `none,bge-v1.5`. See [Comparing embedding profiles](#comparing-embedding-profiles). |
 | `--replay-cassette <PATH>` / `--record-cassette <PATH>` | Replay or record ingest extraction ([cassettes](testing-and-evaluation.md#recordreplay-cassettes)) for a free, repeatable LCG ingest. |
