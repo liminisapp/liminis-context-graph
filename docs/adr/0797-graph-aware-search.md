@@ -40,7 +40,7 @@ share (and argue byte-identical output), the new module `graph_search.rs` embeds
 shared-code change is mechanical: the belief lookups of `handlers::apply_belief` moved into
 `belief::load_context`, so both reads evaluate belief from the same code (same queries, same order).
 
-Three additive `Conn` primitives were needed:
+Four additive `Conn` primitives were needed:
 
 - `entities_by_lookup_keys` — one `lookup_key IN $keys` probe with **no scan fallback and no
   self-heal write**. `resolve_entities_by_name_any_kind` scans the group and writes on a miss, so it
@@ -58,16 +58,18 @@ Three additive `Conn` primitives were needed:
 
 ### 3. Seeds: four lists, RRF, then an evidence gate
 
-Candidates (40 per list): **exact names** (every 1–4-word n-gram of the query, punctuation and a
-trailing possessive stripped, at most 128, × `(group, kind)` pairs, probed as `lookup_key`s; ranked
-longest name first). With `group_ids` the pairs are those groups × every registered kind, at no
-query cost. Without, they are the pairs actually present among entities (one `DISTINCT` scan of
-`Entity`): every group, not just the groups the capped lists below happened to fill from, and no key
-for a kind a group lacks. The key list is capped at 2,048. A cut drops the longest n-grams across all
-pairs alike, never whole groups, and is reported as an `exact_name_keys` truncation. Callers that
-need the latency budget should pass `group_ids`; omitting them costs the extra scan., **BM25** over entity
-names and summaries, the **name vector** and the **summary vector** (non-finite similarities —
-zero-filled, un-backfilled summaries — dropped). They are fused with `rrf_fuse_scored`.
+Candidates (40 per list) come from four lists: **exact names**, **BM25** over entity names and
+summaries, the **name vector** and the **summary vector** (non-finite similarities — zero-filled,
+un-backfilled summaries — dropped). They are fused with `rrf_fuse_scored`.
+
+Exact names are every 1–4-word n-gram of the query (punctuation and a trailing possessive stripped,
+at most 128) × `(group, kind)` pairs, probed as `lookup_key`s and ranked longest name first. With
+`group_ids` the pairs are those groups × every registered kind, at no query cost. Without, they are
+the pairs actually present among entities (one `DISTINCT` scan of `Entity`): every group, not just
+the groups the capped lists happened to fill from, and no key for a kind a group lacks. The key list
+is capped at 2,048. A cut drops the longest n-grams across all pairs alike, never whole groups, and
+is reported as an `exact_name_keys` truncation. Callers that need the latency budget should pass
+`group_ids`; omitting them costs the extra scan.
 
 Because an ANN probe always fills its k (#613, #629), RRF alone would always produce seeds and
 gibberish would seed the walk. A fused candidate is admitted only on real evidence:
@@ -116,7 +118,7 @@ belief state, and a four-step variable-length pattern through the fact node is u
   relevance needs the embeddings those rows carry; the 20-per-entity fan-out ranks by it next. The 200-fact trim keeps whole paths: a fact is kept, best score first, only
   together with every edge on its path, and an entity reached only through a trimmed edge is no
   longer reached. Cutting by score alone would orphan hop-2 facts, since hop decay can score their
-  weakly worded bridge below them, and leave evidence naming an edge the response omits. Every cap that cut something is reported in `stats.truncations`.
+  weakly worded bridge below them, and leave evidence naming an edge the response omits. Every cap that cut something is reported in `stats.truncations`; a direction holding exactly the row cap is not a cut (one row past the cap is fetched to tell). A self-loop fact is returned once per hop, not once per direction.
 - **No revisits**: an edge walked on an earlier hop is never walked again; reaching it again (or from
   both endpoints in one hop) increments `alternate_paths` and keeps the better path. Meeting it again
   from the entity it led to (A → B, then B → A) is the walk doubling back, not a second path, and is
@@ -154,6 +156,14 @@ RRF (k = 60) over three lists, each capped at `max(3k, 30)`, keyed `p:<episode>`
   with the entity's score. Per episode the **maximum** source score is kept — never a sum, so a
   restatement adds no mass — then multiplied by the passage's own cosine to the query, so a hub
   entity's many mentions do not flood the list. At most 300 candidates are scored.
+
+  **Known cost, open until v2 latency is measured: the mention lookup is unbounded.** The 300 cap
+  applies after one `MENTIONS` lookup that returns every mention of every reached entity (up to the
+  seeds plus about 300 far endpoints), so its row count scales with how often hubs are mentioned, not
+  with k, and `stats.truncations` does not report it. Bounding it — a per-entity limit, or mentions
+  for seeds and beam entities only — would choose *which* mentions compete before their cosine is
+  known, and paraphrase questions depend on the one relevant note among many mentions surviving. So
+  the choice is left to the v2 p50 and paraphrase rows rather than guessed at here.
 - **(b) `passages`** — plain vector passage search with the same embedding, over-drawn 3×, liveness
   applied. Vector-only until #789's hybrid passage list lands (`stats.passage_mode`).
 - **(c) `facts`** — the selected facts by path score.
