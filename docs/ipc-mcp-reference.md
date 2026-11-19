@@ -514,7 +514,7 @@ embedding and **no** LLM call. It is opt-in: no existing read changes.
 |-------|---------|---------|
 | `query` | required | Search text. Empty or whitespace-only is an invalid-params error. |
 | `num_results` | 10 | Results to return, clamped 1–100. Never padded: fewer come back when fewer exist. |
-| `group_ids` | all groups | Same as `knowledge_find_entities`: omitted means all groups, `[]` matches nothing (see [group_ids semantics](#group_ids-semantics-omitted-vs-empty)). Traversal never leaves the requested groups: a fact whose group or far endpoint is outside them is not followed. |
+| `group_ids` | all groups | Same as `knowledge_find_entities`: omitted means all groups, `[]` matches nothing (see [group_ids semantics](#group_ids-semantics-omitted-vs-empty)). Traversal never leaves the requested groups: a fact whose group or far endpoint is outside them is not followed. Omitting `group_ids` costs one extra scan of entities (to find every group's names for exact matching), so pass them when latency matters. |
 | `origins` | none | Applies to **every** stage: seeds need a matching live mention, traversed facts need a matching producing episode, and supporting and plain passages are filtered. |
 | `believed_only` | **true** | **Different from `knowledge_find_relationships`, where belief is opt-in.** By default the read traverses and returns only facts believed now, and only passages live now. `false` returns no-longer-believed results too, each with its belief state. |
 | `as_of` | now | Evaluate belief at this instant (RFC 3339); same meaning as on the other belief-aware reads (ADR-0705/0707). A document superseded with a future effective date stays believed until then. |

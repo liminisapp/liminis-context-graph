@@ -52,6 +52,8 @@ pub const SEED_SIM_MARGIN: f64 = 0.08;
 pub const MAX_NGRAM_WORDS: usize = 4;
 /// Maximum distinct n-grams probed.
 pub const MAX_NGRAMS: usize = 128;
+/// Most `lookup_key`s one exact-name probe sends: n-grams × (group, kind) pairs are cut to fit.
+pub const MAX_EXACT_KEYS: usize = 2048;
 /// Hop limit of the walk.
 pub const MAX_HOPS: usize = 2;
 /// Multiplicative score decay per hop beyond the first.
@@ -354,6 +356,28 @@ pub fn query_ngrams(query: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// The exact-name `lookup_key`s to probe, at most `cap`, and whether the cap cut any. N-grams
+/// are taken in [`query_ngrams`] order (shortest first) and each is probed in every `(group,
+/// kind)` pair before the next is added, so a cut drops the longest n-grams everywhere rather
+/// than whole groups — every group keeps the same chance of an exact match.
+pub fn exact_name_keys(
+    pairs: &[(String, String)],
+    ngrams: &[String],
+    cap: usize,
+) -> (Vec<String>, bool) {
+    let mut keys = Vec::new();
+    if pairs.is_empty() {
+        return (keys, false);
+    }
+    for n in ngrams {
+        if keys.len() + pairs.len() > cap {
+            return (keys, true);
+        }
+        keys.extend(pairs.iter().map(|(g, k)| compute_lookup_key(g, k, n)));
+    }
+    (keys, false)
 }
 
 /// The query as plain alphanumeric terms for `QUERY_FTS_INDEX`, so punctuation (e.g. `→`, #646)
@@ -934,27 +958,27 @@ fn seed_stage(
         }
     }
 
-    // Exact names: every query n-gram × group × known kind, one batched lookup_key probe. With
-    // no `group_ids` that means every group holding entities, not just the groups the other
-    // lists happened to fill from: those lists are capped, so in a multi-group database a group
-    // can contribute no candidate and its exact names would otherwise never be probed.
-    let groups: Vec<String> = match gids {
-        Some(g) => g.iter().map(|s| s.to_string()).collect(),
+    // Exact names: query n-grams × (group, kind) pairs, one batched lookup_key probe. With
+    // `group_ids` the pairs are those groups × every registered kind (no scan). Without, they
+    // are the pairs actually present among entities (one scan) — every group, not just the
+    // groups the capped lists above happened to fill from, and no key for a kind a group lacks.
+    // Either way the key list is capped at MAX_EXACT_KEYS.
+    let pairs: Vec<(String, String)> = match gids {
+        Some(g) => {
+            let mut kinds = conn.known_kinds();
+            kinds.sort();
+            g.iter()
+                .flat_map(|g| kinds.iter().map(move |k| (g.to_string(), k.clone())))
+                .collect()
+        }
         None => {
             st.db_queries += 1;
-            conn.entity_group_ids()?
+            conn.entity_group_kinds()?
         }
     };
-    let mut kinds = conn.known_kinds();
-    kinds.sort();
-    let ngrams = query_ngrams(&p.query);
-    let mut keys: Vec<String> = Vec::new();
-    for g in &groups {
-        for kind in &kinds {
-            for n in &ngrams {
-                keys.push(compute_lookup_key(g, kind, n));
-            }
-        }
+    let (keys, keys_truncated) = exact_name_keys(&pairs, &query_ngrams(&p.query), MAX_EXACT_KEYS);
+    if keys_truncated {
+        st.truncate("exact_name_keys", MAX_EXACT_KEYS);
     }
     let mut exact: Vec<(String, f64)> = Vec::new();
     if !keys.is_empty() {
@@ -1350,6 +1374,32 @@ mod tests {
             query_ngrams("Fable\u{2019}s price"),
             vec!["fable", "price", "fable price"]
         );
+    }
+
+    #[test]
+    fn exact_name_keys_are_capped_by_dropping_longest_ngrams_everywhere() {
+        let pairs: Vec<(String, String)> = [("g1", "Entity"), ("g1", "Person"), ("g2", "Entity")]
+            .iter()
+            .map(|(g, k)| (g.to_string(), k.to_string()))
+            .collect();
+        let grams = query_ngrams("cedar core supplier");
+        assert_eq!(grams.len(), 6);
+
+        let (all, cut) = exact_name_keys(&pairs, &grams, 1000);
+        assert!(!cut);
+        assert_eq!(all.len(), pairs.len() * grams.len());
+        assert!(all.contains(&compute_lookup_key("g2", "Entity", "cedar core")));
+
+        // Room for 4 n-grams × 3 pairs: the two longest n-grams go, for every pair alike.
+        let (keys, cut) = exact_name_keys(&pairs, &grams, 13);
+        assert!(cut);
+        assert_eq!(keys.len(), 12);
+        for (g, k) in &pairs {
+            assert!(keys.contains(&compute_lookup_key(g, k, "cedar core")));
+            assert!(!keys.contains(&compute_lookup_key(g, k, "cedar core supplier")));
+        }
+        assert!(exact_name_keys(&[], &grams, 10).0.is_empty());
+        assert_eq!(exact_name_keys(&pairs, &grams, 2), (vec![], true));
     }
 
     #[test]

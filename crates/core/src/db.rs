@@ -4575,19 +4575,21 @@ impl<'db> Conn<'db> {
             .collect())
     }
 
-    /// Every distinct `group_id` holding an `Entity` row, sorted. Graph-aware search (issue #797)
-    /// uses it to build exact-name `lookup_key` probes when the caller gives no `group_ids`: the
-    /// key embeds the group, so a group left out here is a group whose exact names are never
-    /// matched. Only the `Entity` table is read, since only entities can be seeds (unlike
-    /// [`Self::list_distinct_group_ids`], which covers every group-scoped node table).
-    pub fn entity_group_ids(&self) -> Result<Vec<String>, Error> {
+    /// Every distinct `(group_id, kind)` pair present among `Entity` rows, sorted (a NULL kind is
+    /// the default kind, as [`value_as_kind`] reads it). Graph-aware search (issue #797) builds
+    /// exact-name `lookup_key` probes from it when the caller gives no `group_ids`: the key embeds
+    /// group and kind, so a pair left out is one whose exact names are never matched, and a pair
+    /// that does not exist is a wasted key. Probing only the pairs present — rather than every
+    /// group × every registered kind — keeps the key list proportional to the data. One scan of
+    /// the `Entity` table; only entities can be seeds, so no other table is read.
+    pub fn entity_group_kinds(&self) -> Result<Vec<(String, String)>, Error> {
         let rows = self.query_params(
-            "MATCH (e:Entity) RETURN DISTINCT e.group_id",
+            "MATCH (e:Entity) RETURN DISTINCT e.group_id, e.kind",
             serde_json::json!({}),
         )?;
-        let mut out: Vec<String> = rows
+        let mut out: Vec<(String, String)> = rows
             .iter()
-            .filter_map(|r| value_as_optional_string(&r[0]))
+            .filter_map(|r| Some((value_as_optional_string(&r[0])?, value_as_kind(&r[1]))))
             .collect();
         out.sort();
         out.dedup();
@@ -7745,15 +7747,35 @@ mod graph_search_primitive_tests {
     }
 
     #[test]
-    fn entity_group_ids_lists_every_group_once_sorted() {
+    fn entity_group_kinds_lists_each_present_pair_once_sorted() {
         let (_d, db) = graph();
         let c = db.connect().unwrap();
-        assert_eq!(c.entity_group_ids().unwrap(), vec!["g", "h"]);
+        c.insert_entity(&EntityRow {
+            uuid: "p".into(),
+            name: "Pat".into(),
+            group_id: "g".into(),
+            kind: "Person".into(),
+            labels: vec!["Entity".into()],
+            created_at: "2026-01-01 00:00:00".into(),
+            name_embedding: vec![0.1; DIM],
+            attributes: "{}".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        let d = crate::types::DEFAULT_KIND.to_string();
+        assert_eq!(
+            c.entity_group_kinds().unwrap(),
+            vec![
+                ("g".to_string(), d.clone()),
+                ("g".to_string(), "Person".to_string()),
+                ("h".to_string(), d),
+            ]
+        );
         let (_d2, empty) = open();
         assert!(empty
             .connect()
             .unwrap()
-            .entity_group_ids()
+            .entity_group_kinds()
             .unwrap()
             .is_empty());
     }

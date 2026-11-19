@@ -45,9 +45,11 @@ Three additive `Conn` primitives were needed:
 - `entities_by_lookup_keys` — one `lookup_key IN $keys` probe with **no scan fallback and no
   self-heal write**. `resolve_entities_by_name_any_kind` scans the group and writes on a miss, so it
   cannot probe dozens of candidate n-grams on a read path. (Whether lbug's ART index serves `IN` is
-  unverified; at the probe sizes here — n-grams × kinds × groups, a few hundred keys — a scan of the
-  `Entity` table is still well within budget. If it becomes a hotspot, a loop of indexed `=` probes
-  is the drop-in alternative.)
+  unverified. The key list is n-grams × `(group, kind)` pairs, hard-capped at 2,048 keys
+  (`MAX_EXACT_KEYS`); at that size even a scan of the `Entity` table stays bounded. If it becomes a
+  hotspot, a loop of indexed `=` probes is the drop-in alternative.)
+- `entity_group_kinds` — the distinct `(group_id, kind)` pairs present among entities, one scan,
+  used only when the caller gives no `group_ids`.
 - `expand_frontier` — every fact incident to a set of entities, both directions, as two batched
   queries per hop (O(hops), not O(seeds) like `get_entity_neighbors`), returning `episodes`,
   `warrant`, `fact_embedding`, and the far endpoint's name, group and tombstone status.
@@ -57,9 +59,13 @@ Three additive `Conn` primitives were needed:
 ### 3. Seeds: four lists, RRF, then an evidence gate
 
 Candidates (40 per list): **exact names** (every 1–4-word n-gram of the query, punctuation and a
-trailing possessive stripped, at most 128, × requested groups — or, when none are given, every group
-holding entities (one `DISTINCT group_id` read), not just the groups the capped lists below filled
-from — × known kinds, probed as `lookup_key`s; ranked longest name first), **BM25** over entity
+trailing possessive stripped, at most 128, × `(group, kind)` pairs, probed as `lookup_key`s; ranked
+longest name first). With `group_ids` the pairs are those groups × every registered kind, at no
+query cost. Without, they are the pairs actually present among entities (one `DISTINCT` scan of
+`Entity`): every group, not just the groups the capped lists below happened to fill from, and no key
+for a kind a group lacks. The key list is capped at 2,048. A cut drops the longest n-grams across all
+pairs alike, never whole groups, and is reported as an `exact_name_keys` truncation. Callers that
+need the latency budget should pass `group_ids`; omitting them costs the extra scan., **BM25** over entity
 names and summaries, the **name vector** and the **summary vector** (non-finite similarities —
 zero-filled, un-backfilled summaries — dropped). They are fused with `rrf_fuse_scored`.
 
