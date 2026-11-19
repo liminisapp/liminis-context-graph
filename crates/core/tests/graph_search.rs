@@ -654,6 +654,15 @@ async fn multi_hop_reaches_the_note_that_never_names_the_seed() {
     assert_eq!(price["evidence"]["path"][1]["hop"], 2);
     assert_eq!(price["evidence"]["path"][0]["from_name"], "Cedar Core");
     assert_eq!(price["evidence"]["path"][1]["to_name"], "Unit Pricing");
+    // Walking hop 2 out of Fable Supply meets the hop-1 edge again from its far side. That is
+    // the same path doubling back, not a second path to the fact.
+    let supply = find(&r, "f:e-supply").expect("the bridging fact is returned");
+    assert!(
+        !seed_uuids(&r).contains(&"fable".to_string()),
+        "Fable Supply is reached, not seeded: {}",
+        r["seeds"]
+    );
+    assert_eq!(supply["evidence"]["alternate_paths"], 0, "{supply}");
     // The price note is the best passage for the question.
     let first_passage = keys(&r).into_iter().find(|k| k.starts_with("p:")).unwrap();
     assert_eq!(first_passage, "p:ep-fable", "{:?}", keys(&r));

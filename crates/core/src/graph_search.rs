@@ -1066,11 +1066,17 @@ fn expand(
             st.truncate("frontier_rows", FRONTIER_ROW_CAP);
         }
         rows.retain(|r| !r.far_merged);
-        // An edge walked on an earlier hop is never revisited; reaching it again is an
-        // alternate path.
+        // An edge walked on an earlier hop is never revisited. Reaching it again is an alternate
+        // path, unless the entity it is reached from was itself reached through that edge: that
+        // is the walk doubling back along its own path (A → B, then B → A), not a second path.
         rows.retain(|r| match facts.get_mut(&r.edge.uuid) {
             Some(f) => {
-                f.alternates += 1;
+                let back_edge = reach
+                    .get(&r.from_uuid)
+                    .is_some_and(|rc| rc.path.iter().any(|s| s.edge_uuid == r.edge.uuid));
+                if !back_edge {
+                    f.alternates += 1;
+                }
                 false
             }
             None => true,

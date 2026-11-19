@@ -95,7 +95,9 @@ belief state, and a four-step variable-length pattern through the fact node is u
   next frontier (newly reached entities only), at most 200 facts overall, 1,000 rows per direction
   per frontier query. Every cap that cut something is reported in `stats.truncations`.
 - **No revisits**: an edge walked on an earlier hop is never walked again; reaching it again (or from
-  both endpoints in one hop) increments `alternate_paths` and keeps the better path. An entity keeps
+  both endpoints in one hop) increments `alternate_paths` and keeps the better path. Meeting it again
+  from the entity it led to (A → B, then B → A) is the walk doubling back, not a second path, and is
+  not counted. An entity keeps
   its earliest-hop best path.
 - **Scope**: an edge is followed only if its own group and its far endpoint's group are requested, so
   traversal never leaves the requested groups through a cross-group edge. Tombstoned endpoints are
