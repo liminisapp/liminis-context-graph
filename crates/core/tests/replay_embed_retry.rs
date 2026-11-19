@@ -378,6 +378,28 @@ fn deleting_a_recorded_row_clears_its_entry() {
     );
 }
 
+// A bulk delete carrying a `uuids` list (`WHERE n.uuid IN $uuids`) clears every listed entry.
+#[test]
+fn bulk_delete_with_uuids_list_clears_entries() {
+    let fx = Fixture::new();
+    let mut lines = n_rows(3, |i| format!("entity-{i}"));
+    lines.push(wal_line(
+        3,
+        "MATCH (n:Entity) WHERE n.uuid IN $uuids DETACH DELETE n",
+        serde_json::json!({ "uuids": ["u0", "u2"] }),
+    ));
+    write_wal(&fx.wal_dir, &lines);
+    let db = fx.open();
+    let failing: RecomputeEmbedFn = Box::new(|_t: &[&str]| Err(status_err("400 Bad Request")));
+    replay(&fx, &db, failing, fast_policy(0), 64, 0);
+    let conn = db.connect().unwrap();
+    assert_eq!(conn.count_nodes("Entity").unwrap(), 1);
+    assert_eq!(
+        conn.list_zero_vector_rows(GROUP, None).unwrap(),
+        vec![(ZeroKind::Name, "u1".to_string())]
+    );
+}
+
 // FR-009 / #526: rows with no source text, and skipped vector-only SETs, are never recorded.
 #[test]
 fn no_text_and_skipped_rows_are_not_recorded() {

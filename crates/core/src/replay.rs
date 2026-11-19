@@ -1261,11 +1261,11 @@ fn resolve_embed_window_with(
             if !row.match_prefixed || !is_delete_form(&row.cypher) {
                 continue;
             }
-            if let Some(uuid) = uuid_of(row_idx) {
+            for uuid in deleted_uuids(&row.params_map) {
                 for kind in ZeroKind::ALL {
                     row_effects[row_idx].push(ZeroEffect::Clear {
                         kind,
-                        uuid: uuid.to_string(),
+                        uuid: uuid.clone(),
                     });
                 }
             }
@@ -1681,6 +1681,19 @@ struct PreparedCache {
 fn with_match_count_probe(template: &str) -> String {
     let trimmed = template.trim().trim_end_matches(';').trim_end();
     format!("{trimmed} RETURN count(*)")
+}
+
+/// Row uuids a DELETE-form mutation targets: a singular `uuid` param (`{uuid: $uuid}` forms) and/or
+/// a `uuids` list param (`WHERE n.uuid IN $uuids` bulk forms, e.g. `delete_by_source`).
+fn deleted_uuids(params: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(u) = params.get("uuid").and_then(|v| v.as_str()) {
+        out.push(u.to_string());
+    }
+    if let Some(list) = params.get("uuids").and_then(|v| v.as_array()) {
+        out.extend(list.iter().filter_map(|v| v.as_str()).map(str::to_string));
+    }
+    out
 }
 
 /// Returns true if a `MATCH`-prefixed `template` is DELETE-form (`MATCH ... DETACH DELETE` /
