@@ -1081,6 +1081,30 @@ fn seed_stage(
         .collect())
 }
 
+/// The next hop's frontier: the far endpoints of this hop's best edges, at most `beam` of them,
+/// newly reached only. Each `(score, edge uuid, far uuid)` is taken best score first (edge-uuid
+/// tie-break). An already-reached entity or one already chosen is skipped *before* counting
+/// toward `beam`, so edges back to seeds or between reached entities cannot use up the slots and
+/// starve the walk of the new entities a multi-hop path needs. Sorted by uuid.
+pub fn select_beam(
+    mut hop_edges: Vec<(f64, String, String)>,
+    visited: &HashSet<String>,
+    beam: usize,
+) -> Vec<String> {
+    hop_edges.sort_by(|a, b| by_score_then_key((a.0, &a.1), (b.0, &b.1)));
+    let mut next: Vec<String> = Vec::new();
+    for (_, _, far) in hop_edges {
+        if next.len() == beam {
+            break;
+        }
+        if !visited.contains(&far) && !next.contains(&far) {
+            next.push(far);
+        }
+    }
+    next.sort();
+    next
+}
+
 /// One hop's frontier rows, at most `cap` per direction. The batched lookup is tried first (two
 /// queries). Its cut is by `rn.uuid` across the whole frontier, so when it hits the cap one hub
 /// could take every row and starve the other frontier entities. In that case each entity is
@@ -1346,16 +1370,7 @@ fn expand(
             }
         }
 
-        // Beam: far endpoints of the best edges of this hop, newly reached, seed the next hop.
-        hop_edges.sort_by(|a, b| by_score_then_key((a.0, &a.1), (b.0, &b.1)));
-        let mut next: Vec<String> = Vec::new();
-        for (_, _, far) in hop_edges.iter().take(BEAM) {
-            if !visited.contains(far) && !next.contains(far) {
-                next.push(far.clone());
-            }
-        }
-        next.sort();
-        frontier = next;
+        frontier = select_beam(hop_edges, &visited, BEAM);
     }
 
     if facts.len() > TOTAL_EDGE_CAP {
@@ -1405,6 +1420,29 @@ mod tests {
             query_ngrams("Fable\u{2019}s price"),
             vec!["fable", "price", "fable price"]
         );
+    }
+
+    #[test]
+    fn beam_slots_go_to_newly_reached_entities_only() {
+        let e = |score: f64, edge: &str, far: &str| (score, edge.to_string(), far.to_string());
+        let visited: HashSet<String> = ["seed_a", "seed_b"].iter().map(|s| s.to_string()).collect();
+        // The three best edges lead back to seeds or to an entity already chosen; the new
+        // entities sit below them.
+        let edges = vec![
+            e(0.9, "e1", "seed_b"),
+            e(0.8, "e2", "seed_a"),
+            e(0.7, "e3", "x"),
+            e(0.6, "e4", "x"),
+            e(0.5, "e5", "y"),
+            e(0.4, "e6", "z"),
+        ];
+        // A cut taken before the filter would keep e1 and e2, both seeds, and yield nothing.
+        assert_eq!(select_beam(edges.clone(), &visited, 2), vec!["x", "y"]);
+        assert_eq!(
+            select_beam(edges.clone(), &visited, 10),
+            vec!["x", "y", "z"]
+        );
+        assert!(select_beam(edges, &visited, 0).is_empty());
     }
 
     #[test]

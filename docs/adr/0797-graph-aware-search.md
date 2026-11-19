@@ -98,8 +98,8 @@ belief state, and a four-step variable-length pattern through the fact node is u
 - **Path score** = root seed score × **0.6**^(hop − 1) × relevance of the *last* edge. Multiplying
   relevances along the path was rejected: the bridging edge of a multi-hop question ("depends on") is
   usually weakly related to the question, and the beam already gates it.
-- **Caps**: 20 edges per frontier entity per hop (by relevance), the 10 best edges of a hop choose the
-  next frontier (newly reached entities only), at most 200 facts overall, 1,000 rows per direction
+- **Caps**: 20 edges per frontier entity per hop (by relevance), the next frontier is the 10 best
+  newly reached far endpoints of the hop (an edge back to a reached entity takes no slot), at most 200 facts overall, 1,000 rows per direction
   per frontier query. That row cap is cut by uuid across the whole batched frontier, so when it is
   hit each frontier entity is refetched on its own with an equal share of the same budget
   (reported as `frontier_rows`, plus `entity_rows` for any entity that still overflows its share):

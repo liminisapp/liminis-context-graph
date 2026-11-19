@@ -533,7 +533,7 @@ embedding and **no** LLM call. It is opt-in: no existing read changes.
    fact is scored by the cosine of its fact embedding against the query, plus a small bonus for its
    rank in a full-text search over facts, and decays by 0.6 per hop beyond the first, so a one-hop
    fact outranks an equally relevant two-hop one. Each entity keeps its 20 most relevant facts per
-   hop, the 10 best hop-1 facts choose the hop-2 frontier, the walk keeps at most 200 facts (each kept
+   hop, the 10 best newly reached entities of hop 1 form the hop-2 frontier, the walk keeps at most 200 facts (each kept
    with every edge on its path, so evidence never names a dropped edge), and an edge is never
    walked twice. A fact that is not believed is never a step, so a path breaks at a
    superseded edge. Legacy and warranted edges are believed and traversable, but have no
