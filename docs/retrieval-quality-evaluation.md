@@ -23,7 +23,8 @@ It is a separate mode of the existing `lcg-eval` binary. The extraction eval
 
 | Configuration | What runs |
 |---|---|
-| `lcg-passages` | `knowledge_search_passages` with `mode: "vector"` sent explicitly. **Vector-only**: no FTS and no RRF. Pinned, so it stays a stable baseline whatever the service default is. |
+| `lcg-passages` | `knowledge_search_passages` sending neither `mode` nor `belief_aware`: **the service's shipped default** (#806), i.e. belief-aware vector, no FTS and no RRF. It tracks the default, so a change to the default shows up here. The harness removes `LCG_PASSAGE_SEARCH_MODE` and `LCG_PASSAGE_BELIEF_AWARE` from the spawned service's environment so an operator's overrides cannot change what it measures. It is the same request as `lcg-passages-belief` today. |
+| `lcg-passages-raw` | *Opt-in (#806), not in the default run.* `mode: "vector"`, `belief_aware: false`: cosine only, the pre-#806 `lcg-passages` baseline, so the belief-aware gain stays measurable. |
 | `lcg-entities-facts` | `knowledge_find_entities` + `knowledge_find_relationships` (hybrid FTS + vector, RRF), default reads. k is split across the two reads (`ceil(k/2)` entities + `ceil(k/2)` facts) and the ranks are interleaved. |
 | `qmd` | `qmd query --no-rerank` (query expansion on). |
 | `qmd-rerank` | `qmd query` with its LLM reranker. |
