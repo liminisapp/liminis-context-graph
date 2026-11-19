@@ -349,6 +349,77 @@ pub struct RerankAcceptance {
 }
 
 impl Report {
+    /// The headroom section (issue #797 steer): a per-question oracle that takes, for each
+    /// question, the best nDCG@k any configuration in this run reached, and each configuration's
+    /// gap to it. It shows how much a composite that picked the right retriever per question could
+    /// gain, and how much of that a given configuration already captures. Omitted with fewer than
+    /// two configurations, where the oracle is just the one configuration.
+    fn oracle_section(&self, o: &mut String) {
+        let ran = self.ran();
+        if ran.len() < 2 {
+            return;
+        }
+        let runs: Vec<&[QuestionScore]> = ran.iter().map(|(_, r)| r.scores.as_slice()).collect();
+        let oracle = oracle_ndcg(&runs);
+        let Some(overall) = oracle.overall else {
+            return;
+        };
+        let _ = writeln!(
+            o,
+            "## Headroom: per-question oracle
+"
+        );
+        let _ = writeln!(o, "The oracle takes, for each question, the best nDCG@{} any configuration in this run reached, then averages. It is an upper bound for a composite that always picked the right retriever, not a configuration. `gap` is the oracle minus the configuration, over the same questions; `captured` is the configuration as a share of the oracle.
+", self.meta.k);
+        let _ = writeln!(
+            o,
+            "Oracle nDCG@{}: **{overall:.3}** overall (n = {}).
+",
+            self.meta.k, oracle.n
+        );
+        let _ = writeln!(o, "| config | nDCG@{} | gap | captured |", self.meta.k);
+        let _ = writeln!(o, "|---|---|---|---|");
+        for (c, r) in &ran {
+            let mean = mean_over(&r.scores, &oracle.questions);
+            let _ = writeln!(
+                o,
+                "| `{}` | {mean:.3} | {:.3} | {:.0}% |",
+                c.id,
+                overall - mean,
+                if overall > 0.0 {
+                    100.0 * mean / overall
+                } else {
+                    0.0
+                }
+            );
+        }
+        let _ = writeln!(
+            o,
+            "
+| category | oracle | best config | best |"
+        );
+        let _ = writeln!(o, "|---|---|---|---|");
+        for (cat, v) in &oracle.by_category {
+            let qs: std::collections::BTreeSet<String> = oracle
+                .questions
+                .iter()
+                .filter(|q| oracle.category_of.get(*q) == Some(cat))
+                .cloned()
+                .collect();
+            let best = ran
+                .iter()
+                .map(|(c, r)| (c.id.as_str(), mean_over(&r.scores, &qs)))
+                .fold(None, |b: Option<(&str, f64)>, (id, m)| match b {
+                    Some((_, bm)) if bm >= m => b,
+                    _ => Some((id, m)),
+                });
+            if let Some((id, m)) = best {
+                let _ = writeln!(o, "| {} | {v:.3} | `{id}` | {m:.3} |", cat.label());
+            }
+        }
+        let _ = writeln!(o);
+    }
+
     fn ran(&self) -> Vec<(&ConfigOutcome, &ConfigRun)> {
         self.configs
             .iter()
@@ -974,6 +1045,7 @@ impl Report {
             let _ = writeln!(o);
         }
 
+        self.oracle_section(&mut o);
         self.origin_section(&mut o);
         self.variants_section(&mut o);
         self.graph_section(&mut o);
@@ -1598,6 +1670,70 @@ fn fmt_winners(w: &[String]) -> String {
     }
 }
 
+/// The per-question oracle over several runs: for each question any run scored (nDCG@k present),
+/// the best nDCG@k among them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Oracle {
+    /// Mean oracle nDCG@k over [`Oracle::questions`]; `None` when no run scored any question.
+    pub overall: Option<f64>,
+    pub by_category: BTreeMap<Category, f64>,
+    /// Ids of the questions the oracle is defined on.
+    pub questions: std::collections::BTreeSet<String>,
+    pub category_of: BTreeMap<String, Category>,
+    pub n: usize,
+}
+
+pub fn oracle_ndcg(runs: &[&[QuestionScore]]) -> Oracle {
+    let mut best: BTreeMap<String, (Category, f64)> = BTreeMap::new();
+    for run in runs {
+        for q in run.iter() {
+            if let Some(v) = q.ndcg {
+                let e = best.entry(q.id.clone()).or_insert((q.category, v));
+                if v > e.1 {
+                    e.1 = v;
+                }
+            }
+        }
+    }
+    let n = best.len();
+    if n == 0 {
+        return Oracle::default();
+    }
+    let mut by_cat: BTreeMap<Category, (f64, usize)> = BTreeMap::new();
+    for (cat, v) in best.values() {
+        let e = by_cat.entry(*cat).or_insert((0.0, 0));
+        e.0 += v;
+        e.1 += 1;
+    }
+    Oracle {
+        overall: Some(best.values().map(|(_, v)| v).sum::<f64>() / n as f64),
+        by_category: by_cat
+            .into_iter()
+            .map(|(c, (s, k))| (c, s / k as f64))
+            .collect(),
+        questions: best.keys().cloned().collect(),
+        category_of: best.iter().map(|(q, (c, _))| (q.clone(), *c)).collect(),
+        n,
+    }
+}
+
+/// A run's mean nDCG@k over `questions`; a question the run did not score counts as 0, so every
+/// configuration is averaged over the same question set as the oracle.
+fn mean_over(scores: &[QuestionScore], questions: &std::collections::BTreeSet<String>) -> f64 {
+    if questions.is_empty() {
+        return 0.0;
+    }
+    let by_id: BTreeMap<&str, f64> = scores
+        .iter()
+        .filter_map(|q| q.ndcg.map(|v| (q.id.as_str(), v)))
+        .collect();
+    questions
+        .iter()
+        .map(|q| by_id.get(q.as_str()).copied().unwrap_or(0.0))
+        .sum::<f64>()
+        / questions.len() as f64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1890,6 +2026,65 @@ mod tests {
         r.configs[1].status = Status::Skipped("qmd not installed".into());
         assert_eq!(r.hypotheses(), (Reading::CannotRead, Reading::CannotRead));
         assert!(r.render_markdown().contains("cannot be read"));
+    }
+
+    fn qs(id: &str, cat: Category, ndcg: Option<f64>) -> QuestionScore {
+        QuestionScore {
+            id: id.into(),
+            category: cat,
+            recall: None,
+            mrr: None,
+            ndcg,
+            false_positive: None,
+            stale_above_current: None,
+            stale_in_top_k: None,
+            grounded_recall: None,
+            grounded_mrr: None,
+            ranked: vec![],
+        }
+    }
+
+    #[test]
+    fn oracle_takes_the_best_ndcg_per_question() {
+        let a = vec![
+            qs("q1", Category::Direct, Some(1.0)),
+            qs("q2", Category::Paraphrase, Some(0.0)),
+            qs("n1", Category::Negative, None),
+        ];
+        let b = vec![
+            qs("q1", Category::Direct, Some(0.5)),
+            qs("q2", Category::Paraphrase, Some(0.6)),
+        ];
+        let o = oracle_ndcg(&[&a, &b]);
+        assert_eq!(o.n, 2, "a question no run scored is not in the oracle");
+        assert!((o.overall.unwrap() - 0.8).abs() < 1e-12);
+        assert_eq!(o.by_category[&Category::Direct], 1.0);
+        assert_eq!(o.by_category[&Category::Paraphrase], 0.6);
+        // Each run over the oracle's questions: a = 0.5, b = 0.55.
+        assert!((mean_over(&a, &o.questions) - 0.5).abs() < 1e-12);
+        assert!((mean_over(&b, &o.questions) - 0.55).abs() < 1e-12);
+        assert_eq!(oracle_ndcg(&[]).overall, None);
+    }
+
+    #[test]
+    fn headroom_section_needs_two_configs() {
+        let mut one = report();
+        one.configs.truncate(1);
+        assert!(
+            !one.render_markdown().contains("## Headroom"),
+            "one configuration is its own oracle"
+        );
+        let mut r = report();
+        let mut c = r.configs[0].clone();
+        c.id = "lcg-graph".into();
+        r.configs.push(c);
+        let md = r.render_markdown();
+        assert!(md.contains("## Headroom: per-question oracle"), "{md}");
+        assert!(md.contains("| `lcg-graph` |"), "{md}");
+        assert!(
+            md.contains("| category | oracle | best config | best |"),
+            "{md}"
+        );
     }
 
     #[test]
