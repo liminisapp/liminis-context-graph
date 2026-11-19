@@ -432,11 +432,11 @@ mod tests {
         // check must catch it first. 5 x 401 chars = 2005 > 2000; counted in chars, not bytes.
         let fx = tiny_fixture();
         let long = "é".repeat(401);
-        let five: Vec<&str> = std::iter::repeat(long.as_str()).take(5).collect();
+        let five: Vec<&str> = vec![long.as_str(); 5];
         let err = parse_variants(&line("para-1", H, &five), &fx).unwrap_err();
         assert!(err.contains("2005"), "{err}");
         assert!(err.contains("para-1"), "{err}");
-        let ok: Vec<&str> = std::iter::repeat(&long[..2 * 400]).take(5).collect();
+        let ok: Vec<&str> = vec![&long[..2 * 400]; 5];
         assert!(parse_variants(&line("para-1", H, &ok), &fx).is_ok());
     }
 
