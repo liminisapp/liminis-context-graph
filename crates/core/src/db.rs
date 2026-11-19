@@ -2384,13 +2384,16 @@ impl<'db> Conn<'db> {
             ""
         };
         // `embedding.len()` is an integer, so formatting it into the cast is injection-safe.
+        // A zero-vector embedding scores NaN (or NULL); `sim <> sim` holds only for NaN, so such a
+        // mention is ranked last *inside* the query rather than wherever lbug sorts NaN.
         let cypher = format!(
             "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
              WHERE n.uuid = $uuid AND coalesce(ep.origin, '') IN $origins {live} \
              WITH DISTINCT ep \
-             RETURN ep.uuid, coalesce(ep.origin, ''), ep.doc_id, ep.superseded_at, ep.group_id, \
-             array_cosine_similarity(ep.content_embedding, CAST($emb, 'FLOAT[{dim}]')) AS sim \
-             ORDER BY sim DESC, ep.uuid ASC LIMIT $limit",
+             WITH ep, array_cosine_similarity(ep.content_embedding, CAST($emb, 'FLOAT[{dim}]')) AS sim \
+             WITH ep, CASE WHEN sim IS NULL OR sim <> sim THEN -2.0 ELSE sim END AS rank_sim \
+             RETURN ep.uuid, coalesce(ep.origin, ''), ep.doc_id, ep.superseded_at, ep.group_id \
+             ORDER BY rank_sim DESC, ep.uuid ASC LIMIT $limit",
             dim = embedding.len()
         );
         let mut params = serde_json::json!({
@@ -2408,52 +2411,29 @@ impl<'db> Conn<'db> {
                 episode_origin_info_from_cols(&r[1], &r[2], &r[3], &r[4]),
             )
         };
-        // The in-query ranking is used only when every similarity it returned is finite. A
-        // zero-vector embedding yields NaN, and where lbug sorts NaN under `DESC` is not
-        // something to rely on: an unscorable mention must never take a slot ahead of a relevant
-        // one. So any non-finite value sends the request to the Rust ranking below, which puts
-        // unscorable rows last.
         if let Ok(rows) = self.query_params(&cypher, params.clone()) {
-            if rows.iter().all(|r| value_as_finite_f64(&r[5]).is_some()) {
-                return Ok(rows.iter().map(|r| row_out(r)).collect());
-            }
+            return Ok(rows.iter().map(|r| row_out(r)).collect());
         }
-        // lbug fails the whole query, rather than yielding NULL, on a vector of the wrong length
-        // (as `expand_frontier_scored` notes), and may return NaN for a zero vector (above). Fall
-        // back to the same filtered match returning the embeddings, and rank in Rust with the same
-        // order: similarity descending (unscorable last), uuid tie-break, then the same limit.
+        // lbug fails the whole query, rather than yielding NULL, when the query vector has another
+        // dimension (as `expand_frontier_scored` notes). Stored `content_embedding`s are a fixed
+        // `FLOAT[dim]`, so in that case no mention could be scored anywhere: fall back to the same
+        // filtered match in uuid order, with the same limit. Bounded like the scored path, so a
+        // large hub is never loaded whole.
         let fallback = format!(
             "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
              WHERE n.uuid = $uuid AND coalesce(ep.origin, '') IN $origins {live} \
              WITH DISTINCT ep \
-             RETURN ep.uuid, coalesce(ep.origin, ''), ep.doc_id, ep.superseded_at, ep.group_id, \
-             ep.content_embedding"
+             RETURN ep.uuid, coalesce(ep.origin, ''), ep.doc_id, ep.superseded_at, ep.group_id \
+             ORDER BY ep.uuid ASC LIMIT $limit"
         );
         if let Some(o) = params.as_object_mut() {
             o.remove("emb");
-            o.remove("limit");
         }
-        let mut scored: Vec<(Option<f64>, String, crate::origin::EpisodeOriginInfo)> = self
+        Ok(self
             .query_params(&fallback, params)?
             .iter()
-            .map(|r| {
-                let (uuid, info) = row_out(r);
-                (
-                    rust_cosine(embedding, &value_as_float_array(&r[5])),
-                    uuid,
-                    info,
-                )
-            })
-            .collect();
-        scored.sort_by(|a, b| {
-            let (x, y) = (
-                a.0.unwrap_or(f64::NEG_INFINITY),
-                b.0.unwrap_or(f64::NEG_INFINITY),
-            );
-            y.total_cmp(&x).then_with(|| a.1.cmp(&b.1))
-        });
-        scored.truncate(limit);
-        Ok(scored.into_iter().map(|(_, u, i)| (u, i)).collect())
+            .map(|r| row_out(r))
+            .collect())
     }
 
     /// Entities among `entity_uuids` with at least one live primary or external mention — the
