@@ -1881,8 +1881,10 @@ send it are unaffected. The cause and the planned mitigation are in
 | Each entry | non-empty after trimming whitespace |
 | Total length | at most **2000** Unicode scalar values (`chars()`) across the trimmed entries |
 
-Variants are trimmed; `query` is not. A variant equal (after trimming, case-sensitive) to `query` or to
-an earlier variant is dropped before searching, so repeating a phrase never boosts a result.
+Variants are trimmed; `query` is not. A trimmed variant equal (case-sensitive) to `query` as sent
+or to an earlier variant is dropped before searching, so repeating a phrase never boosts a result. `query` is
+compared verbatim: if it carries surrounding whitespace, a variant equal to its trimmed text is not dropped and
+is searched as a near-identical second query, so send `query` without stray whitespace.
 
 **Execution.** `[query, ...queries]` are embedded in one batched query-role call. Each query then runs the
 request's **whole retrieval pipeline**, concurrently and each on its own connection: the same `mode`

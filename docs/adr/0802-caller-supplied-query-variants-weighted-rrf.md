@@ -44,10 +44,13 @@ had nowhere to put rewrites it can write for free.
    caller's original `[query, ...queries]`. It is skipped when absent, so no-`queries` responses are
    unchanged. It is simpler for an agent than ADR-0629's nested `search` object and follows its additive
    per-item-evidence precedent.
-6. **Duplicates are dropped, indices stay original.** After trimming, a variant equal (exact,
-   case-sensitive) to the primary or an earlier variant is not probed and its index is not reported. Keeping
+6. **Duplicates are dropped, indices stay original.** A trimmed variant equal (exact,
+   case-sensitive) to the primary query as sent (which is not trimmed) or to an earlier variant is not probed and its index is not reported. Keeping
    duplicates would let repetition boost a document, the exact failure the spec warns about. Case-folding
-   was rejected: "Foo" and "foo" can embed differently, and dropping is for exact repeats only.
+   was rejected: "Foo" and "foo" can embed differently, and dropping is for exact repeats only. Known edge: a `query` with surrounding whitespace is not matched by
+   its trimmed twin among the variants, so that variant is searched as a near-identical second query. The
+   primary is left untrimmed to keep requests without `queries` byte-identical, and the case needs a caller to
+   send stray whitespace on `query`.
 7. **With `queries`, `score` is the fused rank score and `similarity` the best cosine** across the vector
    legs that matched (absent for a lexical-only hit), the same contract as hybrid mode (ADR-0789). The
    first design kept `score` as the cosine, which left the list non-monotone and could not feed belief-aware

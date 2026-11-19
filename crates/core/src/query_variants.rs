@@ -13,8 +13,9 @@
 //! - the total number of Unicode scalar values (`chars()`) across the *trimmed* entries must not
 //!   exceed [`MAX_VARIANTS_TOTAL_CHARS`];
 //! - variants are trimmed; the primary `query` is not (so existing behaviour is unchanged);
-//! - a trimmed variant equal (exact, case-sensitive) to the primary query or to an earlier
-//!   variant is dropped, so repetition cannot boost a document. Surviving variants keep their
+//! - a trimmed variant equal (exact, case-sensitive) to the primary query *as sent* (the primary is
+//!   not trimmed, so a `query` with surrounding whitespace is not matched by its trimmed twin) or
+//!   to an earlier variant is dropped, so repetition cannot boost a document. Surviving variants keep their
 //!   original position in `[query, ...queries]`, so evidence indices stay stable for the caller.
 
 use serde_json::Value;
