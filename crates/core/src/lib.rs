@@ -65,6 +65,7 @@ pub mod wal_generation;
 pub mod wal_group;
 pub mod wal_strip;
 pub mod write_policy;
+pub mod zero_vector_record;
 
 pub use app_state::AppState;
 pub use cassette::{CassetteRecord, CassetteWriter, RecordingExtractor, ReplayingExtractor};

@@ -217,6 +217,18 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          embedding_doc_prefix STRING\
          )",
     )?;
+    // Durable per-group record of rows stored with a fallback zero vector because the embedder
+    // failed during WAL replay recompute (issue #808, ADR-0808). lcg-only derived state, like
+    // `WalPosition` — no counterpart in graphiti's `kuzu_driver.py`, so no parity change. See
+    // `zero_vector_record`. `id` is `"{group_id}|{kind}|{uuid}"`.
+    conn.raw_query(
+        "CREATE NODE TABLE IF NOT EXISTS EmbeddingZeroRow (\
+         id STRING PRIMARY KEY, \
+         group_id STRING, \
+         kind STRING, \
+         uuid STRING\
+         )",
+    )?;
     Ok(())
 }
 
