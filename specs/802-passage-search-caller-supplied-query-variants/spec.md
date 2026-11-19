@@ -99,12 +99,14 @@ Variants add candidates, but they never bypass belief-time, origin, or group sco
 
 **Why this priority**: Leaking superseded, out-of-scope or other-group content through a variant would be a correctness and privacy bug, and would invalidate the evaluation.
 
-**Independent Test**: Run a search with `believed_only`, `as_of`, an origin filter and a group filter, plus variants chosen to match excluded notes. None of the excluded notes appear.
+**Independent Test**: Run a search with an origin filter, a group filter and a `min_score` floor, plus variants chosen to match excluded notes. None of the excluded notes appear.
 
 **Acceptance Scenarios**:
 
-1. **Given** `believed_only`, `as_of`, origin or group filters, **When** a search has variants, **Then** every per-query retrieval applies those filters, and no result is excluded by the filters in the single-query case but present in the variant case.
-2. **Given** a variant that closely matches a superseded note, **When** `believed_only` is set, **Then** that note is not returned.
+1. **Given** `group_ids`, `origins` or `min_score`, **When** a search has variants, **Then** every per-query retrieval applies those filters, and no result is excluded by the filters in the single-query case but present in the variant case.
+2. **Given** a variant that closely matches a superseded note, **When** `belief_aware` ranking is on (the default in `hybrid` mode), **Then** that note is demoted exactly as it would be for the primary query, because belief-aware ranking runs once on the fused candidates.
+
+*Scope note: `believed_only` and `as_of` are edge-read parameters, not passage-search parameters (ADR-0705), so they do not apply here. Belief handling for passages is `belief_aware` (ADR-0789). See ADR-0802, "Deferred".*
 
 ---
 
@@ -198,7 +200,7 @@ Once graph search (#797) has landed, `knowledge_graph_search` accepts `queries` 
 - **FR-005**: For each query, the mode's normal retrieval MUST run, including any stages enabled for that mode.
 - **FR-006**: Per-query results MUST be combined with weighted reciprocal-rank fusion in which the primary query has a higher weight than a variant. The primary weight MUST be a single named, documented constant (`PRIMARY_QUERY_WEIGHT`, initial value 2, as in qmd). The variants MUST share a fixed total budget (`VARIANT_BUDGET_WEIGHT`, initial value 1) split equally across the variants actually searched, so that together they never outweigh the primary query (its share of the total weight is at least 2/3 for 1–5 variants). *Revised after the first v2 measurement: the original wording gave every variant weight 1, which let 5 variants outweigh the primary 5:2 and cost 0.046 overall nDCG@10; see ADR-0802, decision 4.*
 - **FR-007**: When a rerank stage is enabled (#796), it MUST run once on the fused candidate set, scored against the primary query only, never once per variant. If the rerank stage is not present in the code at implementation time, this requirement is deferred to that stage.
-- **FR-008**: Every existing filter (`believed_only`, `as_of`, origin filters, group scoping) MUST apply to every per-query retrieval. Variants MUST NOT surface any result the same filters would exclude for the primary query.
+- **FR-008**: Every existing passage-search filter (`group_ids`, `origins` and the `min_score` floor) MUST apply to every per-query retrieval. Variants MUST NOT surface any result the same filters would exclude for the primary query. Belief handling is `belief_aware` ranking, which runs once on the fused candidates. `believed_only` and `as_of` are not passage-search parameters, so they are out of scope here (ADR-0802, "Deferred").
 - **FR-009**: Each result in a request that used variants MUST report which queries matched it, as indices into `[query, ...queries]`. A result matched by several queries lists all of them, in ascending order.
 - **FR-010**: Fusion and tie-breaking MUST be deterministic: the same input and index state produce the same output order.
 - **FR-011**: The `knowledge_search_passages` entry in the MCP tool registry MUST document `queries` in its input schema, and its description MUST say when to supply variants (a direct search came back thin, or the question describes something rather than naming it) and what good variants are (keywords the note would use, a likely name for the thing described, a one-sentence hypothetical answer). The registry's own count assertions MUST remain correct.
