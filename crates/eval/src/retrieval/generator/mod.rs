@@ -19,6 +19,7 @@ pub mod notes;
 pub mod questions;
 pub mod render;
 pub mod skeleton;
+pub mod variants;
 pub mod vocab;
 pub mod world;
 

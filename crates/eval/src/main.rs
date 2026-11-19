@@ -44,6 +44,10 @@ async fn main() {
     if args.first().map(String::as_str) == Some("retrieval-render") {
         std::process::exit(lcg_eval::retrieval::generator::render::run_cli(&args[1..]).await);
     }
+    // `lcg-eval retrieval-variants …` (#802): the offline exchange for query-variants.jsonl.
+    if args.first().map(String::as_str) == Some("retrieval-variants") {
+        std::process::exit(lcg_eval::retrieval::generator::variants::run_cli(&args[1..]).await);
+    }
     let cli = match parse_args(&args) {
         Ok(cli) => cli,
         Err(e) => {
