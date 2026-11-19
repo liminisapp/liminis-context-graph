@@ -22,6 +22,7 @@ pub mod episode;
 pub mod error;
 pub mod extraction_failures;
 pub mod extractor;
+pub mod graph_search;
 pub mod group_purge;
 pub mod handlers;
 pub mod identifier_veto;
