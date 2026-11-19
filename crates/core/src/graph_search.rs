@@ -276,7 +276,7 @@ pub struct SeedCandidate {
     pub summary_similarity: Option<f64>,
     /// Admitted as a seed (within the cap and every filter).
     pub seeded: bool,
-    /// Why: `exact_name`, `bm25_rank`, `vector` or `vector_agreement` when admitted;
+    /// Why: `exact_name`, `bm25_rank`, `vector` or `summary_vector` when admitted;
     /// `no_evidence`, `merged`, `no_row`, `origin_filter` or `seed_cap` when not.
     pub reason: &'static str,
 }

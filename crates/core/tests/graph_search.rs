@@ -810,18 +810,20 @@ async fn hub_seed_ranks_the_relevant_edge_above_unrelated_ones() {
     let fx = fixture();
     let r = search(
         &fx,
-        json!({"query": Q_HUB, "group_ids": [G], "num_results": 20}),
+        // The maximum, so nothing the walk found is cut: every spoke fact is in the response, and
+        // the ordering below is checked against each of them rather than vacuously.
+        json!({"query": Q_HUB, "group_ids": [G], "num_results": 100}),
     )
     .await;
     let relevant = rank(&r, "f:e-orbit-price").expect("relevant edge returned");
     for i in 1..=5 {
-        if let Some(other) = rank(&r, &format!("f:e-spoke{i}")) {
-            assert!(
-                relevant < other,
-                "relevant edge must outrank spoke {i}: {:?}",
-                keys(&r)
-            );
-        }
+        let other = rank(&r, &format!("f:e-spoke{i}"))
+            .unwrap_or_else(|| panic!("spoke {i} fact must be returned: {:?}", keys(&r)));
+        assert!(
+            relevant < other,
+            "relevant edge must outrank spoke {i}: {:?}",
+            keys(&r)
+        );
     }
 }
 
@@ -1386,7 +1388,7 @@ async fn explain_reports_every_seed_candidate_and_why() {
             .unwrap_or_else(|| panic!("seed {s} missing from trace"));
         assert_eq!(c["seeded"], true);
         assert!(
-            ["exact_name", "bm25_rank", "vector", "vector_agreement"]
+            ["exact_name", "bm25_rank", "vector", "summary_vector"]
                 .contains(&c["reason"].as_str().unwrap()),
             "{c}"
         );

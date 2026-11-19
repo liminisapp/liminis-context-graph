@@ -133,7 +133,7 @@ impl RpcTransport for FakeLcg {
                     .collect();
                 let count = results.len();
                 Ok(json!({"results": results, "count": count, "seeds": [],
-                          "stats": {"embed_calls": 1, "passage_mode": "vector"}}))
+                          "stats": {"embed_calls": 1, "passage_mode": "vector_belief"}}))
             }
             other => Err(format!("unexpected method {other}")),
         };

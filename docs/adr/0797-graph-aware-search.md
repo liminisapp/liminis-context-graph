@@ -91,7 +91,8 @@ gibberish would seed the walk. A fused candidate is admitted only on real eviden
   candidates.
 
 Merged tombstones are dropped; under `origins`, a seed needs a matching live mention
-(`origin_reads::entity_support`). The top **5** by RRF are kept, scored relative to the best (1.0).
+(`origin_reads::entity_support`). The top **5** by RRF are kept, scored relative to the best (1.0);
+up to 3 summary-vector seeds may follow (below), so a response carries **at most 8** seeds.
 There is **no fuzzy name matcher**: near-miss names are covered by BM25 and the name vector. A
 vector list is reported in a seed's `matched` only at or above the 0.5 floor, so filler is never
 presented as evidence.
@@ -112,7 +113,16 @@ summary similarity is both within **0.03** of the best summary similarity *and* 
 that list's median. Both tests are relative to the list, never an absolute cosine floor, whose right
 value depends on the embedder. The median test is what keeps ANN filler out (#613): a query that
 matches no summary well gives a flat list, whose best barely clears the median, so nothing
-qualifies. Such a seed reports `summary_vector` in `matched` and in the trace.
+qualifies. Such a seed reports `summary_vector` in `matched` and in the trace. A candidate cut by
+the RRF cap can return this way: the cap judges fused rank, this pass judges the summary list alone.
+
+**These constants were tuned in-sample.** `SUMMARY_SEEDS` (tried 0, 2, 3), `SUMMARY_SEED_MARGIN`
+(0.03, not varied) and `SUPPORT_SOURCE_EXP` (§6; tried 1, 0.5, 0.25, 0) were chosen on the **whole**
+v2 question set, the same set the success criteria are judged on. There was no held-out split.
+That was eight runs of a small grid, on a local harness that computes nDCG@10 as `lcg-eval` does,
+without the judge. So v2 gains on paraphrase and multi-hop from these two changes are partly
+in-sample. They are evidence the mechanism works, not an independent acceptance test. A held-out
+check needs either a v2 split fixed before tuning, or a fresh corpus.
 
 **`explain: true`** adds `seed_trace` to the response: every fused candidate with its rank in each
 list, its similarities, whether it was seeded, and why (`exact_name`, `bm25_rank`, `vector`,
