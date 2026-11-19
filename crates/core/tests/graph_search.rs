@@ -1246,6 +1246,52 @@ async fn hub_mentions_are_bounded_ranked_by_relevance_and_filtered_before_the_cu
     );
 }
 
+#[tokio::test]
+async fn a_hub_whose_qualifying_mentions_all_fit_reports_no_cut() {
+    // 60 mentions make Brook Hall a hub (more than 50), but 20 are derived pages the ranked
+    // query filters out. The 40 that qualify all fit, so nothing was cut and none is reported.
+    let fx = fixture_built(|c| {
+        entity(c, "brook", "Brook Hall", G, SUMMARY);
+        for i in 0..40 {
+            episode_in(c, G, &format!("m-{i:02}"), axis(PRICE), None, &["brook"]);
+        }
+        for i in 0..20 {
+            episode_in(
+                c,
+                G,
+                &format!("d-{i:02}"),
+                axis(PRICE),
+                Some("derived"),
+                &["brook"],
+            );
+        }
+    });
+    let r = search(
+        &fx,
+        json!({"query": Q_BROOK, "group_ids": [G], "num_results": 100, "stages": "seeds"}),
+    )
+    .await;
+    assert!(
+        seed_uuids(&r).contains(&"brook".to_string()),
+        "{}",
+        r["seeds"]
+    );
+    let cut = r["stats"]["truncations"].as_array().unwrap();
+    assert!(
+        !cut.iter().any(|t| t["cap"] == "mentions_per_entity"),
+        "no qualifying mention was dropped, so no cut is reported: {}",
+        r["stats"]
+    );
+    // All 40 primary mentions compete; no derived page does.
+    let primary = keys(&r).iter().filter(|k| k.starts_with("p:m-")).count();
+    assert_eq!(primary, 40, "{:?}", keys(&r));
+    assert!(
+        keys(&r).iter().all(|k| !k.starts_with("p:d-")),
+        "{:?}",
+        keys(&r)
+    );
+}
+
 // ── Story 7: one model call ───────────────────────────────────────────────────
 
 #[tokio::test]

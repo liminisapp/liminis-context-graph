@@ -1408,7 +1408,6 @@ fn mention_rows(
         out.extend(conn.entity_mention_origins(&small)?);
     }
     if !hubs.is_empty() {
-        st.truncate("mentions_per_entity", MENTIONS_PER_ENTITY);
         let score = |u: &String| reach.get(u).map_or(0.0, |r| r.score);
         hubs.sort_by(|a, b| by_score_then_key((score(a), a), (score(b), b)));
         if hubs.len() > MAX_HUB_MENTION_QUERIES {
@@ -1427,11 +1426,16 @@ fn mention_rows(
         let live_at = p.believed_only.then_some(p.as_of_us);
         for hub in hubs {
             st.db_queries += 1;
-            for (ep, info) in
-                conn.entity_mentions_ranked(&hub, emb, &allowed, live_at, MENTIONS_PER_ENTITY)?
-            {
-                out.push((hub.clone(), ep, info));
+            // A hub is classified by its raw mention count, but the ranked query filters derived,
+            // out-of-`origins` and superseded mentions in the query, so its qualifying mentions
+            // may all fit. Fetch one row past the bound and report a cut only when it comes back.
+            let mut rows =
+                conn.entity_mentions_ranked(&hub, emb, &allowed, live_at, MENTIONS_PER_ENTITY + 1)?;
+            if rows.len() > MENTIONS_PER_ENTITY {
+                rows.truncate(MENTIONS_PER_ENTITY);
+                st.truncate("mentions_per_entity", MENTIONS_PER_ENTITY);
             }
+            out.extend(rows.into_iter().map(|(ep, info)| (hub.clone(), ep, info)));
         }
     }
     Ok(out)
