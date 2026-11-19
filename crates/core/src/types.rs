@@ -442,6 +442,11 @@ pub struct PassageResult {
     /// `vector` mode (or when absent), so the vector-mode response is unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub similarity: Option<f64>,
+    /// Which queries retrieved this passage (issue #802): ascending indices into the caller's
+    /// `[query, ...queries]` (0 is the primary query). Present only when the request supplied
+    /// `queries`, so a request without them serializes exactly as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_queries: Option<Vec<usize>>,
 }
 
 /// Why an entity was returned by `knowledge_find_entities` (issue #629): the fused RRF score
