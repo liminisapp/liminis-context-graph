@@ -516,8 +516,11 @@ pub fn registry() -> Vec<ToolSpec> {
                            Reciprocal Rank Fusion, the lexical list weighing less, issue #789); \
                            in hybrid mode `score` is the fused rank score, not a cosine, and \
                            `similarity` carries the cosine where the vector retriever matched. \
-                           `belief_aware` (default on in hybrid) ranks a derived page below the \
-                           primary note it cites and a superseded passage below its successor. Each result includes the `attributes` (issue \
+                           `belief_aware` (default on in both modes; send `false` to opt out, or \
+                           set LCG_PASSAGE_BELIEF_AWARE=off on the service to restore the old \
+                           default) ranks a derived page below the primary note it cites and a \
+                           superseded passage below its successor; demoted passages can have \
+                           a lower `score` as well as a later position. Each result includes the `attributes` (issue \
                            #528) of the episode it belongs to — no separate per-episode fetch \
                            is needed to obtain them. Each result also carries the `origin` \
                            (issue #752) of its episode, and `origins` restricts results to \
@@ -553,8 +556,10 @@ pub fn registry() -> Vec<ToolSpec> {
                                 ranks below the `primary`/`external` note it cites by \
                                 [[wikilink]], and a superseded passage below its successor. \
                                 Superseded passages are demoted, never dropped. Default: true in \
-                                `hybrid` mode, false in `vector` mode (so the vector default is \
-                                unchanged)."
+                                both modes (issue #806). `false` restores the previous, \
+                                non-belief ordering; omitted, the service default applies \
+                                (LCG_PASSAGE_BELIEF_AWARE=off turns the default off; an \
+                                explicit value here always wins)."
                         },
                         "group_ids": group_ids_prop(),
                         "origins": origins_prop()
