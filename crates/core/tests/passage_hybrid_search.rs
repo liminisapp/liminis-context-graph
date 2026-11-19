@@ -232,13 +232,14 @@ async fn punctuation_and_operator_queries_never_error() {
 async fn vector_mode_is_unchanged_and_exposes_no_similarity_field() {
     let eps = [ep("a", "alpha text", 0), ep("b", "beta text", 1)];
     let (state, _db, _d) = make_state(embedder(&[("alpha", graded_query())]), &eps);
-    let vector = search(&state, params("alpha", "vector")).await;
+    // Raw vector (belief-aware off, #806): cosine scores, no `similarity` key.
+    let vector = search(&state, belief("alpha", "vector", false)).await;
     // Cosine scores, no `similarity` key.
     assert!(vector[0].get("similarity").is_none());
     let s0 = vector[0]["score"].as_f64().unwrap();
     assert!(s0 > 0.5 && s0 <= 1.0, "cosine score expected, got {s0}");
     // Omitting mode uses the default, which is vector unless LCG_PASSAGE_SEARCH_MODE is set.
-    let mut p = params("alpha", "vector");
+    let mut p = belief("alpha", "vector", false);
     p.as_object_mut().unwrap().remove("mode");
     let default = search(&state, p).await;
     assert_eq!(default, vector);
@@ -419,19 +420,133 @@ async fn hybrid_ranks_a_derived_page_below_the_primary_note_it_cites() {
     assert_eq!(uuids(&default), vec!["src", "page"]);
 }
 
+/// The pre-#806 default vector output: the untouched raw path, called directly.
+async fn raw_vector(state: &Arc<AppState>, query: &str) -> Value {
+    let passages = lcg_core::search::search_passages(
+        state.db.load_full().unwrap(),
+        Arc::clone(&state.embedder),
+        query,
+        Some(vec![G.to_string()]),
+        10,
+        0.0,
+        None,
+    )
+    .await
+    .unwrap();
+    serde_json::to_value(passages).unwrap()
+}
+
+/// The pre-#806 hybrid output with belief-aware ranking off, called directly.
+async fn raw_hybrid(state: &Arc<AppState>, query: &str) -> Value {
+    let passages = lcg_core::search::search_passages_hybrid(
+        state.db.load_full().unwrap(),
+        Arc::clone(&state.embedder),
+        query,
+        Some(vec![G.to_string()]),
+        10,
+        0.0,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    serde_json::to_value(passages).unwrap()
+}
+
+/// Issue #806: vector mode is belief-aware by default; `belief_aware: false` restores the previous
+/// default byte-for-byte.
 #[tokio::test]
-async fn vector_mode_applies_the_rules_only_behind_its_own_switch() {
+async fn vector_mode_is_belief_aware_by_default_and_opts_out_with_false() {
     let (state, _db, _d) = make_state(
         embedder(&[("quokkaplex", graded_query())]),
         &derived_and_source(),
     );
     let default = search(&state, params("quokkaplex", "vector")).await;
-    let off = search(&state, belief("quokkaplex", "vector", false)).await;
-    assert_eq!(default, off, "vector default is unchanged");
-    assert_eq!(uuids(&default), vec!["page", "src"]);
     let on = search(&state, belief("quokkaplex", "vector", true)).await;
-    assert_eq!(uuids(&on), vec!["src", "page"]);
-    assert!(on[0].get("similarity").is_none(), "still vector mode");
+    let off = search(&state, belief("quokkaplex", "vector", false)).await;
+    // The derived page now sits below the primary note it cites.
+    assert_eq!(uuids(&default), vec!["src", "page"]);
+    assert_eq!(default, on, "default equals explicit belief_aware: true");
+    assert_eq!(uuids(&off), vec!["page", "src"]);
+    assert_ne!(default, off);
+    // Opting out is exactly what the pre-#806 default returned (order, ids and scores).
+    assert_eq!(Value::Array(off), raw_vector(&state, "quokkaplex").await);
+    assert!(default[0].get("similarity").is_none(), "still vector mode");
+}
+
+/// A client that sends neither `mode` nor `belief_aware` (SC-004).
+#[tokio::test]
+async fn no_mode_and_no_belief_aware_equals_explicit_vector_belief() {
+    let (state, _db, _d) = make_state(
+        embedder(&[("quokkaplex", graded_query())]),
+        &derived_and_source(),
+    );
+    let mut bare = params("quokkaplex", "vector");
+    bare.as_object_mut().unwrap().remove("mode");
+    let default = search(&state, bare).await;
+    let explicit = search(&state, belief("quokkaplex", "vector", true)).await;
+    assert_eq!(default, explicit);
+    assert_eq!(uuids(&default), vec!["src", "page"]);
+}
+
+#[tokio::test]
+async fn belief_aware_null_is_treated_as_omitted() {
+    let (state, _db, _d) = make_state(
+        embedder(&[("quokkaplex", graded_query())]),
+        &derived_and_source(),
+    );
+    for mode in ["vector", "hybrid"] {
+        let mut p = params("quokkaplex", mode);
+        p["belief_aware"] = Value::Null;
+        let with_null = search(&state, p).await;
+        let omitted = search(&state, params("quokkaplex", mode)).await;
+        assert_eq!(with_null, omitted, "{mode}");
+        assert_eq!(uuids(&with_null), vec!["src", "page"], "{mode}");
+    }
+}
+
+#[tokio::test]
+async fn non_boolean_belief_aware_is_still_a_validation_error() {
+    let (state, _db, _d) = make_state(
+        embedder(&[("quokkaplex", graded_query())]),
+        &derived_and_source(),
+    );
+    let mut p = params("quokkaplex", "vector");
+    p["belief_aware"] = json!("yes");
+    let v = try_search(&state, p).await;
+    assert!(v.get("error").is_some(), "{v}");
+}
+
+/// Hybrid was already belief-aware by default (#789); `belief_aware: false` still gives the
+/// unchanged weighted-RRF output.
+#[tokio::test]
+async fn hybrid_belief_aware_false_is_unchanged_weighted_rrf() {
+    let (state, _db, _d) = make_state(
+        embedder(&[("quokkaplex", graded_query())]),
+        &derived_and_source(),
+    );
+    let off = search(&state, belief("quokkaplex", "hybrid", false)).await;
+    assert_eq!(uuids(&off), vec!["page", "src"]);
+    assert_eq!(Value::Array(off), raw_hybrid(&state, "quokkaplex").await);
+    let default = search(&state, params("quokkaplex", "hybrid")).await;
+    let on = search(&state, belief("quokkaplex", "hybrid", true)).await;
+    assert_eq!(default, on);
+    assert_eq!(uuids(&default), vec!["src", "page"]);
+}
+
+/// With nothing to demote, belief-aware and raw vector rankings coincide in ids, order and scores.
+#[tokio::test]
+async fn without_anchors_belief_aware_and_raw_vector_agree() {
+    let eps = [
+        ep("a", "alpha text", 0),
+        ep("b", "beta text", 1),
+        ep("c", "gamma text", 2),
+    ];
+    let (state, _db, _d) = make_state(embedder(&[("alpha", graded_query())]), &eps);
+    let default = search(&state, params("alpha", "vector")).await;
+    let off = search(&state, belief("alpha", "vector", false)).await;
+    assert_eq!(uuids(&default), vec!["a", "b", "c"]);
+    assert_eq!(default, off);
 }
 
 #[tokio::test]
