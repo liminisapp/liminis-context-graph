@@ -2188,11 +2188,15 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
             .parse::<search::PassageSearchMode>()
             .map_err(Error::Ipc)?,
     };
-    let top_rank_bonus = match p.get("top_rank_bonus").filter(|v| !v.is_null()) {
-        None => true,
-        Some(v) => v
-            .as_bool()
-            .ok_or_else(|| Error::Ipc("top_rank_bonus must be a boolean".to_string()))?,
+    // Belief-aware re-ranking (issue #789, steer 2026-11-19): derived pages rank below the primary
+    // note they cite, and superseded passages below their successor. On by default in `hybrid`,
+    // off by default in `vector` so the vector default stays byte-for-byte unchanged.
+    let belief_override = match p.get("belief_aware").filter(|v| !v.is_null()) {
+        None => None,
+        Some(v) => Some(
+            v.as_bool()
+                .ok_or_else(|| Error::Ipc("belief_aware must be a boolean".to_string()))?,
+        ),
     };
 
     let run = |state: Arc<AppState>| {
@@ -2203,8 +2207,20 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
             let db = load_db(&state)?;
             let embedder = Arc::clone(&state.embedder);
             match mode {
-                search::PassageSearchMode::Vector => {
+                search::PassageSearchMode::Vector if belief_override != Some(true) => {
                     search::search_passages(
+                        db,
+                        embedder,
+                        &query,
+                        group_ids,
+                        num_results,
+                        min_score,
+                        origins,
+                    )
+                    .await
+                }
+                search::PassageSearchMode::Vector => {
+                    search::search_passages_vector_belief(
                         db,
                         embedder,
                         &query,
@@ -2224,7 +2240,7 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
                         num_results,
                         min_score,
                         origins,
-                        top_rank_bonus,
+                        belief_override.unwrap_or(true),
                     )
                     .await
                 }

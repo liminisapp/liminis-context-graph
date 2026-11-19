@@ -20,10 +20,14 @@ pub const ALL_CONFIGS: [&str; 5] = [
     "lcg-entities-facts-belief",
 ];
 
-/// Opt-in LCG passage-search variants (#789), measured on one binary by sending `mode` explicitly:
-/// RRF fusion of BM25 and vector alone, and RRF with the top-rank bonus. Not in the default run.
-pub const HYBRID_PASSAGE_CONFIGS: [&str; 2] =
-    ["lcg-passages-hybrid-rrf", "lcg-passages-hybrid-bonus"];
+/// Opt-in LCG passage-search variants (#789), measured on one binary by sending `mode` and
+/// `belief_aware` explicitly: vector with the belief-aware rules, weighted-RRF hybrid alone, and
+/// weighted-RRF hybrid with the belief-aware rules. Not in the default run.
+pub const HYBRID_PASSAGE_CONFIGS: [&str; 3] = [
+    "lcg-passages-belief",
+    "lcg-passages-hybrid",
+    "lcg-passages-hybrid-belief",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalArgs {
@@ -75,8 +79,9 @@ OPTIONS:
     --k <N>                    Shared cut-off for every configuration (1..=100, default 10).
     --configs <LIST>           Comma-separated subset of: lcg-passages, lcg-entities-facts, qmd,
                                qmd-rerank, lcg-entities-facts-belief. Default: all five.
-                               Opt-in (#789): lcg-passages-hybrid-rrf (BM25 + vector, RRF),
-                               lcg-passages-hybrid-bonus (the same plus the top-rank bonus).
+                               Opt-in (#789): lcg-passages-hybrid (BM25 + vector, weighted RRF),
+                               lcg-passages-hybrid-belief (the same plus belief-aware ranking),
+                               lcg-passages-belief (vector plus belief-aware ranking).
     --service-bin <PATH>       liminis-context-graph binary to spawn (default: alongside lcg-eval,
                                else `liminis-context-graph` on PATH).
     --embedder-http <URL>      Real embedder for the spawned service (required for LCG configs
@@ -327,7 +332,7 @@ mod tests {
         }
         match p(&[
             "--configs",
-            "lcg-passages,lcg-passages-hybrid-rrf,lcg-passages-hybrid-bonus",
+            "lcg-passages,lcg-passages-hybrid,lcg-passages-hybrid-belief",
         ])
         .unwrap()
         {

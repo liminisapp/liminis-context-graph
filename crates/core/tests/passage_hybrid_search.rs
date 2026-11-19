@@ -1,4 +1,5 @@
-//! Issue #789 / ADR-0789: hybrid BM25 + vector passage search with RRF and a top-rank bonus.
+//! Issue #789 / ADR-0789: hybrid BM25 + vector passage search with weighted RRF and belief-aware
+//! re-ranking.
 //!
 //! Episodes are inserted directly with chosen one-hot embeddings and `NameMapEmbedder` maps each
 //! query to a chosen vector, so the vector ranking is fully determined. Lexical ranking comes
@@ -17,7 +18,6 @@ use lcg_core::{
     extractor::ConfigurableExtractor,
     handlers,
     ipc::IpcRequest,
-    search::{TOP1_BONUS_FRACTION, TOP3_BONUS_FRACTION},
     telemetry::NoopSink,
     types::EpisodicRow,
 };
@@ -42,6 +42,9 @@ struct Ep {
     origin: Option<&'static str>,
     content: &'static str,
     axis: usize,
+    doc_id: Option<&'static str>,
+    /// `(superseded_at, kind, superseded_by, reason)` for a superseded episode.
+    superseded: Option<(&'static str, &'static str, &'static str, &'static str)>,
 }
 
 fn ep(uuid: &'static str, content: &'static str, axis: usize) -> Ep {
@@ -51,7 +54,23 @@ fn ep(uuid: &'static str, content: &'static str, axis: usize) -> Ep {
         origin: None,
         content,
         axis,
+        doc_id: None,
+        superseded: None,
     }
+}
+
+/// A `primary`/`derived` document passage: `doc_id` set (and `origin` as given).
+fn doc(
+    uuid: &'static str,
+    doc_id: &'static str,
+    origin: &'static str,
+    content: &'static str,
+    axis: usize,
+) -> Ep {
+    let mut e = ep(uuid, content, axis);
+    e.doc_id = Some(doc_id);
+    e.origin = Some(origin);
+    e
 }
 
 fn make_state(embedder: Arc<dyn Embedder>, eps: &[Ep]) -> (Arc<AppState>, Arc<Db>, TempDir) {
@@ -74,6 +93,11 @@ fn make_state(embedder: Arc<dyn Embedder>, eps: &[Ep]) -> (Arc<AppState>, Arc<Db
                 entity_edges: vec![],
                 attributes: "{}".to_string(),
                 origin: e.origin.map(str::to_string),
+                doc_id: e.doc_id.map(str::to_string),
+                superseded_at: e.superseded.map(|s| s.0.to_string()),
+                superseded_by_kind: e.superseded.map(|s| s.1.to_string()),
+                superseded_by: e.superseded.map(|s| s.2.to_string()),
+                supersession_reason: e.superseded.map(|s| s.3.to_string()),
                 ..Default::default()
             })
             .unwrap();
@@ -292,9 +316,11 @@ async fn unknown_or_ill_typed_mode_is_rejected_and_empty_origins_still_rejected(
         let v = try_search(&state, p).await;
         assert!(v.get("error").is_some(), "mode {bad} accepted: {v}");
     }
-    let mut p = params("alpha", "hybrid");
-    p["top_rank_bonus"] = json!("yes");
-    assert!(try_search(&state, p).await.get("error").is_some());
+    for mode in ["hybrid", "vector"] {
+        let mut p = params("alpha", mode);
+        p["belief_aware"] = json!("yes");
+        assert!(try_search(&state, p).await.get("error").is_some(), "{mode}");
+    }
     let mut p = params("alpha", "hybrid");
     p["origins"] = json!([]);
     assert!(try_search(&state, p).await.get("error").is_some());
@@ -335,51 +361,184 @@ async fn num_results_truncates_hybrid() {
     assert_eq!(search(&state, p).await.len(), 2);
 }
 
-#[tokio::test]
-async fn top_rank_bonus_is_switchable() {
-    // `deep` ranks 3rd lexically (shorter docs score higher) and 1st by vector; construct so
-    // bonus on/off produce valid, distinct scores for the same passage.
-    let eps = [
-        ep("a", "needleword", 1),
-        ep("b", "needleword and more words here", 2),
-        ep(
-            "c",
-            "needleword and many more extra words here to dilute",
+/// Hybrid params with the belief rules explicitly on or off.
+fn belief(query: &str, mode: &str, on: bool) -> Value {
+    let mut p = params(query, mode);
+    p["belief_aware"] = json!(on);
+    p
+}
+
+/// The BM25 list alone, as uuids: the precondition that makes a belief test meaningful.
+fn lexical_order(db: &Db, query: &str) -> Vec<String> {
+    let conn = db.connect().unwrap();
+    lcg_core::search::lexical_passage_list(&conn, query, Some(&[G]), None, 10)
+        .unwrap()
+        .into_iter()
+        .map(|(u, _)| u)
+        .collect()
+}
+
+/// A restating (`derived`) page that repeats the query's wording, so BM25 puts it first, and the
+/// primary note it cites, which is longer and so scores lower lexically.
+fn derived_and_source() -> [Ep; 2] {
+    [
+        doc(
+            "page",
+            "page",
+            "derived",
+            "quokkaplex summary of [[src]]",
             0,
         ),
-    ];
-    let (state, _db, _d) = make_state(embedder(&[("needleword", graded_query())]), &eps);
-    let mut on = params("needleword", "hybrid");
-    on["top_rank_bonus"] = json!(true);
-    let mut off = params("needleword", "hybrid");
-    off["top_rank_bonus"] = json!(false);
-    let on = search(&state, on).await;
-    let off = search(&state, off).await;
-    assert_eq!(on.len(), 3);
-    assert_eq!(off.len(), 3);
-    // Compare the same passage with the bonus on and off: the score difference is exactly the
-    // tier constant (rank 1 in either list → TOP1, ranks 2–3 → TOP3), scaled by 1/60.
-    let score_of = |rs: &[Value], u: &str| {
-        rs.iter().find(|p| p["uuid"] == u).unwrap()["score"]
-            .as_f64()
-            .unwrap()
-    };
-    let top1 = TOP1_BONUS_FRACTION / 60.0;
-    let top3 = TOP3_BONUS_FRACTION / 60.0;
-    // `c` is the vector retriever's rank-1 hit (axis 0 is closest to the query), so it always
-    // gets the top tier.
-    assert!(
-        (score_of(&on, "c") - score_of(&off, "c") - top1).abs() < 1e-9,
-        "c: top-tier bonus"
+        doc(
+            "src",
+            "src",
+            "primary",
+            "the quokkaplex migration plan with many more words about the rollout schedule",
+            1,
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn hybrid_ranks_a_derived_page_below_the_primary_note_it_cites() {
+    let (state, db, _d) = make_state(
+        embedder(&[("quokkaplex", graded_query())]),
+        &derived_and_source(),
     );
-    // Every candidate is in the top 3 of at least one list, so each gets exactly one tier.
-    for u in ["a", "b", "c"] {
-        let diff = score_of(&on, u) - score_of(&off, u);
-        assert!(
-            (diff - top1).abs() < 1e-9 || (diff - top3).abs() < 1e-9,
-            "{u}: bonus {diff} is neither TOP1 nor TOP3"
-        );
-    }
+    assert_eq!(lexical_order(&db, "quokkaplex"), vec!["page", "src"]);
+    // Without the rule the restating page is first (BM25 and vector both favour it).
+    let off = search(&state, belief("quokkaplex", "hybrid", false)).await;
+    assert_eq!(uuids(&off), vec!["page", "src"], "precondition");
+    // With it, the page falls below its source, and the scores stay in rank order.
+    let on = search(&state, belief("quokkaplex", "hybrid", true)).await;
+    assert_eq!(uuids(&on), vec!["src", "page"]);
+    let scores: Vec<f64> = on.iter().map(|p| p["score"].as_f64().unwrap()).collect();
+    assert!(scores[0] > scores[1], "{scores:?}");
+    // Hybrid defaults to the rule being on.
+    let default = search(&state, params("quokkaplex", "hybrid")).await;
+    assert_eq!(uuids(&default), vec!["src", "page"]);
+}
+
+#[tokio::test]
+async fn vector_mode_applies_the_rules_only_behind_its_own_switch() {
+    let (state, _db, _d) = make_state(
+        embedder(&[("quokkaplex", graded_query())]),
+        &derived_and_source(),
+    );
+    let default = search(&state, params("quokkaplex", "vector")).await;
+    let off = search(&state, belief("quokkaplex", "vector", false)).await;
+    assert_eq!(default, off, "vector default is unchanged");
+    assert_eq!(uuids(&default), vec!["page", "src"]);
+    let on = search(&state, belief("quokkaplex", "vector", true)).await;
+    assert_eq!(uuids(&on), vec!["src", "page"]);
+    assert!(on[0].get("similarity").is_none(), "still vector mode");
+}
+
+#[tokio::test]
+async fn hybrid_derived_page_is_kept_when_its_source_was_not_retrieved() {
+    // The cited note is in another group, so it is not a candidate: nothing to rank below.
+    let mut src = doc("src", "src", "primary", "the quokkaplex plan", 1);
+    src.group = "g2";
+    let eps = [
+        doc(
+            "page",
+            "page",
+            "derived",
+            "quokkaplex summary of [[src]]",
+            0,
+        ),
+        src,
+    ];
+    let (state, _db, _d) = make_state(embedder(&[("quokkaplex", graded_query())]), &eps);
+    let on = search(&state, belief("quokkaplex", "hybrid", true)).await;
+    assert_eq!(uuids(&on), vec!["page"]);
+}
+
+fn stale_and_current(
+    superseded: (&'static str, &'static str, &'static str, &'static str),
+) -> [Ep; 2] {
+    let mut old = doc(
+        "old",
+        "old",
+        "primary",
+        "quokkaplex decision: use plan A",
+        0,
+    );
+    old.superseded = Some(superseded);
+    [
+        old,
+        doc(
+            "new",
+            "new",
+            "primary",
+            "quokkaplex decision: use plan B after review of the rollout schedule",
+            1,
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn hybrid_ranks_a_superseded_document_below_the_document_that_replaced_it() {
+    let eps = stale_and_current((
+        "2026-01-01 00:00:00",
+        "document",
+        "new",
+        "document_superseded",
+    ));
+    let (state, db, _d) = make_state(embedder(&[("quokkaplex", graded_query())]), &eps);
+    assert_eq!(lexical_order(&db, "quokkaplex"), vec!["old", "new"]);
+    let off = search(&state, belief("quokkaplex", "hybrid", false)).await;
+    assert_eq!(uuids(&off), vec!["old", "new"], "precondition");
+    let on = search(&state, belief("quokkaplex", "hybrid", true)).await;
+    assert_eq!(uuids(&on), vec!["new", "old"]);
+    // The stale passage is demoted, not dropped (superseded episodes are still returned).
+    assert_eq!(on.len(), 2);
+}
+
+#[tokio::test]
+async fn hybrid_ranks_a_revised_episode_below_its_revision() {
+    let eps = stale_and_current(("2026-01-01 00:00:00", "episode", "new", "revision"));
+    let (state, _db, _d) = make_state(embedder(&[("quokkaplex", graded_query())]), &eps);
+    let on = search(&state, belief("quokkaplex", "hybrid", true)).await;
+    assert_eq!(uuids(&on), vec!["new", "old"]);
+}
+
+#[tokio::test]
+async fn a_pending_document_supersession_does_not_demote() {
+    // ADR-0707: a future effective instant leaves the document believed until it is reached.
+    let eps = stale_and_current((
+        "2099-01-01 00:00:00",
+        "document",
+        "new",
+        "document_superseded",
+    ));
+    let (state, _db, _d) = make_state(embedder(&[("quokkaplex", graded_query())]), &eps);
+    let on = search(&state, belief("quokkaplex", "hybrid", true)).await;
+    assert_eq!(uuids(&on), vec!["old", "new"]);
+}
+
+#[tokio::test]
+async fn a_removed_chunk_has_no_successor_and_is_not_demoted() {
+    let eps = stale_and_current(("2026-01-01 00:00:00", "", "", "chunk_removed"));
+    let (state, _db, _d) = make_state(embedder(&[("quokkaplex", graded_query())]), &eps);
+    let on = search(&state, belief("quokkaplex", "hybrid", true)).await;
+    assert_eq!(uuids(&on), vec!["old", "new"]);
+}
+
+#[tokio::test]
+async fn belief_rules_respect_the_origins_and_group_filters() {
+    // With `origins: [primary]` the derived page is not a candidate at all, and the primary note
+    // still comes back; with the other group selected neither does.
+    let (state, _db, _d) = make_state(
+        embedder(&[("quokkaplex", graded_query())]),
+        &derived_and_source(),
+    );
+    let mut p = belief("quokkaplex", "hybrid", true);
+    p["origins"] = json!(["primary"]);
+    assert_eq!(uuids(&search(&state, p).await), vec!["src"]);
+    let mut p = belief("quokkaplex", "hybrid", true);
+    p["group_ids"] = json!(["g2"]);
+    assert!(search(&state, p).await.is_empty());
 }
 
 #[tokio::test]

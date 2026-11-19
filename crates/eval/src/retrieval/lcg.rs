@@ -544,43 +544,45 @@ fn items(v: &Value, key: &str) -> Vec<Value> {
 pub enum PassageMode {
     /// `mode: "vector"` — cosine only (`lcg-passages`).
     Vector,
-    /// `mode: "hybrid"`, `top_rank_bonus: false` — BM25 + vector with plain RRF.
-    HybridRrf,
-    /// `mode: "hybrid"`, `top_rank_bonus: true` — RRF plus the top-rank bonus.
-    HybridBonus,
+    /// `mode: "vector"`, `belief_aware: true` — cosine plus the belief-aware rules.
+    VectorBelief,
+    /// `mode: "hybrid"`, `belief_aware: false` — BM25 + vector with weighted RRF.
+    Hybrid,
+    /// `mode: "hybrid"`, `belief_aware: true` — weighted RRF plus the belief-aware rules.
+    HybridBelief,
 }
 
 impl PassageMode {
     pub fn config_id(self) -> &'static str {
         match self {
             PassageMode::Vector => "lcg-passages",
-            PassageMode::HybridRrf => "lcg-passages-hybrid-rrf",
-            PassageMode::HybridBonus => "lcg-passages-hybrid-bonus",
+            PassageMode::VectorBelief => "lcg-passages-belief",
+            PassageMode::Hybrid => "lcg-passages-hybrid",
+            PassageMode::HybridBelief => "lcg-passages-hybrid-belief",
         }
     }
 
-    /// The `knowledge_search_passages` request. `mode` is always sent explicitly, so
-    /// `lcg-passages` stays a stable vector-only baseline even if the service default changes.
+    /// The `knowledge_search_passages` request. `mode` and `belief_aware` are always sent
+    /// explicitly, so `lcg-passages` stays a stable vector-only baseline even if a service default
+    /// changes.
     pub fn request(self, q: &str, k: usize) -> Value {
         let mut p =
             json!({"query": q, "num_results": k, "min_score": 0.0, "group_ids": [EVAL_GROUP]});
-        match self {
-            PassageMode::Vector => p["mode"] = json!("vector"),
-            PassageMode::HybridRrf => {
-                p["mode"] = json!("hybrid");
-                p["top_rank_bonus"] = json!(false);
-            }
-            PassageMode::HybridBonus => {
-                p["mode"] = json!("hybrid");
-                p["top_rank_bonus"] = json!(true);
-            }
-        }
+        let (mode, belief) = match self {
+            PassageMode::Vector => ("vector", false),
+            PassageMode::VectorBelief => ("vector", true),
+            PassageMode::Hybrid => ("hybrid", false),
+            PassageMode::HybridBelief => ("hybrid", true),
+        };
+        p["mode"] = json!(mode);
+        p["belief_aware"] = json!(belief);
         p
     }
 }
 
-/// `lcg-passages` (vector-only, `mode: "vector"`), `lcg-passages-hybrid-rrf` and
-/// `lcg-passages-hybrid-bonus` (#789): `knowledge_search_passages` in each retrieval mode.
+/// `lcg-passages` (vector-only, `mode: "vector"`) and the opt-in #789 variants
+/// (`lcg-passages-belief`, `lcg-passages-hybrid`, `lcg-passages-hybrid-belief`):
+/// `knowledge_search_passages` in each retrieval mode.
 pub struct LcgPassages {
     pub t: Arc<dyn RpcTransport>,
     pub mode: PassageMode,
@@ -595,11 +597,14 @@ impl Retriever for LcgPassages {
             PassageMode::Vector => {
                 "knowledge_search_passages (mode=vector: vector-only, no FTS, no RRF), min_score=0"
             }
-            PassageMode::HybridRrf => {
-                "knowledge_search_passages (mode=hybrid: BM25 + vector, RRF, no top-rank bonus), min_score=0"
+            PassageMode::VectorBelief => {
+                "knowledge_search_passages (mode=vector, belief_aware: derived below cited primary, superseded below successor), min_score=0"
             }
-            PassageMode::HybridBonus => {
-                "knowledge_search_passages (mode=hybrid: BM25 + vector, RRF + top-rank bonus), min_score=0"
+            PassageMode::Hybrid => {
+                "knowledge_search_passages (mode=hybrid: BM25 + vector, weighted RRF, belief_aware=false), min_score=0"
+            }
+            PassageMode::HybridBelief => {
+                "knowledge_search_passages (mode=hybrid: BM25 + vector, weighted RRF, belief_aware=true), min_score=0"
             }
         }
         .into()
@@ -862,24 +867,27 @@ mod tests {
     }
 
     #[test]
-    fn passage_modes_send_mode_and_bonus_explicitly() {
-        let v = PassageMode::Vector.request("q", 5);
-        assert_eq!(v["mode"], "vector");
-        assert!(v.get("top_rank_bonus").is_none());
-        let rrf = PassageMode::HybridRrf.request("q", 5);
-        assert_eq!(
-            (rrf["mode"].as_str(), rrf["top_rank_bonus"].as_bool()),
-            (Some("hybrid"), Some(false))
-        );
-        let bonus = PassageMode::HybridBonus.request("q", 5);
-        assert_eq!(
-            (bonus["mode"].as_str(), bonus["top_rank_bonus"].as_bool()),
-            (Some("hybrid"), Some(true))
-        );
+    fn passage_modes_send_mode_and_belief_explicitly() {
+        let cases = [
+            (PassageMode::Vector, "vector", false),
+            (PassageMode::VectorBelief, "vector", true),
+            (PassageMode::Hybrid, "hybrid", false),
+            (PassageMode::HybridBelief, "hybrid", true),
+        ];
+        for (m, mode, belief) in cases {
+            let r = m.request("q", 5);
+            assert_eq!(
+                (r["mode"].as_str(), r["belief_aware"].as_bool()),
+                (Some(mode), Some(belief)),
+                "{m:?}"
+            );
+            assert!(r.get("top_rank_bonus").is_none());
+        }
         for m in [
             PassageMode::Vector,
-            PassageMode::HybridRrf,
-            PassageMode::HybridBonus,
+            PassageMode::VectorBelief,
+            PassageMode::Hybrid,
+            PassageMode::HybridBelief,
         ] {
             let r = m.request("q", 5);
             assert_eq!(r["min_score"], 0.0);

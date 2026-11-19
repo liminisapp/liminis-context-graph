@@ -22,17 +22,20 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
-- **Hybrid passage search: `knowledge_search_passages` `mode` and `top_rank_bonus` (#789,
+- **Hybrid passage search: `knowledge_search_passages` `mode` and `belief_aware` (#789,
   ADR-0789).** `mode: "hybrid"` fuses BM25 over episode text (the existing `episode_content`
-  full-text index) with the vector ranking by Reciprocal Rank Fusion and adds a qmd-style top-rank
-  bonus (`top_rank_bonus: false` for plain RRF). `mode: "vector"` is the unchanged previous
-  behaviour. In hybrid mode `score` is the fused rank score and a new `similarity` field carries the
+  full-text index) with the vector ranking by *weighted* Reciprocal Rank Fusion (lexical weight 0.4,
+  vector 1.0) and then, with `belief_aware` (default on in hybrid, off in vector), ranks a derived
+  page below the primary note it cites and a superseded passage below its successor. The qmd-style
+  top-rank bonus was dropped: it was indistinguishable from plain RRF. `mode: "vector"` is the
+  unchanged previous behaviour. In hybrid mode `score` is the fused rank score and a new `similarity` field carries the
   cosine where the vector retriever matched; `min_score` floors only the vector retriever.
   `group_ids` and `origins` apply to both retrievers; a missing full-text index falls back to
   vector-only. **The default stays `vector`** (set `LCG_PASSAGE_SEARCH_MODE=hybrid` to opt in): the
   v2/v1 retrieval eval scored hybrid below vector on v2 (overall nDCG@10 0.527 RRF / 0.531 with
   bonus vs 0.568; paraphrase 0.150 to 0.070), so hybrid is opt-in only (see ADR-0789). New opt-in eval configurations
-  `lcg-passages-hybrid-rrf` and `lcg-passages-hybrid-bonus`; `lcg-passages` now pins `mode: "vector"`.
+  `lcg-passages-hybrid`, `lcg-passages-hybrid-belief` and `lcg-passages-belief`; `lcg-passages` now
+  pins `mode: "vector"`. The weighted-fusion and belief-aware design is not yet measured.
 - **Document mode: `knowledge_process_document` (write) and `knowledge_preview_chunks` (read)
   (#785, ADR-0785, slice 1 of #733).** Send a whole document as a completeness claim; the server
   chunks it by section, skips unchanged sections by content hash (an identical resubmission makes

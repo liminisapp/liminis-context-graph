@@ -163,7 +163,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0778](0778-lazy-stamp-restore-and-data-check-when-stamp-absent.md) | Lazy Stamp Restore and Stored-Kind Check When the D1 Stamp Is Absent | 2026-11-17 |
 | [0785](0785-document-mode-revisions-and-commit-boundary.md) | Document Mode — Server-Side Chunking, Revision Diff and a Data Commit Boundary | 2026-11-18 |
 | [0788](0788-retrieval-corpus-v2-and-bootstrap-reporting.md) | Retrieval Corpus v2 and Bootstrap Reporting — a Generated, Origin-Aware Fixture and Intervals That Label Noise | 2026-11-18 |
-| [0789](0789-hybrid-passage-search-rrf-top-rank-bonus.md) | Hybrid Passage Search — BM25 + Vector with RRF and a Top-Rank Bonus | 2026-11-18 |
+| [0789](0789-hybrid-passage-search-rrf-top-rank-bonus.md) | Hybrid Passage Search — BM25 + Vector with Weighted RRF and Belief-Aware Ranking | 2026-11-18 |
 | [0790](0790-embedder-roles-and-instruction-profiles.md) | Embedder Roles and Instruction Profiles | 2026-11-18 |
 
 ## Historical numbering

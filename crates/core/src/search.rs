@@ -30,11 +30,20 @@ pub fn rrf_fuse(lists: &[&[(String, f64)]]) -> Vec<String> {
 /// Accumulates `1/(rank+60)` per uuid across `lists` (in list order) and sorts by descending
 /// score with a UUID tie-break. Shared by [`rrf_fuse`] and [`rrf_fuse_scored`].
 fn rrf_rank(lists: &[&[(String, f64)]]) -> Vec<(String, f64)> {
+    rrf_rank_weighted(lists, &vec![1.0; lists.len()])
+}
+
+/// [`rrf_rank`] with a per-list weight: each list contributes `weight / (rank + 60)`. A weight of
+/// `1.0` for every list is exactly [`rrf_rank`] (multiplying by `1.0` is exact in IEEE-754), which
+/// is why the unweighted entity, edge and dedup callers share this implementation unchanged.
+/// `weights` must have one entry per list.
+fn rrf_rank_weighted(lists: &[&[(String, f64)]], weights: &[f64]) -> Vec<(String, f64)> {
+    debug_assert_eq!(lists.len(), weights.len());
     let mut scores: HashMap<String, f64> = HashMap::new();
 
-    for list in lists {
+    for (list, weight) in lists.iter().zip(weights) {
         for (rank, (uuid, _)) in list.iter().enumerate() {
-            *scores.entry(uuid.clone()).or_default() += 1.0 / (rank as f64 + 60.0);
+            *scores.entry(uuid.clone()).or_default() += weight / (rank as f64 + 60.0);
         }
     }
 
@@ -61,6 +70,12 @@ pub struct FusedHit {
 /// [`rrf_fuse`] that also returns each item's fused score and per-list raw values. If a uuid
 /// appears more than once in a list, its first occurrence supplies the raw value.
 pub fn rrf_fuse_scored(lists: &[&[(String, f64)]]) -> Vec<FusedHit> {
+    rrf_fuse_scored_weighted(lists, &vec![1.0; lists.len()])
+}
+
+/// [`rrf_fuse_scored`] with a per-list weight (see [`rrf_rank_weighted`]). Only hybrid passage
+/// search uses non-unit weights; entity and edge search stay on the unweighted entry point.
+pub fn rrf_fuse_scored_weighted(lists: &[&[(String, f64)]], weights: &[f64]) -> Vec<FusedHit> {
     let mut raws: HashMap<&str, Vec<Option<f64>>> = HashMap::new();
     for (i, list) in lists.iter().enumerate() {
         for (uuid, raw) in list.iter() {
@@ -72,7 +87,7 @@ pub fn rrf_fuse_scored(lists: &[&[(String, f64)]]) -> Vec<FusedHit> {
             }
         }
     }
-    rrf_rank(lists)
+    rrf_rank_weighted(lists, weights)
         .into_iter()
         .map(|(uuid, rrf_score)| {
             let raw = raws.remove(uuid.as_str()).unwrap_or_default();
@@ -173,7 +188,7 @@ pub async fn search_passages(
 pub enum PassageSearchMode {
     /// Pure vector cosine (the pre-#789 behaviour, unchanged).
     Vector,
-    /// BM25 over episode text + vector, fused with RRF (optionally with a top-rank bonus).
+    /// BM25 over episode text + vector, fused with weighted RRF, then belief-aware re-ranking.
     Hybrid,
 }
 
@@ -218,14 +233,14 @@ impl std::str::FromStr for PassageSearchMode {
     }
 }
 
-/// Top-rank bonus for a passage whose best rank in either retriever is 1 (qmd-style), as a
-/// fraction of the single-list rank-1 RRF contribution (`1/60`). qmd's absolute 0.05 / 0.02 would
-/// dwarf RRF scores of ~0.016 and degenerate to "first hit of either list wins", so the same 5:2
-/// ratio is applied relative to RRF's own scale. Initial values, not tuned: the v1/v2 eval could not
-/// distinguish the bonus from plain RRF, so there was no signal to tune on (ADR-0789).
-pub const TOP1_BONUS_FRACTION: f64 = 0.25;
-/// Bonus for a best rank of 2 or 3. See [`TOP1_BONUS_FRACTION`].
-pub const TOP3_BONUS_FRACTION: f64 = 0.10;
+/// RRF weight of the lexical (BM25) list in hybrid passage search; the vector list has weight
+/// `1.0`. Equal weights fuse two retrievers of unequal quality as if they were peers: on v2 the
+/// vector leg is clearly stronger, and BM25's top hits on paraphrase questions are lexical decoys,
+/// so unweighted RRF halved paraphrase nDCG (0.150 to 0.070, ADR-0789). A starting value in the
+/// 0.3–0.5 range chosen by the maintainer; not yet measured, to be confirmed on the next v1/v2 run.
+pub const LEXICAL_RRF_WEIGHT: f64 = 0.4;
+// The lexical list must weigh something, and less than the (unit-weight) vector list.
+const _: () = assert!(LEXICAL_RRF_WEIGHT > 0.0 && LEXICAL_RRF_WEIGHT < 1.0);
 
 /// Maximum query tokens sent to the full-text index, bounding lexical work on very long queries.
 const MAX_FTS_QUERY_TOKENS: usize = 64;
@@ -240,36 +255,6 @@ pub fn sanitize_fts_query(query: &str) -> String {
         .take(MAX_FTS_QUERY_TOKENS)
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Adds the top-rank bonus to fused hits and re-sorts (descending score, UUID tie-break).
-///
-/// Each passage gets at most one bonus, from its best (lowest) 0-based rank across `lists`:
-/// rank 0 gets [`TOP1_BONUS_FRACTION`], ranks 1–2 get [`TOP3_BONUS_FRACTION`], both times
-/// `1/60`. It does not stack across lists — RRF already rewards agreement by summing.
-fn apply_top_rank_bonus(lists: &[&[(String, f64)]], mut hits: Vec<FusedHit>) -> Vec<FusedHit> {
-    let mut best: HashMap<&str, usize> = HashMap::new();
-    for list in lists {
-        for (rank, (uuid, _)) in list.iter().enumerate().take(3) {
-            let e = best.entry(uuid.as_str()).or_insert(rank);
-            *e = (*e).min(rank);
-        }
-    }
-    for hit in &mut hits {
-        let fraction = match best.get(hit.uuid.as_str()) {
-            Some(0) => TOP1_BONUS_FRACTION,
-            Some(_) => TOP3_BONUS_FRACTION,
-            None => 0.0,
-        };
-        hit.rrf_score += fraction / 60.0;
-    }
-    hits.sort_by(|a, b| {
-        b.rrf_score
-            .partial_cmp(&a.rrf_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.uuid.cmp(&b.uuid))
-    });
-    hits
 }
 
 /// Logs once per process that the lexical leg was unavailable and hybrid search fell back to
@@ -309,14 +294,249 @@ pub fn lexical_passage_list(
     }
 }
 
-/// Hybrid passage search (issue #789): BM25 over episode text + HNSW, fused with RRF and an
-/// optional top-rank bonus (HOT path — no lock held).
+// ── Belief-aware passage re-ranking (issue #789 steer, ADR-0789) ──────────────
+
+/// What a passage's episode was superseded by (ADR-0705 / ADR-0707), when that is a thing that can
+/// itself be ranked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Successor {
+    /// A revision: the superseding episode's uuid.
+    Episode(String),
+    /// A document supersession: the superseding document's `doc_id`.
+    Document(String),
+}
+
+/// The facts about one candidate passage that the belief-aware rules read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeliefFacts {
+    pub uuid: String,
+    pub group_id: String,
+    /// Origin is `derived` or `answer` (not corroborating, ADR-0752).
+    pub derived: bool,
+    /// Origin is `primary` or `external` (corroborating, ADR-0752).
+    pub corroborating: bool,
+    pub doc_id: Option<String>,
+    /// `[[wikilink]]` targets in the passage text: what a derived page cites.
+    pub cites: Vec<String>,
+    /// Set only when the episode's belief has ended (no longer live) *and* the supersession names
+    /// a successor. A `chunk_removed` episode has none, so it is never demoted.
+    pub successor: Option<Successor>,
+}
+
+/// `[[target]]`, `[[target|alias]]` and `[[target#heading]]` link targets in `content`, in order,
+/// without duplicates. This is how a derived note records the source notes it restates.
+pub fn wikilink_targets(content: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = content;
+    while let Some(open) = rest.find("[[") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("]]") else { break };
+        let inner = &after[..close];
+        let target = inner.split('|').next().unwrap_or("");
+        let target = target.split('#').next().unwrap_or("").trim();
+        if !target.is_empty() && !out.iter().any(|t| t == target) {
+            out.push(target.to_string());
+        }
+        rest = &after[close + 2..];
+    }
+    out
+}
+
+/// A document reference reduced to its comparable form: last path segment, without a `.md`
+/// suffix, lower-cased (wikilinks name a note, not a path, and are case-insensitive).
+fn doc_ref_key(r: &str) -> String {
+    let leaf = r.rsplit('/').next().unwrap_or(r).trim();
+    let leaf = leaf.strip_suffix(".md").unwrap_or(leaf);
+    leaf.to_lowercase()
+}
+
+/// Whether a wikilink `target` names the document `doc_id`.
+fn doc_ref_matches(target: &str, doc_id: &str) -> bool {
+    target == doc_id || doc_ref_key(target) == doc_ref_key(doc_id)
+}
+
+/// For each candidate that must rank below something, the *groups* it must rank below. A group is
+/// the set of candidate passages that stand for one thing (the chunks of one cited note, or of the
+/// superseding document); the candidate must rank below the best-ranked member of **every** group
+/// that has any member in the candidate set. Groups with no member present are dropped, so a
+/// demotion never depends on a passage that was not retrieved.
+///
+/// - **Derived rule (ADR-0752):** a `derived`/`answer` passage ranks below the `primary`/`external`
+///   note it cites by `[[wikilink]]`, matched on `doc_id`, within its group.
+/// - **Stale rule (ADR-0705/0707):** a passage whose episode is no longer believed ranks below its
+///   successor (the revising episode, or the superseding document's passages).
+pub fn belief_anchor_groups(facts: &[BeliefFacts]) -> HashMap<String, Vec<Vec<String>>> {
+    let mut out: HashMap<String, Vec<Vec<String>>> = HashMap::new();
+    for p in facts {
+        let mut groups: Vec<Vec<String>> = Vec::new();
+        if p.derived {
+            for target in &p.cites {
+                let members: Vec<String> = facts
+                    .iter()
+                    .filter(|q| {
+                        q.uuid != p.uuid
+                            && q.corroborating
+                            && q.group_id == p.group_id
+                            && q.doc_id
+                                .as_deref()
+                                .is_some_and(|d| doc_ref_matches(target, d))
+                    })
+                    .map(|q| q.uuid.clone())
+                    .collect();
+                if !members.is_empty() && !groups.contains(&members) {
+                    groups.push(members);
+                }
+            }
+        }
+        if let Some(succ) = &p.successor {
+            let members: Vec<String> = facts
+                .iter()
+                .filter(|q| {
+                    q.uuid != p.uuid
+                        && match succ {
+                            Successor::Episode(u) => &q.uuid == u,
+                            Successor::Document(d) => {
+                                q.group_id == p.group_id && q.doc_id.as_deref() == Some(d.as_str())
+                            }
+                        }
+                })
+                .map(|q| q.uuid.clone())
+                .collect();
+            if !members.is_empty() && !groups.contains(&members) {
+                groups.push(members);
+            }
+        }
+        if !groups.is_empty() {
+            out.insert(p.uuid.clone(), groups);
+        }
+    }
+    out
+}
+
+/// Lowers each anchored passage's score to just below its anchors' best (see
+/// [`belief_anchor_groups`]) and re-sorts by descending score, UUID tie-break. Only anchored
+/// passages move, and only downwards; the demoted score stays strictly below the anchor so the
+/// returned scores remain in rank order. Iterates to a fixed point so chains (a derived page that
+/// is also stale) settle, bounded by the candidate count so a cyclic input still terminates.
+pub fn demote_below_anchors(
+    ranked: &mut [(String, f64)],
+    anchors: &HashMap<String, Vec<Vec<String>>>,
+) {
+    if anchors.is_empty() {
+        return;
+    }
+    for _ in 0..=ranked.len() {
+        let snapshot: HashMap<String, f64> = ranked.iter().cloned().collect();
+        let mut changed = false;
+        for (uuid, score) in ranked.iter_mut() {
+            let Some(groups) = anchors.get(uuid.as_str()) else {
+                continue;
+            };
+            let mut bound: Option<f64> = None;
+            for group in groups {
+                let best = group
+                    .iter()
+                    .filter_map(|u| snapshot.get(u.as_str()).copied())
+                    .fold(None, |m: Option<f64>, v| Some(m.map_or(v, |x| x.max(v))));
+                if let Some(b) = best {
+                    bound = Some(bound.map_or(b, |x| x.min(b)));
+                }
+            }
+            if let Some(b) = bound {
+                if *score >= b {
+                    let below = b - (b.abs() * 1e-9).max(1e-15);
+                    *score = below;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+}
+
+/// Builds [`BeliefFacts`] for `rows`, given each row's supersession state and the instant `now_us`
+/// that decides whether belief has ended (a pending document supersession with a future
+/// `superseded_at` is still live, ADR-0707).
+fn belief_facts(
+    rows: &[PassageResult],
+    supersession: &HashMap<String, crate::belief::EpisodeSupersession>,
+    now_us: i64,
+) -> Vec<BeliefFacts> {
+    rows.iter()
+        .map(|r| {
+            let origin = crate::origin::Origin::from_stored(Some(&r.origin));
+            let sup = supersession.get(&r.uuid);
+            let successor = sup.filter(|s| !s.live_at(now_us)).and_then(|s| {
+                let by = s.superseded_by.clone()?;
+                match s.kind.as_deref() {
+                    Some("episode") => Some(Successor::Episode(by)),
+                    Some("document") => Some(Successor::Document(by)),
+                    _ => None,
+                }
+            });
+            BeliefFacts {
+                uuid: r.uuid.clone(),
+                group_id: r.group_id.clone(),
+                derived: !origin.is_corroborating(),
+                corroborating: origin.is_corroborating(),
+                doc_id: sup.and_then(|s| s.doc_id.clone()),
+                cites: wikilink_targets(&r.content),
+                successor,
+            }
+        })
+        .collect()
+}
+
+/// Applies the belief-aware rules to `rows`, which are in rank order with `score` set, and returns
+/// them re-ordered (and with demoted scores). One batched supersession lookup; a no-op, without
+/// the lookup's cost mattering, when nothing is anchored.
+fn apply_belief_ranking(
+    conn: &crate::db::Conn,
+    rows: Vec<PassageResult>,
+) -> Result<Vec<PassageResult>, Error> {
+    if rows.len() < 2 {
+        return Ok(rows);
+    }
+    let uuids: Vec<String> = rows.iter().map(|r| r.uuid.clone()).collect();
+    let supersession = conn.get_episode_supersession(&uuids)?;
+    let facts = belief_facts(&rows, &supersession, chrono::Utc::now().timestamp_micros());
+    let anchors = belief_anchor_groups(&facts);
+    if anchors.is_empty() {
+        return Ok(rows);
+    }
+    let mut ranked: Vec<(String, f64)> = rows.iter().map(|r| (r.uuid.clone(), r.score)).collect();
+    demote_below_anchors(&mut ranked, &anchors);
+    let mut by_uuid: HashMap<String, PassageResult> =
+        rows.into_iter().map(|r| (r.uuid.clone(), r)).collect();
+    Ok(ranked
+        .into_iter()
+        .filter_map(|(uuid, score)| {
+            let mut r = by_uuid.remove(&uuid)?;
+            r.score = score;
+            Some(r)
+        })
+        .collect())
+}
+
+/// Hybrid passage search (issue #789): BM25 over episode text + HNSW, fused with weighted RRF
+/// (the lexical list weighs [`LEXICAL_RRF_WEIGHT`], the vector list `1.0`), optionally followed by
+/// belief-aware re-ranking (HOT path — no lock held).
 ///
 /// - `min_score` floors the *vector* list's cosine similarity before fusion; lexical-only hits
 ///   are never floored (FR-007).
 /// - `score` on each result is the fused score; `similarity` is the cosine where the vector
 ///   retriever matched.
 /// - With no lexical hits the result is the vector ranking (FR-008), re-scored as fused.
+/// - With `belief_aware`, the rules of [`belief_anchor_groups`] run on the fused candidate set
+///   (up to `3 × num_results`) *before* truncating, so a demoted passage is replaced by the next
+///   candidate rather than merely reshuffled.
 #[allow(clippy::too_many_arguments)]
 pub async fn search_passages_hybrid(
     db: Arc<Db>,
@@ -326,7 +546,7 @@ pub async fn search_passages_hybrid(
     num_results: usize,
     min_score: f64,
     origins: Option<Vec<crate::origin::Origin>>,
-    top_rank_bonus: bool,
+    belief_aware: bool,
 ) -> Result<Vec<PassageResult>, Error> {
     let embedding = embedder.embed(query, EmbedRole::Query).await?;
     let candidate_limit = num_results * 3;
@@ -360,21 +580,22 @@ pub async fn search_passages_hybrid(
             Some(min_score),
         );
 
-        let mut fused = rrf_fuse_scored(&[&bm25, &vector]);
-        if top_rank_bonus {
-            fused = apply_top_rank_bonus(&[&bm25, &vector], fused);
-        }
-        fused.truncate(num_results);
+        let mut fused = rrf_fuse_scored_weighted(&[&bm25, &vector], &[LEXICAL_RRF_WEIGHT, 1.0]);
+        // Belief-aware ranking needs the whole candidate set, not just the top `num_results`.
+        fused.truncate(if belief_aware {
+            candidate_limit
+        } else {
+            num_results
+        });
 
-        let top_uuids: Vec<String> = fused.iter().map(|h| h.uuid.clone()).collect();
         let mut rows: HashMap<String, PassageResult> = vector_rows
             .into_iter()
             .map(|p| (p.uuid.clone(), p))
             .collect();
-        let missing: Vec<String> = top_uuids
+        let missing: Vec<String> = fused
             .iter()
-            .filter(|u| !rows.contains_key(*u))
-            .cloned()
+            .filter(|h| !rows.contains_key(&h.uuid))
+            .map(|h| h.uuid.clone())
             .collect();
         for p in conn.get_passages_by_uuids(&missing)? {
             rows.insert(p.uuid.clone(), p);
@@ -382,7 +603,7 @@ pub async fn search_passages_hybrid(
 
         // `fused` is already in rank order; rows are looked up, not re-sorted, so the order is
         // exactly the fused (deterministic) order.
-        Ok(fused
+        let mut ranked: Vec<PassageResult> = fused
             .into_iter()
             .filter_map(|hit| {
                 let mut p = rows.remove(&hit.uuid)?;
@@ -390,7 +611,50 @@ pub async fn search_passages_hybrid(
                 p.similarity = similarity(hit.raw[1]);
                 Some(p)
             })
-            .collect())
+            .collect();
+        if belief_aware {
+            ranked = apply_belief_ranking(&conn, ranked)?;
+        }
+        ranked.truncate(num_results);
+        Ok(ranked)
+    })
+    .await?
+}
+
+/// Vector passage search followed by belief-aware re-ranking: the opt-in (`mode: "vector"` with
+/// `belief_aware: true`) variant of [`search_passages`], which is left untouched so the vector
+/// default stays byte-for-byte unchanged. `score` stays a cosine similarity, except that a
+/// demoted passage's score is lowered to just below the passage it ranks under.
+pub async fn search_passages_vector_belief(
+    db: Arc<Db>,
+    embedder: Arc<dyn Embedder>,
+    query: &str,
+    group_ids: Option<Vec<String>>,
+    num_results: usize,
+    min_score: f64,
+    origins: Option<Vec<crate::origin::Origin>>,
+) -> Result<Vec<PassageResult>, Error> {
+    let embedding = embedder.embed(query, EmbedRole::Query).await?;
+    let overdraw = num_results * 3;
+
+    tokio::task::spawn_blocking(move || -> Result<Vec<PassageResult>, Error> {
+        let conn = db.connect()?;
+        let gid_refs: Option<Vec<&str>> = group_ids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+        let mut passages = conn.vector_search_episodic_origins(
+            &embedding,
+            gid_refs.as_deref(),
+            overdraw,
+            origins.as_deref(),
+        )?;
+        for p in &mut passages {
+            p.score = 1.0 - p.score;
+        }
+        passages.retain(|p| p.score >= min_score);
+        let mut ranked = apply_belief_ranking(&conn, passages)?;
+        ranked.truncate(num_results);
+        Ok(ranked)
     })
     .await?
 }
@@ -639,64 +903,297 @@ mod tests {
     }
 
     #[test]
-    fn top_rank_bonus_lifts_a_rank_one_hit_over_a_much_deeper_double_hit() {
-        // `x` is rank 1 in BM25 only; `d` is rank 41 in both lists (2/100 = 0.0200 vs x's plain
-        // 1/60 = 0.0167). Without the bonus the double hit wins; with it x (0.0208) does.
-        let mut bm25 = list(&["x"]);
-        let mut vector = list(&["y"]);
-        for i in 0..39 {
-            bm25.push((format!("pb{i}"), 0.0));
-            vector.push((format!("pv{i}"), 0.0));
-        }
-        bm25.push(("d".to_string(), 0.0));
-        vector.push(("d".to_string(), 0.0));
-        let plain = rrf_fuse_scored(&[&bm25, &vector]);
-        assert_eq!(plain[0].uuid, "d");
-        let bonus = apply_top_rank_bonus(&[&bm25, &vector], plain);
-        assert!(
-            ["x", "y"].contains(&bonus[0].uuid.as_str()),
-            "{:?}",
-            order(&bonus[..3])
+    fn unit_weights_reproduce_unweighted_fusion_exactly() {
+        let bm25 = list(&["a", "b", "c"]);
+        let vector = list(&["c", "d", "a"]);
+        assert_eq!(
+            rrf_fuse_scored_weighted(&[&bm25, &vector], &[1.0, 1.0]),
+            rrf_fuse_scored(&[&bm25, &vector])
         );
     }
 
     #[test]
-    fn top_rank_bonus_tiers_and_does_not_stack() {
-        let bm25 = list(&["a", "b", "c", "d"]);
-        let vector = list(&["a", "b", "c", "d"]);
-        let plain = rrf_fuse_scored(&[&bm25, &vector]);
-        let base: HashMap<String, f64> = plain
-            .iter()
-            .map(|h| (h.uuid.clone(), h.rrf_score))
-            .collect();
-        let bonus = apply_top_rank_bonus(&[&bm25, &vector], plain);
-        let got: HashMap<&str, f64> = bonus
-            .iter()
-            .map(|h| (h.uuid.as_str(), h.rrf_score))
-            .collect();
-        // Present in both lists at rank 1: one bonus, not two.
-        assert!((got["a"] - base["a"] - TOP1_BONUS_FRACTION / 60.0).abs() < 1e-12);
-        assert!((got["b"] - base["b"] - TOP3_BONUS_FRACTION / 60.0).abs() < 1e-12);
-        assert!((got["c"] - base["c"] - TOP3_BONUS_FRACTION / 60.0).abs() < 1e-12);
-        assert!((got["d"] - base["d"]).abs() < 1e-12, "rank 4 gets no bonus");
+    fn lexical_weight_keeps_a_bm25_decoy_below_the_top_vector_hit() {
+        // Both are rank 1 in their own list only. Unweighted they tie on score, and the UUID
+        // tie-break puts the BM25 decoy first; weighted, the vector hit wins on merit.
+        let bm25 = list(&["decoy"]);
+        let vector = list(&["good"]);
+        let unweighted = rrf_fuse_scored(&[&bm25, &vector]);
+        assert_eq!(order(&unweighted), vec!["decoy", "good"]);
+        let weighted = rrf_fuse_scored_weighted(&[&bm25, &vector], &[LEXICAL_RRF_WEIGHT, 1.0]);
+        assert_eq!(order(&weighted), vec!["good", "decoy"]);
+        assert!((weighted[1].rrf_score - LEXICAL_RRF_WEIGHT / 60.0).abs() < 1e-12);
     }
 
     #[test]
-    fn top_rank_bonus_uses_best_rank_across_lists() {
-        let bm25 = list(&["a", "b", "z"]);
-        let vector = list(&["z", "q"]);
-        let hits = apply_top_rank_bonus(&[&bm25, &vector], rrf_fuse_scored(&[&bm25, &vector]));
-        let z = hits.iter().find(|h| h.uuid == "z").unwrap();
-        let plain = 1.0 / 62.0 + 1.0 / 60.0;
-        assert!((z.rrf_score - plain - TOP1_BONUS_FRACTION / 60.0).abs() < 1e-12);
+    fn lexical_weight_still_rewards_agreement_between_the_lists() {
+        // `x` is rank 1 in BM25 and rank 4 in the vector list: with the lexical weight it still
+        // outranks a vector-only rank-1 hit, so BM25 helps when it agrees with the vector leg.
+        let bm25 = list(&["x"]);
+        let vector = list(&["g", "v2", "v3", "x"]);
+        let hits = rrf_fuse_scored_weighted(&[&bm25, &vector], &[LEXICAL_RRF_WEIGHT, 1.0]);
+        assert_eq!(hits[0].uuid, "x");
+    }
+
+    // ── belief-aware re-ranking ──
+
+    fn facts(
+        uuid: &str,
+        derived: bool,
+        doc_id: Option<&str>,
+        cites: &[&str],
+        successor: Option<Successor>,
+    ) -> BeliefFacts {
+        BeliefFacts {
+            uuid: uuid.to_string(),
+            group_id: "g".to_string(),
+            derived,
+            corroborating: !derived,
+            doc_id: doc_id.map(str::to_string),
+            cites: cites.iter().map(|c| c.to_string()).collect(),
+            successor,
+        }
+    }
+
+    fn ranked(items: &[(&str, f64)]) -> Vec<(String, f64)> {
+        items.iter().map(|(u, s)| (u.to_string(), *s)).collect()
+    }
+
+    fn uuids(r: &[(String, f64)]) -> Vec<&str> {
+        r.iter().map(|(u, _)| u.as_str()).collect()
     }
 
     #[test]
-    fn top_rank_bonus_is_deterministic_on_ties() {
-        let bm25 = list(&["b"]);
-        let vector = list(&["a"]);
-        let hits = apply_top_rank_bonus(&[&bm25, &vector], rrf_fuse_scored(&[&bm25, &vector]));
-        assert_eq!(order(&hits), vec!["a", "b"]);
+    fn wikilink_targets_strip_alias_heading_and_duplicates() {
+        let t = wikilink_targets("See [[note-a]], [[Note B|the b note]], [[note-c#Plan]] and [[note-a]]. [[ ]] [[unclosed");
+        assert_eq!(t, vec!["note-a", "Note B", "note-c"]);
+        assert!(wikilink_targets("no links here").is_empty());
+    }
+
+    #[test]
+    fn doc_ref_matches_ids_paths_and_case() {
+        assert!(doc_ref_matches("note-a", "note-a"));
+        assert!(doc_ref_matches("Note-A", "notes/note-a.md"));
+        assert!(doc_ref_matches("notes/note-a", "note-a"));
+        assert!(!doc_ref_matches("note-b", "note-a"));
+    }
+
+    #[test]
+    fn derived_page_ranks_below_the_primary_it_cites_even_when_bm25_put_it_first() {
+        // The restating page repeats the fact's wording, so BM25 (and the fusion) puts it first.
+        let f = vec![
+            facts("page", true, Some("page"), &["src"], None),
+            facts("src", false, Some("src"), &[], None),
+            facts("other", false, Some("other"), &[], None),
+        ];
+        let mut r = ranked(&[("page", 0.030), ("src", 0.025), ("other", 0.020)]);
+        demote_below_anchors(&mut r, &belief_anchor_groups(&f));
+        assert_eq!(uuids(&r), vec!["src", "page", "other"]);
+        assert!(
+            r[1].1 < r[0].1 && r[1].1 > r[2].1,
+            "scores stay in rank order: {r:?}"
+        );
+    }
+
+    #[test]
+    fn derived_page_already_below_its_source_is_untouched() {
+        let f = vec![
+            facts("src", false, Some("src"), &[], None),
+            facts("page", true, Some("page"), &["src"], None),
+        ];
+        let mut r = ranked(&[("src", 0.030), ("page", 0.025)]);
+        let before = r.clone();
+        demote_below_anchors(&mut r, &belief_anchor_groups(&f));
+        assert_eq!(r, before);
+    }
+
+    #[test]
+    fn derived_page_is_not_demoted_when_its_source_is_not_in_the_candidates() {
+        let f = vec![facts("page", true, Some("page"), &["src"], None)];
+        assert!(belief_anchor_groups(&f).is_empty());
+        // A cited note in another group, or an uncorroborating (derived) one, is no anchor.
+        let mut other_group = facts("src", false, Some("src"), &[], None);
+        other_group.group_id = "elsewhere".to_string();
+        let f = vec![
+            facts("page", true, Some("page"), &["src"], None),
+            other_group,
+        ];
+        assert!(belief_anchor_groups(&f).is_empty());
+        let f = vec![
+            facts("page", true, Some("page"), &["src"], None),
+            facts("src", true, Some("src"), &[], None),
+        ];
+        assert!(belief_anchor_groups(&f).is_empty());
+    }
+
+    #[test]
+    fn a_primary_passage_is_never_demoted_for_citing() {
+        // Only derived/answer origin is subject to the derived rule.
+        let f = vec![
+            facts("a", false, Some("a"), &["b"], None),
+            facts("b", false, Some("b"), &[], None),
+        ];
+        assert!(belief_anchor_groups(&f).is_empty());
+    }
+
+    #[test]
+    fn derived_page_goes_below_the_best_chunk_of_each_cited_note() {
+        // `src` has two chunks present; the page must end up under the better one, not the worse.
+        let f = vec![
+            facts("page", true, Some("page"), &["src", "src2"], None),
+            facts("src#1", false, Some("src"), &[], None),
+            facts("src#0", false, Some("src"), &[], None),
+            facts("src2#0", false, Some("src2"), &[], None),
+        ];
+        let mut r = ranked(&[
+            ("page", 0.040),
+            ("src#1", 0.030),
+            ("src#0", 0.020),
+            ("src2#0", 0.010),
+        ]);
+        demote_below_anchors(&mut r, &belief_anchor_groups(&f));
+        // Below src2's only chunk (the lowest "best chunk"), so below every cited note.
+        assert_eq!(uuids(&r), vec!["src#1", "src#0", "src2#0", "page"]);
+    }
+
+    #[test]
+    fn stale_passage_ranks_below_its_revising_episode() {
+        let f = vec![
+            facts(
+                "old",
+                false,
+                Some("n"),
+                &[],
+                Some(Successor::Episode("new".into())),
+            ),
+            facts("new", false, Some("n"), &[], None),
+        ];
+        let mut r = ranked(&[("old", 0.030), ("new", 0.020)]);
+        demote_below_anchors(&mut r, &belief_anchor_groups(&f));
+        assert_eq!(uuids(&r), vec!["new", "old"]);
+    }
+
+    #[test]
+    fn stale_passage_ranks_below_the_superseding_document() {
+        let f = vec![
+            facts(
+                "old#0",
+                false,
+                Some("old"),
+                &[],
+                Some(Successor::Document("new".into())),
+            ),
+            facts("new#0", false, Some("new"), &[], None),
+            facts("new#1", false, Some("new"), &[], None),
+            facts("unrelated", false, Some("u"), &[], None),
+        ];
+        let mut r = ranked(&[
+            ("old#0", 0.050),
+            ("unrelated", 0.040),
+            ("new#1", 0.030),
+            ("new#0", 0.020),
+        ]);
+        demote_below_anchors(&mut r, &belief_anchor_groups(&f));
+        // Below the best chunk of the new document (new#1), still above what ranked under it.
+        assert_eq!(uuids(&r), vec!["unrelated", "new#1", "old#0", "new#0"]);
+    }
+
+    #[test]
+    fn stale_passage_with_no_successor_in_the_candidates_or_none_at_all_stays() {
+        // chunk_removed: belief ended, nothing replaced it, so there is nothing to rank below.
+        let f = vec![facts("gone", false, Some("n"), &[], None)];
+        assert!(belief_anchor_groups(&f).is_empty());
+        let f = vec![facts(
+            "old",
+            false,
+            Some("n"),
+            &[],
+            Some(Successor::Episode("absent".into())),
+        )];
+        assert!(belief_anchor_groups(&f).is_empty());
+    }
+
+    #[test]
+    fn a_derived_and_stale_passage_settles_below_both_anchors() {
+        let f = vec![
+            facts(
+                "page",
+                true,
+                Some("page"),
+                &["src"],
+                Some(Successor::Episode("page2".into())),
+            ),
+            facts("src", false, Some("src"), &[], None),
+            facts("page2", true, Some("page"), &["src"], None),
+        ];
+        let mut r = ranked(&[("page", 0.050), ("page2", 0.040), ("src", 0.030)]);
+        demote_below_anchors(&mut r, &belief_anchor_groups(&f));
+        // page2 must fall under src, and page under both.
+        assert_eq!(uuids(&r), vec!["src", "page2", "page"]);
+    }
+
+    #[test]
+    fn demotion_terminates_on_cyclic_anchors() {
+        let anchors: HashMap<String, Vec<Vec<String>>> = HashMap::from([
+            ("a".to_string(), vec![vec!["b".to_string()]]),
+            ("b".to_string(), vec![vec!["a".to_string()]]),
+        ]);
+        let mut r = ranked(&[("a", 0.02), ("b", 0.01)]);
+        demote_below_anchors(&mut r, &anchors);
+        assert_eq!(r.len(), 2);
+    }
+
+    #[test]
+    fn demotion_does_not_touch_unanchored_scores_and_is_deterministic() {
+        let f = vec![
+            facts("page", true, Some("page"), &["src"], None),
+            facts("src", false, Some("src"), &[], None),
+            facts("x", false, Some("x"), &[], None),
+        ];
+        let anchors = belief_anchor_groups(&f);
+        let mut r1 = ranked(&[("page", 0.030), ("src", 0.025), ("x", 0.020)]);
+        let mut r2 = r1.clone();
+        demote_below_anchors(&mut r1, &anchors);
+        demote_below_anchors(&mut r2, &anchors);
+        assert_eq!(r1, r2);
+        let score = |r: &[(String, f64)], u: &str| r.iter().find(|(x, _)| x == u).unwrap().1;
+        assert_eq!(score(&r1, "src"), 0.025);
+        assert_eq!(score(&r1, "x"), 0.020);
+    }
+
+    #[test]
+    fn belief_facts_treat_a_pending_document_supersession_as_still_live() {
+        let row = PassageResult {
+            uuid: "old".into(),
+            name: "old".into(),
+            content: "text".into(),
+            source_description: String::new(),
+            group_id: "g".into(),
+            created_at: String::new(),
+            valid_at: None,
+            score: 0.0,
+            attributes: "{}".into(),
+            origin: "primary".into(),
+            similarity: None,
+        };
+        let mk = |superseded_at_us| crate::belief::EpisodeSupersession {
+            superseded_at_us,
+            kind: Some("document".into()),
+            superseded_by: Some("new".into()),
+            reason: Some("document_superseded".into()),
+            group_id: "g".into(),
+            doc_id: Some("old".into()),
+            ..Default::default()
+        };
+        let now = 1_000_000;
+        let live = HashMap::from([("old".to_string(), mk(Some(now + 5)))]);
+        let ended = HashMap::from([("old".to_string(), mk(Some(now - 5)))]);
+        let rows = std::slice::from_ref(&row);
+        assert_eq!(belief_facts(rows, &live, now)[0].successor, None);
+        assert_eq!(
+            belief_facts(rows, &ended, now)[0].successor,
+            Some(Successor::Document("new".into()))
+        );
     }
 
     #[test]

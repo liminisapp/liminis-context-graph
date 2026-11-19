@@ -512,10 +512,12 @@ pub fn registry() -> Vec<ToolSpec> {
             description: "Passage search over ingested episode text, returning scored \
                            text snippets. `mode` selects `vector` (cosine similarity, the \
                            default unless the service sets LCG_PASSAGE_SEARCH_MODE) or `hybrid` \
-                           (BM25 over episode text fused with the vector ranking by Reciprocal \
-                           Rank Fusion, issue #789); in hybrid mode `score` is the fused rank \
-                           score, not a cosine, and `similarity` carries the cosine where the \
-                           vector retriever matched. Each result includes the `attributes` (issue \
+                           (BM25 over episode text fused with the vector ranking by weighted \
+                           Reciprocal Rank Fusion, the lexical list weighing less, issue #789); \
+                           in hybrid mode `score` is the fused rank score, not a cosine, and \
+                           `similarity` carries the cosine where the vector retriever matched. \
+                           `belief_aware` (default on in hybrid) ranks a derived page below the \
+                           primary note it cites and a superseded passage below its successor. Each result includes the `attributes` (issue \
                            #528) of the episode it belongs to — no separate per-episode fetch \
                            is needed to obtain them. Each result also carries the `origin` \
                            (issue #752) of its episode, and `origins` restricts results to \
@@ -541,15 +543,18 @@ pub fn registry() -> Vec<ToolSpec> {
                         "mode": {
                             "type": "string", "enum": ["vector", "hybrid"],
                             "description": "Retrieval mode: `vector` (cosine only) or `hybrid` \
-                                (BM25 + vector, RRF). Omitted: the service default \
+                                (BM25 + vector, weighted RRF). Omitted: the service default \
                                 (LCG_PASSAGE_SEARCH_MODE, else `vector`). Unknown values are \
                                 rejected."
                         },
-                        "top_rank_bonus": {
-                            "type": "boolean", "default": true,
-                            "description": "Hybrid mode only: give extra weight to a passage \
-                                ranked first, or in the top 3, by either retriever. Set false \
-                                for plain RRF."
+                        "belief_aware": {
+                            "type": "boolean",
+                            "description": "Belief-aware re-ranking: a `derived`/`answer` passage \
+                                ranks below the `primary`/`external` note it cites by \
+                                [[wikilink]], and a superseded passage below its successor. \
+                                Superseded passages are demoted, never dropped. Default: true in \
+                                `hybrid` mode, false in `vector` mode (so the vector default is \
+                                unchanged)."
                         },
                         "group_ids": group_ids_prop(),
                         "origins": origins_prop()

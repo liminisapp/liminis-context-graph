@@ -548,8 +548,13 @@ impl Report {
         let mut passages = String::from(
             " `lcg-passages` is vector-only (`knowledge_search_passages` with `mode: \"vector\"`: no FTS, no RRF).",
         );
-        if ran("lcg-passages-hybrid-rrf") || ran("lcg-passages-hybrid-bonus") {
-            passages.push_str(" `lcg-passages-hybrid-rrf` and `lcg-passages-hybrid-bonus` fuse BM25 over episode text with the vector ranking by RRF (the latter adds the top-rank bonus).");
+        if ran("lcg-passages-hybrid") || ran("lcg-passages-hybrid-belief") {
+            passages.push_str(" `lcg-passages-hybrid` fuses BM25 over episode text with the vector ranking by weighted RRF (the lexical list weighs less than the vector list); `lcg-passages-hybrid-belief` adds belief-aware ranking (a derived page ranks below the primary note it cites, a superseded passage below its successor).");
+        }
+        if ran("lcg-passages-belief") {
+            passages.push_str(
+                " `lcg-passages-belief` is the vector ranking with the same belief-aware rules.",
+            );
         }
         format!("> **Read with care.** LCG and qmd use different embedding (and reranker) models, so this compares *systems*, not retrieval algorithms. {corpus}.{passages}\n")
     }

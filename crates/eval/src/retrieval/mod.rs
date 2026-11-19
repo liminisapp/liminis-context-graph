@@ -582,13 +582,17 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                         t: transport.clone(),
                         mode: lcg::PassageMode::Vector,
                     }),
-                    "lcg-passages-hybrid-rrf" => Box::new(lcg::LcgPassages {
+                    "lcg-passages-belief" => Box::new(lcg::LcgPassages {
                         t: transport.clone(),
-                        mode: lcg::PassageMode::HybridRrf,
+                        mode: lcg::PassageMode::VectorBelief,
                     }),
-                    "lcg-passages-hybrid-bonus" => Box::new(lcg::LcgPassages {
+                    "lcg-passages-hybrid" => Box::new(lcg::LcgPassages {
                         t: transport.clone(),
-                        mode: lcg::PassageMode::HybridBonus,
+                        mode: lcg::PassageMode::Hybrid,
+                    }),
+                    "lcg-passages-hybrid-belief" => Box::new(lcg::LcgPassages {
+                        t: transport.clone(),
+                        mode: lcg::PassageMode::HybridBelief,
                     }),
                     "lcg-entities-facts" => Box::new(lcg::LcgEntitiesFacts {
                         t: transport.clone(),
