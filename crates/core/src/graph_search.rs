@@ -1142,6 +1142,35 @@ pub fn select_beam(
     next
 }
 
+/// One frontier entity's steps after fan-out, in their given (relevance) order: at most `cap`
+/// corroborating steps and, on a separate budget, at most `cap` citation-only ones. A
+/// citation-only edge (every producer derived / answer) can neither rank nor carry the walk, so
+/// it must never take a slot from a primary edge (ADR-0752); it is kept only to be cited. Returns
+/// the kept steps and whether each budget cut anything.
+pub fn split_fanout<T>(
+    steps: Vec<T>,
+    is_citation: impl Fn(&T) -> bool,
+    cap: usize,
+) -> (Vec<T>, bool, bool) {
+    let (mut primary, mut citations) = (0usize, 0usize);
+    let (mut cut_primary, mut cut_citations) = (false, false);
+    let mut kept = Vec::with_capacity(steps.len().min(2 * cap));
+    for s in steps {
+        let (n, cut) = if is_citation(&s) {
+            (&mut citations, &mut cut_citations)
+        } else {
+            (&mut primary, &mut cut_primary)
+        };
+        if *n < cap {
+            *n += 1;
+            kept.push(s);
+        } else {
+            *cut = true;
+        }
+    }
+    (kept, cut_primary, cut_citations)
+}
+
 /// One hop's frontier rows, at most `cap` per direction. The batched lookup is tried first (two
 /// queries). Its cut is by `rn.uuid` across the whole frontier, so when it hits the cap one hub
 /// could take every row and starve the other frontier entities. In that case each entity is
@@ -1331,9 +1360,14 @@ fn expand(
             steps.sort_by(|a, b| {
                 by_score_then_key((a.rel, &a.fe.edge.uuid), (b.rel, &b.fe.edge.uuid))
             });
-            if steps.len() > PER_ENTITY_FANOUT {
-                steps.truncate(PER_ENTITY_FANOUT);
+            let (kept, cut_primary, cut_citations) =
+                split_fanout(steps, |s| s.citation_only, PER_ENTITY_FANOUT);
+            steps = kept;
+            if cut_primary {
                 st.truncate("per_entity_fanout", PER_ENTITY_FANOUT);
+            }
+            if cut_citations {
+                st.truncate("per_entity_citations", PER_ENTITY_FANOUT);
             }
             let Some(origin) = reach.get(&from).cloned() else {
                 continue;
@@ -1411,16 +1445,30 @@ fn expand(
         frontier = select_beam(hop_edges, &visited, BEAM);
     }
 
-    if facts.len() > TOTAL_EDGE_CAP {
+    // The total cap counts only facts that can rank or carry the walk. A citation-only fact is
+    // an attachment: it takes no slot, and it survives the trim only while every walk edge
+    // before it on its path does.
+    let primary = facts.values().filter(|f| !f.citation_only).count();
+    if primary > TOTAL_EDGE_CAP {
         let candidates: Vec<(f64, String, Vec<String>)> = facts
             .iter()
+            .filter(|(_, f)| !f.citation_only)
             .map(|(u, f)| {
                 let path = f.path.iter().map(|s| s.edge_uuid.clone()).collect();
                 (f.score, u.clone(), path)
             })
             .collect();
         let keep = path_closed_keep(candidates, TOTAL_EDGE_CAP);
-        facts.retain(|u, _| keep.contains(u));
+        facts.retain(|u, f| {
+            if f.citation_only {
+                f.path
+                    .iter()
+                    .filter(|s| &s.edge_uuid != u)
+                    .all(|s| keep.contains(&s.edge_uuid))
+            } else {
+                keep.contains(u)
+            }
+        });
         // An entity reached only through a trimmed edge is no longer reached: its mention
         // passages must not enter list (a) with a path through an edge the response omits.
         reach.retain(|_, r| r.path.iter().all(|s| keep.contains(&s.edge_uuid)));
@@ -1792,6 +1840,38 @@ mod tests {
             &unfiltered,
             15
         ));
+    }
+
+    #[test]
+    fn citation_only_steps_never_take_a_primary_fanout_slot() {
+        // Relevance order: three on-topic derived restatements ahead of three primary edges.
+        let steps = vec![
+            ("d1", true),
+            ("d2", true),
+            ("d3", true),
+            ("p1", false),
+            ("p2", false),
+            ("p3", false),
+        ];
+        let (kept, cut_primary, cut_citations) = split_fanout(steps.clone(), |s| s.1, 2);
+        let ids: Vec<&str> = kept.iter().map(|s| s.0).collect();
+        // Old behaviour (one shared budget of 2) would have kept d1, d2 and no primary edge.
+        assert_eq!(
+            ids,
+            vec!["d1", "d2", "p1", "p2"],
+            "order kept, budgets separate"
+        );
+        assert!(cut_primary && cut_citations);
+
+        let (kept, cut_primary, cut_citations) = split_fanout(steps.clone(), |s| s.1, 3);
+        assert_eq!(kept.len(), 6);
+        assert!(!cut_primary && !cut_citations);
+
+        let only_derived: Vec<(&str, bool)> = (0..5).map(|_| ("d", true)).collect();
+        let (kept, cut_primary, cut_citations) = split_fanout(only_derived, |s| s.1, 2);
+        assert_eq!(kept.len(), 2);
+        assert!(!cut_primary, "no primary edge was cut");
+        assert!(cut_citations);
     }
 
     #[test]

@@ -535,7 +535,9 @@ embedding and **no** LLM call. It is opt-in: no existing read changes.
    fact outranks an equally relevant two-hop one. Each entity keeps its 20 most relevant facts per
    hop, the 10 best newly reached entities of hop 1 form the hop-2 frontier, the walk keeps at most 200 facts (each kept
    with every edge on its path, so evidence never names a dropped edge), and an edge is never
-   walked twice. A fact that is not believed is never a step, so a path breaks at a
+   walked twice. An edge produced only by derived or answer pages takes none of these slots. It
+   has its own budget of 20 per entity (`per_entity_citations`), it is kept only to be cited, and it
+   carries the walk nowhere. A fact that is not believed is never a step, so a path breaks at a
    superseded edge. Legacy and warranted edges are believed and traversable, but have no
    supporting passage.
 3. **Fusion.** RRF over three lists: `supporting` — passages that produced the selected facts or
