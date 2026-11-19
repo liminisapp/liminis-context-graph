@@ -542,7 +542,21 @@ impl Report {
         } else {
             "The corpus is small and hand-built: results are indicative, not general"
         };
-        format!("> **Read with care.** LCG and qmd use different embedding (and reranker) models, so this compares *systems*, not retrieval algorithms. {corpus}. `lcg-passages` is vector-only (`knowledge_search_passages` does no FTS or RRF).\n")
+        let ran = |id: &str| self.ran().iter().any(|(c, _)| c.id == id);
+        // `lcg-passages` always sends `mode: "vector"` explicitly, so this holds whatever the
+        // service default is.
+        let mut passages = String::from(
+            " `lcg-passages` is vector-only (`knowledge_search_passages` with `mode: \"vector\"`: no FTS, no RRF).",
+        );
+        if ran("lcg-passages-hybrid") || ran("lcg-passages-hybrid-belief") {
+            passages.push_str(" `lcg-passages-hybrid` fuses BM25 over episode text with the vector ranking by weighted RRF (the lexical list weighs less than the vector list); `lcg-passages-hybrid-belief` adds belief-aware ranking (a derived page ranks below the primary note it cites, a superseded passage below its successor).");
+        }
+        if ran("lcg-passages-belief") {
+            passages.push_str(
+                " `lcg-passages-belief` is the vector ranking with the same belief-aware rules.",
+            );
+        }
+        format!("> **Read with care.** LCG and qmd use different embedding (and reranker) models, so this compares *systems*, not retrieval algorithms. {corpus}.{passages}\n")
     }
 
     /// `nDCG@k` ceiling statement for a scope: every ran configuration at or above [`CEILING`].

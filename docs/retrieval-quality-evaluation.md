@@ -23,10 +23,13 @@ It is a separate mode of the existing `lcg-eval` binary. The extraction eval
 
 | Configuration | What runs |
 |---|---|
-| `lcg-passages` | `knowledge_search_passages`. **Vector-only**: this method does no FTS and no RRF. |
+| `lcg-passages` | `knowledge_search_passages` with `mode: "vector"` sent explicitly. **Vector-only**: no FTS and no RRF. Pinned, so it stays a stable baseline whatever the service default is. |
 | `lcg-entities-facts` | `knowledge_find_entities` + `knowledge_find_relationships` (hybrid FTS + vector, RRF), default reads. k is split across the two reads (`ceil(k/2)` entities + `ceil(k/2)` facts) and the ranks are interleaved. |
 | `qmd` | `qmd query --no-rerank` (query expansion on). |
 | `qmd-rerank` | `qmd query` with its LLM reranker. |
+| `lcg-passages-hybrid` | *Opt-in (#789), not in the default run.* `knowledge_search_passages` with `mode: "hybrid"`, `belief_aware: false`: BM25 over episode text + vector, weighted RRF (lexical weight 0.4, vector 1.0). |
+| `lcg-passages-hybrid-belief` | *Opt-in (#789).* As above with `belief_aware: true` (the hybrid default): a derived page ranks below the primary note it cites, and a superseded passage below its successor. |
+| `lcg-passages-belief` | *Opt-in (#789).* `mode: "vector"` with `belief_aware: true`: the vector ranking plus the same rules. Comparing the `lcg-passages*` rows shows what weighted fusion and the belief rules each add, per category. Unweighted RRF and the top-rank bonus were measured and dropped (ADR-0789). |
 | `lcg-entities-facts-belief` | *Extra, clearly labelled variant.* As `lcg-entities-facts`, but facts are read with `believed_only=true`. |
 
 Fact reads carry no `episodes` field: the harness maps each fact to its producing notes through
@@ -557,7 +560,7 @@ the report will say so.
 
 ## Out of scope
 
-This eval measures retrieval; it does not change it. Query expansion, a top-rank bonus in RRF,
+This eval measures retrieval; it does not change it. Query expansion,
 position-aware reranker blending and an explain trace are follow-up work that plugs in as new
 configurations. Context assembly baselines (#734), document mode (#733) and retrieval
 restricted to primary sources (#752) are separate. Design record:

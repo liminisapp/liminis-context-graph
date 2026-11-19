@@ -539,28 +539,82 @@ fn items(v: &Value, key: &str) -> Vec<Value> {
     v[key].as_array().cloned().unwrap_or_default()
 }
 
-/// `lcg-passages`: `knowledge_search_passages`. **Vector-only** — `search_passages` does no FTS
-/// and no RRF — and says so in its description.
+/// How a [`LcgPassages`] configuration reads `knowledge_search_passages` (#789).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassageMode {
+    /// `mode: "vector"` — cosine only (`lcg-passages`).
+    Vector,
+    /// `mode: "vector"`, `belief_aware: true` — cosine plus the belief-aware rules.
+    VectorBelief,
+    /// `mode: "hybrid"`, `belief_aware: false` — BM25 + vector with weighted RRF.
+    Hybrid,
+    /// `mode: "hybrid"`, `belief_aware: true` — weighted RRF plus the belief-aware rules.
+    HybridBelief,
+}
+
+impl PassageMode {
+    pub fn config_id(self) -> &'static str {
+        match self {
+            PassageMode::Vector => "lcg-passages",
+            PassageMode::VectorBelief => "lcg-passages-belief",
+            PassageMode::Hybrid => "lcg-passages-hybrid",
+            PassageMode::HybridBelief => "lcg-passages-hybrid-belief",
+        }
+    }
+
+    /// The `knowledge_search_passages` request. `mode` and `belief_aware` are always sent
+    /// explicitly, so `lcg-passages` stays a stable vector-only baseline even if a service default
+    /// changes.
+    pub fn request(self, q: &str, k: usize) -> Value {
+        let mut p =
+            json!({"query": q, "num_results": k, "min_score": 0.0, "group_ids": [EVAL_GROUP]});
+        let (mode, belief) = match self {
+            PassageMode::Vector => ("vector", false),
+            PassageMode::VectorBelief => ("vector", true),
+            PassageMode::Hybrid => ("hybrid", false),
+            PassageMode::HybridBelief => ("hybrid", true),
+        };
+        p["mode"] = json!(mode);
+        p["belief_aware"] = json!(belief);
+        p
+    }
+}
+
+/// `lcg-passages` (vector-only, `mode: "vector"`) and the opt-in #789 variants
+/// (`lcg-passages-belief`, `lcg-passages-hybrid`, `lcg-passages-hybrid-belief`):
+/// `knowledge_search_passages` in each retrieval mode.
 pub struct LcgPassages {
     pub t: Arc<dyn RpcTransport>,
+    pub mode: PassageMode,
 }
 
 impl Retriever for LcgPassages {
     fn id(&self) -> &str {
-        "lcg-passages"
+        self.mode.config_id()
     }
     fn description(&self) -> String {
-        "knowledge_search_passages (vector-only: no FTS, no RRF), min_score=0".into()
+        match self.mode {
+            PassageMode::Vector => {
+                "knowledge_search_passages (mode=vector: vector-only, no FTS, no RRF), min_score=0"
+            }
+            PassageMode::VectorBelief => {
+                "knowledge_search_passages (mode=vector, belief_aware: derived below cited primary, superseded below successor), min_score=0"
+            }
+            PassageMode::Hybrid => {
+                "knowledge_search_passages (mode=hybrid: BM25 + vector, weighted RRF, belief_aware=false), min_score=0"
+            }
+            PassageMode::HybridBelief => {
+                "knowledge_search_passages (mode=hybrid: BM25 + vector, weighted RRF, belief_aware=true), min_score=0"
+            }
+        }
+        .into()
     }
     fn retrieve<'a>(&'a self, q: &'a str, k: usize) -> BoxFuture<'a, Result<RankedResult, String>> {
         Box::pin(async move {
             let t0 = Instant::now();
             let r = self
                 .t
-                .call(
-                    "knowledge_search_passages",
-                    json!({"query": q, "num_results": k, "min_score": 0.0, "group_ids": [EVAL_GROUP]}),
-                )
+                .call("knowledge_search_passages", self.mode.request(q, k))
                 .await?;
             let latency = t0.elapsed();
             let (notes, evidence) = map_passages(&items(&r, "passages"));
@@ -812,13 +866,48 @@ mod tests {
         assert_eq!(interleave::<i32>(&[], &[]), Vec::<i32>::new());
     }
 
+    #[test]
+    fn passage_modes_send_mode_and_belief_explicitly() {
+        let cases = [
+            (PassageMode::Vector, "vector", false),
+            (PassageMode::VectorBelief, "vector", true),
+            (PassageMode::Hybrid, "hybrid", false),
+            (PassageMode::HybridBelief, "hybrid", true),
+        ];
+        for (m, mode, belief) in cases {
+            let r = m.request("q", 5);
+            assert_eq!(
+                (r["mode"].as_str(), r["belief_aware"].as_bool()),
+                (Some(mode), Some(belief)),
+                "{m:?}"
+            );
+            assert!(r.get("top_rank_bonus").is_none());
+        }
+        for m in [
+            PassageMode::Vector,
+            PassageMode::VectorBelief,
+            PassageMode::Hybrid,
+            PassageMode::HybridBelief,
+        ] {
+            let r = m.request("q", 5);
+            assert_eq!(r["min_score"], 0.0);
+            assert_eq!(r["num_results"], 5);
+        }
+    }
+
     #[tokio::test]
     async fn passages_retriever_sets_k_and_zero_floor() {
         let t = Arc::new(FakeTransport::new(|m, _| {
             assert_eq!(m, "knowledge_search_passages");
             Ok(json!({"passages":[{"content":"c","source_description":"n1:n1#0"}],"count":1}))
         }));
-        let r = LcgPassages { t: t.clone() }.retrieve("q", 7).await.unwrap();
+        let r = LcgPassages {
+            t: t.clone(),
+            mode: PassageMode::Vector,
+        }
+        .retrieve("q", 7)
+        .await
+        .unwrap();
         assert_eq!(r.notes, vec!["n1"]);
         assert_eq!(r.model_calls, Some(1));
         let log = t.log.lock().unwrap();

@@ -580,6 +580,19 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                 let r: Box<dyn Retriever> = match id.as_str() {
                     "lcg-passages" => Box::new(lcg::LcgPassages {
                         t: transport.clone(),
+                        mode: lcg::PassageMode::Vector,
+                    }),
+                    "lcg-passages-belief" => Box::new(lcg::LcgPassages {
+                        t: transport.clone(),
+                        mode: lcg::PassageMode::VectorBelief,
+                    }),
+                    "lcg-passages-hybrid" => Box::new(lcg::LcgPassages {
+                        t: transport.clone(),
+                        mode: lcg::PassageMode::Hybrid,
+                    }),
+                    "lcg-passages-hybrid-belief" => Box::new(lcg::LcgPassages {
+                        t: transport.clone(),
+                        mode: lcg::PassageMode::HybridBelief,
                     }),
                     "lcg-entities-facts" => Box::new(lcg::LcgEntitiesFacts {
                         t: transport.clone(),

@@ -404,6 +404,57 @@ way (a non-number is an invalid-params error), but `min_similarity` has **no def
 or `null` means no floor and results are identical to before, apart from the added `search`
 object — and it acts before fusion and per path rather than as a post-filter on a single list.
 
+### Hybrid passage search (`knowledge_search_passages`, issue #789)
+
+`knowledge_search_passages` ranks episode passages in one of two modes, chosen per request with
+`mode`:
+
+| `mode` | Ranking | `score` | `similarity` |
+|---|---|---|---|
+| `vector` | Vector cosine only — exactly the behaviour before #789. | Cosine similarity (`1 - distance`). | Not present. |
+| `hybrid` | BM25 over episode text (the existing `episode_content` full-text index) and the vector ranking, fused with **weighted** Reciprocal Rank Fusion (`weight/(rank+60)` per list; the lexical list has weight 0.4, the vector list 1.0), then belief-aware re-ranking (see `belief_aware`). | The **fused rank score** (at most about 0.023). It orders results; it is not a cosine and not comparable across queries. | Cosine similarity where the vector retriever matched the passage; absent for a passage only the lexical retriever found. |
+
+- **`mode`** is optional. Omitted, the service default applies: the `LCG_PASSAGE_SEARCH_MODE`
+  environment variable (`vector` or `hybrid`; an unrecognised value warns on stderr and falls back
+  to `vector`), else `vector`. An unknown or non-string `mode` is an invalid-params error. Callers
+  that need cosine scores or a strict similarity floor should send `mode: "vector"` explicitly, so
+  they are unaffected if the service default changes.
+- **`belief_aware`** (boolean; default `true` in `hybrid`, `false` in `vector`): after fusion and
+  before truncating to `num_results`, two rules re-rank the candidate set (up to `3 × num_results`).
+  A `derived` or `answer` passage that cites a `primary`/`external` note by `[[wikilink]]` (matched
+  on that note's `doc_id`, within the same group) ranks below that note's best-ranked passage, so a
+  page restating a fact does not outrank its source ([ADR-0752](adr/0752-episode-origin-and-corroboration.md)).
+  A passage whose episode is no longer believed (a revision, or a superseded document;
+  [ADR-0705](adr/0705-belief-time-separate-from-validity.md),
+  [ADR-0707](adr/0707-document-supersession.md)) ranks below its successor. A rule applies only when
+  the passage it ranks under is itself in the candidate set. A removed chunk has no successor and a
+  document supersession with a future effective instant is still believed, so neither is demoted.
+  Demoted passages are never dropped, and a demoted passage's `score` is lowered to just below the
+  passage it ranks under. With `mode: "vector"` and `belief_aware: true` the same rules run on the
+  vector ranking (`score` stays a cosine otherwise); `mode: "vector"` without it is unchanged.
+  A non-boolean value is an invalid-params error. The removed `top_rank_bonus` parameter is ignored.
+- **`min_score`** (default 0.5, clamped 0–1) floors the *vector retriever's* cosine similarity
+  before fusion, as `min_similarity` does for entity search. A passage found only by the lexical
+  retriever is **not** excluded by it. This is a deliberate change in meaning from `vector` mode,
+  where `min_score` filters the single list.
+- **Fallbacks.** A query with no lexical tokens (punctuation or stop words only), or no lexical
+  match, returns the vector ranking. If the episode full-text index is missing or inconsistent
+  (for example right after an lbug upgrade, before the index is rebuilt) hybrid search silently
+  falls back to vector-only, and the service logs one line on stderr per process. Query text is
+  reduced to alphanumeric tokens before it reaches the index, so no query can cause a parse error.
+- **Filters.** `group_ids` and `origins` ([ADR-0752](adr/0752-episode-origin-and-corroboration.md))
+  are applied inside both the lexical and the vector query, so a passage excluded by either cannot
+  enter through the other path.
+- **Superseded episodes** are still returned in both modes; `belief_aware` only moves them below
+  their successor.
+
+The full-text index also covers an episode's `source` and `source_description`, so a query term in
+a file name or description can match. Which mode is better is measured per category on the
+retrieval eval (`lcg-passages`, `lcg-passages-belief`, `lcg-passages-hybrid`,
+`lcg-passages-hybrid-belief`; see
+[retrieval-quality-evaluation.md](retrieval-quality-evaluation.md) and
+[ADR-0789](adr/0789-hybrid-passage-search-rrf-top-rank-bonus.md)).
+
 ### group_ids semantics: omitted vs. empty
 
 Every read tool that accepts `group_ids` treats an **omitted or `null` `group_ids` uniformly as
@@ -796,7 +847,7 @@ has a listed origin, an entity if one of its live mentioning episodes does, a pa
 does. Asserted facts, entities with no episode at all, and pre-#705 edges count as `primary`. Omitted,
 nothing changes. `origins: ["primary", "external"]` is what an agent should send while refreshing its
 own page. The filter runs after retrieval (relationships and entities over-fetch ×3; passages
-oversample the nearest-neighbour probe), so a selective filter can return fewer than `num_results`.
+oversample the nearest-neighbour probe; in hybrid mode the filter also runs inside the full-text query), so a selective filter can return fewer than `num_results`.
 
 **Derived content never overrides primary content.** A `derived` or `answer` submission:
 
