@@ -391,6 +391,8 @@ type WalGroupPosition = (
     Option<i64>,
     // Recorded document prefix (issue #790); `None` = pre-#790 row, read as the empty prefix.
     Option<String>,
+    // Rows stored with a fallback zero vector because the embedder failed (issue #808).
+    crate::zero_vector_record::ZeroVectorCounts,
 );
 
 struct StatusFields {
@@ -633,12 +635,18 @@ async fn handle_knowledge_status_inner(state: Arc<AppState>) -> Result<Value, Er
             // Backfilling already happened above under the write lock (Phase 0) — this is a pure
             // read of whatever that pass established, never a write, so it's safe under the
             // shared read lock this closure runs under.
+            // One grouped count over the (normally empty) zero-vector record for every group at
+            // once (issue #808): counts only, never a list, inside this already read-locked
+            // closure — no extra lock. Best-effort like the other reads here: a failure degrades
+            // to "none recorded" rather than failing the whole status response.
+            let mut zero_vector_counts = conn.zero_vector_counts_all().unwrap_or_default();
             let wal_group_positions: Vec<WalGroupPosition> = wal_root
                 .as_deref()
                 .and_then(|root| crate::wal_group::list_group_wal_dirs(root).ok())
                 .unwrap_or_default()
                 .into_iter()
                 .map(|(gid, dir)| {
+                    let gid_for_counts = gid.clone();
                     let position = conn.get_wal_position(&gid).unwrap_or_default();
                     let max = crate::wal::wal_max_seq(&dir).unwrap_or(None);
                     let generation = crate::wal_generation::read_generation(&dir);
@@ -650,6 +658,9 @@ async fn handle_knowledge_status_inner(state: Arc<AppState>) -> Result<Value, Er
                         position.embedding_model,
                         position.embedding_dim,
                         position.embedding_doc_prefix,
+                        zero_vector_counts
+                            .remove(&gid_for_counts)
+                            .unwrap_or_default(),
                     )
                 })
                 .collect();
@@ -1043,7 +1054,16 @@ fn wal_group_positions_json(positions: &[WalGroupPosition], running: (&str, i64,
     let map: serde_json::Map<String, Value> = positions
         .iter()
         .map(
-            |(gid, applied, max, generation, embedding_model, embedding_dim, doc_prefix)| {
+            |(
+                gid,
+                applied,
+                max,
+                generation,
+                embedding_model,
+                embedding_dim,
+                doc_prefix,
+                zero_vector_rows,
+            )| {
                 (
                     gid.clone(),
                     json!({
@@ -1061,6 +1081,10 @@ fn wal_group_positions_json(positions: &[WalGroupPosition], running: (&str, i64,
                             doc_prefix.as_deref(),
                             running,
                         ),
+                        // Rows currently stored with a fallback zero vector because the embedder
+                        // failed during replay (issue #808) — invisible to vector search. Always
+                        // present, all zeros when clean; additive.
+                        "zero_vector_rows": zero_vector_rows.to_json(),
                     }),
                 )
             },

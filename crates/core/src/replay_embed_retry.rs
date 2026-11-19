@@ -13,8 +13,8 @@
 //! - a **permanent** error (HTTP 4xx other than 429, shape mismatch, ...) is never retried; on a
 //!   multi-request call it splits once straight away (a batch-level 4xx is usually caused by one
 //!   text), and a single request that hits one fails after exactly one attempt;
-//! - a **per-window call budget** bounds the total number of embed calls across the whole split
-//!   tree, and a **cross-window breaker** drops the next window to one attempt with no retry or
+//! - a **per-window budget** on transiently failing calls bounds the slow work across the whole
+//!   split tree, and a **cross-window breaker** drops the next window to one attempt with no retry or
 //!   split when the previous window failed entirely and transiently (a dead embedder), so a dead
 //!   embedder costs about one timeout per window — the pre-#808 cost — instead of hours.
 //!
@@ -147,11 +147,15 @@ impl EmbedRetryPolicy {
         half + (ceiling - half).mul_f64(unit.clamp(0.0, 1.0))
     }
 
-    /// Maximum number of embed calls one window may make across its whole retry/split tree:
+    /// Maximum number of *transiently failing* embed calls (timeouts, dead connections — the
+    /// slow kind) one window may spend across its whole retry/split tree:
     /// `(retries+1)*(depth+2) + depth` where `depth = ceil(log2(window_requests))` — enough for
     /// one always-transiently-failing text to be isolated down to a single request with slack,
     /// but not enough for a dead embedder to pay a full retry budget on every one of the up to
-    /// `2n-1` sub-requests. With retries disabled the window gets exactly one call.
+    /// `2n-1` sub-requests. Successful and permanently failing calls are not counted (they are
+    /// prompt and structurally bounded). Once spent, every still-unresolved request in the
+    /// window fails without a further call. With retries disabled the window gets exactly one
+    /// call.
     pub fn call_budget(&self, requests: usize) -> u32 {
         if self.retries == 0 {
             return 1;
@@ -265,7 +269,6 @@ where
                 );
                 return;
             }
-            self.budget -= 1;
             let (err_msg, class) = match (self.embed_fn)(&self.texts[lo..hi]) {
                 Ok(vectors) if vectors.len() == n => {
                     for (slot, v) in self.results[lo..hi].iter_mut().zip(vectors) {
@@ -283,6 +286,16 @@ where
                 ),
                 Err(e) => (e.to_string(), classify_embed_error(&e)),
             };
+
+            // Only a *transient* failure — the slow kind: a timeout or a dead connection — spends
+            // the window budget. Successes and permanent errors return promptly and are bounded
+            // structurally (a permanent error splits at most once per tree node, so at most
+            // `2n-1` calls), and must not be starved by other rows' failures: with many poison
+            // texts in one window their permanent errors would otherwise burn the budget and
+            // fail innocent neighbours.
+            if class == EmbedErrorClass::Transient {
+                self.budget = self.budget.saturating_sub(1);
+            }
 
             if class == EmbedErrorClass::Transient && attempt < self.policy.retries {
                 let d = self.policy.backoff_with_unit(attempt, (self.env.jitter)());
@@ -525,6 +538,24 @@ mod tests {
         assert_eq!(failed, vec![40]);
         // Never retried: 1 root + 1 per split level on the poison path (6) + sibling halves (6).
         assert_eq!(calls.get(), 13);
+    }
+
+    #[test]
+    fn many_permanent_poison_texts_do_not_starve_innocent_neighbours() {
+        let texts: Vec<String> = (0..64).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        // 40 of 64 texts are poison (permanent error); the rest must still be embedded.
+        let is_bad = |t: &str| t[1..].parse::<usize>().unwrap() % 8 < 5;
+        let (out, _) = run(&refs, policy(4), |t| {
+            if t.iter().any(|x| is_bad(x)) {
+                Err(permanent_err())
+            } else {
+                Ok(t.iter().map(|x| vec_for(x)).collect())
+            }
+        });
+        for (i, r) in out.iter().enumerate() {
+            assert_eq!(r.is_err(), is_bad(&texts[i]), "row {i}");
+        }
     }
 
     #[test]
