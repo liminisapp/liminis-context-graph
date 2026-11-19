@@ -5225,6 +5225,11 @@ The committed v2 fixture (244 questions, 1,194 variants) was written by Sonnet 4
 alone through this exchange; `--check` finds no leaks. About one variant in ten is a hypothetical answer with a
 placeholder (`[date]`, `[Name]`), which adds a noise token and will not match note text.
 
+That fixture **predates the current `query-variants.prompt.md`**, which since added the rules to keep every
+named entity and to send no placeholders. The fixture does not follow them (about 41% of multi-hop variants
+omit the anchor entity), and it is not reproducible from the committed prompt, because replies are keyed by a
+hash of the system prompt. It will be regenerated and re-measured with #797's composite search.
+
 Every variants config sends the *same request as its base config* plus `queries`, so each query runs that
 pipeline (vector, or BM25 + vector) and the per-query rankings are fused (primary weight 2, the variants
 sharing a total of 1). The report's "Query variants vs `<base>`" section, one per variants config

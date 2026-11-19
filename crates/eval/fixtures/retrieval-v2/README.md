@@ -88,5 +88,14 @@ target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2
    (`--export-prompts` / `--replies` exchange, no API key); `--check` reports no leaks against questions hash
    `c110fc2cb5090cea`.
 
+   **The committed fixture predates the current prompt.** It was generated with the earlier
+   `query-variants.prompt.md`, before the entity-preserving and no-placeholder rules were added, so it does
+   not follow them: about 41% of multi-hop variants omit the question's named entity and about 10% of all
+   variants carry placeholders such as `[Name]` or `[date]` (ADR-0802). `call_key` hashes the system prompt,
+   so re-running `--replies` against the current prompt finds none of the existing replies, and the
+   fixture is not reproducible from the committed prompt. The maintainer will regenerate it with the current
+   prompt and re-measure together with #797's composite search; until then the multi-hop result is a
+   known regression.
+
 `cargo test -p lcg-eval --test retrieval_v2` checks the skeleton against the scenario, the pipeline
 against a template-prose test double, and (once rendered) the checked-in prose against the skeleton.
