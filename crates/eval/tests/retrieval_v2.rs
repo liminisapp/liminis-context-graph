@@ -1193,7 +1193,7 @@ async fn run_report(fx: &Fixture, judge_path: &Path) -> Report {
     let slots = vec![
         Slot::Run(Box::new(LcgPassages {
             t: dynt.clone(),
-            mode: lcg::PassageMode::Vector,
+            mode: lcg::PassageMode::Default,
         })),
         Slot::Run(Box::new(NoteLexical {
             notes: fx
