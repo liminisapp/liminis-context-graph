@@ -75,7 +75,8 @@ configuration's ranking are unchanged.
 
 Read the three `lcg-graph*` rows together: `seeds` → `expand` is what traversal adds, `expand` →
 `full` is what fusing in plain passage search adds. The plain-passage list inside `lcg-graph` is
-**vector-only** until hybrid passage search (#789) lands; the report says which mode ran. The local
+**vector-only**, `knowledge_search_passages`' default mode: hybrid passage search (#789) is opt-in
+and scored below vector on v2. The report says which mode ran. The local
 reranker (#796) has not landed, so the report states it was not measured.
 
 **Why `lcg-entities-facts-rrf` exists (FR-019).** Measured against the graph's potential,

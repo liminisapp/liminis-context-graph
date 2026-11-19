@@ -600,7 +600,7 @@ impl Report {
         let _ = writeln!(o, "## Graph-aware search (#797)\n");
         if graph {
             let _ = writeln!(o, "- `lcg-graph*` drive `knowledge_graph_search` (one service call, one query embedding, no LLM). Ablation rows: `lcg-graph-seeds` = passages mentioning the linked seed entities only; `lcg-graph-expand` = + two-hop expansion (supporting passages and facts); `lcg-graph` = + plain passage search, fused with RRF.");
-            let _ = writeln!(o, "- The plain-passage list inside `lcg-graph` is **vector-only** on this build (hybrid BM25 passage search is #789). Each response reports it as `stats.passage_mode`.");
+            let _ = writeln!(o, "- The plain-passage list inside `lcg-graph` is **vector-only**: `knowledge_search_passages`' default mode, since hybrid passage search (#789) is opt-in and scored below vector on v2 (ADR-0789). Each response reports it as `stats.passage_mode`.");
             let _ = writeln!(o, "- `knowledge_graph_search` is believed-only by default: superseded facts and passages are neither returned nor traversed.");
             let _ = writeln!(
                 o,

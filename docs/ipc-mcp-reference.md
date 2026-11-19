@@ -542,8 +542,9 @@ embedding and **no** LLM call. It is opt-in: no existing read changes.
    supporting passage.
 3. **Fusion.** RRF over three lists: `supporting` — passages that produced the selected facts or
    mention the seed and reached entities, scored by their path score times their own similarity to
-   the query; `passages` — plain passage search (`full` only; vector-only until #789's hybrid
-   passage search lands, reported as `stats.passage_mode`); and `facts` — the selected facts by path
+   the query; `passages` — plain passage search (`full` only; vector, the
+   `knowledge_search_passages` default — hybrid stays opt-in, see ADR-0789 — reported as
+   `stats.passage_mode`); and `facts` — the selected facts by path
    score. `seeds` fuses only the `supporting` list restricted to passages mentioning a seed.
 
 **Derived content cites but never corroborates** (ADR-0752). A `derived` or `answer` passage never

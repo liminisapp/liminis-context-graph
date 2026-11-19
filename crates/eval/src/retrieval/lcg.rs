@@ -1036,7 +1036,7 @@ impl Retriever for LcgGraph {
             GraphStages::Full => "full fusion (supporting passages + plain passages + facts, RRF)",
         };
         format!(
-            "knowledge_graph_search stages={}: {what}; believed-only default; plain-passage list is vector-only until #789",
+            "knowledge_graph_search stages={}: {what}; believed-only default; plain-passage list is vector (the knowledge_search_passages default)",
             self.stages.param()
         )
     }
@@ -1676,7 +1676,13 @@ mod tests {
             "knowledge_get_edges_by_uuids" => Ok(json!({"edges":[]})),
             other => Err(format!("unexpected {other}")),
         }));
-        let p = LcgPassages { t: t.clone() }.retrieve("q", 5).await.unwrap();
+        let p = LcgPassages {
+            t: t.clone(),
+            mode: PassageMode::Vector,
+        }
+        .retrieve("q", 5)
+        .await
+        .unwrap();
         assert_eq!(p.service_calls, Some(1));
         let ef = LcgEntitiesFacts {
             t: t.clone(),

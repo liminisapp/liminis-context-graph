@@ -250,7 +250,8 @@ pub struct Truncation {
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphSearchStats {
     pub stages: &'static str,
-    /// `vector` until hybrid passage search (#789) is available to list (b).
+    /// `vector`: list (b) uses `knowledge_search_passages`' default ranking. Hybrid passage search
+    /// (#789) exists but is opt-in, measured below vector on v2 (ADR-0789).
     pub passage_mode: &'static str,
     pub believed_only: bool,
     pub as_of: String,
@@ -390,7 +391,8 @@ pub fn exact_name_keys(
 }
 
 /// The query as plain alphanumeric terms for `QUERY_FTS_INDEX`, so punctuation (e.g. `→`, #646)
-/// can never break the FTS parser. Replace with #789's `sanitize_fts_query` once it lands.
+/// can never break the FTS parser. #789's `sanitize_fts_query` now exists; moving to it (which also
+/// drops stop words) is a measured follow-up, not part of #797.
 pub fn fts_terms(query: &str) -> String {
     query
         .split(|c: char| !c.is_alphanumeric())
@@ -1821,6 +1823,7 @@ mod tests {
                 score: 0.0,
                 attributes: String::new(),
                 origin: "primary".into(),
+                similarity: None,
             },
             origin: Origin::Primary,
             supersession: belief::EpisodeSupersession {

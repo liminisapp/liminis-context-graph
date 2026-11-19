@@ -190,7 +190,8 @@ RRF (k = 60) over three lists, each capped at `max(3k, 30)`, keyed `p:<episode>`
   The ranked query's supersession bound is rounded down to the millisecond, so it
   can only keep an episode the exact liveness check later drops.
 - **(b) `passages`** — plain vector passage search with the same embedding, over-drawn 3×, liveness
-  applied. Vector-only until #789's hybrid passage list lands (`stats.passage_mode`). The group
+  applied. Vector, `knowledge_search_passages`' default mode (`stats.passage_mode`): #789's hybrid
+  mode has landed but is opt-in, measured below vector on v2 (ADR-0789). The group
   and origin filters run after the ANN probe. So whenever `group_ids` or `origins` is set, the
   probe is oversampled 10×: otherwise, in a multi-group database, other groups' passages crowd the
   requested group's out of the nearest neighbours and the list comes back short or empty. The
@@ -252,8 +253,10 @@ difference.
   the budget, the first levers are the frontier row cap and the supporting-candidate cap.
 - The success criteria (SC-001–SC-007) need a run on v2 with a real embedder; they are not provable
   in unit tests, which use hand-chosen vectors.
-- When #789 merges, list (b) should switch to its hybrid passage list, and the private `fts_terms`
-  sanitiser to `sanitize_fts_query`.
+- #789 has merged with hybrid passage search opt-in, because it scored below vector on v2
+  (ADR-0789). List (b) therefore keeps the vector default, as FR-015 asks. Switching it to the
+  weighted-RRF hybrid list, and the private `fts_terms` sanitiser to `sanitize_fts_query`, are
+  follow-ups to measure on the v2 rows, not assumed wins.
 - #796's reranker can sit on top as a final stage.
 
 ## Rejected alternatives

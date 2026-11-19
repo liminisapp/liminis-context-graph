@@ -1432,8 +1432,9 @@ embedding and **no** LLM call. It is opt-in: no existing read changes.
    supporting passage.
 3. **Fusion.** RRF over three lists: `supporting` — passages that produced the selected facts or
    mention the seed and reached entities, scored by their path score times their own similarity to
-   the query; `passages` — plain passage search (`full` only; vector-only until #789's hybrid
-   passage search lands, reported as `stats.passage_mode`); and `facts` — the selected facts by path
+   the query; `passages` — plain passage search (`full` only; vector, the
+   `knowledge_search_passages` default — hybrid stays opt-in, see ADR-0789 — reported as
+   `stats.passage_mode`); and `facts` — the selected facts by path
    score. `seeds` fuses only the `supporting` list restricted to passages mentioning a seed.
 
 **Derived content cites but never corroborates** (ADR-0752). A `derived` or `answer` passage never
@@ -5146,7 +5147,8 @@ configuration's ranking are unchanged.
 
 Read the three `lcg-graph*` rows together: `seeds` → `expand` is what traversal adds, `expand` →
 `full` is what fusing in plain passage search adds. The plain-passage list inside `lcg-graph` is
-**vector-only** until hybrid passage search (#789) lands; the report says which mode ran. The local
+**vector-only**, `knowledge_search_passages`' default mode: hybrid passage search (#789) is opt-in
+and scored below vector on v2. The report says which mode ran. The local
 reranker (#796) has not landed, so the report states it was not measured.
 
 **Why `lcg-entities-facts-rrf` exists (FR-019).** Measured against the graph's potential,

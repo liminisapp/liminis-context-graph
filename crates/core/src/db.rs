@@ -4839,6 +4839,7 @@ impl<'db> Conn<'db> {
                         attributes: value_as_string(&r[7]),
                         score: 0.0,
                         origin: origin.as_str().to_string(),
+                        similarity: None,
                     },
                     origin,
                     supersession: crate::belief::EpisodeSupersession {
