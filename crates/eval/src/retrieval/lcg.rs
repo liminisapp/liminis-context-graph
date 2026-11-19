@@ -645,6 +645,62 @@ impl Retriever for LcgPassages {
     }
 }
 
+/// `lcg-passages-variants` (issue #802): `knowledge_search_passages` with the question's
+/// caller-style variants from `query-variants.jsonl` passed as `queries`. Same request as
+/// [`LcgPassages`] otherwise (vector-only, `min_score` 0), so any difference between the two rows
+/// is the variants and the weighted fusion. The variants are keyed by question id, so scoring goes
+/// through [`Retriever::retrieve_for`]; a question with no variants sends no `queries` at all.
+pub struct LcgVariants {
+    pub t: Arc<dyn RpcTransport>,
+    pub variants: super::variants::VariantsFixture,
+}
+
+impl LcgVariants {
+    async fn search(&self, q: &str, variants: &[String], k: usize) -> Result<RankedResult, String> {
+        let mut params =
+            json!({"query": q, "num_results": k, "min_score": 0.0, "group_ids": [EVAL_GROUP]});
+        if !variants.is_empty() {
+            params["queries"] = json!(variants);
+        }
+        let t0 = Instant::now();
+        let r = self.t.call("knowledge_search_passages", params).await?;
+        let latency = t0.elapsed();
+        let (notes, evidence) = map_passages(&items(&r, "passages"));
+        Ok(RankedResult {
+            notes,
+            evidence,
+            // One batched embed call, however many variants.
+            model_calls: Some(1),
+            lookup_calls: 0,
+            evidence_gaps: 0,
+            latency,
+        })
+    }
+}
+
+impl Retriever for LcgVariants {
+    fn id(&self) -> &str {
+        "lcg-passages-variants"
+    }
+    fn description(&self) -> String {
+        "knowledge_search_passages with caller-supplied query variants from query-variants.jsonl (vector-only, weighted RRF, primary x2), min_score=0".into()
+    }
+    /// Without a question id there are no variants to look up: the plain `lcg-passages` request.
+    fn retrieve<'a>(&'a self, q: &'a str, k: usize) -> BoxFuture<'a, Result<RankedResult, String>> {
+        Box::pin(async move { self.search(q, &[], k).await })
+    }
+    fn retrieve_for<'a>(
+        &'a self,
+        q: &'a super::fixture::Question,
+        k: usize,
+    ) -> BoxFuture<'a, Result<RankedResult, String>> {
+        Box::pin(async move {
+            self.search(&q.text, self.variants.for_question(&q.id), k)
+                .await
+        })
+    }
+}
+
 /// `lcg-entities-facts` (default reads) and `lcg-entities-facts-belief` (`believed_only=true` on
 /// the fact read — only edge reads can express belief, ADR-0705).
 pub struct LcgEntitiesFacts {
@@ -943,6 +999,47 @@ mod tests {
         assert_eq!(log[0].1["num_results"], 7);
         assert_eq!(log[0].1["min_score"], 0.0);
         assert_eq!(log[0].1["group_ids"], json!([EVAL_GROUP]));
+    }
+
+    #[tokio::test]
+    async fn variants_retriever_sends_the_question_s_variants_keyed_by_id() {
+        let t = Arc::new(FakeTransport::new(|m, _| {
+            assert_eq!(m, "knowledge_search_passages");
+            Ok(json!({"passages":[{"content":"c","source_description":"n1:n1#0"}],"count":1}))
+        }));
+        let mut vf = crate::retrieval::variants::VariantsFixture::default();
+        vf.by_id
+            .insert("q1".into(), vec!["alt one".into(), "alt two".into()]);
+        let rt = LcgVariants {
+            t: t.clone(),
+            variants: vf,
+        };
+        let mk = |id: &str| crate::retrieval::fixture::Question {
+            id: id.into(),
+            category: crate::retrieval::fixture::Category::Paraphrase,
+            text: "same text".into(),
+            relevant: vec![],
+            evidence: vec![],
+            current: vec![],
+            stale: vec![],
+            negative: false,
+        };
+        let with = rt.retrieve_for(&mk("q1"), 7).await.unwrap();
+        assert_eq!(with.notes, vec!["n1"]);
+        assert_eq!(with.model_calls, Some(1));
+        // Two questions can share text; only the id decides which variants apply.
+        rt.retrieve_for(&mk("q2"), 7).await.unwrap();
+        let log = t.log.lock().unwrap();
+        assert_eq!(log[0].1["query"], "same text");
+        assert_eq!(log[0].1["queries"], json!(["alt one", "alt two"]));
+        assert_eq!(log[0].1["num_results"], 7);
+        assert_eq!(log[0].1["min_score"], 0.0);
+        assert_eq!(log[0].1["group_ids"], json!([EVAL_GROUP]));
+        assert!(
+            log[1].1.get("queries").is_none(),
+            "no variants: no queries key"
+        );
+        assert_eq!(rt.id(), "lcg-passages-variants");
     }
 
     fn map() -> Arc<IngestMap> {

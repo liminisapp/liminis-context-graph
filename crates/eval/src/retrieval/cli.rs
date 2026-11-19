@@ -10,10 +10,12 @@ pub const DEFAULT_K: usize = 10;
 pub const DEFAULT_FIXTURE_DIR: &str = "crates/eval/fixtures/retrieval";
 pub const DEFAULT_EVIDENCE_CACHE: &str = "retrieval_evidence_cache.jsonl";
 
-/// The four headline configurations (FR-004), then the labelled extra belief-aware variant.
+/// The four headline configurations (FR-004), then the labelled extras: the belief-aware variant
+/// and `lcg-passages-variants` (#802, needs `query-variants.jsonl`; a skipped row without it).
 pub const HEADLINE_CONFIGS: [&str; 4] = ["lcg-passages", "lcg-entities-facts", "qmd", "qmd-rerank"];
-pub const ALL_CONFIGS: [&str; 5] = [
+pub const ALL_CONFIGS: [&str; 6] = [
     "lcg-passages",
+    "lcg-passages-variants",
     "lcg-entities-facts",
     "qmd",
     "qmd-rerank",
@@ -81,9 +83,11 @@ OPTIONS:
                                Default: crates/eval/fixtures/retrieval
     --k <N>                    Shared cut-off for every configuration (1..=100, default 10).
     --configs <LIST>           Comma-separated subset of: lcg-passages, lcg-entities-facts, qmd,
-                               qmd-rerank, lcg-entities-facts-belief. Default: all five.
-                               lcg-passages is the service's shipped default (belief-aware
-                               vector since #806).
+                               qmd-rerank, lcg-entities-facts-belief, lcg-passages-variants.
+                               Default: all six. lcg-passages is the service's shipped default
+                               (belief-aware vector since #806). lcg-passages-variants reads
+                               <DIR>/query-variants.jsonl (see `lcg-eval retrieval-variants`) and is
+                               reported as skipped when that file is absent.
                                Opt-in: lcg-passages-raw (belief_aware=false, the pre-#806
                                baseline), (#789) lcg-passages-hybrid (BM25 + vector, weighted RRF),
                                lcg-passages-hybrid-belief (the same plus belief-aware ranking),
@@ -320,7 +324,8 @@ mod tests {
         match p(&[]).unwrap() {
             RetrievalMode::Run(a) => {
                 assert_eq!(a.k, DEFAULT_K);
-                assert_eq!(a.configs.len(), 5);
+                assert_eq!(a.configs.len(), 6);
+                assert!(a.configs.iter().any(|c| c == "lcg-passages-variants"));
                 assert_eq!(a.corpus, PathBuf::from(DEFAULT_FIXTURE_DIR));
                 assert!(!a.dry_run);
             }
@@ -359,6 +364,18 @@ mod tests {
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn variants_config_is_selectable_and_listed_in_usage() {
+        match p(&["--configs", "lcg-passages,lcg-passages-variants"]).unwrap() {
+            RetrievalMode::Run(a) => {
+                assert_eq!(a.configs, vec!["lcg-passages", "lcg-passages-variants"])
+            }
+            _ => panic!(),
+        }
+        assert!(usage().contains("lcg-passages-variants"));
+        assert!(p(&["--configs", "lcg-passages-variant"]).is_err());
     }
 
     #[test]

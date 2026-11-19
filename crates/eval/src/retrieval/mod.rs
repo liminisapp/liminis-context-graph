@@ -456,8 +456,12 @@ fn default_service_bin() -> PathBuf {
     PathBuf::from("liminis-context-graph")
 }
 
+/// The config id of the caller-supplied-variants passage search (#802).
+pub const VARIANTS_CONFIG: &str = "lcg-passages-variants";
+
 fn skipped_slot(id: &str, reason: &str) -> Slot {
     let description = match id {
+        VARIANTS_CONFIG => "knowledge_search_passages with caller-supplied query variants",
         "qmd" => "qmd query --no-rerank",
         "qmd-rerank" => "qmd query with reranker",
         other => other,
@@ -505,6 +509,13 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
     for w in &plan.warnings {
         eprintln!("lcg-eval retrieval: WARNING {w}");
     }
+    // Query variants (#802): validated before the service is spawned or anything is ingested. A
+    // missing file makes the config a skipped row; a stale or leaking one aborts the run.
+    let query_variants = if a.configs.iter().any(|c| c == VARIANTS_CONFIG) {
+        variants::load_variants(&a.corpus, &fx)?
+    } else {
+        None
+    };
 
     let mut meta = RunMeta {
         corpus_version: plan.corpus_version.clone(),
@@ -616,6 +627,26 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                         t: transport.clone(),
                         mode: lcg::PassageMode::HybridBelief,
                     }),
+                    VARIANTS_CONFIG => match &query_variants {
+                        Some(vf) => Box::new(lcg::LcgVariants {
+                            t: transport.clone(),
+                            variants: vf.clone(),
+                        }),
+                        None => {
+                            let slot_id = match &profile {
+                                Some(p) if multi => profiled_id(id, p, true),
+                                _ => id.clone(),
+                            };
+                            lcg_slots.insert(
+                                slot_id,
+                                skipped_slot(
+                                    id,
+                                    &format!("no {} in {}", variants::FILE, a.corpus.display()),
+                                ),
+                            );
+                            continue;
+                        }
+                    },
                     "lcg-entities-facts" => Box::new(lcg::LcgEntitiesFacts {
                         t: transport.clone(),
                         map: map.clone(),
