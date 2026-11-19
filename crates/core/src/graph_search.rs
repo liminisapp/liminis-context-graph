@@ -1329,7 +1329,17 @@ fn seed_stage(
         t
     });
 
-    let top = admitted.first().map_or(1.0, |(h, _, _)| h.rrf_score);
+    // Normalise against the best fused score among *all* final seeds. Summary-vector seeds are
+    // appended after the RRF-ordered ones, so the first seed is not necessarily the best.
+    let top = admitted
+        .iter()
+        .map(|(h, _, _)| h.rrf_score)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let top = if top.is_finite() && top > 0.0 {
+        top
+    } else {
+        1.0
+    };
     let seeds = admitted
         .into_iter()
         .map(|(h, row, reason)| {

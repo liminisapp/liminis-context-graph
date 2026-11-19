@@ -730,6 +730,25 @@ fn path_edges(x: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Seed scores are normalised so the best seed scores exactly 1.0 and none exceeds it.
+fn assert_seed_scores_normalised(r: &Value) {
+    let scores: Vec<f64> = r["seeds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["score"].as_f64().unwrap())
+        .collect();
+    if scores.is_empty() {
+        return;
+    }
+    let max = scores.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        (max - 1.0).abs() < 1e-12,
+        "best seed scores 1.0: {scores:?}"
+    );
+    assert!(scores.iter().all(|s| *s > 0.0 && *s <= 1.0), "{scores:?}");
+}
+
 fn seed_uuids(r: &Value) -> Vec<String> {
     r["seeds"]
         .as_array()
@@ -754,6 +773,7 @@ fn list_names(x: &Value) -> Vec<String> {
 async fn multi_hop_reaches_the_note_that_never_names_the_seed() {
     let fx = fixture();
     let r = search(&fx, json!({"query": Q_MULTI, "group_ids": [G]})).await;
+    assert_seed_scores_normalised(&r);
     assert!(
         seed_uuids(&r).contains(&"cedar".to_string()),
         "{}",
@@ -850,6 +870,7 @@ async fn one_hop_fact_ranks_at_least_as_high_as_an_equally_relevant_two_hop_fact
 async fn role_description_seeds_the_entity_through_its_summary() {
     let fx = fixture();
     let r = search(&fx, json!({"query": Q_PARA, "group_ids": [G]})).await;
+    assert_seed_scores_normalised(&r);
     let seeds = r["seeds"].as_array().unwrap();
     assert_eq!(
         seeds.len(),
