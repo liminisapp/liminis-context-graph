@@ -186,7 +186,9 @@ pub async fn search_passages(
 /// Retrieval mode for `knowledge_search_passages`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassageSearchMode {
-    /// Pure vector cosine (the pre-#789 behaviour, unchanged).
+    /// Vector cosine. Since #806 it is followed by belief-aware re-ranking unless that is turned
+    /// off (`belief_aware: false` or `LCG_PASSAGE_BELIEF_AWARE=off`), which gives the pre-#789
+    /// pure-cosine behaviour byte-for-byte.
     Vector,
     /// BM25 over episode text + vector, fused with weighted RRF, then belief-aware re-ranking.
     Hybrid,
@@ -218,6 +220,43 @@ impl PassageSearchMode {
             _ => PassageSearchMode::Vector,
         }
     }
+}
+
+/// Parse a `LCG_PASSAGE_BELIEF_AWARE` value (issue #806). Trimmed and case-insensitive:
+/// `off`/`0`/`false` disable, `on`/`1`/`true` enable, anything else is `None` (unrecognised).
+pub fn parse_belief_aware_switch(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "off" | "0" | "false" => Some(false),
+        "on" | "1" | "true" => Some(true),
+        _ => None,
+    }
+}
+
+/// The workspace default for belief-aware ranking from `LCG_PASSAGE_BELIEF_AWARE`: `Some(b)` when
+/// the variable holds a recognised value, `None` when it is unset, empty or unrecognised. An
+/// unrecognised value warns on stderr (once per process) and is otherwise ignored. Read per
+/// request, like `LCG_PASSAGE_SEARCH_MODE`, so it needs no `AppState` field.
+pub fn belief_aware_default_from_env() -> Option<bool> {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    match std::env::var("LCG_PASSAGE_BELIEF_AWARE") {
+        Ok(v) if !v.trim().is_empty() => {
+            let parsed = parse_belief_aware_switch(&v);
+            if parsed.is_none() && !WARNED.swap(true, Ordering::Relaxed) {
+                eprintln!(
+                    "liminis-context-graph: LCG_PASSAGE_BELIEF_AWARE={v:?} is not one of \
+                     off/0/false/on/1/true; ignoring it (belief-aware ranking stays on by default)"
+                );
+            }
+            parsed
+        }
+        _ => None,
+    }
+}
+
+/// Resolve whether a passage search is belief-aware: an explicit request value wins, then the
+/// workspace switch, then `true` (issue #806).
+pub fn resolve_belief_aware(request: Option<bool>, env: Option<bool>) -> bool {
+    request.or(env).unwrap_or(true)
 }
 
 impl std::str::FromStr for PassageSearchMode {
@@ -621,9 +660,10 @@ pub async fn search_passages_hybrid(
     .await?
 }
 
-/// Vector passage search followed by belief-aware re-ranking: the opt-in (`mode: "vector"` with
-/// `belief_aware: true`) variant of [`search_passages`], which is left untouched so the vector
-/// default stays byte-for-byte unchanged. `score` stays a cosine similarity, except that a
+/// Vector passage search followed by belief-aware re-ranking: the default (#806) variant of
+/// [`search_passages`] in `mode: "vector"`. [`search_passages`] is left untouched: it is the
+/// `belief_aware: false` / `LCG_PASSAGE_BELIEF_AWARE=off` path, which stays byte-for-byte the
+/// pre-#806 default. `score` stays a cosine similarity, except that a
 /// demoted passage's score is lowered to just below the passage it ranks under.
 pub async fn search_passages_vector_belief(
     db: Arc<Db>,
@@ -853,6 +893,32 @@ pub async fn hybrid_edge_search_scored(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn belief_aware_switch_spellings() {
+        for off in ["off", "OFF", "Off", "0", "false", "FALSE", "  off  "] {
+            assert_eq!(parse_belief_aware_switch(off), Some(false), "{off:?}");
+        }
+        for on in ["on", "ON", "1", "true", "True", " on\n"] {
+            assert_eq!(parse_belief_aware_switch(on), Some(true), "{on:?}");
+        }
+        for bad in ["", "   ", "no", "yes", "2", "disabled", "of", "vector"] {
+            assert_eq!(parse_belief_aware_switch(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn belief_aware_resolution_precedence() {
+        // No request value: the switch applies, else the default is on.
+        assert!(resolve_belief_aware(None, None));
+        assert!(!resolve_belief_aware(None, Some(false)));
+        assert!(resolve_belief_aware(None, Some(true)));
+        // An explicit request value always wins over the switch.
+        assert!(resolve_belief_aware(Some(true), Some(false)));
+        assert!(!resolve_belief_aware(Some(false), Some(true)));
+        assert!(!resolve_belief_aware(Some(false), None));
+        assert!(resolve_belief_aware(Some(true), None));
+    }
 
     #[test]
     fn sanitize_fts_query_strips_operators_and_punctuation() {
