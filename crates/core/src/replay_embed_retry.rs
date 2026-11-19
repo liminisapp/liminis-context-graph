@@ -307,6 +307,17 @@ where
             // fail innocent neighbours.
             if class == EmbedErrorClass::Transient {
                 self.budget = self.budget.saturating_sub(1);
+                // The budget is spent: the next loop iteration would fail this range without a
+                // call, so skip the (up to `cap_ms`) backoff sleep and fail it now.
+                if self.budget == 0 {
+                    self.fail_range(
+                        lo,
+                        hi,
+                        "embed retry call budget exhausted for this window",
+                        true,
+                    );
+                    return;
+                }
             }
 
             if class == EmbedErrorClass::Transient && attempt < self.policy.retries {
@@ -582,6 +593,42 @@ mod tests {
         assert!(out.iter().all(|r| r.is_err()));
         assert_eq!(calls.get(), policy(4).call_budget(64));
         assert!(breaker.is_open());
+    }
+
+    #[test]
+    fn spent_budget_skips_the_final_backoff_sleep() {
+        // Dead embedder, 64-row window: the window budget is the limiter. The call that spends
+        // the budget must not be followed by a backoff sleep — the retry it would wait for can
+        // never be made.
+        let events: RefCell<Vec<char>> = RefCell::new(Vec::new());
+        let cancel = || false;
+        let sleep = |_d: Duration| events.borrow_mut().push('S');
+        let jitter = || 0.5;
+        let f = |_: &[&str]| {
+            events.borrow_mut().push('C');
+            Err(timeout_err())
+        };
+        let texts: Vec<String> = (0..64).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let pol = policy(4);
+        let mut breaker = RetryBreaker::default();
+        let _ = embed_with_retry(
+            &refs,
+            &pol,
+            &mut breaker,
+            &env_of(&cancel, &sleep, &jitter),
+            &f,
+        );
+        let ev = events.borrow();
+        assert_eq!(
+            ev.iter().filter(|c| **c == 'C').count() as u32,
+            pol.call_budget(64)
+        );
+        assert_eq!(
+            ev.last(),
+            Some(&'C'),
+            "a backoff sleep trailed the last call"
+        );
     }
 
     #[test]

@@ -588,7 +588,6 @@ impl WalReplayer {
                 .unwrap_or(true),
             _ => false,
         };
-        batch.track_clears = initial_track;
         let mut resolve_state =
             EmbedResolveState::new(embed_retry, record_zero_rows, initial_track);
         // Single-entry prepared-statement cache carried across `flush_batch` calls for this
@@ -1440,13 +1439,6 @@ fn push_resolved_rows(
         batch.rows.push(row.params_map);
         batch.match_prefixed.push(row.match_prefixed);
         batch.seqs.push(row.seq);
-        if row
-            .zero_effects
-            .iter()
-            .any(|e| matches!(e, ZeroEffect::Add { .. }))
-        {
-            batch.track_clears = true;
-        }
         batch.zero_effects.push(row.zero_effects);
 
         // Flush when the batch reaches the size limit (FR-002, FR-003). Same template as the
@@ -1625,8 +1617,6 @@ struct ReplayBatch {
     zero_effects: Vec<Vec<ZeroEffect>>,
     /// The group whose record `zero_effects` apply to; `None` records nothing. Survives `clear`.
     group_id: Option<String>,
-    /// Set once the record is known to be non-empty (see `replay_opts`); carried for the run.
-    track_clears: bool,
 }
 
 impl ReplayBatch {
@@ -1638,7 +1628,6 @@ impl ReplayBatch {
             seqs: Vec::new(),
             zero_effects: Vec::new(),
             group_id,
-            track_clears: false,
         }
     }
 
