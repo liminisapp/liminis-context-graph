@@ -74,8 +74,9 @@ replay starts.
 ### 2. A durable per-group record in the database, written in the replay transaction
 
 A row stored with a fallback zero vector *because the embedder failed* is recorded as
-`(group, kind, uuid)` in a new lcg-only node table `EmbeddingZeroRow(id, group_id, kind, uuid)`
-(`id = "{group}|{kind}|{uuid}"`; kinds `name`, `fact`, `summary`, `content`, derived from the vector
+`(group, kind, uuid)` in a new lcg-only node table `EmbeddingZeroRow(id, wal_group, kind, uuid)`
+(`id = "{group}|{kind}|{uuid}"`; the column is `wal_group`, not `group_id`, so a stray entry never
+makes a group look "present" to the write-policy group enumeration; kinds `name`, `fact`, `summary`, `content`, derived from the vector
 param). It is derived state: written through the unrecorded path, never reaching the WAL, and with
 no counterpart in graphiti's schema (no `kuzu_driver.py` parity change, like `WalPosition`).
 

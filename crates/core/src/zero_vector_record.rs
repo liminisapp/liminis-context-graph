@@ -1,7 +1,7 @@
 //! Durable per-group record of rows stored with a fallback zero vector because the embedder
 //! failed during WAL replay recompute (issue #808, ADR-0808).
 //!
-//! The record is an lcg-only node table, `EmbeddingZeroRow(id, group_id, kind, uuid)`, with
+//! The record is an lcg-only node table, `EmbeddingZeroRow(id, wal_group, kind, uuid)`, with
 //! `id = "{group_id}|{kind}|{uuid}"`. It lives in the database, not in a sidecar, because replay
 //! writes it **inside `flush_batch`'s own transaction** (see [`apply_zero_effects`]): an entry
 //! commits or rolls back with the zero-vector row it describes, so a rollback, cancel or crash can
@@ -134,7 +134,7 @@ fn value_as_count(v: &lbug::Value) -> u64 {
 }
 
 const ADD_Q: &str = "MERGE (z:EmbeddingZeroRow {id: $id}) \
-                     SET z.group_id = $group_id, z.kind = $kind, z.uuid = $uuid";
+                     SET z.wal_group = $group_id, z.kind = $kind, z.uuid = $uuid";
 const DEL_Q: &str = "MATCH (z:EmbeddingZeroRow {id: $id}) DELETE z";
 
 /// Folds `effects` (in order) into their net result per `(kind, uuid)` and applies it through
@@ -191,7 +191,7 @@ impl Conn<'_> {
     /// has not run the idempotent schema step yet) reads as empty.
     pub fn zero_vector_counts_all(&self) -> Result<HashMap<String, ZeroVectorCounts>, Error> {
         let rows = match self.query_params(
-            "MATCH (z:EmbeddingZeroRow) RETURN z.group_id, z.kind, count(*)",
+            "MATCH (z:EmbeddingZeroRow) RETURN z.wal_group, z.kind, count(*)",
             serde_json::json!({}),
         ) {
             Ok(rows) => rows,
@@ -230,7 +230,7 @@ impl Conn<'_> {
         kind: Option<ZeroKind>,
     ) -> Result<Vec<(ZeroKind, String)>, Error> {
         let rows = match self.query_params(
-            "MATCH (z:EmbeddingZeroRow {group_id: $group_id}) RETURN z.kind, z.uuid",
+            "MATCH (z:EmbeddingZeroRow {wal_group: $group_id}) RETURN z.kind, z.uuid",
             serde_json::json!({ "group_id": group_id }),
         ) {
             Ok(rows) => rows,
@@ -292,7 +292,7 @@ impl Conn<'_> {
     /// Drops every entry for `group_id` (a full rebuild/purge resets the record). Unrecorded.
     pub fn clear_zero_vector_rows(&self, group_id: &str) -> Result<(), Error> {
         match self.exec_params_unrecorded(
-            "MATCH (z:EmbeddingZeroRow {group_id: $group_id}) DELETE z",
+            "MATCH (z:EmbeddingZeroRow {wal_group: $group_id}) DELETE z",
             serde_json::json!({ "group_id": group_id }),
         ) {
             Ok(()) => Ok(()),
