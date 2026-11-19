@@ -250,8 +250,10 @@ where
         let n = hi - lo;
         let mut attempt: u32 = 0;
         loop {
-            if self.cancelled || (self.env.cancel)() {
-                self.cancelled = true;
+            // `cancel` is deliberately polled only on the failure paths (backoff sleeps and
+            // split points), never before a first attempt: a healthy window must not add any
+            // `cancel_fn` calls beyond the replay loop's own per-row polling.
+            if self.cancelled {
                 return;
             }
             if self.budget == 0 {
@@ -297,11 +299,16 @@ where
                 return;
             }
             let mid = lo + n / 2;
-            self.solve(lo, mid);
-            if self.cancelled {
-                return;
+            for (a, b) in [(lo, mid), (mid, hi)] {
+                if (self.env.cancel)() {
+                    self.cancelled = true;
+                    return;
+                }
+                self.solve(a, b);
+                if self.cancelled {
+                    return;
+                }
             }
-            self.solve(mid, hi);
             return;
         }
     }
