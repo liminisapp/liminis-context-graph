@@ -45,6 +45,22 @@ harness validates every `knowledge_supersede_document` response and aborts, nami
 call ended belief for zero episodes (replays and future-dated supersessions excepted); the report's
 ingest block shows "Belief ended for N episode(s) across M document supersession(s)".
 
+The first four are the headline table. The fifth exists because only edge reads can express
+belief time ([ADR-0705](adr/0705-belief-time-separate-from-validity.md)): passages and entities
+have no belief filter and return superseded text by default, so without it the temporal
+hypothesis would test the configuration, not the architecture.
+
+Every configuration runs over the same corpus and question set with the **same k**
+(`--k`, default 10). Score floors are set to zero (`min_score=0`, `min_similarity=0`) so a floor
+never truncates a result list below k.
+
+For `lcg-entities-facts` and `lcg-entities-facts-belief` the shared k is a *retrieval budget*
+split across the entity and fact reads, so the configuration does not get 2k results against the
+other configurations' k. One asymmetry remains by design: an entity maps to every note it was
+extracted from, so a single entity result can credit several notes before the list is cut to k
+notes. (`lcg-entities-facts-rrf`, below, asks each read for k and caps each entity at 2 notes;
+its fused list is still cut to k notes.)
+
 ### Graph-aware configurations (opt-in, #797)
 
 These run only when named in `--configs`; the default run, its row count and every existing
@@ -88,20 +104,6 @@ target/release/lcg-eval retrieval \
 
 The per-category paired comparisons against `lcg-passages` answer the success criteria directly;
 the cost table gives p50 latency and service and model calls per query.
-
-The first four are the headline table. The fifth exists because only edge reads can express
-belief time ([ADR-0705](adr/0705-belief-time-separate-from-validity.md)): passages and entities
-have no belief filter and return superseded text by default, so without it the temporal
-hypothesis would test the configuration, not the architecture.
-
-Every configuration runs over the same corpus and question set with the **same k**
-(`--k`, default 10). Score floors are set to zero (`min_score=0`, `min_similarity=0`) so a floor
-never truncates a result list below k.
-
-For `lcg-entities-facts*` the shared k is a *retrieval budget* split across the entity and fact
-reads, so the configuration does not get 2k results against the other configurations' k. One
-asymmetry remains by design: an entity maps to every note it was extracted from, so a single
-entity result can credit several notes before the list is cut to k notes.
 
 ### Metrics
 
