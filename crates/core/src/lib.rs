@@ -45,6 +45,7 @@ pub mod read_page;
 pub mod rebuild_job;
 pub mod recovery;
 pub mod replay;
+pub mod replay_embed_retry;
 pub mod reprocess_relations;
 pub mod rerank;
 pub mod schema;
