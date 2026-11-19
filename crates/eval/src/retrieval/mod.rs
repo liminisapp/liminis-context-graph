@@ -18,6 +18,7 @@ pub mod origin;
 pub mod qmd;
 pub mod report;
 pub mod stats;
+pub mod variants;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -69,6 +70,16 @@ pub trait Retriever: Send + Sync {
         question: &'a str,
         k: usize,
     ) -> BoxFuture<'a, Result<RankedResult, String>>;
+    /// Retrieves for a whole question. Defaults to its text; a retriever that needs more than
+    /// the text (the variants retriever is keyed by question id, #802) overrides this. The
+    /// scoring loop always calls this one.
+    fn retrieve_for<'a>(
+        &'a self,
+        q: &'a Question,
+        k: usize,
+    ) -> BoxFuture<'a, Result<RankedResult, String>> {
+        self.retrieve(&q.text, k)
+    }
 }
 
 /// Everything `--dry-run` prints and the real run starts from (ADR-0052: one resolution path).
@@ -150,6 +161,13 @@ impl Retriever for Profiled {
         k: usize,
     ) -> BoxFuture<'a, Result<RankedResult, String>> {
         self.inner.retrieve(question, k)
+    }
+    fn retrieve_for<'a>(
+        &'a self,
+        q: &'a Question,
+        k: usize,
+    ) -> BoxFuture<'a, Result<RankedResult, String>> {
+        self.inner.retrieve_for(q, k)
     }
 }
 
@@ -279,7 +297,7 @@ pub async fn score_config(
 ) -> Status {
     let warm_n = if r.per_process() { 1 } else { questions.len() };
     for q in questions.iter().take(warm_n) {
-        let _ = r.retrieve(&q.text, k).await;
+        let _ = r.retrieve_for(q, k).await;
     }
     let mut scores: Vec<QuestionScore> = Vec::new();
     let mut latencies = Vec::new();
@@ -290,7 +308,7 @@ pub async fn score_config(
     let mut judge_failure: Option<String> = None;
 
     for q in questions {
-        let res = match r.retrieve(&q.text, k).await {
+        let res = match r.retrieve_for(q, k).await {
             Ok(res) => res,
             Err(e) => {
                 errors.push(format!("{}: {e}", q.id));
