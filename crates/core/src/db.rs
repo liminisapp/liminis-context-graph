@@ -2408,13 +2408,20 @@ impl<'db> Conn<'db> {
                 episode_origin_info_from_cols(&r[1], &r[2], &r[3], &r[4]),
             )
         };
+        // The in-query ranking is used only when every similarity it returned is finite. A
+        // zero-vector embedding yields NaN, and where lbug sorts NaN under `DESC` is not
+        // something to rely on: an unscorable mention must never take a slot ahead of a relevant
+        // one. So any non-finite value sends the request to the Rust ranking below, which puts
+        // unscorable rows last.
         if let Ok(rows) = self.query_params(&cypher, params.clone()) {
-            return Ok(rows.iter().map(|r| row_out(r)).collect());
+            if rows.iter().all(|r| value_as_finite_f64(&r[5]).is_some()) {
+                return Ok(rows.iter().map(|r| row_out(r)).collect());
+            }
         }
         // lbug fails the whole query, rather than yielding NULL, on a vector of the wrong length
-        // (as `expand_frontier_scored` notes). Fall back to the same filtered match returning the
-        // embeddings, and rank in Rust with the same order: similarity descending (unscorable
-        // last), uuid tie-break, then the same limit.
+        // (as `expand_frontier_scored` notes), and may return NaN for a zero vector (above). Fall
+        // back to the same filtered match returning the embeddings, and rank in Rust with the same
+        // order: similarity descending (unscorable last), uuid tie-break, then the same limit.
         let fallback = format!(
             "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
              WHERE n.uuid = $uuid AND coalesce(ep.origin, '') IN $origins {live} \
@@ -8151,6 +8158,24 @@ mod graph_search_primitive_tests {
             .entity_mentions_ranked("a", &[1.0, 0.0], &corroborating, Some(june_us), 10)
             .unwrap();
         assert_eq!(ids(got), vec!["m-best", "m-far", "m-good"]);
+
+        // Zero-vector embeddings (a failed or un-backfilled embed) carry no relevance. Their uuids
+        // sort first, so if they ranked as NaN-first, or by uuid, they would take the slots ahead
+        // of relevant mentions. They must not: they score no higher than an orthogonal mention
+        // (0), and only that tie is broken by uuid.
+        mention(&c, "a-zero-1", vec![0.0; 4], None, None);
+        mention(&c, "a-zero-2", vec![0.0; 4], None, None);
+        let got = c
+            .entity_mentions_ranked("a", &q, &corroborating, Some(june_us), 2)
+            .unwrap();
+        assert_eq!(ids(got), vec!["m-best", "m-good"]);
+        let got = c
+            .entity_mentions_ranked("a", &q, &corroborating, Some(june_us), 10)
+            .unwrap();
+        assert_eq!(
+            ids(got),
+            vec!["m-best", "m-good", "a-zero-1", "a-zero-2", "m-far"]
+        );
     }
 
     #[test]
