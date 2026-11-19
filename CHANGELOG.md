@@ -99,6 +99,22 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   cannot run degrades to first-stage results with `applied: false`. `lcg-eval retrieval` gains
   `lcg-passages-rerank`, `lcg-passages-belief-rerank`, `lcg-passages-expand` and `lcg-passages-expand-rerank`.
 
+- **Graph-aware search: `knowledge_graph_search` (read) (#797, ADR-0797).** One deterministic read
+  that links the query to seed entities (exact names, entity BM25, name and summary vectors, with an
+  evidence gate so top-k filler never seeds), walks up to two hops of relationships scored by fact
+  relevance with hop decay, and fuses supporting passages, plain passage search and the facts with
+  RRF. Each result carries an evidence trail (contributing lists, seeds and how they matched, edge
+  path, supporting episodes), and the response a `stats` block. Believed-only by default — unlike
+  `knowledge_find_relationships` — with `believed_only` / `as_of` meaning what they mean elsewhere;
+  `origins` applies to every stage, and derived pages cite but never corroborate. One query
+  embedding, no LLM call; a `stages` parameter (`seeds` / `expand` / `full`) switches stages off for
+  ablation. The MCP registry grows to 55 tools (read scope: 20). No existing read, schema or WAL
+  format changes.
+- **Retrieval eval: graph configurations (#797).** `lcg-eval retrieval --configs` accepts the opt-in
+  `lcg-graph`, `lcg-graph-seeds`, `lcg-graph-expand` and `lcg-entities-facts-rrf` (a fairer merge of
+  the entity and fact reads); the default run is unchanged. The cost table gains service calls per
+  query.
+
 - **Document mode: `knowledge_process_document` (write) and `knowledge_preview_chunks` (read)
   (#785, ADR-0785, slice 1 of #733).** Send a whole document as a completeness claim; the server
   chunks it by section, skips unchanged sections by content hash (an identical resubmission makes

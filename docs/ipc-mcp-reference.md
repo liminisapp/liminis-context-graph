@@ -42,11 +42,11 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (55)
+## IPC methods (56)
 
-The socket dispatch handles **55 methods**: 54 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **56 methods**: 55 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (55) and the MCP tool registry (54, below) differ by exactly one — `health_check` is
+surface (56) and the MCP tool registry (55, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -56,7 +56,7 @@ not exposed as an MCP tool.
 | Ingestion | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode` |
 | Document chunking (read-only) | `knowledge_preview_chunks` |
 | Direct assertion | `knowledge_assert_entity`, `knowledge_assert_relationship` |
-| Search | `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
+| Search | `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_graph_search`, `knowledge_query_cypher` |
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
 | Correction reads | `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
 | Notebook health | `knowledge_lint` |
@@ -225,7 +225,7 @@ union of all active scopes.
 
 | Scope | Methods |
 |-------|---------|
-| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
+| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_graph_search`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
 | `write` | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |
@@ -497,26 +497,113 @@ below its successor) is applied to each first-stage list, not to the fused resul
 and **without** `rerank` it is not guaranteed; `expand: true` together with `rerank: true` ranks a
 replacement above the note it supersedes when both are among the reranked candidates (`rerank_candidates`). See [Passage rerank and query expansion](configuration.md#passage-rerank-and-query-expansion).
 
+### Graph-aware search: `knowledge_graph_search` (issue #797)
+
+The other search reads each use one of LCG's modes on its own: entity search matches names and
+summaries, relationship search matches fact text, passage search matches note text. None of them
+follows a relationship, so a question such as "what does Cedar Core's supplier charge?" finds
+Cedar Core but never reaches the supplier's price, and a question that only describes an entity
+("the initiative covering shift rostering") rarely reaches it. `knowledge_graph_search` composes
+them into one deterministic read: it links the query to seed entities, walks their relationships,
+applies belief time, and fuses what it finds with plain passage search. It makes **one** query
+embedding and **no** LLM call. It is opt-in: no existing read changes.
+
+**Parameters**
+
+| Param | Default | Meaning |
+|-------|---------|---------|
+| `query` | required | Search text. Empty or whitespace-only is an invalid-params error. |
+| `num_results` | 10 | Results to return, clamped 1–100. Never padded: fewer come back when fewer exist. |
+| `group_ids` | all groups | Same as `knowledge_find_entities`: omitted means all groups, `[]` matches nothing (see [group_ids semantics](#group_ids-semantics-omitted-vs-empty)). Traversal never leaves the requested groups: a fact whose group or far endpoint is outside them is not followed. |
+| `origins` | none | Applies to **every** stage: seeds need a matching live mention, traversed facts need a matching producing episode, and supporting and plain passages are filtered. |
+| `believed_only` | **true** | **Different from `knowledge_find_relationships`, where belief is opt-in.** By default the read traverses and returns only facts believed now, and only passages live now. `false` returns no-longer-believed results too, each with its belief state. |
+| `as_of` | now | Evaluate belief at this instant (RFC 3339); same meaning as on the other belief-aware reads (ADR-0705/0707). A document superseded with a future effective date stays believed until then. |
+| `stages` | `full` | Ablation switch: `seeds`, `expand` or `full` (below). |
+
+**Pipeline**
+
+1. **Seeds.** Four candidate lists — exact names (every 1–4-word n-gram of the query, probed as an
+   exact `lookup_key`), BM25 over entity names and summaries, the name vector and the summary
+   vector — fused with RRF. Because a vector index always fills its top-k (#613, #629), a candidate
+   is admitted only on real evidence: an exact-name hit, a top-10 BM25 hit, or a vector similarity
+   of at least 0.5 that is within 0.08 of the best candidate's. At most 5 seeds are kept. There is no
+   separate fuzzy matcher: near-miss names are covered by BM25 and the name vector. When nothing is
+   admitted the response has `stats.no_seeds: true` and the results are plain passage search.
+2. **Expansion** (`expand`, `full`). Up to two hops from the seeds, one batched lookup per hop. Each
+   fact is scored by the cosine of its fact embedding against the query, plus a small bonus for its
+   rank in a full-text search over facts, and decays by 0.6 per hop beyond the first, so a one-hop
+   fact outranks an equally relevant two-hop one. Each entity keeps its 20 most relevant facts per
+   hop, the 10 best hop-1 facts choose the hop-2 frontier, the walk keeps at most 200 facts, and an
+   edge is never walked twice. A fact that is not believed is never a step, so a path breaks at a
+   superseded edge. Legacy and warranted edges are believed and traversable, but have no
+   supporting passage.
+3. **Fusion.** RRF over three lists: `supporting` — passages that produced the selected facts or
+   mention the seed and reached entities, scored by their path score times their own similarity to
+   the query; `passages` — plain passage search (`full` only; vector-only until #789's hybrid
+   passage search lands, reported as `stats.passage_mode`); and `facts` — the selected facts by path
+   score. `seeds` fuses only the `supporting` list restricted to passages mentioning a seed.
+
+**Derived content cites but never corroborates** (ADR-0752). A `derived` or `answer` passage never
+enters the `supporting` list, and a fact whose only producing episodes are derived or answer is
+never ranked as a fact. It is attached instead to its same-fact sibling's `supporting_episodes`
+with `corroborating: false`, so restating a fact on an agent page does not raise its rank. With no
+`origins` filter a derived passage can still surface on its own merit through plain passage
+search.
+
+**Response** (ADR-0020 envelope, plus `seeds` and `stats`):
+
+```jsonc
+{"results": [{
+   "kind": "fact" | "passage",
+   "score": 0.0328,                      // fused RRF score: ordering only
+   "fact": {...},                        // kind = fact: the relationship, with `episodes`
+   "passage": {...},                     // kind = passage: as knowledge_search_passages; score = similarity
+   "belief": {...},                      // facts: the full belief annotation; passages: {state, believed, supersession?}
+   "support": {...}, "corroboration": 1, // facts: as knowledge_find_relationships
+   "evidence": {
+     "lists": [{"list": "supporting" | "passages" | "facts", "rank": 1, "score": 0.61}],
+     "seeds": [{"uuid", "name", "group_id", "kind", "score", "matched": ["name", "bm25", "name_vector", "summary_vector"], ...}],
+     "path": [{"edge_uuid", "relation", "fact", "from_uuid", "from_name", "to_uuid", "to_name", "hop"}],
+     "supporting_episodes": [{"uuid", "source_description", "origin", "corroborating"}],
+     "via": {"kind": "fact", "edge_uuid": "..."} | {"kind": "mention", "entity_uuid": "..."},
+     "warrant": "assertion",
+     "alternate_paths": 0
+   }}],
+ "count": 1,
+ "seeds": [...],
+ "stats": {"stages", "passage_mode", "believed_only", "as_of", "embed_calls": 1, "db_queries",
+           "seed_candidates", "seeds", "expanded_edges", "hops", "truncated", "truncations": [{"cap", "limit"}],
+           "no_seeds"}}
+```
+
+A result returned only by plain passage search has no `seeds`, `path` or `via`. A fact or passage
+reached several ways appears once and keeps its best path (`alternate_paths` counts the others).
+The path is in traversal order, from the seed outward, regardless of each edge's stored direction.
+A `matched` vector kind is reported only when its similarity is at least 0.5; the raw
+`bm25_score`, `name_similarity` and `summary_similarity` are always reported. `stats.truncations`
+names any cap that cut the walk or the candidate pool. Every sort breaks ties by uuid, so the same
+graph, parameters and embedding give the same results in the same order. See ADR-0797.
+
 ### group_ids semantics: omitted vs. empty
 
 Every read tool that accepts `group_ids` treats an **omitted or `null` `group_ids` uniformly as
-"all groups"** (issue #413) — this holds across all 10 read tools: `knowledge_find_entities`,
-`knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_list_entities`,
+"all groups"** (issue #413) — this holds across all 11 read tools: `knowledge_find_entities`,
+`knowledge_find_relationships`, `knowledge_graph_search`, `knowledge_search_passages`, `knowledge_list_entities`,
 `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`,
 `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_episodes`.
 
 **An explicit `group_ids: []` does not mean the same thing on every tool**, and this split is
 deliberate, not an inconsistency to be fixed here:
 
-- On `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_get_nodes_by_group`,
-  and `knowledge_get_edges_by_group`, an explicit `group_ids: []` is preserved as "exactly these
+- On `knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_graph_search`,
+  `knowledge_get_nodes_by_group`, and `knowledge_get_edges_by_group`, an explicit `group_ids: []` is preserved as "exactly these
   groups" — i.e. **zero rows**, a filter matching nothing.
 - On the other six read tools (`knowledge_search_passages`, `knowledge_list_entities`,
   `knowledge_list_relationships`, `knowledge_get_entity_neighbors`,
   `knowledge_get_entities_by_source`, `knowledge_get_episodes`), an explicit `group_ids: []` collapses to the same
   behavior as omitting it — **all groups**.
 
-If you need "zero rows" as a filter result, use one of the four tools in the first list, or check
+If you need "zero rows" as a filter result, use one of the five tools in the first list, or check
 the tool's own `ToolSpec` description in
 [`crates/service/src/mcp/tools.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/service/src/mcp/tools.rs)
 before relying on `[]` to mean "nothing" — on the other six it doesn't.

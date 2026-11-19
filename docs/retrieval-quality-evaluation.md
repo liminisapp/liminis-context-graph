@@ -45,6 +45,50 @@ harness validates every `knowledge_supersede_document` response and aborts, nami
 call ended belief for zero episodes (replays and future-dated supersessions excepted); the report's
 ingest block shows "Belief ended for N episode(s) across M document supersession(s)".
 
+### Graph-aware configurations (opt-in, #797)
+
+These run only when named in `--configs`; the default run, its row count and every existing
+configuration's ranking are unchanged.
+
+| Configuration | What runs |
+|---|---|
+| `lcg-graph` | `knowledge_graph_search` (ADR-0797), full pipeline: seed entities → two-hop expansion → RRF over supporting passages, plain passages and facts. One service call and one query embedding per question; believed-only by default. |
+| `lcg-graph-expand` | Ablation row: `stages=expand` — seeds + expansion, no plain passage list. |
+| `lcg-graph-seeds` | Ablation row: `stages=seeds` — only passages that mention a linked seed entity. |
+| `lcg-entities-facts-rrf` | A fairer merge of the same two reads as `lcg-entities-facts` (below). |
+
+Read the three `lcg-graph*` rows together: `seeds` → `expand` is what traversal adds, `expand` →
+`full` is what fusing in plain passage search adds. The plain-passage list inside `lcg-graph` is
+**vector-only** until hybrid passage search (#789) lands; the report says which mode ran. The local
+reranker (#796) has not landed, so the report states it was not measured.
+
+**Why `lcg-entities-facts-rrf` exists (FR-019).** Measured against the graph's potential,
+`lcg-entities-facts` is unfair regardless of any new read: one entity result expands to *every* note
+that mentions it, in note-id order, before the first fact is placed (a popular entity can fill the
+top 10 alphabetically); unmapped results still take a turn; each read asks for only `ceil(k/2)`
+results, and entities and facts often resolve to the same notes, so after de-duplication far fewer
+than k distinct notes remain (multi-hop questions need two); and the merge is strict alternation,
+using no score. `lcg-entities-facts-rrf` sends the same two reads but asks each for k, lets each
+entity contribute at most 2 notes, skips unmapped results, reads facts with `believed_only=true`, and
+fuses the two note lists with RRF so a note both reads found rises. `lcg-entities-facts` itself is
+untouched, so historical numbers stay comparable.
+
+Measure the issue's acceptance criteria on v2 with a real embedder (the BGE-base sidecar the
+cassette was recorded with) and k = 10:
+
+```bash
+target/release/lcg-eval retrieval \
+  --corpus crates/eval/fixtures/retrieval-v2 \
+  --replay-cassette crates/eval/fixtures/retrieval-v2/cassette.jsonl \
+  --service-bin target/release/liminis-context-graph \
+  --embedder-http http://127.0.0.1:8080 --k 10 --no-grounded \
+  --configs lcg-passages,lcg-graph-seeds,lcg-graph-expand,lcg-graph,lcg-entities-facts-rrf \
+  --out retrieval-report-797
+```
+
+The per-category paired comparisons against `lcg-passages` answer the success criteria directly;
+the cost table gives p50 latency and service and model calls per query.
+
 The first four are the headline table. The fifth exists because only edge reads can express
 belief time ([ADR-0705](adr/0705-belief-time-separate-from-validity.md)): passages and entities
 have no belief filter and return superseded text by default, so without it the temporal
@@ -153,6 +197,8 @@ Each rate carries a bootstrap interval. v1 declares no origins, so it never prin
 - Entity → notes: every note whose episodes mention the entity (built once at ingest).
 - Fact → notes: the fact's *producing* episodes (`episodes`). ADR-0012's either-endpoint
   inference is never used.
+- Graph-search result → notes (#797): a `fact` result maps like a fact, a `passage` result like a
+  passage. Fact evidence is `from → to: fact` from the last step of its path.
 - qmd result → note: the result path's file stem.
 
 ## Query variants (`lcg-passages-variants`)
@@ -512,7 +558,7 @@ target/release/lcg-eval retrieval \
 |---|---|
 | `--corpus <DIR>` | Fixture directory (default `crates/eval/fixtures/retrieval`, v1; the full corpus is `crates/eval/fixtures/retrieval-v2`). |
 | `--k <N>` | Shared cut-off, 1–100 (default 10). |
-| `--configs <LIST>` | Subset of the six configuration ids. |
+| `--configs <LIST>` | Subset of the six configuration ids, plus the opt-in [graph-aware configurations](#graph-aware-configurations-opt-in-797). |
 | `--service-bin`, `--embedder-http/--embedder-uds`, `--extractor-http/--extractor-uds` | How the spawned LCG service is configured. |
 | `--embedding-profile <LIST>` | Embedding [instruction profile(s)](configuration.md#embedding-instruction-profiles) to measure, e.g. `none,bge-v1.5`. See [Comparing embedding profiles](#comparing-embedding-profiles). |
 | `--replay-cassette <PATH>` / `--record-cassette <PATH>` | Replay or record ingest extraction ([cassettes](testing-and-evaluation.md#recordreplay-cassettes)) for a free, repeatable LCG ingest. |
@@ -627,7 +673,10 @@ model) are in [ADR-0796](adr/0796-passage-rerank-and-query-expansion.md#belief-a
   are returned and outrank the primary source.
 - **Hypotheses**: *YES*, *NO*, *not distinguishable from noise* or *cannot be read* (a side was
   skipped) for "LCG beats qmd on temporal/superseded" and "qmd beats LCG on paraphrase".
-- **Cost**, **Reproduction** (corpus/question versions and hashes, LCG build, qmd version and
+- **Graph-aware search (#797)** (only when a graph configuration ran): what each ablation row
+  means, the plain-passage mode, the `lcg-entities-facts-rrf` change, and the reranker status.
+- **Cost** (p50/p95 latency, model calls per query, service calls per query — every RPC the query
+  made, the main reads included — and lookup calls), **Reproduction** (corpus/question versions and hashes, LCG build, qmd version and
   models, embedder, extractor, judge model, k, latency convention).
 
 ## Running on a private real notebook

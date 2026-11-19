@@ -169,6 +169,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0802](0802-caller-supplied-query-variants-weighted-rrf.md) | Caller-Supplied Query Variants, Fused with Weighted RRF | 2026-11-18 |
 | [0806](0806-belief-aware-passage-ranking-default.md) | Belief-Aware Passage Ranking Is the Default | 2026-11-19 |
 | [0812](0812-search-min-score-env-default.md) | Operator-Configurable Default `min_score` for Passage Search | 2026-11-19 |
+| [0797](0797-graph-aware-search.md) | Graph-Aware Search — One Read That Links, Walks, Believes and Fuses | 2026-11-18 |
 
 ## Historical numbering
 
