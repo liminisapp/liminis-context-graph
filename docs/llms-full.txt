@@ -1835,6 +1835,53 @@ and `"external"` for clipped material; leave notes unmarked. Search with
 `origins: ["primary", "external"]` while the agent refreshes a page. To adopt this on an existing
 notebook, run `knowledge_stamp_origin` as a dry run, check `changes`, then run it for real.
 
+### Query variants: `knowledge_search_passages` `queries` (issue #802)
+
+`knowledge_search_passages` takes one required `query`. A question that *describes* a thing instead of
+naming it shares few words with the note that answers it, so a direct search can come back thin. The
+caller, usually an LLM agent, can write rewrites of its own question and pass them as the optional
+**`queries`** array. LCG adds no model call of its own: the variants are the caller's.
+
+```json
+{"query": "Whose sign-off lets someone get around the rule covering new-hire induction?",
+ "queries": ["onboarding policy exception approver",
+             "onboarding policy",
+             "The policy exception approver for onboarding is a named person."]}
+```
+
+Good variants are keywords the note itself would use, a likely name for the thing described, and a
+one-sentence hypothetical answer. Use them when a direct search came back thin or the question
+describes something rather than naming it.
+
+**Validation** (an error naming the broken rule; nothing is silently truncated):
+
+| Rule | Value |
+|---|---|
+| Shape | an array of strings; absent, `null` and `[]` all mean "no variants" |
+| Count | at most **5** |
+| Each entry | non-empty after trimming whitespace |
+| Total length | at most **2000** Unicode scalar values (`chars()`) across the trimmed entries |
+
+Variants are trimmed; `query` is not. A variant equal (after trimming, case-sensitive) to `query` or to
+an earlier variant is dropped before searching, so repeating a phrase never boosts a result.
+
+**Execution.** `[query, ...queries]` are embedded in one batched query-role call. Each is searched with the
+*same* `group_ids`, `origins`, probe size and `min_score` as a single-query search, so a variant can never
+surface a passage that filters would exclude for `query`. The per-query ranked lists are fused with weighted
+Reciprocal Rank Fusion (`weight / (rank + 60)`, UUID tie-break): `query` weighs **2** (`PRIMARY_QUERY_WEIGHT`,
+the qmd choice), each variant **1**. The first `num_results` of the fused list are returned.
+
+**Response.** With `queries`, every passage also carries **`matched_queries`**: ascending indices into the
+*caller's* `[query, ...queries]` of the queries that retrieved it (0 is `query`; a dropped duplicate's index is
+simply absent). `score` stays the cosine similarity, the best across the queries that matched, so
+`min_score` keeps its meaning, but the list is in fused order and is **not necessarily score-monotone**.
+Without `queries` (or with `[]` / `null`) the response is byte-for-byte what it was before: no
+`matched_queries` key.
+
+`believed_only` / `as_of` are relationship-read parameters, not passage-search ones, so nothing here
+changes belief handling. Rerank-on-fused-candidates and `knowledge_graph_search` `queries` are follow-ups
+([ADR-0802](adr/0802-caller-supplied-query-variants-weighted-rrf.md)).
+
 ### Notebook health: `knowledge_lint` (issue #755)
 
 Wiki-style notebooks need a health pass — contradictions, stale agent-written pages, thinly
@@ -4994,6 +5041,9 @@ It is a separate mode of the existing `lcg-eval` binary. The extraction eval
 |---|---|
 | `lcg-passages` | `knowledge_search_passages` sending neither `mode` nor `belief_aware`: **the service's shipped default** (#806), i.e. belief-aware vector, no FTS and no RRF. It tracks the default, so a change to the default shows up here. The harness removes `LCG_PASSAGE_SEARCH_MODE` and `LCG_PASSAGE_BELIEF_AWARE` from the spawned service's environment so an operator's overrides cannot change what it measures. It is the same request as `lcg-passages-belief` today. |
 | `lcg-passages-raw` | *Opt-in (#806), not in the default run.* `mode: "vector"`, `belief_aware: false`: cosine only, the pre-#806 `lcg-passages` baseline, so the belief-aware gain stays measurable. |
+| `lcg-passages-variants` | *Extra.* `lcg-passages` plus the question's variants from `query-variants.jsonl` passed as `queries` (#802): one batched embed, one vector probe per query (concurrent), weighted RRF with the primary query weighing 2 and the variants sharing a total of 1. Skipped, not failed, when `query-variants.jsonl` is absent. |
+| `lcg-passages-belief-variants` | *Opt-in.* `lcg-passages-belief` plus the same variants: every query runs the vector pipeline, belief-aware ranking runs once on the fused list. Read against `lcg-passages-belief`. |
+| `lcg-passages-hybrid-belief-variants` | *Opt-in.* `lcg-passages-hybrid-belief` plus the same variants: every query runs BM25 + vector (so a variant's keywords reach BM25), belief-aware ranking runs once on the fused list. Read against `lcg-passages-hybrid-belief`. |
 | `lcg-entities-facts` | `knowledge_find_entities` + `knowledge_find_relationships` (hybrid FTS + vector, RRF), default reads. k is split across the two reads (`ceil(k/2)` entities + `ceil(k/2)` facts) and the ranks are interleaved. |
 | `qmd` | `qmd query --no-rerank` (query expansion on). |
 | `qmd-rerank` | `qmd query` with its LLM reranker. |
@@ -5120,6 +5170,33 @@ Each rate carries a bootstrap interval. v1 declares no origins, so it never prin
 - Fact → notes: the fact's *producing* episodes (`episodes`). ADR-0012's either-endpoint
   inference is never used.
 - qmd result → note: the result path's file stem.
+
+## Query variants (`lcg-passages-variants`)
+
+A paraphrase question describes a thing instead of naming it, so it shares few words with the answer
+note. An agent calling `knowledge_search_passages` can supply its own rewrites as `queries`
+([IPC reference](ipc-mcp-reference.md)). The eval simulates that agent from a fixture,
+`query-variants.jsonl`, with up to 5 variants per question id. An LLM writes them seeing **only the
+question text** (no corpus, notes or relevance labels) under the prompt committed beside the fixture,
+`query-variants.prompt.md`. It is a one-time maintainer step, never run in CI:
+
+```bash
+lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --export-prompts prompts.jsonl
+# write each reply (a JSON array of up to 5 strings) to <replies>/<key>.md
+lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --replies <replies>
+lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --check
+```
+
+The fixture is stamped with the questions hash; the eval refuses a stale one. **Leak check:** a variant that
+contains, verbatim, the title (first `# ` heading, whole or without `Notes on ` / `Q&A: `) or a key-fact
+string of any note relevant to its question fails, naming the question and variant. Matching is
+case-insensitive, needles under 8 characters are skipped, and text the question itself already contains is not
+a leak. It catches verbatim leaks only, not paraphrased ones. With no `query-variants.jsonl`, the
+`lcg-passages-variants` row is reported as skipped.
+
+The report's "Query variants vs `lcg-passages`" section gives per-category paired nDCG@k differences with
+intervals, p50/p95, and the merge-bar reading: paraphrase interval above zero, no category wholly below zero,
+p50 at most 100 ms.
 
 ## Caveats the report repeats
 
@@ -5941,6 +6018,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0788](0788-retrieval-corpus-v2-and-bootstrap-reporting.md) | Retrieval Corpus v2 and Bootstrap Reporting — a Generated, Origin-Aware Fixture and Intervals That Label Noise | 2026-11-18 |
 | [0789](0789-hybrid-passage-search-rrf-top-rank-bonus.md) | Hybrid Passage Search — BM25 + Vector with Weighted RRF and Belief-Aware Ranking | 2026-11-18 |
 | [0790](0790-embedder-roles-and-instruction-profiles.md) | Embedder Roles and Instruction Profiles | 2026-11-18 |
+| [0802](0802-caller-supplied-query-variants-weighted-rrf.md) | Caller-Supplied Query Variants, Fused with Weighted RRF | 2026-11-18 |
 | [0806](0806-belief-aware-passage-ranking-default.md) | Belief-Aware Passage Ranking Is the Default | 2026-11-19 |
 
 ## Historical numbering

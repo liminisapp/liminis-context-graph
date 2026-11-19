@@ -25,6 +25,9 @@ It is a separate mode of the existing `lcg-eval` binary. The extraction eval
 |---|---|
 | `lcg-passages` | `knowledge_search_passages` sending neither `mode` nor `belief_aware`: **the service's shipped default** (#806), i.e. belief-aware vector, no FTS and no RRF. It tracks the default, so a change to the default shows up here. The harness removes `LCG_PASSAGE_SEARCH_MODE` and `LCG_PASSAGE_BELIEF_AWARE` from the spawned service's environment so an operator's overrides cannot change what it measures. It is the same request as `lcg-passages-belief` today. |
 | `lcg-passages-raw` | *Opt-in (#806), not in the default run.* `mode: "vector"`, `belief_aware: false`: cosine only, the pre-#806 `lcg-passages` baseline, so the belief-aware gain stays measurable. |
+| `lcg-passages-variants` | *Extra.* `lcg-passages` plus the question's variants from `query-variants.jsonl` passed as `queries` (#802): one batched embed, one vector probe per query (concurrent), weighted RRF with the primary query weighing 2 and the variants sharing a total of 1. Skipped, not failed, when `query-variants.jsonl` is absent. |
+| `lcg-passages-belief-variants` | *Opt-in.* `lcg-passages-belief` plus the same variants: every query runs the vector pipeline, belief-aware ranking runs once on the fused list. Read against `lcg-passages-belief`. |
+| `lcg-passages-hybrid-belief-variants` | *Opt-in.* `lcg-passages-hybrid-belief` plus the same variants: every query runs BM25 + vector (so a variant's keywords reach BM25), belief-aware ranking runs once on the fused list. Read against `lcg-passages-hybrid-belief`. |
 | `lcg-entities-facts` | `knowledge_find_entities` + `knowledge_find_relationships` (hybrid FTS + vector, RRF), default reads. k is split across the two reads (`ceil(k/2)` entities + `ceil(k/2)` facts) and the ranks are interleaved. |
 | `qmd` | `qmd query --no-rerank` (query expansion on). |
 | `qmd-rerank` | `qmd query` with its LLM reranker. |
@@ -151,6 +154,33 @@ Each rate carries a bootstrap interval. v1 declares no origins, so it never prin
 - Fact → notes: the fact's *producing* episodes (`episodes`). ADR-0012's either-endpoint
   inference is never used.
 - qmd result → note: the result path's file stem.
+
+## Query variants (`lcg-passages-variants`)
+
+A paraphrase question describes a thing instead of naming it, so it shares few words with the answer
+note. An agent calling `knowledge_search_passages` can supply its own rewrites as `queries`
+([IPC reference](ipc-mcp-reference.md)). The eval simulates that agent from a fixture,
+`query-variants.jsonl`, with up to 5 variants per question id. An LLM writes them seeing **only the
+question text** (no corpus, notes or relevance labels) under the prompt committed beside the fixture,
+`query-variants.prompt.md`. It is a one-time maintainer step, never run in CI:
+
+```bash
+lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --export-prompts prompts.jsonl
+# write each reply (a JSON array of up to 5 strings) to <replies>/<key>.md
+lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --replies <replies>
+lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --check
+```
+
+The fixture is stamped with the questions hash; the eval refuses a stale one. **Leak check:** a variant that
+contains, verbatim, the title (first `# ` heading, whole or without `Notes on ` / `Q&A: `) or a key-fact
+string of any note relevant to its question fails, naming the question and variant. Matching is
+case-insensitive, needles under 8 characters are skipped, and text the question itself already contains is not
+a leak. It catches verbatim leaks only, not paraphrased ones. With no `query-variants.jsonl`, the
+`lcg-passages-variants` row is reported as skipped.
+
+The report's "Query variants vs `lcg-passages`" section gives per-category paired nDCG@k differences with
+intervals, p50/p95, and the merge-bar reading: paraphrase interval above zero, no category wholly below zero,
+p50 at most 100 ms.
 
 ## Caveats the report repeats
 

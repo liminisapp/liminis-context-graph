@@ -70,5 +70,18 @@ target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2
    Afterwards the script replays it automatically with zero extraction requests. Note the corpus
    hash from the report header beside the file.
 
+4. **Query variants (#802), after the render is final.** `query-variants.prompt.md` is the fixed
+   prompt; the LLM sees each question's text and nothing else. No API key:
+   ```bash
+   target/release/lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --export-prompts prompts.jsonl
+   # write each reply (a JSON array of up to 5 strings) to <replies>/<key>.md, e.g. with agents
+   target/release/lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --replies <replies>
+   target/release/lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --check
+   ```
+   Commit `query-variants.jsonl`. It is stamped with the questions hash, so any edit to
+   `questions.jsonl` makes it stale (regenerate). `--replies` refuses to write if a reply is missing or
+   invalid or any variant contains a relevant note's title or key fact verbatim. Then run the eval with
+   `lcg-passages-variants` to measure the merge bar.
+
 `cargo test -p lcg-eval --test retrieval_v2` checks the skeleton against the scenario, the pipeline
 against a template-prose test double, and (once rendered) the checked-in prose against the skeleton.

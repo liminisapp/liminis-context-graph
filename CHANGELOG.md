@@ -55,6 +55,23 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   bonus vs 0.568; paraphrase 0.150 to 0.070), so hybrid is opt-in only (see ADR-0789). New opt-in eval configurations
   `lcg-passages-hybrid`, `lcg-passages-hybrid-belief` and `lcg-passages-belief`. (Superseded by #806:
   belief-aware is the measured default, and `lcg-passages` tracks the shipped default.)
+
+
+- **`knowledge_search_passages` accepts caller-supplied query variants (#802, ADR-0802).** An optional
+  `queries` array (at most 5 non-empty strings, at most 2000 characters in total) carries rewrites of
+  `query` that the calling agent writes itself: keywords the note would use, a likely name for the thing
+  described, a one-sentence hypothetical answer. All queries are embedded in one batched call, and each
+  runs the request's full pipeline concurrently (its `mode`, `group_ids`, `origins` and `min_score`; in
+  `hybrid` a variant's keywords reach BM25). The per-query rankings are fused with weighted RRF: the primary
+  query weighs 2 and the variants share a total weight of 1, so together they can never outweigh it
+  (the primary keeps at least 2/3). Belief-aware ranking, where on, runs once on the fused list. With
+  `queries`, `score` is the fused rank score, `similarity` the best cosine, and each passage carries
+  `matched_queries`, the indices into `[query, ...queries]` that retrieved it. Without `queries` the response
+  is unchanged. LCG runs no model for this. Eval: `lcg-passages-variants`, `lcg-passages-belief-variants`
+  and `lcg-passages-hybrid-belief-variants` configs, the `query-variants.jsonl` fixture with a
+  verbatim-leak check, `lcg-eval retrieval-variants` (offline `--export-prompts` / `--replies`), and a
+  variants report section.
+
 - **Document mode: `knowledge_process_document` (write) and `knowledge_preview_chunks` (read)
   (#785, ADR-0785, slice 1 of #733).** Send a whole document as a completeness claim; the server
   chunks it by section, skips unchanged sections by content hash (an identical resubmission makes

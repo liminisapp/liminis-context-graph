@@ -912,6 +912,53 @@ and `"external"` for clipped material; leave notes unmarked. Search with
 `origins: ["primary", "external"]` while the agent refreshes a page. To adopt this on an existing
 notebook, run `knowledge_stamp_origin` as a dry run, check `changes`, then run it for real.
 
+### Query variants: `knowledge_search_passages` `queries` (issue #802)
+
+`knowledge_search_passages` takes one required `query`. A question that *describes* a thing instead of
+naming it shares few words with the note that answers it, so a direct search can come back thin. The
+caller, usually an LLM agent, can write rewrites of its own question and pass them as the optional
+**`queries`** array. LCG adds no model call of its own: the variants are the caller's.
+
+```json
+{"query": "Whose sign-off lets someone get around the rule covering new-hire induction?",
+ "queries": ["onboarding policy exception approver",
+             "onboarding policy",
+             "The policy exception approver for onboarding is a named person."]}
+```
+
+Good variants are keywords the note itself would use, a likely name for the thing described, and a
+one-sentence hypothetical answer. Use them when a direct search came back thin or the question
+describes something rather than naming it.
+
+**Validation** (an error naming the broken rule; nothing is silently truncated):
+
+| Rule | Value |
+|---|---|
+| Shape | an array of strings; absent, `null` and `[]` all mean "no variants" |
+| Count | at most **5** |
+| Each entry | non-empty after trimming whitespace |
+| Total length | at most **2000** Unicode scalar values (`chars()`) across the trimmed entries |
+
+Variants are trimmed; `query` is not. A variant equal (after trimming, case-sensitive) to `query` or to
+an earlier variant is dropped before searching, so repeating a phrase never boosts a result.
+
+**Execution.** `[query, ...queries]` are embedded in one batched query-role call. Each is searched with the
+*same* `group_ids`, `origins`, probe size and `min_score` as a single-query search, so a variant can never
+surface a passage that filters would exclude for `query`. The per-query ranked lists are fused with weighted
+Reciprocal Rank Fusion (`weight / (rank + 60)`, UUID tie-break): `query` weighs **2** (`PRIMARY_QUERY_WEIGHT`,
+the qmd choice), each variant **1**. The first `num_results` of the fused list are returned.
+
+**Response.** With `queries`, every passage also carries **`matched_queries`**: ascending indices into the
+*caller's* `[query, ...queries]` of the queries that retrieved it (0 is `query`; a dropped duplicate's index is
+simply absent). `score` stays the cosine similarity, the best across the queries that matched, so
+`min_score` keeps its meaning, but the list is in fused order and is **not necessarily score-monotone**.
+Without `queries` (or with `[]` / `null`) the response is byte-for-byte what it was before: no
+`matched_queries` key.
+
+`believed_only` / `as_of` are relationship-read parameters, not passage-search ones, so nothing here
+changes belief handling. Rerank-on-fused-candidates and `knowledge_graph_search` `queries` are follow-ups
+([ADR-0802](adr/0802-caller-supplied-query-variants-weighted-rrf.md)).
+
 ### Notebook health: `knowledge_lint` (issue #755)
 
 Wiki-style notebooks need a health pass — contradictions, stale agent-written pages, thinly
