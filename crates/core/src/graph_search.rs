@@ -392,6 +392,36 @@ pub fn path_score(seed_score: f64, hop: usize, rel: f64) -> f64 {
     seed_score * HOP_DECAY.powi(hop.saturating_sub(1) as i32) * rel
 }
 
+/// The facts kept when the walk exceeds `cap`: best score first (key tie-break), but a fact is
+/// kept only together with every edge on its path, so no kept fact's evidence names an edge the
+/// response dropped. Hop decay can score a weakly worded hop-1 bridge below the hop-2 facts it
+/// leads to; cutting by score alone would keep those facts and drop their bridge. A fact whose
+/// path no longer fits is skipped, and a later, shorter one may still fit. Each candidate is
+/// `(score, edge uuid, path edge uuids)`; the path ends with the edge itself.
+pub fn path_closed_keep(
+    mut candidates: Vec<(f64, String, Vec<String>)>,
+    cap: usize,
+) -> HashSet<String> {
+    candidates.sort_by(|a, b| by_score_then_key((a.0, &a.1), (b.0, &b.1)));
+    let mut keep: HashSet<String> = HashSet::new();
+    for (_, uuid, path) in &candidates {
+        if keep.contains(uuid) {
+            continue;
+        }
+        let mut need: Vec<&String> = path
+            .iter()
+            .chain(std::iter::once(uuid))
+            .filter(|e| !keep.contains(*e))
+            .collect();
+        need.sort();
+        need.dedup();
+        if keep.len() + need.len() <= cap {
+            keep.extend(need.into_iter().cloned());
+        }
+    }
+    keep
+}
+
 /// An episode live at `t_us`: visible (a committed revision, if any), not superseded at `t_us`,
 /// and ingested by then. The one liveness definition this read uses for supporting and plain
 /// passages (ADR-0797).
@@ -1267,15 +1297,18 @@ fn expand(
     }
 
     if facts.len() > TOTAL_EDGE_CAP {
-        let mut order: Vec<(f64, String)> =
-            facts.iter().map(|(u, f)| (f.score, u.clone())).collect();
-        order.sort_by(|a, b| by_score_then_key((a.0, &a.1), (b.0, &b.1)));
-        let keep: HashSet<String> = order
-            .into_iter()
-            .take(TOTAL_EDGE_CAP)
-            .map(|(_, u)| u)
+        let candidates: Vec<(f64, String, Vec<String>)> = facts
+            .iter()
+            .map(|(u, f)| {
+                let path = f.path.iter().map(|s| s.edge_uuid.clone()).collect();
+                (f.score, u.clone(), path)
+            })
             .collect();
+        let keep = path_closed_keep(candidates, TOTAL_EDGE_CAP);
         facts.retain(|u, _| keep.contains(u));
+        // An entity reached only through a trimmed edge is no longer reached: its mention
+        // passages must not enter list (a) with a path through an edge the response omits.
+        reach.retain(|_, r| r.path.iter().all(|s| keep.contains(&s.edge_uuid)));
         st.truncate("total_edges", TOTAL_EDGE_CAP);
     }
     Ok(())
@@ -1337,6 +1370,50 @@ mod tests {
         assert!((edge_relevance(0.5, Some(0)) - (0.5 + EDGE_BM25_BONUS)).abs() < 1e-12);
         assert!(edge_relevance(0.5, Some(10)) < edge_relevance(0.5, Some(0)));
         assert_eq!(edge_relevance(0.5, Some(EDGE_BM25_LIMIT)), 0.5);
+    }
+
+    #[test]
+    fn total_cap_keeps_whole_paths_never_an_orphaned_hop_two_fact() {
+        let c = |score: f64, uuid: &str, path: &[&str]| {
+            (
+                score,
+                uuid.to_string(),
+                path.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            )
+        };
+        // A weak bridge (0.1) leads to two strong hop-2 facts; one unrelated hop-1 fact (0.5).
+        let cands = vec![
+            c(0.1, "bridge", &["bridge"]),
+            c(0.9, "far1", &["bridge", "far1"]),
+            c(0.8, "far2", &["bridge", "far2"]),
+            c(0.5, "near", &["near"]),
+        ];
+        // Cut by score alone, a cap of 2 keeps far1 + far2 and drops their bridge.
+        let keep = path_closed_keep(cands.clone(), 2);
+        assert_eq!(
+            keep,
+            HashSet::from(["bridge".to_string(), "far1".to_string()])
+        );
+        let keep = path_closed_keep(cands.clone(), 3);
+        assert_eq!(
+            keep,
+            HashSet::from(["bridge".into(), "far1".into(), "far2".into()])
+        );
+        // With a cap of 1 neither two-edge path fits, so the best fact that fits alone is `near`.
+        assert_eq!(
+            path_closed_keep(cands.clone(), 1),
+            HashSet::from(["near".into()])
+        );
+        // Every kept fact's path is fully kept.
+        for cap in 0..=5 {
+            let keep = path_closed_keep(cands.clone(), cap);
+            assert!(keep.len() <= cap);
+            for (_, u, path) in &cands {
+                if keep.contains(u) {
+                    assert!(path.iter().all(|e| keep.contains(e)), "cap {cap}: {u}");
+                }
+            }
+        }
     }
 
     #[test]
