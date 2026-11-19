@@ -545,7 +545,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         },
                         "mode": {
                             "type": "string", "enum": ["vector", "hybrid"],
-                            "description": "Retrieval mode: `vector` (cosine only) or `hybrid` \
+                            "description": "Retrieval mode: `vector` (cosine, then belief-aware \
+                                re-ranking unless `belief_aware` is false) or `hybrid` \
                                 (BM25 + vector, weighted RRF). Omitted: the service default \
                                 (LCG_PASSAGE_SEARCH_MODE, else `vector`). Unknown values are \
                                 rejected."
