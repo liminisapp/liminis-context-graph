@@ -1436,7 +1436,8 @@ embedding and **no** LLM call. It is opt-in: no existing read changes.
 
 **Derived content cites but never corroborates** (ADR-0752). A `derived` or `answer` passage never
 enters the `supporting` list, and a fact whose only producing episodes are derived or answer is
-never ranked as a fact. It is attached instead to its same-fact sibling's `supporting_episodes`
+never ranked as a fact, nor walked: it does not carry the walk to its far endpoint, so a derived
+page cannot pull another entity's notes into the ranking. It is attached instead to its same-fact sibling's `supporting_episodes`
 with `corroborating: false`, so restating a fact on an agent page does not raise its rank. With no
 `origins` filter a derived passage can still surface on its own merit through plain passage
 search.

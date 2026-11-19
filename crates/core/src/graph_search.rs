@@ -1238,10 +1238,17 @@ fn expand(
                 names
                     .entry(s.fe.far_uuid.clone())
                     .or_insert_with(|| s.fe.far_name.clone());
-                hop_edges.push((score, s.fe.edge.uuid.clone(), s.fe.far_uuid.clone()));
+                // A citation-only edge (every producer derived / answer) is recorded so it can be
+                // cited, but it carries the walk nowhere: it neither reaches its far endpoint nor
+                // enters the beam. Otherwise an agent-written page asserting "A relates to B"
+                // would pull B's primary notes into the ranking — rank from derived content,
+                // which ADR-0752 forbids.
+                if !s.citation_only {
+                    hop_edges.push((score, s.fe.edge.uuid.clone(), s.fe.far_uuid.clone()));
+                }
 
                 // The reached entity keeps its best same-hop path; earlier hops win outright.
-                if !visited.contains(&s.fe.far_uuid) {
+                if !s.citation_only && !visited.contains(&s.fe.far_uuid) {
                     let better = reach.get(&s.fe.far_uuid).is_none_or(|r| score > r.score);
                     if better {
                         reach.insert(

@@ -55,6 +55,7 @@ const Q_NONE: &str = "zebra quantum";
 const Q_BELIEF: &str = "Policy Desk decision";
 const Q_ORIGIN: &str = "Kestrel Labs rate";
 const Q_LEGACY: &str = "Old Ledger";
+const Q_BRIDGE: &str = "Heron Desk price";
 
 fn query_map() -> HashMap<String, Vec<f32>> {
     let mut m = HashMap::new();
@@ -62,7 +63,7 @@ fn query_map() -> HashMap<String, Vec<f32>> {
     multi[PRICE] = 0.8;
     multi[SUPPLY] = 0.3;
     m.insert(Q_MULTI.to_string(), multi);
-    for q in [Q_HUB, Q_DECAY, Q_BELIEF, Q_ORIGIN, Q_LEGACY] {
+    for q in [Q_HUB, Q_DECAY, Q_BELIEF, Q_ORIGIN, Q_LEGACY, Q_BRIDGE] {
         m.insert(q.to_string(), axis(PRICE));
     }
     m.insert(Q_PARA.to_string(), axis(ROSTER));
@@ -470,6 +471,41 @@ fn build(c: &Conn<'_>, with_derived: bool) {
             T0,
         );
     }
+
+    // Derived-only bridge: Heron Desk -> Quill Partner is stated only by an agent-written page.
+    // Quill Partner's own primary note never mentions Heron Desk.
+    entity(c, "heron", "Heron Desk", G, SUMMARY);
+    entity(c, "quill", "Quill Partner", G, SUMMARY);
+    episode(
+        c,
+        Ep {
+            uuid: "ep-hd",
+            content: "Summary: Heron Desk buys from Quill Partner.",
+            emb: axis(NOISE),
+            origin: Some("derived"),
+            ingested: T0,
+            superseded: None,
+            mentions: &["heron", "quill"],
+        },
+    );
+    simple_ep(
+        c,
+        "ep-quill",
+        "Quill Partner quote sheet.",
+        axis(NOISE),
+        &["quill"],
+    );
+    fact(
+        c,
+        "e-heron",
+        "heron",
+        "quill",
+        "BUYS_FROM",
+        "Heron Desk buys from Quill Partner at list price",
+        axis(PRICE),
+        &["ep-hd"],
+        T0,
+    );
 
     // Legacy edge: no producing episode, no warrant.
     entity(c, "ledger", "Old Ledger", G, SUMMARY);
@@ -929,6 +965,39 @@ async fn derived_restatement_cites_but_does_not_change_the_facts_rank() {
     // Never in the supporting list.
     if let Some(p) = find(&a, "p:ep-kd") {
         assert!(!list_names(p).contains(&"supporting".to_string()));
+    }
+}
+
+#[tokio::test]
+async fn derived_only_bridge_is_not_traversed_into_primary_passages() {
+    let fx = fixture();
+    let r = search(
+        &fx,
+        json!({"query": Q_BRIDGE, "group_ids": [G], "num_results": 50,
+                               "stages": "expand"}),
+    )
+    .await;
+    assert!(
+        seed_uuids(&r).contains(&"heron".to_string()),
+        "{}",
+        r["seeds"]
+    );
+    // The derived page may not carry the walk to Quill Partner, so Quill's primary note gains
+    // no rank from it (ADR-0752: derived content cites, never corroborates).
+    assert!(
+        find(&r, "p:ep-quill").is_none(),
+        "reached only through a derived-only edge: {:?}",
+        keys(&r)
+    );
+    assert!(
+        find(&r, "f:e-heron").is_none(),
+        "a derived-only edge is never ranked"
+    );
+    for x in results(&r) {
+        assert!(
+            !path_edges(x).contains(&"e-heron".to_string()),
+            "no result's path crosses the derived-only edge: {x}"
+        );
     }
 }
 

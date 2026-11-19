@@ -141,7 +141,10 @@ RRF (k = 60) over three lists, each capped at `max(3k, 30)`, keyed `p:<episode>`
 
 **Derived content cites but never corroborates (ADR-0752).** A `derived`/`answer` passage never
 enters list (a); an edge whose surviving producers are all `derived`/`answer` is never ranked in list
-(c) or used as a fact source for (a) — it may still be traversed. Such episodes are attached to the
+(c) or used as a fact source for (a), and it carries the walk nowhere: it neither reaches its far
+endpoint nor enters the beam. Were it traversed, an agent-written page asserting "A relates to B"
+would pull B's primary notes into list (a) through B's mentions, ranking them on derived evidence
+alone. An entity a primary edge also reaches is still reached that way. Such episodes are attached to the
 same-fact sibling (ADR-0752's `(group, source, target, name)` class) as `supporting_episodes` with
 `corroborating: false`. Under an `origins` filter derived content is excluded from every stage. With
 no filter, a derived passage can still surface on its own merit through list (b). Returned facts
