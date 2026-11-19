@@ -543,11 +543,17 @@ impl Report {
             "The corpus is small and hand-built: results are indicative, not general"
         };
         let ran = |id: &str| self.ran().iter().any(|(c, _)| c.id == id);
-        // `lcg-passages` always sends `mode: "vector"` explicitly, so this holds whatever the
-        // service default is.
+        // `lcg-passages` sends neither `mode` nor `belief_aware` (#806), and the eval removes the
+        // `LCG_PASSAGE_*` overrides from the spawned service's environment, so it measures the
+        // shipped default.
         let mut passages = String::from(
-            " `lcg-passages` is vector-only (`knowledge_search_passages` with `mode: \"vector\"`: no FTS, no RRF).",
+            " `lcg-passages` is the service's shipped default (`knowledge_search_passages` with no `mode` or `belief_aware`: belief-aware vector, no FTS, no RRF; a derived page ranks below the primary note it cites, a superseded passage below its successor).",
         );
+        if ran("lcg-passages-raw") {
+            passages.push_str(
+                " `lcg-passages-raw` is the pre-#806 baseline: `belief_aware: false`, cosine only.",
+            );
+        }
         if ran("lcg-passages-hybrid") || ran("lcg-passages-hybrid-belief") {
             passages.push_str(" `lcg-passages-hybrid` fuses BM25 over episode text with the vector ranking by weighted RRF (the lexical list weighs less than the vector list); `lcg-passages-hybrid-belief` adds belief-aware ranking (a derived page ranks below the primary note it cites, a superseded passage below its successor).");
         }
@@ -1344,7 +1350,7 @@ mod tests {
             assert!(md.contains(s), "missing {s:?} in:\n{md}");
         }
         assert!(md.contains("different embedding"), "caveat must be printed");
-        assert!(md.contains("vector-only"));
+        assert!(md.contains("shipped default"));
         // Point estimate is bolded and followed by its interval.
         let re = md
             .lines()

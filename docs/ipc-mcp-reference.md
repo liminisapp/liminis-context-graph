@@ -411,15 +411,18 @@ object — and it acts before fusion and per path rather than as a post-filter o
 
 | `mode` | Ranking | `score` | `similarity` |
 |---|---|---|---|
-| `vector` | Vector cosine only — exactly the behaviour before #789. | Cosine similarity (`1 - distance`). | Not present. |
+| `vector` | Vector cosine, then belief-aware re-ranking by default (see `belief_aware`); with `belief_aware: false` it is cosine only, exactly the behaviour before #789. | Cosine similarity (`1 - distance`); a demoted passage's score is lowered to just below the passage it ranks under. | Not present. |
 | `hybrid` | BM25 over episode text (the existing `episode_content` full-text index) and the vector ranking, fused with **weighted** Reciprocal Rank Fusion (`weight/(rank+60)` per list; the lexical list has weight 0.4, the vector list 1.0), then belief-aware re-ranking (see `belief_aware`). | The **fused rank score** (at most about 0.023). It orders results; it is not a cosine and not comparable across queries. | Cosine similarity where the vector retriever matched the passage; absent for a passage only the lexical retriever found. |
 
 - **`mode`** is optional. Omitted, the service default applies: the `LCG_PASSAGE_SEARCH_MODE`
   environment variable (`vector` or `hybrid`; an unrecognised value warns on stderr and falls back
   to `vector`), else `vector`. An unknown or non-string `mode` is an invalid-params error. Callers
-  that need cosine scores or a strict similarity floor should send `mode: "vector"` explicitly, so
-  they are unaffected if the service default changes.
-- **`belief_aware`** (boolean; default `true` in `hybrid`, `false` in `vector`): after fusion and
+  that need plain cosine scores or a strict similarity floor should send `mode: "vector"` **and**
+  `belief_aware: false` explicitly: `mode: "vector"` alone is belief-aware by default (since #806),
+  which lowers a demoted passage's `score`. Sending both also makes them unaffected if the service
+  default or `LCG_PASSAGE_BELIEF_AWARE` changes.
+- **`belief_aware`** (boolean; default `true` in both modes since #806; omitted or `null` means
+  "use the default"): after fusion and
   before truncating to `num_results`, two rules re-rank the candidate set (up to `3 × num_results`).
   A `derived` or `answer` passage that cites a `primary`/`external` note by `[[wikilink]]` (matched
   on that note's `doc_id`, within the same group) ranks below that note's best-ranked passage, so a
@@ -430,8 +433,14 @@ object — and it acts before fusion and per path rather than as a post-filter o
   the passage it ranks under is itself in the candidate set. A removed chunk has no successor and a
   document supersession with a future effective instant is still believed, so neither is demoted.
   Demoted passages are never dropped, and a demoted passage's `score` is lowered to just below the
-  passage it ranks under. With `mode: "vector"` and `belief_aware: true` the same rules run on the
-  vector ranking (`score` stays a cosine otherwise); `mode: "vector"` without it is unchanged.
+  passage it ranks under, so **`score` can differ as well as the order**. In `vector` mode the same
+  rules run on the vector ranking (`score` stays a cosine otherwise). `belief_aware: false` turns
+  the rules off and returns, byte-for-byte, what the same request returned before #806 (cosine
+  order and scores in `vector`; weighted RRF without the rules in `hybrid`). The workspace
+  switch `LCG_PASSAGE_BELIEF_AWARE` (`off`, `0` or `false` disable; `on`, `1` or `true` enable;
+  case-insensitive; anything else warns once on stderr and is ignored) sets the default for
+  requests that omit `belief_aware`; an explicit request value always wins. With the switch off,
+  `hybrid` gives weighted RRF without the rules, which is not the pre-#806 hybrid default (rules on).
   A non-boolean value is an invalid-params error. The removed `top_rank_bonus` parameter is ignored.
 - **`min_score`** (default 0.5, clamped 0–1) floors the *vector retriever's* cosine similarity
   before fusion, as `min_similarity` does for entity search. A passage found only by the lexical
@@ -450,8 +459,8 @@ object — and it acts before fusion and per path rather than as a post-filter o
 
 The full-text index also covers an episode's `source` and `source_description`, so a query term in
 a file name or description can match. Which mode is better is measured per category on the
-retrieval eval (`lcg-passages`, `lcg-passages-belief`, `lcg-passages-hybrid`,
-`lcg-passages-hybrid-belief`; see
+retrieval eval (`lcg-passages` is the shipped default; `lcg-passages-raw`,
+`lcg-passages-belief`, `lcg-passages-hybrid` and `lcg-passages-hybrid-belief` are opt-in; see
 [retrieval-quality-evaluation.md](retrieval-quality-evaluation.md) and
 [ADR-0789](adr/0789-hybrid-passage-search-rrf-top-rank-bonus.md)).
 

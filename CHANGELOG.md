@@ -9,8 +9,27 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+### Changed
+
+- **Behaviour change: `knowledge_search_passages` is belief-aware by default (#806, ADR-0806).**
+  A request that omits `belief_aware` now ranks a derived page below the primary note it cites and a
+  superseded passage below its successor, in `vector` mode as well as `hybrid` (which already did).
+  **Results are re-ordered by default** where a corpus has such pages or supersessions, and a
+  demoted passage's `score` is lowered to just below the passage it ranks under, so the `score` can
+  differ as well as the order. On the v2 retrieval corpus this is +0.081 nDCG@10 overall (0.568 to
+  0.649) and +0.174 on temporal questions, with unchanged latency. The default mode stays `vector`.
+  **To restore the previous ordering**, send `belief_aware: false` on the request, or set
+  `LCG_PASSAGE_BELIEF_AWARE=off` for the service; either gives the pre-change output byte-for-byte
+  in `vector` mode. An explicit request value wins over the environment switch. With the switch off
+  `hybrid` yields weighted RRF without the rules, which differs from the old hybrid default.
+  The eval's `lcg-passages` now means the shipped default; the new opt-in `lcg-passages-raw`
+  (`belief_aware: false`) is the old baseline.
+
 ### Upgrading
 
+- **`knowledge_search_passages` result order changes by default** (#806): see *Changed*. Callers that
+  rely on cosine `score` thresholds or on the old order should send `belief_aware: false` or set
+  `LCG_PASSAGE_BELIEF_AWARE=off`.
 - **Additive schema, no storage-version change.** `Episodic` gains six nullable columns
   (`revision_id`, `revision_committed_at`, `byte_start`, `byte_end`, `heading_path`, `chunk_hash`)
   and a `DocRevision` table appears. Existing rows read them as NULL; nothing is backfilled. The MCP
@@ -25,17 +44,17 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 - **Hybrid passage search: `knowledge_search_passages` `mode` and `belief_aware` (#789,
   ADR-0789).** `mode: "hybrid"` fuses BM25 over episode text (the existing `episode_content`
   full-text index) with the vector ranking by *weighted* Reciprocal Rank Fusion (lexical weight 0.4,
-  vector 1.0) and then, with `belief_aware` (default on in hybrid, off in vector), ranks a derived
+  vector 1.0) and then, with `belief_aware` (default on in hybrid; on in vector too since #806), ranks a derived
   page below the primary note it cites and a superseded passage below its successor. The qmd-style
-  top-rank bonus was dropped: it was indistinguishable from plain RRF. `mode: "vector"` is the
-  unchanged previous behaviour. In hybrid mode `score` is the fused rank score and a new `similarity` field carries the
+  top-rank bonus was dropped: it was indistinguishable from plain RRF. `mode: "vector"` with
+  `belief_aware: false` is the previous behaviour. In hybrid mode `score` is the fused rank score and a new `similarity` field carries the
   cosine where the vector retriever matched; `min_score` floors only the vector retriever.
   `group_ids` and `origins` apply to both retrievers; a missing full-text index falls back to
   vector-only. **The default stays `vector`** (set `LCG_PASSAGE_SEARCH_MODE=hybrid` to opt in): the
   v2/v1 retrieval eval scored hybrid below vector on v2 (overall nDCG@10 0.527 RRF / 0.531 with
   bonus vs 0.568; paraphrase 0.150 to 0.070), so hybrid is opt-in only (see ADR-0789). New opt-in eval configurations
-  `lcg-passages-hybrid`, `lcg-passages-hybrid-belief` and `lcg-passages-belief`; `lcg-passages` now
-  pins `mode: "vector"`. The weighted-fusion and belief-aware design is not yet measured.
+  `lcg-passages-hybrid`, `lcg-passages-hybrid-belief` and `lcg-passages-belief`. (Superseded by #806:
+  belief-aware is the measured default, and `lcg-passages` tracks the shipped default.)
 - **Document mode: `knowledge_process_document` (write) and `knowledge_preview_chunks` (read)
   (#785, ADR-0785, slice 1 of #733).** Send a whole document as a completeness claim; the server
   chunks it by section, skips unchanged sections by content hash (an identical resubmission makes

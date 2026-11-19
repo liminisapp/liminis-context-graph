@@ -165,6 +165,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0788](0788-retrieval-corpus-v2-and-bootstrap-reporting.md) | Retrieval Corpus v2 and Bootstrap Reporting — a Generated, Origin-Aware Fixture and Intervals That Label Noise | 2026-11-18 |
 | [0789](0789-hybrid-passage-search-rrf-top-rank-bonus.md) | Hybrid Passage Search — BM25 + Vector with Weighted RRF and Belief-Aware Ranking | 2026-11-18 |
 | [0790](0790-embedder-roles-and-instruction-profiles.md) | Embedder Roles and Instruction Profiles | 2026-11-18 |
+| [0806](0806-belief-aware-passage-ranking-default.md) | Belief-Aware Passage Ranking Is the Default | 2026-11-19 |
 
 ## Historical numbering
 

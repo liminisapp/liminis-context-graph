@@ -32,7 +32,7 @@ must exist before any of them can be judged.
    own qmd index is untouched. qmd documents `--no-rerank` but no switch for query expansion, so
    both qmd configurations include expansion; qmd does not expose model-call counts, reported as
    "not exposed".
-4. **`lcg-passages` is measured as it is: vector-only.** `search_passages` does no FTS and no RRF;
+4. **`lcg-passages` is measured as it is: vector-only.** (Since #806 / ADR-0806 it measures the shipped default, belief-aware vector; `lcg-passages-raw` is the vector-only baseline.) `search_passages` does no FTS and no RRF;
    the report says so. Changing retrieval is out of scope.
 5. **A labelled fifth configuration, `lcg-entities-facts-belief`** (`believed_only=true` on the
    fact read). Only edge reads can express belief time (ADR-0705); without this variant the

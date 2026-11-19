@@ -20,10 +20,13 @@ pub const ALL_CONFIGS: [&str; 5] = [
     "lcg-entities-facts-belief",
 ];
 
-/// Opt-in LCG passage-search variants (#789), measured on one binary by sending `mode` and
-/// `belief_aware` explicitly: vector with the belief-aware rules, weighted-RRF hybrid alone, and
-/// weighted-RRF hybrid with the belief-aware rules. Not in the default run.
-pub const HYBRID_PASSAGE_CONFIGS: [&str; 3] = [
+/// Opt-in LCG passage-search variants (#789, #806), measured on one binary by sending `mode` and
+/// `belief_aware` explicitly: the raw vector baseline (`belief_aware: false`, the pre-#806
+/// default), vector with the belief-aware rules, weighted-RRF hybrid alone, and weighted-RRF
+/// hybrid with the belief-aware rules. Not in the default run (`lcg-passages` is the shipped
+/// default).
+pub const HYBRID_PASSAGE_CONFIGS: [&str; 4] = [
+    "lcg-passages-raw",
     "lcg-passages-belief",
     "lcg-passages-hybrid",
     "lcg-passages-hybrid-belief",
@@ -79,7 +82,10 @@ OPTIONS:
     --k <N>                    Shared cut-off for every configuration (1..=100, default 10).
     --configs <LIST>           Comma-separated subset of: lcg-passages, lcg-entities-facts, qmd,
                                qmd-rerank, lcg-entities-facts-belief. Default: all five.
-                               Opt-in (#789): lcg-passages-hybrid (BM25 + vector, weighted RRF),
+                               lcg-passages is the service's shipped default (belief-aware
+                               vector since #806).
+                               Opt-in: lcg-passages-raw (belief_aware=false, the pre-#806
+                               baseline), (#789) lcg-passages-hybrid (BM25 + vector, weighted RRF),
                                lcg-passages-hybrid-belief (the same plus belief-aware ranking),
                                lcg-passages-belief (vector plus belief-aware ranking).
     --service-bin <PATH>       liminis-context-graph binary to spawn (default: alongside lcg-eval,
@@ -337,6 +343,20 @@ mod tests {
         .unwrap()
         {
             RetrievalMode::Run(a) => assert_eq!(a.configs.len(), 3),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn raw_passage_config_is_opt_in_and_parses() {
+        match p(&[]).unwrap() {
+            RetrievalMode::Run(a) => assert!(!a.configs.iter().any(|c| c == "lcg-passages-raw")),
+            _ => panic!(),
+        }
+        match p(&["--configs", "lcg-passages,lcg-passages-raw"]).unwrap() {
+            RetrievalMode::Run(a) => {
+                assert_eq!(a.configs, vec!["lcg-passages", "lcg-passages-raw"])
+            }
             _ => panic!(),
         }
     }

@@ -194,7 +194,7 @@ async fn full_run(
     let mut slots = vec![
         Slot::Run(Box::new(LcgPassages {
             t: transport.clone(),
-            mode: lcg::PassageMode::Vector,
+            mode: lcg::PassageMode::Default,
         })),
         Slot::Run(Box::new(LcgEntitiesFacts {
             t: transport.clone(),
@@ -443,7 +443,7 @@ async fn grounded_measure_is_skipped_not_zero_without_a_judge() {
     lcg::ingest(transport.as_ref(), &fx).await.unwrap();
     let slots = vec![Slot::Run(Box::new(LcgPassages {
         t: transport,
-        mode: lcg::PassageMode::Vector,
+        mode: lcg::PassageMode::Default,
     }))];
     let out = evaluate(&fx, K, slots, None, "ANTHROPIC_API_KEY not set").await;
     let Status::Ran(run) = &out[0].status else {

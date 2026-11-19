@@ -1,6 +1,7 @@
 # ADR-0789: Hybrid Passage Search — BM25 + Vector with Weighted RRF and Belief-Aware Ranking
 
 **Status**: Accepted — hybrid ships opt-in; the default stays `vector`. The first design (unweighted RRF plus a top-rank bonus) measured worse than vector on v2 and was revised on 2026-11-19 to weighted RRF plus belief-aware re-ranking, with the bonus dropped; the revision is not yet measured (see the measurement section)
+**Superseded in part by**: [ADR-0806](0806-belief-aware-passage-ranking-default.md) — decision 2's default (`belief_aware` is now on in `vector` too) and decision 9 (`lcg-passages` now tracks the shipped default; `lcg-passages-raw` is the old baseline).
 **Date**: 2026-11-18 (measurement section added 2026-11-19)
 **Issue**: #789 (builds on ADR-0629's evidence and similarity floor, ADR-0752's `origins` filter, ADR-0754's eval, ADR-0790's embedder roles)
 

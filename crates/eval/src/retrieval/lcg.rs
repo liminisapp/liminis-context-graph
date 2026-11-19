@@ -267,6 +267,10 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
         cmd.env("LCG_RECORD_LLM", p);
     }
     apply_embedding_profile_env(&mut cmd, o.embedding_profile.as_deref());
+    // `lcg-passages` measures the shipped default (#806): an operator's passage-search overrides
+    // must not leak into the child and silently change what it measures.
+    cmd.env_remove("LCG_PASSAGE_SEARCH_MODE")
+        .env_remove("LCG_PASSAGE_BELIEF_AWARE");
     let mut child = cmd.spawn().map_err(|e| {
         format!(
             "cannot start service '{}': {e} (pass --service-bin, or build with `cargo build --release -p lcg-service`)",
@@ -539,11 +543,15 @@ fn items(v: &Value, key: &str) -> Vec<Value> {
     v[key].as_array().cloned().unwrap_or_default()
 }
 
-/// How a [`LcgPassages`] configuration reads `knowledge_search_passages` (#789).
+/// How a [`LcgPassages`] configuration reads `knowledge_search_passages` (#789, #806).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassageMode {
-    /// `mode: "vector"` — cosine only (`lcg-passages`).
-    Vector,
+    /// Neither `mode` nor `belief_aware` is sent: exactly what a default client sends, so this
+    /// measures the shipped default (belief-aware vector since #806) (`lcg-passages`).
+    Default,
+    /// `mode: "vector"`, `belief_aware: false` — cosine only, the pre-#806 default
+    /// (`lcg-passages-raw`).
+    Raw,
     /// `mode: "vector"`, `belief_aware: true` — cosine plus the belief-aware rules.
     VectorBelief,
     /// `mode: "hybrid"`, `belief_aware: false` — BM25 + vector with weighted RRF.
@@ -555,21 +563,25 @@ pub enum PassageMode {
 impl PassageMode {
     pub fn config_id(self) -> &'static str {
         match self {
-            PassageMode::Vector => "lcg-passages",
+            PassageMode::Default => "lcg-passages",
+            PassageMode::Raw => "lcg-passages-raw",
             PassageMode::VectorBelief => "lcg-passages-belief",
             PassageMode::Hybrid => "lcg-passages-hybrid",
             PassageMode::HybridBelief => "lcg-passages-hybrid-belief",
         }
     }
 
-    /// The `knowledge_search_passages` request. `mode` and `belief_aware` are always sent
-    /// explicitly, so `lcg-passages` stays a stable vector-only baseline even if a service default
-    /// changes.
+    /// The `knowledge_search_passages` request. `Default` omits `mode` and `belief_aware` so it
+    /// tracks the service's default; every other configuration sends both explicitly so it keeps
+    /// its meaning if the default changes again. (`spawn_service` removes `LCG_PASSAGE_SEARCH_MODE`
+    /// and `LCG_PASSAGE_BELIEF_AWARE` from the child's environment, so "the default" is the
+    /// shipped one, not the operator's.)
     pub fn request(self, q: &str, k: usize) -> Value {
         let mut p =
             json!({"query": q, "num_results": k, "min_score": 0.0, "group_ids": [EVAL_GROUP]});
         let (mode, belief) = match self {
-            PassageMode::Vector => ("vector", false),
+            PassageMode::Default => return p,
+            PassageMode::Raw => ("vector", false),
             PassageMode::VectorBelief => ("vector", true),
             PassageMode::Hybrid => ("hybrid", false),
             PassageMode::HybridBelief => ("hybrid", true),
@@ -580,9 +592,9 @@ impl PassageMode {
     }
 }
 
-/// `lcg-passages` (vector-only, `mode: "vector"`) and the opt-in #789 variants
-/// (`lcg-passages-belief`, `lcg-passages-hybrid`, `lcg-passages-hybrid-belief`):
-/// `knowledge_search_passages` in each retrieval mode.
+/// `lcg-passages` (the shipped default), `lcg-passages-raw` (the pre-#806 vector baseline) and the
+/// opt-in #789 variants (`lcg-passages-belief`, `lcg-passages-hybrid`,
+/// `lcg-passages-hybrid-belief`): `knowledge_search_passages` in each retrieval mode.
 pub struct LcgPassages {
     pub t: Arc<dyn RpcTransport>,
     pub mode: PassageMode,
@@ -594,8 +606,11 @@ impl Retriever for LcgPassages {
     }
     fn description(&self) -> String {
         match self.mode {
-            PassageMode::Vector => {
-                "knowledge_search_passages (mode=vector: vector-only, no FTS, no RRF), min_score=0"
+            PassageMode::Default => {
+                "knowledge_search_passages (service default: mode=vector, belief_aware: derived below cited primary, superseded below successor), min_score=0"
+            }
+            PassageMode::Raw => {
+                "knowledge_search_passages (mode=vector, belief_aware=false: vector-only, no FTS, no RRF), min_score=0"
             }
             PassageMode::VectorBelief => {
                 "knowledge_search_passages (mode=vector, belief_aware: derived below cited primary, superseded below successor), min_score=0"
@@ -867,9 +882,16 @@ mod tests {
     }
 
     #[test]
-    fn passage_modes_send_mode_and_belief_explicitly() {
+    fn passage_modes_send_mode_and_belief_as_documented() {
+        // `Default` sends neither: it is what a default client sends (#806).
+        let r = PassageMode::Default.request("q", 5);
+        assert!(
+            r.get("mode").is_none() && r.get("belief_aware").is_none(),
+            "{r}"
+        );
+        // Every other configuration sends both explicitly.
         let cases = [
-            (PassageMode::Vector, "vector", false),
+            (PassageMode::Raw, "vector", false),
             (PassageMode::VectorBelief, "vector", true),
             (PassageMode::Hybrid, "hybrid", false),
             (PassageMode::HybridBelief, "hybrid", true),
@@ -884,7 +906,8 @@ mod tests {
             assert!(r.get("top_rank_bonus").is_none());
         }
         for m in [
-            PassageMode::Vector,
+            PassageMode::Default,
+            PassageMode::Raw,
             PassageMode::VectorBelief,
             PassageMode::Hybrid,
             PassageMode::HybridBelief,
@@ -895,6 +918,12 @@ mod tests {
         }
     }
 
+    #[test]
+    fn passage_config_ids_are_distinct() {
+        assert_eq!(PassageMode::Default.config_id(), "lcg-passages");
+        assert_eq!(PassageMode::Raw.config_id(), "lcg-passages-raw");
+    }
+
     #[tokio::test]
     async fn passages_retriever_sets_k_and_zero_floor() {
         let t = Arc::new(FakeTransport::new(|m, _| {
@@ -903,7 +932,7 @@ mod tests {
         }));
         let r = LcgPassages {
             t: t.clone(),
-            mode: PassageMode::Vector,
+            mode: PassageMode::Default,
         }
         .retrieve("q", 7)
         .await

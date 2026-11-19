@@ -251,7 +251,8 @@ Source: https://docs.liminis.app/liminis-context-graph/configuration
 | `LCG_EMBEDDING_PROFILE` | No | Embedding instruction profile: `none` (default), `bge-v1.5`, `nomic-v1.5`, `e5`, or `embedder`. Tells LCG which role prefixes to put on search strings (query) and stored text (document) for asymmetric embedding models. An unknown name is a startup error listing the valid ones. See [Embedding instruction profiles](#embedding-instruction-profiles). |
 | `LCG_EMBEDDING_QUERY_PREFIX` | No | Explicit query prefix; overrides the profile's query prefix. An explicitly empty value disables it. A query-prefix change never needs a re-embed. |
 | `LCG_EMBEDDING_DOCUMENT_PREFIX` | No | Explicit document prefix; overrides the profile's document prefix. An explicitly empty value disables it. **Part of the workspace's embedding identity** — changing it needs a re-embed. |
-| `LCG_PASSAGE_SEARCH_MODE` | No | Default retrieval mode for `knowledge_search_passages` when a request names no `mode`: `vector` (default; cosine only) or `hybrid` (BM25 + vector, weighted RRF, with belief-aware re-ranking; see [IPC reference](ipc-mcp-reference.md#hybrid-passage-search-knowledge_search_passages-issue-789)). Read per request. An unrecognised value logs a warning to stderr and falls back to `vector`. A request's own `mode` always wins. |
+| `LCG_PASSAGE_SEARCH_MODE` | No | Default retrieval mode for `knowledge_search_passages` when a request names no `mode`: `vector` (default; cosine similarity, then belief-aware re-ranking unless turned off with `belief_aware: false` or `LCG_PASSAGE_BELIEF_AWARE=off`, which can lower the `score` of a demoted passage) or `hybrid` (BM25 + vector, weighted RRF, with belief-aware re-ranking by default; see [IPC reference](ipc-mcp-reference.md#hybrid-passage-search-knowledge_search_passages-issue-789)). Read per request. An unrecognised value logs a warning to stderr and falls back to `vector`. A request's own `mode` always wins. |
+| `LCG_PASSAGE_BELIEF_AWARE` | No | Workspace default for belief-aware re-ranking in `knowledge_search_passages` (a derived page ranks below the primary note it cites, a superseded passage below its successor), applied when a request omits `belief_aware`. Belief-aware ranking is **on by default** in both modes (#806). `off`, `0` or `false` turn it off, restoring the pre-#806 ordering byte-for-byte in `vector` mode (in `hybrid` it gives weighted RRF without the rules, which is not the old hybrid default); `on`, `1` or `true` leave it on. Case-insensitive. Read per request. An unrecognised value logs a warning to stderr once and is ignored (default applies). A request's own `belief_aware` always wins. |
 | `LCG_EMBEDDING_API_KEY` | No | Bearer token sent as `Authorization: Bearer <key>` on the HTTP embedder transport (`--embedder-http`/`LCG_EMBEDDING_URL`). Falls back to `GRAPHITI_EMBEDDING_API_KEY`, then to `OPENAI_API_KEY`. Unset (or empty) sends no `Authorization` header, unchanged from prior versions. Never applies to the UDS transport (`--embedder-uds`) — a local socket never accepts a credential regardless of this variable. |
 | `OPENAI_API_KEY` | No | Convenience fallback for `LCG_EMBEDDING_API_KEY` (see above) — reuses an already-exported OpenAI key. Not a deprecated alias, so using it logs no *deprecation* warning — but since it sends whatever key is exported for OpenAI tooling generally to whatever `--embedder-http`/`LCG_EMBEDDING_URL` endpoint is configured (not necessarily OpenAI's own API), using this tier does log a one-line informational notice naming the endpoint the key will be sent to. |
 | `LCG_EMBEDDING_TIMEOUT_MS` | No | Whole-request timeout, in milliseconds, applied per attempt by **both** embedder transports — HTTP (`--embedder-http`/`LCG_EMBEDDING_URL`) and UDS (`--embedder-uds`, the default when the sidecar's socket exists) — covering single embed, batch embed, and the startup probe (default `30000`, generous enough for a default-sized 64-text batch under normal latency). An unparseable or zero value is rejected with a configuration error rather than silently ignored. See [ADR-0510](adr/0510-oaiembedder-http-timeouts.md) (HTTP) and [ADR-0541](adr/0541-uds-embedder-transport-timeouts.md) (UDS). |
@@ -1333,15 +1334,18 @@ object — and it acts before fusion and per path rather than as a post-filter o
 
 | `mode` | Ranking | `score` | `similarity` |
 |---|---|---|---|
-| `vector` | Vector cosine only — exactly the behaviour before #789. | Cosine similarity (`1 - distance`). | Not present. |
+| `vector` | Vector cosine, then belief-aware re-ranking by default (see `belief_aware`); with `belief_aware: false` it is cosine only, exactly the behaviour before #789. | Cosine similarity (`1 - distance`); a demoted passage's score is lowered to just below the passage it ranks under. | Not present. |
 | `hybrid` | BM25 over episode text (the existing `episode_content` full-text index) and the vector ranking, fused with **weighted** Reciprocal Rank Fusion (`weight/(rank+60)` per list; the lexical list has weight 0.4, the vector list 1.0), then belief-aware re-ranking (see `belief_aware`). | The **fused rank score** (at most about 0.023). It orders results; it is not a cosine and not comparable across queries. | Cosine similarity where the vector retriever matched the passage; absent for a passage only the lexical retriever found. |
 
 - **`mode`** is optional. Omitted, the service default applies: the `LCG_PASSAGE_SEARCH_MODE`
   environment variable (`vector` or `hybrid`; an unrecognised value warns on stderr and falls back
   to `vector`), else `vector`. An unknown or non-string `mode` is an invalid-params error. Callers
-  that need cosine scores or a strict similarity floor should send `mode: "vector"` explicitly, so
-  they are unaffected if the service default changes.
-- **`belief_aware`** (boolean; default `true` in `hybrid`, `false` in `vector`): after fusion and
+  that need plain cosine scores or a strict similarity floor should send `mode: "vector"` **and**
+  `belief_aware: false` explicitly: `mode: "vector"` alone is belief-aware by default (since #806),
+  which lowers a demoted passage's `score`. Sending both also makes them unaffected if the service
+  default or `LCG_PASSAGE_BELIEF_AWARE` changes.
+- **`belief_aware`** (boolean; default `true` in both modes since #806; omitted or `null` means
+  "use the default"): after fusion and
   before truncating to `num_results`, two rules re-rank the candidate set (up to `3 × num_results`).
   A `derived` or `answer` passage that cites a `primary`/`external` note by `[[wikilink]]` (matched
   on that note's `doc_id`, within the same group) ranks below that note's best-ranked passage, so a
@@ -1352,8 +1356,14 @@ object — and it acts before fusion and per path rather than as a post-filter o
   the passage it ranks under is itself in the candidate set. A removed chunk has no successor and a
   document supersession with a future effective instant is still believed, so neither is demoted.
   Demoted passages are never dropped, and a demoted passage's `score` is lowered to just below the
-  passage it ranks under. With `mode: "vector"` and `belief_aware: true` the same rules run on the
-  vector ranking (`score` stays a cosine otherwise); `mode: "vector"` without it is unchanged.
+  passage it ranks under, so **`score` can differ as well as the order**. In `vector` mode the same
+  rules run on the vector ranking (`score` stays a cosine otherwise). `belief_aware: false` turns
+  the rules off and returns, byte-for-byte, what the same request returned before #806 (cosine
+  order and scores in `vector`; weighted RRF without the rules in `hybrid`). The workspace
+  switch `LCG_PASSAGE_BELIEF_AWARE` (`off`, `0` or `false` disable; `on`, `1` or `true` enable;
+  case-insensitive; anything else warns once on stderr and is ignored) sets the default for
+  requests that omit `belief_aware`; an explicit request value always wins. With the switch off,
+  `hybrid` gives weighted RRF without the rules, which is not the pre-#806 hybrid default (rules on).
   A non-boolean value is an invalid-params error. The removed `top_rank_bonus` parameter is ignored.
 - **`min_score`** (default 0.5, clamped 0–1) floors the *vector retriever's* cosine similarity
   before fusion, as `min_similarity` does for entity search. A passage found only by the lexical
@@ -1372,8 +1382,8 @@ object — and it acts before fusion and per path rather than as a post-filter o
 
 The full-text index also covers an episode's `source` and `source_description`, so a query term in
 a file name or description can match. Which mode is better is measured per category on the
-retrieval eval (`lcg-passages`, `lcg-passages-belief`, `lcg-passages-hybrid`,
-`lcg-passages-hybrid-belief`; see
+retrieval eval (`lcg-passages` is the shipped default; `lcg-passages-raw`,
+`lcg-passages-belief`, `lcg-passages-hybrid` and `lcg-passages-hybrid-belief` are opt-in; see
 [retrieval-quality-evaluation.md](retrieval-quality-evaluation.md) and
 [ADR-0789](adr/0789-hybrid-passage-search-rrf-top-rank-bonus.md)).
 
@@ -4982,7 +4992,8 @@ It is a separate mode of the existing `lcg-eval` binary. The extraction eval
 
 | Configuration | What runs |
 |---|---|
-| `lcg-passages` | `knowledge_search_passages` with `mode: "vector"` sent explicitly. **Vector-only**: no FTS and no RRF. Pinned, so it stays a stable baseline whatever the service default is. |
+| `lcg-passages` | `knowledge_search_passages` sending neither `mode` nor `belief_aware`: **the service's shipped default** (#806), i.e. belief-aware vector, no FTS and no RRF. It tracks the default, so a change to the default shows up here. The harness removes `LCG_PASSAGE_SEARCH_MODE` and `LCG_PASSAGE_BELIEF_AWARE` from the spawned service's environment so an operator's overrides cannot change what it measures. It is the same request as `lcg-passages-belief` today. |
+| `lcg-passages-raw` | *Opt-in (#806), not in the default run.* `mode: "vector"`, `belief_aware: false`: cosine only, the pre-#806 `lcg-passages` baseline, so the belief-aware gain stays measurable. |
 | `lcg-entities-facts` | `knowledge_find_entities` + `knowledge_find_relationships` (hybrid FTS + vector, RRF), default reads. k is split across the two reads (`ceil(k/2)` entities + `ceil(k/2)` facts) and the ranks are interleaved. |
 | `qmd` | `qmd query --no-rerank` (query expansion on). |
 | `qmd-rerank` | `qmd query` with its LLM reranker. |
@@ -5930,6 +5941,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0788](0788-retrieval-corpus-v2-and-bootstrap-reporting.md) | Retrieval Corpus v2 and Bootstrap Reporting — a Generated, Origin-Aware Fixture and Intervals That Label Noise | 2026-11-18 |
 | [0789](0789-hybrid-passage-search-rrf-top-rank-bonus.md) | Hybrid Passage Search — BM25 + Vector with Weighted RRF and Belief-Aware Ranking | 2026-11-18 |
 | [0790](0790-embedder-roles-and-instruction-profiles.md) | Embedder Roles and Instruction Profiles | 2026-11-18 |
+| [0806](0806-belief-aware-passage-ranking-default.md) | Belief-Aware Passage Ranking Is the Default | 2026-11-19 |
 
 ## Historical numbering
 
