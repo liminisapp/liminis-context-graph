@@ -57,8 +57,9 @@ Three additive `Conn` primitives were needed:
 ### 3. Seeds: four lists, RRF, then an evidence gate
 
 Candidates (40 per list): **exact names** (every 1–4-word n-gram of the query, punctuation and a
-trailing possessive stripped, at most 128, × requested groups — or the candidates' groups when none
-are given — × known kinds, probed as `lookup_key`s; ranked longest name first), **BM25** over entity
+trailing possessive stripped, at most 128, × requested groups — or, when none are given, every group
+holding entities (one `DISTINCT group_id` read), not just the groups the capped lists below filled
+from — × known kinds, probed as `lookup_key`s; ranked longest name first), **BM25** over entity
 names and summaries, the **name vector** and the **summary vector** (non-finite similarities —
 zero-filled, un-backfilled summaries — dropped). They are fused with `rrf_fuse_scored`.
 

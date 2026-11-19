@@ -904,14 +904,15 @@ fn seed_stage(
         }
     }
 
-    // Exact names: every query n-gram × group × known kind, one batched lookup_key probe.
+    // Exact names: every query n-gram × group × known kind, one batched lookup_key probe. With
+    // no `group_ids` that means every group holding entities, not just the groups the other
+    // lists happened to fill from: those lists are capped, so in a multi-group database a group
+    // can contribute no candidate and its exact names would otherwise never be probed.
     let groups: Vec<String> = match gids {
         Some(g) => g.iter().map(|s| s.to_string()).collect(),
         None => {
-            let mut g: Vec<String> = rows.values().map(|r| r.group_id.clone()).collect();
-            g.sort();
-            g.dedup();
-            g
+            st.db_queries += 1;
+            conn.entity_group_ids()?
         }
     };
     let mut kinds = conn.known_kinds();

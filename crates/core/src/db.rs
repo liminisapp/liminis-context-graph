@@ -4575,6 +4575,25 @@ impl<'db> Conn<'db> {
             .collect())
     }
 
+    /// Every distinct `group_id` holding an `Entity` row, sorted. Graph-aware search (issue #797)
+    /// uses it to build exact-name `lookup_key` probes when the caller gives no `group_ids`: the
+    /// key embeds the group, so a group left out here is a group whose exact names are never
+    /// matched. Only the `Entity` table is read, since only entities can be seeds (unlike
+    /// [`Self::list_distinct_group_ids`], which covers every group-scoped node table).
+    pub fn entity_group_ids(&self) -> Result<Vec<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (e:Entity) RETURN DISTINCT e.group_id",
+            serde_json::json!({}),
+        )?;
+        let mut out: Vec<String> = rows
+            .iter()
+            .filter_map(|r| value_as_optional_string(&r[0]))
+            .collect();
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     /// One hop of neighbourhood expansion: every fact incident to an entity in `frontier`, in
     /// both directions, as two directed queries (one batched lookup per direction instead of
     /// one per entity, unlike [`Self::get_entity_neighbors`]). Each row carries what scoring and
@@ -7723,6 +7742,20 @@ mod graph_search_primitive_tests {
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["Alpha", "Beta"]);
         assert!(c.entities_by_lookup_keys(&[]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn entity_group_ids_lists_every_group_once_sorted() {
+        let (_d, db) = graph();
+        let c = db.connect().unwrap();
+        assert_eq!(c.entity_group_ids().unwrap(), vec!["g", "h"]);
+        let (_d2, empty) = open();
+        assert!(empty
+            .connect()
+            .unwrap()
+            .entity_group_ids()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
