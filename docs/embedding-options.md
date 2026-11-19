@@ -74,7 +74,8 @@ were computed by a different model and are no longer comparable to freshly-embed
 Issue [#440](https://github.com/verveguy/liminis-context-graph/issues/440) added model-identity
 stamping and mismatch detection for exactly this case (`knowledge_status`'s
 `embedding_model_status` field, and the `embeddings_recompute_failed` /
-`embeddings_recompute_skipped_no_text` counters) — see
+`embeddings_recompute_skipped_no_text` counters, and per-group `zero_vector_rows` for rows left
+with a zero vector by an embedder failure) — see
 [Operations: `knowledge_status` health fields](operations.md#knowledge_status-health-fields)
 for the full mechanics.
 

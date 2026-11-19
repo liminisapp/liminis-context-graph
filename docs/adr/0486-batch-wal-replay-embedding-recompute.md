@@ -1,6 +1,6 @@
 # ADR-0486: Batch WAL-Replay Embedding Recompute — An Independent, Unaligned Window Upstream of the Cypher Batch
 
-**Status**: Accepted
+**Status**: Accepted — the whole-window blast radius it accepted is closed by [ADR-0808](0808-replay-embed-retry-and-zero-vector-record.md) (superseded in part)
 **Date**: 2026-09-01
 **Issue**: #486
 **Relates to**: ADR-0440 (recompute embeddings on WAL replay, sync bridge), ADR-0445 (embedder

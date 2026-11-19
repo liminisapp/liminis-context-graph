@@ -301,7 +301,10 @@ Source: https://docs.liminis.app/liminis-context-graph/configuration
 | `LCG_BUFFER_POOL_BYTES` | No | Upper bound on lbug's buffer pool (its page cache). A positive integer byte count (`2147483648`) or an integer with a binary suffix `KiB`, `MiB` or `GiB`, case-insensitive (`2GiB`, `512 mib`). Fractions (`2.5GiB`), decimal suffixes (`2GB`), `0`, an empty value and overflow are rejected. Unset = lbug's own default (roughly 80% of system memory). **An invalid value fails startup** with an error naming the variable and the value — it never silently falls back to the default. Applies to every database open (startup, recovery, rebuild, migration validation). lbug enforces its own minimum pool size; the service imposes no floor. The effective value is logged once at startup: `liminis-context-graph: lbug buffer pool: 2.0 GiB (2147483648 bytes) (LCG_BUFFER_POOL_BYTES); max threads: default (lbug auto: one per CPU)`. See [Memory sizing in containers](operations.md#memory-sizing-in-containers) and [ADR-0737](adr/0737-configurable-lbug-tuning-strict-env.md). |
 | `LCG_MAX_THREADS` | No | Upper bound on lbug's worker threads. A positive integer. Unset = lbug's default (one per CPU, read from the host, which is misleading inside a CPU-limited container). `0`, an empty value or a non-numeric value fails startup with an error naming the variable and the value. Logged in the same startup line as `LCG_BUFFER_POOL_BYTES`. |
 | `LCG_WRITABLE_GROUPS` | No | Environment equivalent of `--writable-groups`: a comma-separated allow-list of the groups clients may change (e.g. `LCG_WRITABLE_GROUPS=mine` or `mine,scratch`). Entries are trimmed; duplicates collapse; matching is exact and case-sensitive. **Strictly parsed:** a set-but-empty value, an empty entry (`a,,b`, a leading/trailing comma) or an entry containing whitespace fails startup with an error naming the variable — it is never treated as "unset". The `--writable-groups` flag wins when both are given (the env value is then not parsed). Unset (and no flag) = every group writable. Read once at startup; changing it needs a restart. The effective list is logged once: `liminis-context-graph: writable groups: [a, b] (all other groups are read-only)`. Ignored, with a warning, by an attached MCP process (`--connect`) — the daemon enforces it. See [Per-group write allow-list](ipc-mcp-reference.md#per-group-write-allow-list) and [ADR-0742](adr/0742-per-group-write-allow-list.md). |
-| `LCG_REPLAY_EMBED_WINDOW_SIZE` | No | Rows buffered before their embedding recompute is resolved via one batched embedder call during WAL replay (default `64`, valid range `1`–`256`). Independent of `LCG_REPLAY_BATCH_SIZE` — this bounds embedder round-trips, not Cypher execution batches. Lower values reduce cancellation latency, peak memory, and per-failure blast radius (one transient embedder failure degrades every row in its window, not just one — set to `1` to reproduce pre-batching per-row isolation exactly); higher values reduce embedder round-trips on a large rebuild. See [ADR-0486](adr/0486-batch-wal-replay-embedding-recompute.md). |
+| `LCG_REPLAY_EMBED_WINDOW_SIZE` | No | Rows buffered before their embedding recompute is resolved via one batched embedder call during WAL replay (default `64`, valid range `1`–`256`). Independent of `LCG_REPLAY_BATCH_SIZE` — this bounds embedder round-trips, not Cypher execution batches. Lower values reduce cancellation latency, peak memory and the size of the worst-case retry tree; higher values reduce embedder round-trips on a large rebuild. Since #808 a transient embedder failure no longer degrades the whole window: it is retried with backoff and, if that is exhausted, the window is split so one bad text fails only its own row (see `LCG_REPLAY_EMBED_RETRIES`). See [ADR-0486](adr/0486-batch-wal-replay-embedding-recompute.md) and [ADR-0808](adr/0808-replay-embed-retry-and-zero-vector-record.md). |
+| `LCG_REPLAY_EMBED_RETRIES` | No | How many times WAL replay retries a *transient* embedder failure (timeout, connection reset or broken pipe, HTTP 5xx including 503, HTTP 429) before giving up on a request. Integer `0`–`10`, default `4`; `0` disables retry **and** window splitting (one attempt per window, the pre-#808 behaviour). Non-transient errors (other 4xx, a wrong-dimension or non-finite vector) are never retried. When a multi-row window exhausts its retries it is split in half and the halves retried, down to a single row, so one text the embedder can never process fails only its own row; a single-row request that exhausts its retries is not retried or split further. A row counts as failed (`embeddings_recompute_failed`, `knowledge_status` `zero_vector_rows`) only after this gives up. Replay only — live ingest is unchanged. Validated at startup: an invalid value is fatal and names the variable. See [ADR-0808](adr/0808-replay-embed-retry-and-zero-vector-record.md) and the worst-case time bound in [Operations](operations.md#embedding-failures-during-replay-retry-and-the-zero-vector-record). |
+| `LCG_REPLAY_EMBED_BACKOFF_MS` | No | Base backoff between replay embedding retries, in milliseconds. Integer `1`–`60000`, default `500`. Retry *n* (0-based) waits `min(cap, base × 2ⁿ)` with jitter uniform in the upper half of that interval. Validated at startup. |
+| `LCG_REPLAY_EMBED_BACKOFF_MAX_MS` | No | Cap on a single replay embedding backoff wait, in milliseconds. Integer `1`–`300000`, default `10000`; must be at least `LCG_REPLAY_EMBED_BACKOFF_MS`. Validated at startup. |
 | `LCG_REPLAY_FAILURE_SAMPLES` | No | How many distinct failing lines to retain and report per WAL replay (default `10`). Samples are deduplicated by failure shape, so one bad template cannot crowd out the rest. |
 | `LCG_REPLAY_FIDELITY_THRESHOLD` | No | Float `0.0`–`1.0`. Replay warns when the fraction of successfully applied mutations falls below this, i.e. the rebuilt graph is not a faithful reconstruction of the WAL. |
 | `LCG_MIGRATION_KEEP_BACKUP` | No | When set, a workspace-layout migration retains its pre-migration backup instead of removing it after a successful migration. |
@@ -956,7 +959,8 @@ were computed by a different model and are no longer comparable to freshly-embed
 Issue [#440](https://github.com/verveguy/liminis-context-graph/issues/440) added model-identity
 stamping and mismatch detection for exactly this case (`knowledge_status`'s
 `embedding_model_status` field, and the `embeddings_recompute_failed` /
-`embeddings_recompute_skipped_no_text` counters) — see
+`embeddings_recompute_skipped_no_text` counters, and per-group `zero_vector_rows` for rows left
+with a zero vector by an embedder failure) — see
 [Operations: `knowledge_status` health fields](operations.md#knowledge_status-health-fields)
 for the full mechanics.
 
@@ -2169,6 +2173,13 @@ supported yet. See [ADR-0667](adr/0667-read-path-paging-cursor-and-status-label.
 a WAL root is configured it now also carries `"scope": "default_group"`, `"default_group":
 "liminis"` and `"see": "wal_groups"`, so `exists: false` there means the default group has no
 stream — read `wal_groups` for every group's position. With no WAL root the block is unchanged.
+
+Each `wal_groups.<gid>` entry also carries `zero_vector_rows`
+(`{"total": N, "by_kind": {"name": …, "fact": …, "summary": …, "content": …}}`, issue #808): how
+many rows of that group are stored with a fallback zero vector because the embedder failed during
+replay, and so are missing from vector search. Always present (all zeros when clean), exact, and
+durable across restarts; additive, so a client that ignores unknown fields is unaffected. See
+[Operations](operations.md#embedding-failures-during-replay-retry-and-the-zero-vector-record).
 
 ### Deletion (`delete_chunk_episode`, `delete_by_source`)
 
@@ -3895,8 +3906,10 @@ the named one) with `CALL DROP_FTS_INDEX('Entity','node_name_and_summary')`,
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below
 (`{applied_seq, max_seq, generation, generation_status, hydration_status, embedding_model,
-embedding_dim, embedding_model_status}` — the last three added by issue #440, mirroring each
-group's own embedding identity the same way `generation` is already mirrored per group). This is
+embedding_dim, embedding_model_status, zero_vector_rows}` — the embedding fields added by issue
+#440, mirroring each group's own embedding identity the same way `generation` is already mirrored
+per group, and `zero_vector_rows` by issue #808, see
+[below](#embedding-failures-during-replay-retry-and-the-zero-vector-record)). This is
 the multi-group view; the flat
 `wal.applied_seq`/`wal.max_seq`/`wal.generation`/`wal.generation_status`/`wal.hydration_status`/`wal.embedding_model`/`wal.embedding_dim`/`wal.embedding_model_status`
 fields described next remain present and
@@ -4037,6 +4050,56 @@ next write or an explicit rebuild — never a false `"match"`.
 | `"unknown"` | a position is recorded, but no embedding identity was recorded alongside it — a pre-#440 write, or a rebuild whose recompute attempts failed |
 | `"match"` | the recorded identity equals the running embedder's `(model, dim, document prefix)` |
 | `"mismatch"` | the recorded identity differs from the running embedder's — by model name, by dimension (e.g. a `LCG_EMBEDDING_DIM` override under the same model name still counts), by **document prefix** (issue #790), or any combination |
+
+### Embedding failures during replay: retry and the zero-vector record
+
+*(Issue #808, [ADR-0808](adr/0808-replay-embed-retry-and-zero-vector-record.md).)* A row whose
+embedding could not be computed during replay is stored with a same-dimension **zero vector** and
+is invisible to vector search. Two mechanisms limit and expose that:
+
+**Retry with backoff (replay only).** Replay's embedding recompute retries a *transient* embedder
+failure — a timeout, a connection reset or broken pipe, HTTP 5xx (including 503) or HTTP 429 —
+with exponential backoff and jitter. It never retries a non-transient error (another 4xx, a
+wrong-dimension or non-finite vector). When a multi-row window exhausts its retries it is split in
+half and the halves retried recursively, so one text the embedder cannot process costs only its
+own row. Tune with `LCG_REPLAY_EMBED_RETRIES` (default 4), `LCG_REPLAY_EMBED_BACKOFF_MS` (default
+500) and `LCG_REPLAY_EMBED_BACKOFF_MAX_MS` (default 10000); see
+[configuration](configuration.md). Live ingest (`add_episode`) does not use this: it has no
+zero-vector fallback, an embedder failure fails the ingest.
+
+**Worst-case time.** Each attempt is bounded by `LCG_EMBEDDING_TIMEOUT_MS` (default 30 s). One
+request costs at most `(retries + 1) × timeout + Σ backoff`, with the defaults about 150 s + 10 s.
+Splitting does not multiply that: a window may spend at most
+`(retries + 1) × (depth + 2) + depth` *transiently failing* calls across its whole retry tree,
+where `depth = ⌈log₂ rows⌉` (46 for a 64-row window at the defaults; successful and
+permanently-failing calls are not counted). When the budget is spent the rest of the window fails
+without further calls. If an entire window fails transiently (the embedder is down) the next
+window gets one attempt with no retry or split, until a window succeeds again, so a dead embedder
+costs about one timeout per window — what it cost before #808. A cancel or shutdown during a
+backoff aborts the window within about 100 ms.
+
+**`wal_groups.<gid>.zero_vector_rows`.** `knowledge_status` reports, per group, how many rows are
+currently stored with a fallback zero vector because the embedder failed, with a breakdown by the
+column that is zero:
+
+```json
+"zero_vector_rows": { "total": 25, "by_kind": { "name": 25, "fact": 0, "summary": 0, "content": 0 } }
+```
+
+The field is always present (all zeros when nothing failed), exact however many rows failed (the
+per-row log stops after 10), and survives a restart. A non-zero total means vector search is
+missing those rows; it does not change `embedding_model_status`, and a later clean run can stamp
+the embedding identity while old entries remain — treat `zero_vector_rows` as the authority on
+degraded rows. Rows with no source text, and vector-only updates that were skipped (issue #526),
+are not counted: they are not failures.
+
+The record is a database table (`EmbeddingZeroRow`), written in the same transaction as the rows
+it describes, so it cannot name a row that was rolled back or miss one that was stored. A full
+rebuild (`knowledge_rebuild_from_wal` with `force_clear`, or `knowledge_delete_by_group`) resets
+it to that rebuild's own failures. An incremental replay that later embeds a recorded row
+successfully, or deletes it, clears its entry. Repair is a separate tool (which lists the rows
+with `Conn::list_zero_vector_rows` and removes entries with `Conn::remove_zero_vector_rows`);
+until it exists, a full rebuild against a healthy embedder re-embeds everything.
 
 **Document prefix (issue #790).** The identity also records the *document* prefix of the
 [instruction profile](configuration.md#embedding-instruction-profiles) (`wal.embedding_doc_prefix`,
@@ -6249,6 +6312,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0802](0802-caller-supplied-query-variants-weighted-rrf.md) | Caller-Supplied Query Variants, Fused with Weighted RRF | 2026-11-18 |
 | [0806](0806-belief-aware-passage-ranking-default.md) | Belief-Aware Passage Ranking Is the Default | 2026-11-19 |
 | [0812](0812-search-min-score-env-default.md) | Operator-Configurable Default `min_score` for Passage Search | 2026-11-19 |
+| [0808](0808-replay-embed-retry-and-zero-vector-record.md) | Replay Embedding Recompute — Bounded Retry, Window Splitting and a Durable Zero-Vector Record | 2026-11-19 |
 
 ## Historical numbering
 
