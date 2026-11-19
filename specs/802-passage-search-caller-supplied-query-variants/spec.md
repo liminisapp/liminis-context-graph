@@ -104,7 +104,7 @@ Variants add candidates, but they never bypass belief-time, origin, or group sco
 **Acceptance Scenarios**:
 
 1. **Given** `group_ids`, `origins` or `min_score`, **When** a search has variants, **Then** every per-query retrieval applies `group_ids` and `origins`, and the `min_score` floor to its vector list, so no result excluded by the group or origin filters in the single-query case is present in the variant case. In `hybrid` mode a variant's BM25 hits are not subject to the cosine floor, as in single-query hybrid.
-2. **Given** a variant that closely matches a superseded note, **When** `belief_aware` ranking is on (the default in `hybrid` mode), **Then** that note is demoted exactly as it would be for the primary query, because belief-aware ranking runs once on the fused candidates.
+2. **Given** a variant that closely matches a superseded note, **When** `belief_aware` ranking is on (the default since #806), **Then** that note is demoted exactly as it would be for the primary query, because belief-aware ranking runs once on the fused candidates.
 
 *Scope note: `believed_only` and `as_of` are edge-read parameters, not passage-search parameters (ADR-0705), so they do not apply here. Belief handling for passages is `belief_aware` (ADR-0789). See ADR-0802, "Deferred".*
 

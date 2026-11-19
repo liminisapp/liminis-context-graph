@@ -2216,10 +2216,6 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
             let db = load_db(&state)?;
             let embedder = Arc::clone(&state.embedder);
             if !variants.is_empty() {
-                let belief_aware = match mode {
-                    search::PassageSearchMode::Vector => belief_override == Some(true),
-                    search::PassageSearchMode::Hybrid => belief_override.unwrap_or(true),
-                };
                 return search::search_passages_variants(
                     db,
                     embedder,
@@ -2230,7 +2226,7 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
                     min_score,
                     origins,
                     mode,
-                    belief_aware,
+                    belief,
                 )
                 .await;
             }

@@ -57,8 +57,8 @@ had nowhere to put rewrites it can write for free.
    ranking, which re-sorts by score. `min_score` still floors each query's vector list.
 7a. **Belief-aware ranking runs once, after fusion**, on the fused candidate set (up to `3 * num_results`),
    never per variant: a derived page and the note it cites can be retrieved by different queries, and only
-   the fused list contains both. It follows the request's own rule: on by default in `hybrid`, opt-in in
-   `vector`.
+   the fused list contains both. It follows the request's own rule (#806): on by default in both modes, off
+   with `belief_aware: false` or `LCG_PASSAGE_BELIEF_AWARE=off`.
 8. **The eval simulates the agent without leaking answers.** `query-variants.jsonl` holds up to 5 variants per
    question, stamped with the questions hash, written once by an LLM that sees only the question text under a
    committed prompt (`query-variants.prompt.md`) via an offline `lcg-eval retrieval-variants`

@@ -736,7 +736,7 @@ async fn a_variants_keywords_reach_bm25_in_hybrid_mode_but_not_in_vector_mode() 
 async fn belief_ranking_is_honoured_once_on_the_fused_list_in_both_modes() {
     // `page` (derived) restates the query and is first for the primary; the variant retrieves its
     // cited source `src` first. Fused without belief the page still leads; with it the page falls
-    // below its source, in vector mode (opt-in) and in hybrid mode (default on).
+    // below its source, in vector mode and in hybrid mode (both default on since #806).
     let (state, _db, _d) = make_state(
         embedder(&[
             ("quokkaplex", graded_query()),
@@ -762,7 +762,7 @@ async fn belief_ranking_is_honoured_once_on_the_fused_list_in_both_modes() {
         assert!(scores[0] > scores[1], "{mode}: {scores:?}");
         assert_eq!(matched_queries(&on[0]), vec![0, 1], "{mode}");
     }
-    // Hybrid defaults to the rule being on, vector to off, exactly as without variants.
+    // Both modes default to the rule being on (#806), exactly as without variants.
     let hybrid = search(
         &state,
         with_variants(params("quokkaplex", "hybrid"), json!(["migration plan"])),
@@ -774,7 +774,7 @@ async fn belief_ranking_is_honoured_once_on_the_fused_list_in_both_modes() {
         with_variants(params("quokkaplex", "vector"), json!(["migration plan"])),
     )
     .await;
-    assert_eq!(uuids(&vector), vec!["page", "src"]);
+    assert_eq!(uuids(&vector), vec!["src", "page"]);
 }
 
 #[tokio::test]

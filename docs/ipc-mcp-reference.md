@@ -974,7 +974,7 @@ single-query hybrid), so a variant keyword can add a lexical-only passage whose 
 variants **share a total weight of 1** (`VARIANT_BUDGET_WEIGHT`, split equally: 1 each for one variant, 0.2
 each for five). However many variants there are, `query` keeps at least **2/3** of the weight, so variants
 widen the candidate set but together can never outvote the primary query. Belief-aware ranking (`belief_aware`;
-default on in `hybrid`, off in `vector`) runs **once, on the fused candidates**, never per variant. The first
+on by default in both modes since #806; `belief_aware: false` opts out) runs **once, on the fused candidates**, never per variant. The first
 `num_results` of the result are returned.
 
 **Response.** With `queries`, every passage also carries **`matched_queries`**: ascending indices into the
