@@ -382,6 +382,8 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
 /// One group's `(group_id, applied_seq, max_seq, generation, embedding_model, embedding_dim)` in
 /// `knowledge_status`'s `wal_groups` breakdown (issue #378 FR-007; generation added by issue
 /// #387; embedding_model/embedding_dim added by issue #440 FR-007).
+/// The trailing elements are the recorded document prefix (#790) and the group's zero-vector row
+/// counts (#808).
 type WalGroupPosition = (
     String,
     Option<u64>,
