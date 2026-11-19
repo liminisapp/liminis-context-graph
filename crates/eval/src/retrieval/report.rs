@@ -145,9 +145,6 @@ pub(crate) fn variants_base_id(id: &str) -> Option<String> {
     })
 }
 
-/// The merge bar's p50 ceiling for the variants config, in milliseconds (#802, SC-004).
-pub const VARIANTS_P50_BAR_MS: f64 = 100.0;
-
 /// Nearest-rank percentile over unsorted samples; `None` when empty.
 pub fn percentile(samples: &[f64], p: f64) -> Option<f64> {
     if samples.is_empty() {
@@ -943,22 +940,15 @@ impl Report {
             );
             let _ = writeln!(
                 o,
-                "- no category regresses beyond noise (no interval wholly below zero): {}",
+                "- no category regresses beyond noise (no interval wholly below zero): {}\n",
                 if regressions.is_empty() {
                     "**met**".to_string()
                 } else {
                     format!("**not met** ({})", regressions.join(", "))
                 }
             );
-            let _ = writeln!(
-                o,
-                "- p50 ≤ {VARIANTS_P50_BAR_MS:.0} ms: {}\n",
-                match vrun.latency_p50_ms {
-                    Some(v) if v <= VARIANTS_P50_BAR_MS => "**met**",
-                    Some(_) => "**not met**",
-                    None => "cannot be read (no latency)",
-                }
-            );
+            // Latency is reported above, not gated: variants are deliberate agent searches (#802,
+            // SC-004 dropped its p50 ceiling).
         }
     }
 
@@ -1455,12 +1445,15 @@ mod tests {
             md.contains("no interval wholly below zero): **met**"),
             "{md}"
         );
-        assert!(md.contains("p50 ≤ 100 ms: **met**"), "{md}");
+        assert!(
+            !md.contains("p50 ≤"),
+            "latency is reported, not gated: {md}"
+        );
         assert!(md.contains("p50 40 ms"), "{md}");
     }
 
     #[test]
-    fn variants_section_flags_a_regressing_category_and_a_slow_p50() {
+    fn variants_section_flags_a_regressing_category_and_does_not_gate_latency() {
         // Temporal regresses clearly; paraphrase does not move.
         let md = variants_report((0.8, 0.5), (0.5, 0.5), 150.0).render_markdown();
         assert!(
@@ -1468,7 +1461,11 @@ mod tests {
             "{md}"
         );
         assert!(md.contains("**not met** (temporal)"), "{md}");
-        assert!(md.contains("p50 ≤ 100 ms: **not met**"), "{md}");
+        assert!(md.contains("p50 150 ms"), "{md}");
+        assert!(
+            !md.contains("p50 ≤"),
+            "latency is reported, not gated: {md}"
+        );
     }
 
     #[test]

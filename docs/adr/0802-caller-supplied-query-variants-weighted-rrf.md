@@ -67,7 +67,8 @@ had nowhere to put rewrites it can write for free.
    file its row is *skipped*, a stale or leaking file aborts the run.
 10. **The report gains "Query variants vs `<base>`"** per variants config: per-category paired nDCG@k
     difference with its interval, p50/p95, and the merge-bar reading (paraphrase interval above zero; no
-    category wholly below zero; p50 <= 100 ms). Each variants config is read against the same config
+    category wholly below zero; p50/p95 are reported, not gated: the maintainer dropped the 100 ms
+    ceiling on 2026-11-19 because these are deliberate agent searches). Each variants config is read against the same config
     without variants (`lcg-passages-variants` against `lcg-passages`, `lcg-passages-hybrid-belief-variants`
     against `lcg-passages-hybrid-belief`). The H1/H2 "best `lcg-*`" selection excludes variants rows so
     those readings keep their meaning.
@@ -87,7 +88,47 @@ had nowhere to put rewrites it can write for free.
 
 - A caller that never sends `queries` sees no change.
 - Cost with N variants is one batched embed plus N+1 retrievals run concurrently (one connection each).
-- The merge bar (paraphrase improvement, no regression, p50 <= 100 ms) is measured on v2 with the committed
-  fixture. The first measurement, of the vector-only per-variant-weight design, missed it (decision 4);
-  the design here (full pipeline per query, fixed variant budget, belief once after fusion, concurrent
-  retrieval) has not been re-measured yet.
+- The merge bar (paraphrase improvement, no regression) is measured on v2 with the committed fixture; p50/p95
+  are reported, not gated. The first measurement, of the vector-only per-variant-weight design, missed it
+  (decision 4).
+
+## Known regression: multi-hop (measured 2026-11-19, head `87c85525`)
+
+The shipped design (full pipeline per query, fixed variant budget, belief once after fusion, concurrent
+retrieval) was measured on v2 with the committed fixture (BGE base v1.5, cassette replay), nDCG@10 with
+paired 95% intervals against each config's own base:
+
+| | overall | paraphrase | multi-hop | passage |
+|---|---|---|---|---|
+| vector (`lcg-passages-belief-variants`) | +0.011 (noise) | +0.029 (noise) | **-0.062 [-0.107, -0.026]** | **+0.117 [+0.020, +0.217]** |
+| hybrid (`lcg-passages-hybrid-belief-variants`) | +0.017 (noise) | **+0.082 [+0.017, +0.153]** | **-0.059 [-0.097, -0.027]** | **+0.112 [+0.032, +0.197]** |
+
+p50 is 140-143 ms against 26-29 ms for the bases. Multi-hop is the one category whose interval lies wholly
+below zero, so SC-003 is not met; the maintainer decided to ship regardless, with `queries` opt-in and the
+guidance below, and to re-measure with a regenerated fixture alongside #797's composite search.
+
+**Cause** (traced by re-fusing the real per-query lists for the five worst questions and the whole
+category; vector mode, belief off):
+
+- The loss comes mostly from the fusion. The variants paraphrase each other, so they all lift the same
+  generic "other company's supplier / uptime / contact" notes. Those sit at primary ranks 4-30. RRF scores
+  at ranks 1-10 differ by only about 15% (2/61 against 2/70), so a handful of agreeing votes, even at the
+  fixed 1.0 total budget, leapfrogs the primary's own top hits. Agreement among correlated rewrites is not
+  independent evidence. All 31 distractors that entered a losing question's top 10 were already in the
+  primary's top-30 pool; none came from variants alone, and 4.4 of 5 variants voted for each.
+- Multi-hop is hit hardest because the second-hop note is never named in the question, so
+  attribute-only variants match every company's note for that attribute equally. A single correct variant
+  can be outvoted.
+- Variants that drop the named entity are the secondary cause: 41% of multi-hop variants omit the anchor
+  entity, and about 10% of all variants carry placeholders (`[Name]`, `X%`). Dropping the entity does not
+  separate winning from losing questions on its own (the anchor survives in 54% of variants for losing
+  questions and 64% for the rest), which is why the fusion is the main cause.
+- A lower variant budget (0.5, 0.25), a one-vote cap and protecting the primary's top 3 each trade the
+  gains away without removing the loss.
+
+**Mitigations.** Planned: entity-preserving variants, from caller guidance (tool description, IPC
+reference) and the same rule in `query-variants.prompt.md`; the fixture will be regenerated and re-measured
+separately. Considered and not shipped: weighting variants by how weak the primary's top-1 cosine is
+(an offline re-fusion gave overall 0.602 against 0.574 for the primary alone and multi-hop -0.008, but it
+is in-sample, tuned on these 210 questions on the BGE cosine scale, and needs a held-out check). Variants
+should be treated as a recall-rescue candidate list, not as equal voters, in #797's composite search.

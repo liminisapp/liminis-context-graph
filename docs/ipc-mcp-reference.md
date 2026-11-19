@@ -930,6 +930,25 @@ Good variants are keywords the note itself would use, a likely name for the thin
 one-sentence hypothetical answer. Use them when a direct search came back thin or the question
 describes something rather than naming it.
 
+**Guidance for callers.**
+
+- **Keep the named entities.** Every variant must keep the question's named entities (people, projects,
+  policies, suppliers) and rephrase only the rest. A variant that drops the entity ("supplier uptime
+  guarantee percentage" for a question about Lumen Core's supplier) matches every company's note for that
+  attribute equally and pulls the right note down.
+- **No placeholders.** Do not send template answers such as `[supplier name]`, `[Name]` or `X%`; they add
+  a noise token that matches no note.
+- **Use variants where they help.** They help most for described-not-named lookups and for exact passage
+  lookups. Do not send them for multi-part questions whose entities are already explicit: on the v2
+  eval these lose to the plain search (see below).
+
+**Known regression.** On the v2 retrieval eval, with the committed fixture, variants lower multi-hop
+nDCG@10 by 0.062 [-0.107, -0.026] (vector) and 0.059 [-0.097, -0.027] (hybrid) against the same config
+without variants, while raising passage-lookup nDCG@10 by about 0.11 and, in hybrid mode, paraphrase by
+0.082 [+0.017, +0.153]. Overall the difference is within noise. `queries` is opt-in, so callers that do not
+send it are unaffected. The cause and the planned mitigation are in
+[ADR-0802](adr/0802-caller-supplied-query-variants-weighted-rrf.md).
+
 **Validation** (an error naming the broken rule; nothing is silently truncated):
 
 | Rule | Value |

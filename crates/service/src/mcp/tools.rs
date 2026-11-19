@@ -532,7 +532,13 @@ pub fn registry() -> Vec<ToolSpec> {
                            rather than naming it: the note that answers it often shares few \
                            words with the question. Good variants are keywords the note itself \
                            would use, a likely name for the thing described, and a \
-                           one-sentence hypothetical answer. Every variant runs the request's \
+                           one-sentence hypothetical answer. Every variant must keep the \
+                           question's named entities (people, projects, policies, suppliers) and \
+                           rephrase only the rest; do not send template answers with \
+                           placeholders such as \"[supplier name]\". Variants help most for \
+                           described-not-named lookups and exact passage lookups; do not send \
+                           them for multi-part questions whose entities are already explicit, \
+                           where they can pull the right notes down. Every variant runs the request's \
                            whole search (its `mode`, filters and `min_score`; in hybrid mode a \
                            variant's keywords reach BM25) and the rankings are fused into one \
                            list in which `query` always keeps at least two thirds of the \
@@ -551,7 +557,7 @@ pub fn registry() -> Vec<ToolSpec> {
                         "queries": {
                             "type": "array", "maxItems": 5,
                             "items": {"type": "string", "minLength": 1},
-                            "description": "Optional extra query variants, at most 5, each non-empty, at most 2000 characters in total. Use when a direct search came back thin or the question describes something rather than naming it. Good variants: keywords the note would use, a likely name for the thing described, a one-sentence hypothetical answer."
+                            "description": "Optional extra query variants, at most 5, each non-empty, at most 2000 characters in total. Use when a direct search came back thin or the question describes something rather than naming it. Good variants: keywords the note would use, a likely name for the thing described, a one-sentence hypothetical answer. Every variant must keep the question's named entities (people, projects, policies, suppliers); no placeholders like \"[supplier name]\". Do not send variants for multi-part questions whose entities are already explicit."
                         },
                         "num_results": {
                             "type": "integer", "minimum": 1, "maximum": 100, "default": 10,
@@ -2147,6 +2153,9 @@ mod tests {
             "keywords the note itself",
             "likely name",
             "hypothetical answer",
+            "named entities",
+            "placeholders",
+            "multi-part",
             "matched_queries",
         ] {
             assert!(

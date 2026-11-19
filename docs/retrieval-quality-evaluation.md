@@ -187,12 +187,17 @@ pipeline (vector, or BM25 + vector) and the per-query rankings are fused (primar
 sharing a total of 1). The report's "Query variants vs `<base>`" section, one per variants config
 (`lcg-passages-variants` against `lcg-passages`, `lcg-passages-hybrid-belief-variants` against
 `lcg-passages-hybrid-belief`), gives per-category paired nDCG@k differences with intervals, p50/p95, and the
-merge-bar reading: paraphrase interval above zero, no category wholly below zero, p50 at most 100 ms.
+merge-bar reading: paraphrase interval above zero, no category wholly below zero. Latency is reported, not gated: variants are deliberate agent searches.
 
 First v2 result (vector-only, per-variant weight 1, head `a0c7e95f`): variants lowered overall nDCG@10 from
 0.568 to 0.522 (paraphrase 0.150 to 0.085, multi-hop 0.662 to 0.552, p50 24 ms to 141 ms). That is why variants
-now run the request's whole pipeline, share a fixed weight budget and fuse concurrently (ADR-0802); it is not
-yet re-measured.
+now run the request's whole pipeline, share a fixed weight budget and fuse concurrently (ADR-0802).
+
+Second v2 result (head `87c85525`, that design): overall +0.011 (vector) and +0.017 (hybrid), within noise;
+passage +0.117 and +0.112, hybrid paraphrase +0.082 [+0.017, +0.153], and multi-hop -0.062 [-0.107, -0.026]
+(vector) and -0.059 [-0.097, -0.027] (hybrid). The multi-hop loss is a known regression with the committed
+fixture, caused mostly by correlated variants voting together for generic distractors; entity-preserving
+variants are the planned mitigation (ADR-0802).
 
 ## Caveats the report repeats
 

@@ -71,6 +71,13 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   and `lcg-passages-hybrid-belief-variants` configs, the `query-variants.jsonl` fixture with a
   verbatim-leak check, `lcg-eval retrieval-variants` (offline `--export-prompts` / `--replies`), and a
   variants report section.
+  **Known regression:** on the v2 eval, variants lower multi-hop nDCG@10 by 0.062 [-0.107, -0.026]
+  (vector) and 0.059 [-0.097, -0.027] (hybrid), with the committed fixture. The five variants paraphrase each
+  other, so their agreeing votes lift generic "other company's note" distractors above the primary's own top
+  hits; variants that drop a question's named entity make it worse. They help passage lookups (+0.11) and, in
+  hybrid mode, paraphrase (+0.082 [+0.017, +0.153]); overall is within noise. `queries` is opt-in. Callers
+  should keep every named entity in each variant, send no placeholders, and skip variants for multi-part
+  questions whose entities are explicit; entity-preserving variants are the planned mitigation (ADR-0802).
 
 - **Document mode: `knowledge_process_document` (write) and `knowledge_preview_chunks` (read)
   (#785, ADR-0785, slice 1 of #733).** Send a whole document as a completeness claim; the server
