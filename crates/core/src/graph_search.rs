@@ -1341,7 +1341,16 @@ fn expand(
             if far_ok.as_ref().is_some_and(|s| !s.contains(&fe.far_uuid)) {
                 continue;
             }
-            let citation_only = !own.is_empty() && own.iter().all(|e| !e.origin.is_corroborating());
+            // Judge corroboration over the producers that still count at `as_of`: an edge whose
+            // primary producer was corrected away but whose derived restatement is live is
+            // believed only on the derived page's word, so it must not rank or carry the walk
+            // (ADR-0752). Without filtering, every listed producer counts.
+            let surviving: Vec<&&EpisodePassage> = own
+                .iter()
+                .filter(|e| !p.believed_only || episode_live_at(e, t))
+                .collect();
+            let citation_only =
+                !surviving.is_empty() && surviving.iter().all(|e| !e.origin.is_corroborating());
             let rel = edge_relevance(
                 relevance(emb, &fe.edge.fact_embedding),
                 edge_bm25.get(&fe.edge.uuid).copied(),

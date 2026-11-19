@@ -56,6 +56,7 @@ const Q_BELIEF: &str = "Policy Desk decision";
 const Q_ORIGIN: &str = "Kestrel Labs rate";
 const Q_LEGACY: &str = "Old Ledger";
 const Q_BRIDGE: &str = "Heron Desk price";
+const Q_WREN: &str = "Wren Mill price";
 
 fn query_map() -> HashMap<String, Vec<f32>> {
     let mut m = HashMap::new();
@@ -63,7 +64,9 @@ fn query_map() -> HashMap<String, Vec<f32>> {
     multi[PRICE] = 0.8;
     multi[SUPPLY] = 0.3;
     m.insert(Q_MULTI.to_string(), multi);
-    for q in [Q_HUB, Q_DECAY, Q_BELIEF, Q_ORIGIN, Q_LEGACY, Q_BRIDGE] {
+    for q in [
+        Q_HUB, Q_DECAY, Q_BELIEF, Q_ORIGIN, Q_LEGACY, Q_BRIDGE, Q_WREN,
+    ] {
         m.insert(q.to_string(), axis(PRICE));
     }
     m.insert(Q_PARA.to_string(), axis(ROSTER));
@@ -504,6 +507,54 @@ fn build(c: &Conn<'_>, with_derived: bool) {
         "Heron Desk buys from Quill Partner at list price",
         axis(PRICE),
         &["ep-hd"],
+        T0,
+    );
+
+    // Corrected primary + live derived: Wren Mill -> Lark Yard was stated by a primary note that
+    // has since been corrected away, and is still restated by a live agent-written page. Lark
+    // Yard's own primary note never mentions Wren Mill.
+    entity(c, "wren", "Wren Mill", G, SUMMARY);
+    entity(c, "lark", "Lark Yard", G, SUMMARY);
+    episode(
+        c,
+        Ep {
+            uuid: "ep-wren-old",
+            content: "Wren Mill sources from Lark Yard.",
+            emb: axis(NOISE),
+            origin: None,
+            ingested: T0,
+            superseded: Some((T_CORR, "episode")),
+            mentions: &["wren", "lark"],
+        },
+    );
+    episode(
+        c,
+        Ep {
+            uuid: "ep-wren-d",
+            content: "Summary: Wren Mill sources from Lark Yard.",
+            emb: axis(NOISE),
+            origin: Some("derived"),
+            ingested: T0,
+            superseded: None,
+            mentions: &["wren", "lark"],
+        },
+    );
+    simple_ep(
+        c,
+        "ep-lark",
+        "Lark Yard price list.",
+        axis(NOISE),
+        &["lark"],
+    );
+    fact(
+        c,
+        "e-wren",
+        "wren",
+        "lark",
+        "SOURCES_FROM",
+        "Wren Mill sources from Lark Yard at list price",
+        axis(PRICE),
+        &["ep-wren-old", "ep-wren-d"],
         T0,
     );
 
@@ -999,6 +1050,56 @@ async fn derived_only_bridge_is_not_traversed_into_primary_passages() {
             "no result's path crosses the derived-only edge: {x}"
         );
     }
+}
+
+#[tokio::test]
+async fn edge_whose_only_live_producer_is_derived_is_citation_only() {
+    let fx = fixture();
+    // Believed now only on the derived page's word: its primary producer was corrected away.
+    let r = search(
+        &fx,
+        json!({"query": Q_WREN, "group_ids": [G], "num_results": 50, "stages": "expand"}),
+    )
+    .await;
+    assert!(
+        seed_uuids(&r).contains(&"wren".to_string()),
+        "{}",
+        r["seeds"]
+    );
+    assert!(
+        find(&r, "f:e-wren").is_none(),
+        "an edge whose only live producer is derived is never ranked: {:?}",
+        keys(&r)
+    );
+    assert!(
+        find(&r, "p:ep-lark").is_none(),
+        "it carries the walk nowhere, so Lark Yard's note gains no rank: {:?}",
+        keys(&r)
+    );
+    for x in results(&r) {
+        assert!(
+            !path_edges(x).contains(&"e-wren".to_string()),
+            "no result's path crosses it: {x}"
+        );
+    }
+
+    // Before the correction the primary producer is live, so the same edge ranks and walks.
+    let r = search(
+        &fx,
+        json!({"query": Q_WREN, "group_ids": [G], "num_results": 50, "stages": "expand",
+               "as_of": "2026-02-01T00:00:00Z"}),
+    )
+    .await;
+    assert!(
+        find(&r, "f:e-wren").is_some(),
+        "with its primary producer live the edge is an ordinary fact: {:?}",
+        keys(&r)
+    );
+    assert!(
+        find(&r, "p:ep-lark").is_some(),
+        "and it carries the walk to Lark Yard: {:?}",
+        keys(&r)
+    );
 }
 
 // ── Story 7: one model call ───────────────────────────────────────────────────
