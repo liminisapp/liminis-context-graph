@@ -610,12 +610,22 @@ fn apply_belief_ranking(
     conn: &crate::db::Conn,
     rows: Vec<PassageResult>,
 ) -> Result<Vec<PassageResult>, Error> {
+    apply_belief_ranking_at(conn, rows, chrono::Utc::now().timestamp_micros())
+}
+
+/// [`apply_belief_ranking`] evaluated at `now_us` rather than the wall clock, for reads that take
+/// an `as_of` (`knowledge_graph_search`'s plain-passage list, issue #797).
+pub(crate) fn apply_belief_ranking_at(
+    conn: &crate::db::Conn,
+    rows: Vec<PassageResult>,
+    now_us: i64,
+) -> Result<Vec<PassageResult>, Error> {
     if rows.len() < 2 {
         return Ok(rows);
     }
     let uuids: Vec<String> = rows.iter().map(|r| r.uuid.clone()).collect();
     let supersession = conn.get_episode_supersession(&uuids)?;
-    let facts = belief_facts(&rows, &supersession, chrono::Utc::now().timestamp_micros());
+    let facts = belief_facts(&rows, &supersession, now_us);
     let anchors = belief_anchor_groups(&facts);
     if anchors.is_empty() {
         return Ok(rows);

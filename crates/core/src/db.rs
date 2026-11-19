@@ -4710,6 +4710,86 @@ impl<'db> Conn<'db> {
         group_ids: Option<&[&str]>,
         row_cap: usize,
     ) -> Result<(Vec<FrontierEdge>, bool), Error> {
+        self.expand_frontier_impl(frontier, group_ids, row_cap, None)
+    }
+
+    /// [`Self::expand_frontier`] that scores each fact against `query` inside the query
+    /// (`array_cosine_similarity`) and returns that as [`FrontierEdge::fact_similarity`] instead
+    /// of shipping every `fact_embedding` back: the frontier is the hot part of graph-aware
+    /// search, and the embeddings dominated its cost. `fact_embedding` is left empty.
+    ///
+    /// lbug's `array_cosine_similarity` fails the whole query, rather than yielding `NULL`, on a
+    /// stored vector of the wrong length (an unembedded legacy fact) or a query of another
+    /// dimension. So on any error this falls back to the unscored lookup and computes the cosine
+    /// in Rust: same rows, same order, same scores, only slower. A fact that cannot be scored
+    /// (empty or zero embedding) gets `None`.
+    pub fn expand_frontier_scored(
+        &self,
+        frontier: &[String],
+        group_ids: Option<&[&str]>,
+        row_cap: usize,
+        query: &[f32],
+    ) -> Result<(Vec<FrontierEdge>, bool), Error> {
+        let (mut rows, truncated) =
+            self.expand_frontier_impl(frontier, group_ids, row_cap, Some(query))?;
+        let mut uuids: Vec<String> = rows.iter().map(|r| r.edge.uuid.clone()).collect();
+        uuids.sort();
+        uuids.dedup();
+        let sims = self.fact_similarities(&uuids, query)?;
+        for r in &mut rows {
+            r.fact_similarity = sims.get(&r.edge.uuid).copied();
+        }
+        Ok((rows, truncated))
+    }
+
+    /// Cosine of each fact's embedding against `query`, in one query that binds and casts the
+    /// query vector once (the per-query cost of binding a vector dominates the frontier lookups,
+    /// so the frontier rows themselves carry none). On an lbug error — a query of another
+    /// dimension — falls back to fetching the embeddings and computing it in Rust. Facts that
+    /// cannot be scored are absent from the map.
+    pub fn fact_similarities(
+        &self,
+        uuids: &[String],
+        query: &[f32],
+    ) -> Result<HashMap<String, f64>, Error> {
+        if uuids.is_empty() || query.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let cypher = format!(
+            "WITH CAST($emb, 'FLOAT[{dim}]') AS q \
+             MATCH (rn:RelatesToNode_) WHERE rn.uuid IN $uuids \
+             RETURN rn.uuid, array_cosine_similarity(rn.fact_embedding, q)",
+            dim = query.len()
+        );
+        let params = serde_json::json!({ "uuids": uuids, "emb": query });
+        if let Ok(rows) = self.query_params(&cypher, params) {
+            return Ok(rows
+                .into_iter()
+                .filter_map(|r| Some((value_as_string(&r[0]), value_as_finite_f64(&r[1])?)))
+                .collect());
+        }
+        let rows = self.query_params(
+            "MATCH (rn:RelatesToNode_) WHERE rn.uuid IN $uuids RETURN rn.uuid, rn.fact_embedding",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let s = rust_cosine(query, &value_as_float_array(&r[1]))?;
+                Some((value_as_string(&r[0]), s))
+            })
+            .collect())
+    }
+
+    fn expand_frontier_impl(
+        &self,
+        frontier: &[String],
+        group_ids: Option<&[&str]>,
+        row_cap: usize,
+        query: Option<&[f32]>,
+    ) -> Result<(Vec<FrontierEdge>, bool), Error> {
+        // An empty query vector scores nothing: take the unscored path.
+        let query = query.filter(|q| !q.is_empty());
         if frontier.is_empty() || row_cap == 0 {
             return Ok((vec![], false));
         }
@@ -4717,11 +4797,18 @@ impl<'db> Conn<'db> {
             Some(_) => "AND rn.group_id IN $gids AND n.group_id IN $gids",
             None => "",
         };
-        let ret = "RETURN rn.uuid, rn.name, rn.fact, rn.group_id, rn.episodes, rn.warrant, \
-                   rn.fact_embedding, rn.valid_at, rn.invalid_at, rn.attributes, \
-                   rn.relation_type, rn.ingested_at, rn.created_at, rn.valid_at_source, \
-                   c.uuid, n.uuid, n.name, n.group_id, n.labels \
-                   ORDER BY rn.uuid ASC, n.uuid ASC LIMIT $cap";
+        // Scored mode ships no vector: the caller scores every row in one later query.
+        let fact_col = match query {
+            Some(_) => "NULL",
+            None => "rn.fact_embedding",
+        };
+        let ret = format!(
+            "RETURN rn.uuid, rn.name, rn.fact, rn.group_id, rn.episodes, rn.warrant, \
+             {fact_col}, rn.valid_at, rn.invalid_at, rn.attributes, \
+             rn.relation_type, rn.ingested_at, rn.created_at, rn.valid_at_source, \
+             c.uuid, n.uuid, n.name, n.group_id, n.labels \
+             ORDER BY rn.uuid ASC, n.uuid ASC LIMIT $cap"
+        );
         let out_sql = format!(
             "MATCH (c:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(n:Entity) \
              WHERE c.uuid IN $frontier {gid_filter} {ret}"
@@ -4763,7 +4850,11 @@ impl<'db> Conn<'db> {
                     group_id: value_as_string(&r[3]),
                     episodes: value_as_str_list(&r[4]),
                     warrant: value_as_optional_string(&r[5]),
-                    fact_embedding: value_as_float_array(&r[6]),
+                    fact_embedding: if query.is_some() {
+                        vec![]
+                    } else {
+                        value_as_float_array(&r[6])
+                    },
                     valid_at: value_as_optional_timestamp_str(&r[7]),
                     invalid_at: value_as_optional_timestamp_str(&r[8]),
                     attributes: value_as_string(&r[9]),
@@ -4782,6 +4873,7 @@ impl<'db> Conn<'db> {
                     far_name: value_as_string(&r[16]),
                     far_group_id: value_as_string(&r[17]),
                     far_merged: value_as_str_list(&r[18]).iter().any(|l| l == "Merged"),
+                    fact_similarity: None,
                 });
             }
         }
@@ -4797,13 +4889,44 @@ impl<'db> Conn<'db> {
         uuids: &[String],
         with_embedding: bool,
     ) -> Result<Vec<EpisodePassage>, Error> {
+        self.get_episode_passages_impl(uuids, with_embedding, None)
+    }
+
+    /// [`Self::get_episode_passages`] with each passage's cosine similarity to `query` computed
+    /// in the query ([`EpisodePassage::similarity`]) rather than its `content_embedding` returned
+    /// (left empty). Falls back to computing it in Rust when the in-query form errors, as
+    /// [`Self::expand_frontier_scored`] does. `None` when it cannot be scored.
+    pub fn get_episode_passages_scored(
+        &self,
+        uuids: &[String],
+        query: &[f32],
+    ) -> Result<Vec<EpisodePassage>, Error> {
+        if let Ok(r) = self.get_episode_passages_impl(uuids, false, Some(query)) {
+            return Ok(r);
+        }
+        let mut rows = self.get_episode_passages_impl(uuids, true, None)?;
+        for r in &mut rows {
+            r.similarity = rust_cosine(query, &r.content_embedding);
+            r.content_embedding = vec![];
+        }
+        Ok(rows)
+    }
+
+    fn get_episode_passages_impl(
+        &self,
+        uuids: &[String],
+        with_embedding: bool,
+        query: Option<&[f32]>,
+    ) -> Result<Vec<EpisodePassage>, Error> {
+        // An empty query vector scores nothing: take the unscored path.
+        let query = query.filter(|q| !q.is_empty());
         if uuids.is_empty() {
             return Ok(vec![]);
         }
-        let emb_col = if with_embedding {
-            ", ep.content_embedding"
-        } else {
-            ""
+        let emb_col = match query {
+            Some(q) => format!(", {}", cosine_col("ep.content_embedding", q.len())),
+            None if with_embedding => ", ep.content_embedding".to_string(),
+            None => String::new(),
         };
         let cypher = format!(
             "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids \
@@ -4813,7 +4936,11 @@ impl<'db> Conn<'db> {
              ep.doc_id, ep.revision_id, ep.revision_committed_at, ep.ingested_at{emb_col} \
              ORDER BY ep.uuid"
         );
-        let rows = self.query_params(&cypher, serde_json::json!({ "uuids": uuids }))?;
+        let mut params = serde_json::json!({ "uuids": uuids });
+        if let Some(q) = query {
+            params["emb"] = serde_json::json!(q);
+        }
+        let rows = self.query_params(&cypher, params)?;
         let opt_us = |v: &lbug::Value| match v {
             lbug::Value::Null(_) => None,
             other => Some(value_as_timestamp_micros(other)),
@@ -4853,11 +4980,12 @@ impl<'db> Conn<'db> {
                         revision_committed_at_us: opt_us(&r[15]),
                     },
                     ingested_at_us: opt_us(&r[16]),
-                    content_embedding: if with_embedding {
+                    content_embedding: if with_embedding && query.is_none() {
                         value_as_float_array(&r[17])
                     } else {
                         vec![]
                     },
+                    similarity: query.and_then(|_| value_as_finite_f64(&r[17])),
                 }
             })
             .collect())
@@ -6155,6 +6283,8 @@ pub struct FrontierEdge {
     pub far_name: String,
     pub far_group_id: String,
     pub far_merged: bool,
+    /// Cosine of the fact embedding against the query, from [`Conn::expand_frontier_scored`].
+    pub fact_similarity: Option<f64>,
 }
 
 /// One episode as graph-aware search sees it (issue #797): the passage fields, origin,
@@ -6166,6 +6296,35 @@ pub struct EpisodePassage {
     pub supersession: crate::belief::EpisodeSupersession,
     pub ingested_at_us: Option<i64>,
     pub content_embedding: Vec<f32>,
+    /// Cosine of the content embedding against the query, from
+    /// [`Conn::get_episode_passages_scored`].
+    pub similarity: Option<f64>,
+}
+
+/// A Cypher expression for the cosine of `col` (a stored `FLOAT[dim]` embedding) against the
+/// `$emb` parameter, the form [`Conn::entity_mentions_ranked`] uses. `dim` is an integer, so
+/// formatting it in is injection-safe.
+fn cosine_col(col: &str, dim: usize) -> String {
+    format!("array_cosine_similarity({col}, CAST($emb, 'FLOAT[{dim}]'))")
+}
+
+/// [`cosine_similarity`] as a finite `f64`; `None` for empty, mismatched or degenerate vectors.
+fn rust_cosine(a: &[f32], b: &[f32]) -> Option<f64> {
+    if a.is_empty() || a.len() != b.len() {
+        return None;
+    }
+    let s = cosine_similarity(a, b) as f64;
+    s.is_finite().then_some(s)
+}
+
+/// A numeric value as a finite `f64`; `None` for `NULL`, non-numeric or non-finite.
+fn value_as_finite_f64(v: &lbug::Value) -> Option<f64> {
+    let x = match v {
+        lbug::Value::Double(x) => *x,
+        lbug::Value::Float(x) => *x as f64,
+        _ => return None,
+    };
+    x.is_finite().then_some(x)
 }
 
 /// The columns an origin-stamp rule selects on (issue #752).
@@ -8051,5 +8210,63 @@ mod graph_search_primitive_tests {
         let no_emb = c.get_episode_passages(&["p1".into()], false).unwrap();
         assert!(no_emb[0].content_embedding.is_empty());
         assert_eq!(no_emb[0].passage.source_description, "p1.md");
+        // Scored: the cosine is computed in the query and no embedding is shipped back.
+        let mut q = vec![0.0f32; DIM];
+        q[0] = 1.0;
+        let scored = c.get_episode_passages_scored(&["p1".into()], &q).unwrap();
+        assert!(scored[0].content_embedding.is_empty());
+        let want = 1.0 / (DIM as f64).sqrt(); // cos([1,0,..], [.25; DIM])
+        let got = scored[0].similarity.expect("a similarity");
+        assert!((got - want).abs() < 1e-5, "{got} vs {want}");
+        assert_eq!(scored[0].passage.source_description, "p1.md");
+        // A query of another dimension fails in lbug; the fallback scores None, not an error.
+        let other = c
+            .get_episode_passages_scored(&["p1".into()], &[1.0, 0.0])
+            .unwrap();
+        assert_eq!(other.len(), 1);
+        assert!(other[0].similarity.is_none());
+        // An empty query vector falls back to the unscored lookup.
+        let empty = c.get_episode_passages_scored(&["p1".into()], &[]).unwrap();
+        assert!(empty[0].similarity.is_none());
+    }
+
+    #[test]
+    fn expand_frontier_scored_returns_fact_cosines_not_embeddings() {
+        let (_d, db) = graph();
+        let c = db.connect().unwrap();
+        let mut q = vec![0.0f32; DIM];
+        q[1] = 2.0;
+        let (plain, _) = c.expand_frontier(&["a".into()], None, 100).unwrap();
+        let (scored, truncated) = c
+            .expand_frontier_scored(&["a".into()], None, 100, &q)
+            .unwrap();
+        assert!(!truncated);
+        // Same rows, in the same order.
+        let ids = |r: &[FrontierEdge]| -> Vec<(String, String)> {
+            r.iter()
+                .map(|x| (x.edge.uuid.clone(), x.far_uuid.clone()))
+                .collect()
+        };
+        assert_eq!(ids(&plain), ids(&scored));
+        let want = 1.0 / (DIM as f64).sqrt(); // cos([0,2,0..], [.5; DIM])
+        for r in &scored {
+            assert!(r.edge.fact_embedding.is_empty());
+            let got = r.fact_similarity.expect("a similarity");
+            assert!(
+                (got - want).abs() < 1e-5,
+                "{}: {got} vs {want}",
+                r.edge.uuid
+            );
+        }
+        assert!(plain.iter().all(|r| r.fact_similarity.is_none()));
+        // A query of another dimension makes the in-query form fail; the fallback still returns
+        // every row, in order, unscored.
+        let (fallback, _) = c
+            .expand_frontier_scored(&["a".into()], None, 100, &[1.0, 0.0])
+            .unwrap();
+        assert_eq!(ids(&plain), ids(&fallback));
+        assert!(fallback
+            .iter()
+            .all(|r| r.fact_similarity.is_none() && r.edge.fact_embedding.is_empty()));
     }
 }

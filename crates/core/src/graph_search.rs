@@ -25,11 +25,12 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::Serialize;
 
 use crate::belief::{self, BeliefAnnotation, SupersessionCause, SupersessionInfo};
-use crate::db::{compute_lookup_key, cosine_similarity, Conn, Db, EpisodePassage, FrontierEdge};
+use crate::db::{compute_lookup_key, Conn, Db, EpisodePassage, FrontierEdge};
 use crate::embedder::{EmbedRole, Embedder};
 use crate::error::Error;
 use crate::origin::Origin;
@@ -77,6 +78,18 @@ pub const PASSAGE_CANDIDATE_CAP: usize = 300;
 pub const MENTIONS_PER_ENTITY: usize = 50;
 /// Most hub entities whose mentions are fetched (one ranked query each), best score first.
 pub const MAX_HUB_MENTION_QUERIES: usize = 10;
+/// Extra seeds taken from the top of the summary-vector list on relative evidence (see the seed
+/// stage), beyond [`SEED_CAP`]. Tuned on v2 (#797 steer, 2026-11-19).
+pub const SUMMARY_SEEDS: usize = 3;
+/// How far below the best summary similarity a summary-vector seed may be.
+pub const SUMMARY_SEED_MARGIN: f64 = 0.03;
+/// Exponent on a supporting passage's source (path or seed) score in list (a):
+/// `source_score^SUPPORT_SOURCE_EXP × similarity`. At 1 a weak seed's notes could not outrank a
+/// strong seed's, so a paraphrase target seeded only by its summary (score ≈ 0.3) lost its own,
+/// most query-similar note to a generic seed's digest mentions; at 0.25 the passage's own
+/// similarity decides, and the path only tilts it. Tuned on v2.
+pub const SUPPORT_SOURCE_EXP: f64 = 0.25;
+
 /// Largest accepted `num_results`.
 pub const MAX_NUM_RESULTS: usize = 100;
 
@@ -124,6 +137,8 @@ pub struct GraphSearchParams {
     pub believed_only: bool,
     pub as_of_us: i64,
     pub stages: Stages,
+    /// Report every seed candidate and why it was admitted or rejected (`seed_trace`).
+    pub explain: bool,
 }
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -239,6 +254,57 @@ pub struct GraphSearchResult {
     pub evidence: GraphEvidence,
 }
 
+/// One seed candidate and the admission decision on it (`explain: true`). Ranks are 1-based
+/// positions in each candidate list; a list that did not return the entity is omitted.
+#[derive(Debug, Clone, Serialize)]
+pub struct SeedCandidate {
+    pub uuid: String,
+    pub name: String,
+    pub kind: String,
+    /// Fused RRF score over the four candidate lists.
+    pub rrf_score: f64,
+    pub exact_name: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bm25_rank: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_vector_rank: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_vector_rank: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name_similarity: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_similarity: Option<f64>,
+    /// Admitted as a seed (within the cap and every filter).
+    pub seeded: bool,
+    /// Why: `exact_name`, `bm25_rank`, `vector` or `vector_agreement` when admitted;
+    /// `no_evidence`, `merged`, `no_row`, `origin_filter` or `seed_cap` when not.
+    pub reason: &'static str,
+}
+
+/// Wall-clock milliseconds per stage of one request. Not part of the ranking: two identical
+/// requests return identical results but, in general, different timings.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StageTimings {
+    pub embed: f64,
+    pub seeds: f64,
+    pub expand: f64,
+    pub supporting: f64,
+    pub passages: f64,
+    pub fusion: f64,
+    pub total: f64,
+}
+
+fn ms(d: std::time::Duration) -> f64 {
+    (d.as_secs_f64() * 100_000.0).round() / 100.0
+}
+
+/// Milliseconds since `clock`, restarting it.
+fn lap(clock: &mut Instant) -> f64 {
+    let d = ms(clock.elapsed());
+    *clock = Instant::now();
+    d
+}
+
 /// A cap that truncated the walk or a candidate pool.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Truncation {
@@ -250,8 +316,9 @@ pub struct Truncation {
 #[derive(Debug, Clone, Serialize)]
 pub struct GraphSearchStats {
     pub stages: &'static str,
-    /// `vector`: list (b) uses `knowledge_search_passages`' default ranking. Hybrid passage search
-    /// (#789) exists but is opt-in, measured below vector on v2 (ADR-0789).
+    /// `vector_belief`: list (b) is `knowledge_search_passages` with `mode: "vector"` and
+    /// `belief_aware: true` (#789), the best passage list measured on v2, with belief evaluated at
+    /// `as_of`.
     pub passage_mode: &'static str,
     pub believed_only: bool,
     pub as_of: String,
@@ -264,6 +331,7 @@ pub struct GraphSearchStats {
     pub truncated: bool,
     pub truncations: Vec<Truncation>,
     pub no_seeds: bool,
+    pub timings_ms: StageTimings,
 }
 
 /// The `knowledge_graph_search` response (ADR-0020 envelope plus `seeds` and `stats`).
@@ -273,6 +341,9 @@ pub struct GraphSearchResponse {
     pub count: usize,
     pub seeds: Vec<SeedEvidence>,
     pub stats: GraphSearchStats,
+    /// Every seed candidate and its admission decision; present only with `explain: true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed_trace: Option<Vec<SeedCandidate>>,
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
@@ -288,12 +359,17 @@ pub async fn graph_search(
         // `group_ids: []` matches no group (#413): nothing to embed or look up.
         return Ok(empty_response(&params, 0));
     }
+    let t0 = Instant::now();
     let embedding = embedder.embed(&params.query, EmbedRole::Query).await?;
-    tokio::task::spawn_blocking(move || -> Result<GraphSearchResponse, Error> {
+    let embed = t0.elapsed();
+    let mut r = tokio::task::spawn_blocking(move || -> Result<GraphSearchResponse, Error> {
         let conn = db.connect()?;
         run(&conn, &params, &embedding)
     })
-    .await?
+    .await??;
+    r.stats.timings_ms.embed = ms(embed);
+    r.stats.timings_ms.total = ms(t0.elapsed());
+    Ok(r)
 }
 
 fn empty_response(p: &GraphSearchParams, embed_calls: usize) -> GraphSearchResponse {
@@ -302,13 +378,14 @@ fn empty_response(p: &GraphSearchParams, embed_calls: usize) -> GraphSearchRespo
         count: 0,
         seeds: vec![],
         stats: new_stats(p, embed_calls),
+        seed_trace: p.explain.then(Vec::new),
     }
 }
 
 fn new_stats(p: &GraphSearchParams, embed_calls: usize) -> GraphSearchStats {
     GraphSearchStats {
         stages: p.stages.as_str(),
-        passage_mode: "vector",
+        passage_mode: "vector_belief",
         believed_only: p.believed_only,
         as_of: belief::format_us(p.as_of_us),
         embed_calls,
@@ -320,6 +397,7 @@ fn new_stats(p: &GraphSearchParams, embed_calls: usize) -> GraphSearchStats {
         truncated: false,
         truncations: vec![],
         no_seeds: true,
+        timings_ms: StageTimings::default(),
     }
 }
 
@@ -399,16 +477,6 @@ pub fn fts_terms(query: &str) -> String {
         .filter(|t| !t.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Cosine similarity clamped to `[0, 1]`; empty, mismatched or non-finite inputs score 0.
-fn relevance(query: &[f32], v: &[f32]) -> f64 {
-    let s = cosine_similarity(query, v) as f64;
-    if s.is_finite() {
-        s.max(0.0)
-    } else {
-        0.0
-    }
 }
 
 /// A fact's relevance: cosine of its embedding plus a bonus for its rank in the global fact
@@ -608,7 +676,9 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
     let list_cap = (3 * k).max(30);
 
     // ── Stage 1: seeds ──
-    let seeds = seed_stage(conn, p, emb, gids, &fts_q, &mut st)?;
+    let mut clock = Instant::now();
+    let (seeds, seed_trace) = seed_stage(conn, p, emb, gids, &fts_q, &mut st)?;
+    st.timings_ms.seeds = lap(&mut clock);
     st.seeds = seeds.len();
     st.no_seeds = seeds.is_empty();
 
@@ -648,6 +718,7 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
         )?;
     }
     st.expanded_edges = facts.len();
+    st.timings_ms.expand = lap(&mut clock);
 
     // ── List (c): facts ──
     let mut fact_order: Vec<(&String, &FactHit)> =
@@ -720,7 +791,7 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
         vec![]
     } else {
         st.db_queries += 1;
-        conn.get_episode_passages(&cand_uuids, true)?
+        conn.get_episode_passages_scored(&cand_uuids, emb)?
     };
     // Passage rows and their query similarity, for every passage any list may return.
     let mut passages: HashMap<String, (EpisodePassage, f64)> = HashMap::new();
@@ -739,8 +810,8 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
         if !admits_support {
             continue;
         }
-        let sim = relevance(emb, &ep.content_embedding);
-        let score = sources[&ep.passage.uuid].score * sim;
+        let sim = ep.similarity.unwrap_or(0.0).max(0.0);
+        let score = sources[&ep.passage.uuid].score.powf(SUPPORT_SOURCE_EXP) * sim;
         list_support.push((ep.passage.uuid.clone(), score));
         passages.insert(ep.passage.uuid.clone(), (ep, sim));
     }
@@ -750,6 +821,8 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
         .into_iter()
         .map(|(u, s)| (format!("p:{u}"), s))
         .collect();
+
+    st.timings_ms.supporting = lap(&mut clock);
 
     // ── List (b): plain passages ──
     let mut list_plain: Vec<(String, f64)> = Vec::new();
@@ -770,6 +843,14 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
             h.score = 1.0 - h.score;
         }
         hits.retain(|h| h.score.is_finite());
+        // Belief-aware ranking (#789, `belief_aware: true`), evaluated at `as_of`: a derived page
+        // ranks below the primary note it cites, a superseded passage below its successor. It runs
+        // over the whole over-drawn candidate set before the liveness filter and the cut, as
+        // `knowledge_search_passages` does, so a demoted passage is replaced, not just reshuffled.
+        if hits.len() > 1 {
+            st.db_queries += 1;
+        }
+        let hits = crate::search::apply_belief_ranking_at(conn, hits, t)?;
         let uuids: Vec<String> = hits.iter().map(|h| h.uuid.clone()).collect();
         let rows = if uuids.is_empty() {
             vec![]
@@ -805,6 +886,8 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
                 .or_insert_with(|| (ep.clone(), h.score));
         }
     }
+
+    st.timings_ms.passages = lap(&mut clock);
 
     // ── Stage 4: fusion ──
     let named: Vec<(&'static str, &Vec<(String, f64)>)> = match p.stages {
@@ -957,11 +1040,13 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
     }
 
     let count = results.len();
+    st.timings_ms.fusion = lap(&mut clock);
     Ok(GraphSearchResponse {
         results,
         count,
         seeds: seeds.iter().map(|s| s.evidence.clone()).collect(),
         stats: st,
+        seed_trace,
     })
 }
 
@@ -973,7 +1058,7 @@ fn seed_stage(
     gids: Option<&[&str]>,
     fts_q: &str,
     st: &mut GraphSearchStats,
-) -> Result<Vec<Seed>, Error> {
+) -> Result<(Vec<Seed>, Option<Vec<SeedCandidate>>), Error> {
     let bm25 = if fts_q.is_empty() {
         vec![]
     } else {
@@ -1071,12 +1156,19 @@ fn seed_stage(
         .filter_map(|h| best_vec(&h.raw))
         .fold(f64::NEG_INFINITY, f64::max);
 
-    let mut admitted = Vec::new();
-    for h in fused {
+    // Admission. `decision` records why each candidate was (or was not) seeded, for the trace;
+    // a later stage may overwrite an earlier verdict (e.g. `no_evidence` → `summary_vector`).
+    let mut decision: HashMap<String, (&'static str, bool)> = HashMap::new();
+    let by_uuid: HashMap<&str, &crate::search::FusedHit> =
+        fused.iter().map(|h| (h.uuid.as_str(), h)).collect();
+    let mut admitted: Vec<(crate::search::FusedHit, EntityRow, &'static str)> = Vec::new();
+    for h in &fused {
         let Some(row) = rows.get(&h.uuid) else {
+            decision.insert(h.uuid.clone(), ("no_row", false));
             continue;
         };
         if row.labels.iter().any(|l| l == "Merged") {
+            decision.insert(h.uuid.clone(), ("merged", false));
             continue;
         }
         let exact_hit = h.raw[0].is_some();
@@ -1085,26 +1177,147 @@ fn seed_stage(
             .is_some_and(|r| *r < SEED_BM25_RANK);
         let vector = best_vec(&h.raw)
             .is_some_and(|s| s >= SEED_SIM_FLOOR && s >= global_best - SEED_SIM_MARGIN);
-        if exact_hit || lexical || vector {
-            admitted.push((h, row.clone()));
-        }
+        let reason = if exact_hit {
+            "exact_name"
+        } else if lexical {
+            "bm25_rank"
+        } else if vector {
+            "vector"
+        } else {
+            decision.insert(h.uuid.clone(), ("no_evidence", false));
+            continue;
+        };
+        admitted.push((h.clone(), row.clone(), reason));
     }
 
     // `origins`: a seed needs a matching live mention (an asserted entity counts as primary).
-    if let Some(filter) = p.origins.as_deref() {
-        let uuids: Vec<String> = admitted.iter().map(|(h, _)| h.uuid.clone()).collect();
-        if !uuids.is_empty() {
+    let origin_ok =
+        |uuids: Vec<String>, st: &mut GraphSearchStats| -> Result<Option<HashSet<String>>, Error> {
+            let Some(filter) = p.origins.as_deref() else {
+                return Ok(None);
+            };
+            if uuids.is_empty() {
+                return Ok(Some(HashSet::new()));
+            }
             st.db_queries += 1;
             let sup = crate::origin_reads::entity_support(conn, &uuids, Some(filter), p.as_of_us)?;
-            admitted.retain(|(h, _)| sup.get(&h.uuid).is_some_and(|s| s.matches));
-        }
+            Ok(Some(
+                sup.into_iter()
+                    .filter(|(_, s)| s.matches)
+                    .map(|(u, _)| u)
+                    .collect(),
+            ))
+        };
+    if let Some(ok) = origin_ok(
+        admitted.iter().map(|(h, _, _)| h.uuid.clone()).collect(),
+        st,
+    )? {
+        admitted.retain(|(h, _, _)| {
+            let keep = ok.contains(&h.uuid);
+            if !keep {
+                decision.insert(h.uuid.clone(), ("origin_filter", false));
+            }
+            keep
+        });
+    }
+    for (h, _, _) in admitted.iter().skip(SEED_CAP) {
+        decision.insert(h.uuid.clone(), ("seed_cap", false));
     }
     admitted.truncate(SEED_CAP);
 
-    let top = admitted.first().map_or(1.0, |(h, _)| h.rrf_score);
-    Ok(admitted
+    // Summary-vector seeds, on relative evidence. A role description ("the rule covering new-hire
+    // induction") names nothing, so its entity matches only through its summary: one list, a low
+    // fused score, no BM25 hit. On v2 such entities sit at the top of the summary list yet lost
+    // every one of the slots above to generic concept entities that also match BM25 on common
+    // words. So up to SUMMARY_SEEDS more seeds are taken in summary-list order, each within
+    // SUMMARY_SEED_MARGIN of the best summary similarity *and* at least that margin above the
+    // list's median. Both tests are relative to the list, never an absolute cosine floor (whose
+    // right value depends on the embedder). The second is what keeps ANN filler out: a query that
+    // matches no summary well (#613) yields a flat list whose best barely clears its median, so
+    // nothing qualifies.
+    let (quota, margin) = (SUMMARY_SEEDS, SUMMARY_SEED_MARGIN);
+    if quota > 0 {
+        let best_sum = sum_vec.first().and_then(|(_, d)| sim(Some(*d)));
+        let median_sum = {
+            let mut v: Vec<f64> = sum_vec.iter().filter_map(|(_, d)| sim(Some(*d))).collect();
+            v.sort_by(|a, b| a.total_cmp(b));
+            v.get(v.len() / 2).copied()
+        };
+        let seeded: HashSet<String> = admitted.iter().map(|(h, _, _)| h.uuid.clone()).collect();
+        let pool: Vec<String> = sum_vec
+            .iter()
+            .filter(|(u, d)| {
+                !seeded.contains(u)
+                    && rows
+                        .get(u)
+                        .is_some_and(|r| !r.labels.iter().any(|l| l == "Merged"))
+                    && sim(Some(*d)).is_some_and(|s| {
+                        best_sum.is_some_and(|b| s >= b - margin)
+                            && median_sum.is_some_and(|m| s >= m + margin)
+                    })
+            })
+            .map(|(u, _)| u.clone())
+            .collect();
+        let ok = origin_ok(pool.clone(), st)?;
+        let mut taken = 0;
+        for u in pool {
+            if taken == quota {
+                break;
+            }
+            if ok.as_ref().is_some_and(|ok| !ok.contains(&u)) {
+                decision.insert(u, ("origin_filter", false));
+                continue;
+            }
+            let h = by_uuid[u.as_str()];
+            admitted.push(((*h).clone(), rows[&u].clone(), "summary_vector"));
+            taken += 1;
+        }
+    }
+
+    let trace = p.explain.then(|| {
+        let rank_in = |l: &[(String, f64)]| -> HashMap<String, usize> {
+            l.iter()
+                .enumerate()
+                .map(|(i, (u, _))| (u.clone(), i + 1))
+                .collect()
+        };
+        let (name_rank, sum_rank) = (rank_in(&name_vec), rank_in(&sum_vec));
+        for (h, _, reason) in &admitted {
+            decision.insert(h.uuid.clone(), (reason, true));
+        }
+        // Candidate order: fused RRF score, uuid tie-break (deterministic).
+        let mut t: Vec<SeedCandidate> = fused
+            .iter()
+            .map(|h| {
+                let row = rows.get(&h.uuid);
+                let (reason, seeded) = decision
+                    .get(&h.uuid)
+                    .copied()
+                    .unwrap_or(("no_evidence", false));
+                SeedCandidate {
+                    uuid: h.uuid.clone(),
+                    name: row.map(|r| r.name.clone()).unwrap_or_default(),
+                    kind: row.map(|r| r.kind.clone()).unwrap_or_default(),
+                    rrf_score: h.rrf_score,
+                    exact_name: h.raw[0].is_some(),
+                    bm25_rank: bm25_rank.get(h.uuid.as_str()).map(|r| r + 1),
+                    name_vector_rank: name_rank.get(&h.uuid).copied(),
+                    summary_vector_rank: sum_rank.get(&h.uuid).copied(),
+                    name_similarity: sim(h.raw[2]),
+                    summary_similarity: sim(h.raw[3]),
+                    seeded,
+                    reason,
+                }
+            })
+            .collect();
+        t.sort_by(|a, b| by_score_then_key((a.rrf_score, &a.uuid), (b.rrf_score, &b.uuid)));
+        t
+    });
+
+    let top = admitted.first().map_or(1.0, |(h, _, _)| h.rrf_score);
+    let seeds = admitted
         .into_iter()
-        .map(|(h, row)| {
+        .map(|(h, row, reason)| {
             let mut matched = Vec::new();
             if h.raw[0].is_some() {
                 matched.push("name");
@@ -1118,7 +1331,9 @@ fn seed_stage(
             if floor_ok(h.raw[2]) {
                 matched.push("name_vector");
             }
-            if floor_ok(h.raw[3]) {
+            // A summary-vector seed was admitted on the summary list's relative evidence, so it
+            // always names that list, whatever the absolute similarity.
+            if floor_ok(h.raw[3]) || reason == "summary_vector" {
                 matched.push("summary_vector");
             }
             let evidence = SeedEvidence {
@@ -1134,7 +1349,8 @@ fn seed_stage(
             };
             Seed { row, evidence }
         })
-        .collect())
+        .collect();
+    Ok((seeds, trace))
 }
 
 /// The next hop's frontier: the far endpoints of this hop's best edges, at most `beam` of them,
@@ -1258,13 +1474,14 @@ pub fn split_fanout<T>(
 /// needs the fact embeddings these rows carry, and the per-entity fan-out ranks by it next.
 fn fetch_frontier(
     conn: &Conn<'_>,
+    emb: &[f32],
     frontier: &[String],
     gids: Option<&[&str]>,
     cap: usize,
     st: &mut GraphSearchStats,
 ) -> Result<Vec<FrontierEdge>, Error> {
-    st.db_queries += 2;
-    let (rows, truncated) = conn.expand_frontier(frontier, gids, cap)?;
+    st.db_queries += 3; // two directions + one scoring query
+    let (rows, truncated) = conn.expand_frontier_scored(frontier, gids, cap, emb)?;
     if !truncated {
         return Ok(rows);
     }
@@ -1275,8 +1492,9 @@ fn fetch_frontier(
     let share = (cap / frontier.len()).max(1);
     let mut out = Vec::new();
     for entity in frontier {
-        st.db_queries += 2;
-        let (r, cut) = conn.expand_frontier(std::slice::from_ref(entity), gids, share)?;
+        st.db_queries += 3; // two directions + one scoring query
+        let (r, cut) =
+            conn.expand_frontier_scored(std::slice::from_ref(entity), gids, share, emb)?;
         if cut {
             st.truncate("entity_rows", share);
         }
@@ -1319,7 +1537,7 @@ fn expand(
             break;
         }
         st.hops = hop;
-        let mut rows = fetch_frontier(conn, &frontier, gids, FRONTIER_ROW_CAP, st)?;
+        let mut rows = fetch_frontier(conn, emb, &frontier, gids, FRONTIER_ROW_CAP, st)?;
         rows.retain(|r| !r.far_merged);
         // An edge walked on an earlier hop is never revisited. Reaching it again is an alternate
         // path, unless the entity it is reached from was itself reached through that edge: that
@@ -1431,7 +1649,7 @@ fn expand(
             let citation_only =
                 !surviving.is_empty() && surviving.iter().all(|e| !e.origin.is_corroborating());
             let rel = edge_relevance(
-                relevance(emb, &fe.edge.fact_embedding),
+                fe.fact_similarity.unwrap_or(0.0).max(0.0),
                 edge_bm25.get(&fe.edge.uuid).copied(),
             );
             by_from.entry(fe.from_uuid.clone()).or_default().push(Step {
@@ -1672,6 +1890,7 @@ mod tests {
             believed_only: true,
             as_of_us: 0,
             stages: Stages::Full,
+            explain: false,
         };
         // A batched cut of 4 rows by uuid keeps e1..e4 and drops z's only edge.
         let (batched, cut) = c.expand_frontier(&frontier, None, 4).unwrap();
@@ -1679,7 +1898,7 @@ mod tests {
         assert!(!batched.iter().any(|r| r.edge.uuid == "f1"));
 
         let mut st = new_stats(&p, 1);
-        let rows = fetch_frontier(&c, &frontier, None, 4, &mut st).unwrap();
+        let rows = fetch_frontier(&c, &[], &frontier, None, 4, &mut st).unwrap();
         let mut got: Vec<&str> = rows.iter().map(|r| r.edge.uuid.as_str()).collect();
         got.sort();
         assert_eq!(
@@ -1696,7 +1915,7 @@ mod tests {
         // Under the cap nothing is refetched.
         let mut st = new_stats(&p, 1);
         assert_eq!(
-            fetch_frontier(&c, &frontier, None, 100, &mut st)
+            fetch_frontier(&c, &[], &frontier, None, 100, &mut st)
                 .unwrap()
                 .len(),
             6
@@ -1802,14 +2021,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn relevance_is_clamped_and_finite() {
-        assert_eq!(relevance(&[1.0, 0.0], &[-1.0, 0.0]), 0.0);
-        assert_eq!(relevance(&[1.0, 0.0], &[]), 0.0);
-        assert_eq!(relevance(&[0.0, 0.0], &[1.0, 0.0]), 0.0);
-        assert!((relevance(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
-    }
-
     fn ep(superseded: Option<i64>, ingested: Option<i64>, pending: bool) -> EpisodePassage {
         EpisodePassage {
             passage: PassageResult {
@@ -1833,6 +2044,7 @@ mod tests {
             },
             ingested_at_us: ingested,
             content_embedding: vec![],
+            similarity: None,
         }
     }
 
@@ -1877,6 +2089,7 @@ mod tests {
             believed_only,
             as_of_us: 0,
             stages: Stages::Full,
+            explain: false,
         };
         let all = [
             Origin::Primary,

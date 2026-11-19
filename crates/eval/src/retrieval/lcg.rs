@@ -1019,6 +1019,20 @@ impl GraphStages {
 
 /// `lcg-graph` and its ablation rows (issue #797): one `knowledge_graph_search` call per query.
 /// Model calls come from the response's `stats.embed_calls`, not a constant.
+/// Env var naming a JSONL file to which every `lcg-graph*` request appends its full response,
+/// with `explain: true` (the seed trace). Unset or empty: no trace, and the request is unchanged.
+pub const GRAPH_TRACE_ENV: &str = "LCG_EVAL_GRAPH_TRACE";
+
+fn append_trace(path: &std::ffi::OsStr, line: &Value) -> Result<(), String> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("{GRAPH_TRACE_ENV}: {e}"))?;
+    writeln!(f, "{line}").map_err(|e| format!("{GRAPH_TRACE_ENV}: {e}"))
+}
+
 pub struct LcgGraph {
     pub t: Arc<dyn RpcTransport>,
     pub map: Arc<IngestMap>,
@@ -1036,22 +1050,29 @@ impl Retriever for LcgGraph {
             GraphStages::Full => "full fusion (supporting passages + plain passages + facts, RRF)",
         };
         format!(
-            "knowledge_graph_search stages={}: {what}; believed-only default; plain-passage list is vector (the knowledge_search_passages default)",
+            "knowledge_graph_search stages={}: {what}; believed-only default; plain-passage list is knowledge_search_passages mode=vector, belief_aware=true",
             self.stages.param()
         )
     }
     fn retrieve<'a>(&'a self, q: &'a str, k: usize) -> BoxFuture<'a, Result<RankedResult, String>> {
         Box::pin(async move {
+            // Diagnostics (issue #797 steer): with LCG_EVAL_GRAPH_TRACE=<file>, every request asks
+            // for the seed trace and appends `{config, query, response}` as one JSON line.
+            let trace = std::env::var_os(GRAPH_TRACE_ENV).filter(|v| !v.is_empty());
+            let mut req = json!({"query": q, "num_results": k, "group_ids": [EVAL_GROUP],
+                                 "stages": self.stages.param()});
+            if trace.is_some() {
+                req["explain"] = json!(true);
+            }
             let t0 = Instant::now();
-            let r = self
-                .t
-                .call(
-                    "knowledge_graph_search",
-                    json!({"query": q, "num_results": k, "group_ids": [EVAL_GROUP],
-                           "stages": self.stages.param()}),
-                )
-                .await?;
+            let r = self.t.call("knowledge_graph_search", req).await?;
             let latency = t0.elapsed();
+            if let Some(path) = trace {
+                append_trace(
+                    &path,
+                    &json!({"config": self.id(), "query": q, "response": r}),
+                )?;
+            }
             let (groups, evidence) =
                 map_graph_results(&items(&r, "results"), &self.map.episode_note);
             Ok(RankedResult {

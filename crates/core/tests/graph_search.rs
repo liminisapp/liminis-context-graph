@@ -1245,7 +1245,7 @@ async fn exactly_one_embed_call_per_request() {
     assert_eq!(fx.embedder.call_count() - before, 1);
     assert_eq!(r["stats"]["embed_calls"], 1);
     assert!(r["stats"]["db_queries"].as_u64().unwrap() > 0);
-    assert_eq!(r["stats"]["passage_mode"], "vector");
+    assert_eq!(r["stats"]["passage_mode"], "vector_belief");
 }
 
 // ── Edge cases ────────────────────────────────────────────────────────────────
@@ -1338,9 +1338,86 @@ async fn k_larger_than_the_pool_is_not_padded_and_items_are_unique() {
 async fn identical_requests_give_identical_results() {
     let fx = fixture();
     let params = json!({"query": Q_MULTI, "as_of": "2026-06-01T00:00:00Z"});
-    let a = search(&fx, params.clone()).await;
-    let b = search(&fx, params).await;
+    let mut a = search(&fx, params.clone()).await;
+    let mut b = search(&fx, params).await;
+    // Wall-clock stage timings are reported, not ranked on; everything else must be byte-equal.
+    for r in [&mut a, &mut b] {
+        let t = r["stats"]
+            .as_object_mut()
+            .unwrap()
+            .remove("timings_ms")
+            .expect("stats.timings_ms is always reported");
+        for stage in [
+            "embed",
+            "seeds",
+            "expand",
+            "supporting",
+            "passages",
+            "fusion",
+            "total",
+        ] {
+            assert!(t[stage].as_f64().is_some_and(|v| v >= 0.0), "{stage}: {t}");
+        }
+    }
     assert_eq!(a.to_string(), b.to_string());
+}
+
+#[tokio::test]
+async fn explain_reports_every_seed_candidate_and_why() {
+    let fx = fixture();
+    let plain = search(&fx, json!({"query": Q_MULTI, "group_ids": [G]})).await;
+    assert!(
+        plain.get("seed_trace").is_none(),
+        "the trace is opt-in: {plain}"
+    );
+
+    let r = search(
+        &fx,
+        json!({"query": Q_MULTI, "group_ids": [G], "explain": true}),
+    )
+    .await;
+    let trace = r["seed_trace"].as_array().expect("seed_trace with explain");
+    assert!(!trace.is_empty());
+    // Every seed appears in the trace as seeded, with an admitting reason.
+    for s in seed_uuids(&r) {
+        let c = trace
+            .iter()
+            .find(|c| c["uuid"] == s.as_str())
+            .unwrap_or_else(|| panic!("seed {s} missing from trace"));
+        assert_eq!(c["seeded"], true);
+        assert!(
+            ["exact_name", "bm25_rank", "vector", "vector_agreement"]
+                .contains(&c["reason"].as_str().unwrap()),
+            "{c}"
+        );
+    }
+    // Exactly the seeds are marked seeded; every other candidate names a rejection reason.
+    let seeds = seed_uuids(&r);
+    for c in trace {
+        let seeded = seeds.contains(&c["uuid"].as_str().unwrap().to_string());
+        assert_eq!(c["seeded"].as_bool().unwrap(), seeded, "{c}");
+        if !seeded {
+            assert!(
+                [
+                    "no_evidence",
+                    "merged",
+                    "no_row",
+                    "origin_filter",
+                    "seed_cap"
+                ]
+                .contains(&c["reason"].as_str().unwrap()),
+                "{c}"
+            );
+        }
+    }
+    // Asking for the trace changes nothing else.
+    assert_eq!(keys(&r), keys(&plain));
+    // A non-boolean `explain` is an input error.
+    let v = raw(&fx, json!({"query": Q_MULTI, "explain": "yes"})).await;
+    assert!(
+        v["error"].to_string().contains("explain must be a boolean"),
+        "{v}"
+    );
 }
 
 // ── Ablation ──────────────────────────────────────────────────────────────────

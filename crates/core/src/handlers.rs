@@ -2479,6 +2479,11 @@ fn parse_graph_search_params(p: &Value) -> Result<crate::graph_search::GraphSear
             ))
         }
     };
+    let explain = match &p["explain"] {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        _ => return Err(Error::Ipc("explain must be a boolean".to_string())),
+    };
     let belief = parse_belief_query(p)?.unwrap_or_else(|| BeliefQuery {
         filter: true,
         as_of_us: chrono::Utc::now().timestamp_micros(),
@@ -2491,6 +2496,7 @@ fn parse_graph_search_params(p: &Value) -> Result<crate::graph_search::GraphSear
         believed_only: belief.filter,
         as_of_us: belief.as_of_us,
         stages,
+        explain,
     })
 }
 
