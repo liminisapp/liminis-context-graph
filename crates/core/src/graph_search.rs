@@ -1081,6 +1081,41 @@ fn seed_stage(
         .collect())
 }
 
+/// One hop's frontier rows, at most `cap` per direction. The batched lookup is tried first (two
+/// queries). Its cut is by `rn.uuid` across the whole frontier, so when it hits the cap one hub
+/// could take every row and starve the other frontier entities. In that case each entity is
+/// refetched on its own with an equal share of the same budget (`cap / frontier`, at least one),
+/// so no entity loses edges to another's. Within one entity the cut is still by uuid: relevance
+/// needs the fact embeddings these rows carry, and the per-entity fan-out ranks by it next.
+fn fetch_frontier(
+    conn: &Conn<'_>,
+    frontier: &[String],
+    gids: Option<&[&str]>,
+    cap: usize,
+    st: &mut GraphSearchStats,
+) -> Result<Vec<FrontierEdge>, Error> {
+    st.db_queries += 2;
+    let (rows, truncated) = conn.expand_frontier(frontier, gids, cap)?;
+    if !truncated {
+        return Ok(rows);
+    }
+    st.truncate("frontier_rows", cap);
+    if frontier.len() == 1 {
+        return Ok(rows);
+    }
+    let share = (cap / frontier.len()).max(1);
+    let mut out = Vec::new();
+    for entity in frontier {
+        st.db_queries += 2;
+        let (r, cut) = conn.expand_frontier(std::slice::from_ref(entity), gids, share)?;
+        if cut {
+            st.truncate("entity_rows", share);
+        }
+        out.extend(r);
+    }
+    Ok(out)
+}
+
 /// Stage 2: neighbourhood expansion with belief and origin applied at every step.
 #[allow(clippy::too_many_arguments)]
 fn expand(
@@ -1115,11 +1150,7 @@ fn expand(
             break;
         }
         st.hops = hop;
-        st.db_queries += 2;
-        let (mut rows, truncated) = conn.expand_frontier(&frontier, gids, FRONTIER_ROW_CAP)?;
-        if truncated {
-            st.truncate("frontier_rows", FRONTIER_ROW_CAP);
-        }
+        let mut rows = fetch_frontier(conn, &frontier, gids, FRONTIER_ROW_CAP, st)?;
         rows.retain(|r| !r.far_merged);
         // An edge walked on an earlier hop is never revisited. Reaching it again is an alternate
         // path, unless the entity it is reached from was itself reached through that edge: that
@@ -1374,6 +1405,92 @@ mod tests {
             query_ngrams("Fable\u{2019}s price"),
             vec!["fable", "price", "fable price"]
         );
+    }
+
+    #[test]
+    fn a_hub_cannot_starve_the_rest_of_the_frontier_of_rows() {
+        const DIM: usize = 4;
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let c = db.connect().unwrap();
+        c.init_schema(DIM).unwrap();
+        let entity = |uuid: &str| {
+            c.insert_entity(&EntityRow {
+                uuid: uuid.into(),
+                name: uuid.into(),
+                group_id: "g".into(),
+                labels: vec!["Entity".into()],
+                created_at: "2026-01-01 00:00:00".into(),
+                name_embedding: vec![0.1; DIM],
+                attributes: "{}".into(),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let edge = |uuid: &str, src: &str, dst: &str| {
+            c.insert_relates_to_edge(&RelatesToEdge {
+                uuid: uuid.into(),
+                name: "REL".into(),
+                source_node_uuid: src.into(),
+                target_node_uuid: dst.into(),
+                group_id: "g".into(),
+                fact: uuid.into(),
+                fact_embedding: vec![0.5; DIM],
+                created_at: "2026-01-01 00:00:00".into(),
+                attributes: "{}".into(),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        // Hub `a` has five edges whose uuids all sort before `z`'s single edge.
+        for e in ["a", "z", "y", "b1", "b2", "b3", "b4", "b5"] {
+            entity(e);
+        }
+        for i in 1..=5 {
+            edge(&format!("e{i}"), "a", &format!("b{i}"));
+        }
+        edge("f1", "z", "y");
+
+        let frontier = vec!["a".to_string(), "z".to_string()];
+        let p = GraphSearchParams {
+            query: "q".into(),
+            group_ids: None,
+            num_results: 10,
+            origins: None,
+            believed_only: true,
+            as_of_us: 0,
+            stages: Stages::Full,
+        };
+        // A batched cut of 4 rows by uuid keeps e1..e4 and drops z's only edge.
+        let (batched, cut) = c.expand_frontier(&frontier, None, 4).unwrap();
+        assert!(cut);
+        assert!(!batched.iter().any(|r| r.edge.uuid == "f1"));
+
+        let mut st = new_stats(&p, 1);
+        let rows = fetch_frontier(&c, &frontier, None, 4, &mut st).unwrap();
+        let mut got: Vec<&str> = rows.iter().map(|r| r.edge.uuid.as_str()).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["e1", "e2", "f1"],
+            "each entity gets an equal share of 4"
+        );
+        assert!(st.truncations.iter().any(|t| t.cap == "frontier_rows"));
+        assert!(st
+            .truncations
+            .iter()
+            .any(|t| t.cap == "entity_rows" && t.limit == 2));
+
+        // Under the cap nothing is refetched.
+        let mut st = new_stats(&p, 1);
+        assert_eq!(
+            fetch_frontier(&c, &frontier, None, 100, &mut st)
+                .unwrap()
+                .len(),
+            6
+        );
+        assert!(!st.truncated);
+        assert_eq!(st.db_queries, 2);
     }
 
     #[test]

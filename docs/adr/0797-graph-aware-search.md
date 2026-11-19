@@ -100,7 +100,11 @@ belief state, and a four-step variable-length pattern through the fact node is u
   usually weakly related to the question, and the beam already gates it.
 - **Caps**: 20 edges per frontier entity per hop (by relevance), the 10 best edges of a hop choose the
   next frontier (newly reached entities only), at most 200 facts overall, 1,000 rows per direction
-  per frontier query. The 200-fact trim keeps whole paths: a fact is kept, best score first, only
+  per frontier query. That row cap is cut by uuid across the whole batched frontier, so when it is
+  hit each frontier entity is refetched on its own with an equal share of the same budget
+  (reported as `frontier_rows`, plus `entity_rows` for any entity that still overflows its share):
+  a hub cannot starve the other frontier entities. Within one entity the cut stays by uuid, since
+  relevance needs the embeddings those rows carry; the 20-per-entity fan-out ranks by it next. The 200-fact trim keeps whole paths: a fact is kept, best score first, only
   together with every edge on its path, and an entity reached only through a trimmed edge is no
   longer reached. Cutting by score alone would orphan hop-2 facts, since hop decay can score their
   weakly worded bridge below them, and leave evidence naming an edge the response omits. Every cap that cut something is reported in `stats.truncations`.
