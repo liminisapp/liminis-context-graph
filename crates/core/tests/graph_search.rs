@@ -950,9 +950,15 @@ async fn believed_only_false_returns_superseded_facts_with_their_state() {
     assert_eq!(old["belief"]["state"], "superseded");
     assert_eq!(old["belief"]["believed"], false);
     assert_eq!(old["belief"]["supersession"]["cause"], "corrected");
-    if let Some(p) = find(&r, "p:ep-old") {
-        assert_eq!(p["belief"]["state"], "superseded");
-    }
+    // The superseded passage is returned too, and says so.
+    let p = find(&r, "p:ep-old").unwrap_or_else(|| {
+        panic!(
+            "superseded passage returned when not filtering: {:?}",
+            keys(&r)
+        )
+    });
+    assert_eq!(p["belief"]["state"], "superseded");
+    assert_eq!(p["belief"]["believed"], false);
 }
 
 // ── Story 4: evidence ─────────────────────────────────────────────────────────
@@ -1066,9 +1072,12 @@ async fn derived_restatement_cites_but_does_not_change_the_facts_rank() {
     assert_eq!(cites[0]["corroborating"], false);
     assert_eq!(cites[0]["origin"], "derived");
     // Never in the supporting list.
-    if let Some(p) = find(&a, "p:ep-kd") {
-        assert!(!list_names(p).contains(&"supporting".to_string()));
-    }
+    // With no filter the derived page may surface on its own merit through plain passage search,
+    // but never through the supporting list.
+    let p = find(&a, "p:ep-kd")
+        .unwrap_or_else(|| panic!("derived page surfaces via plain passages: {:?}", keys(&a)));
+    assert!(!list_names(p).contains(&"supporting".to_string()), "{p}");
+    assert_eq!(list_names(p), vec!["passages".to_string()], "{p}");
 }
 
 #[tokio::test]

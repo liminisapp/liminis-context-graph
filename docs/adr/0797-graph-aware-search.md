@@ -315,7 +315,10 @@ difference.
 - The success criteria (SC-001–SC-007) need a run on v2 with a real embedder; they are not provable
   in unit tests, which use hand-chosen vectors.
 - #789 has merged with hybrid passage search opt-in, because it scored below vector on v2
-  (ADR-0789). List (b) therefore keeps the vector default, as FR-015 asks. Switching it to the
+  (ADR-0789). List (b) therefore keeps vector retrieval, with #789's belief-aware ranking layered on
+  top (`belief_aware: true`, evaluated at `as_of`; §6). That is not `knowledge_search_passages`'
+  plain vector default, so `lcg-graph` against `lcg-passages` measures the graph stages and the
+  belief rules together; `lcg-passages-belief` isolates the graph stages. Switching list (b) to the
   weighted-RRF hybrid list, and the private `fts_terms` sanitiser to `sanitize_fts_query`, are
   follow-ups to measure on the v2 rows, not assumed wins.
 - #796's reranker can sit on top as a final stage.
