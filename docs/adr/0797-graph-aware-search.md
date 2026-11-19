@@ -83,6 +83,15 @@ There is **no fuzzy name matcher**: near-miss names are covered by BM25 and the 
 vector list is reported in a seed's `matched` only at or above the 0.5 floor, so filler is never
 presented as evidence.
 
+**Known trade-off, open until v2 is measured: generic one-word names.** Every query word is probed
+as an exact name, and an exact hit is admitted unconditionally, so an entity literally named
+`Status`, `Price` or `Notes` is seeded by "what is the price status". Multi-word exact hits rank
+above it in the exact list, but with no multi-word hit it takes that list's first place. Requiring a
+one-word hit to also pass the BM25 gate would not help, since BM25 ranks such an entity highly for
+the same word. Telling a generic name from a real one needs a specificity signal, such as damping
+entities by mention count (HippoRAG's node specificity). That is a tuning change to judge on the v2
+`direct` and `paraphrase` rows, not to guess at here, so the gate is left as it is.
+
 ### 4. Expansion: batched hops, relevance from the fact text, hop decay, bounded fan-out
 
 Up to **2** hops. Per hop: one frontier lookup (both directions); belief context for the new edges;
