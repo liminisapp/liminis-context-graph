@@ -15,8 +15,10 @@
 //!   text), and a single request that hits one fails after exactly one attempt;
 //! - a **per-window budget** on transiently failing calls bounds the slow work across the whole
 //!   split tree, and a **cross-window breaker** drops the next window to one attempt with no retry or
-//!   split when the previous window failed entirely and transiently (a dead embedder), so a dead
-//!   embedder costs about one timeout per window — the pre-#808 cost — instead of hours.
+//!   split when the previous window failed entirely and transiently (a dead embedder), so from the
+//!   second window on a dead embedder costs about one timeout per window — the pre-#808 cost. The
+//!   first window of an outage (and the first after each recovery) can still spend its whole
+//!   budget; a permanent error still splits while the breaker is open.
 //!
 //! Replay runs in `spawn_blocking` (or a bare-sync caller), so backoff is a plain sleep, taken in
 //! short slices so a cancellation or shutdown is noticed promptly.
@@ -227,6 +229,11 @@ struct Ctx<'a, F> {
     texts: &'a [&'a str],
     embed_fn: &'a F,
     policy: EmbedRetryPolicy,
+    /// Whether a *permanent* error on a multi-request call splits to isolate the bad text. False
+    /// only when the operator configured `LCG_REPLAY_EMBED_RETRIES=0` (retry and splitting off);
+    /// an open breaker zeroes `policy.retries` for the probe but must still isolate permanent
+    /// poison texts.
+    split_permanent: bool,
     env: &'a RetryEnv<'a>,
     budget: u32,
     results: Vec<Option<RequestResult>>,
@@ -330,7 +337,12 @@ where
             }
 
             // Retries exhausted (transient) or not applicable (permanent).
-            if n == 1 || self.policy.retries == 0 {
+            let no_split = n == 1
+                || match class {
+                    EmbedErrorClass::Transient => self.policy.retries == 0,
+                    EmbedErrorClass::Permanent => !self.split_permanent,
+                };
+            if no_split {
                 self.fail_range(lo, hi, &err_msg, class == EmbedErrorClass::Transient);
                 return;
             }
@@ -380,6 +392,7 @@ where
         texts,
         embed_fn,
         policy: effective,
+        split_permanent: policy.retries > 0,
         env,
         budget: effective.call_budget(texts.len()),
         results: (0..texts.len()).map(|_| None).collect(),
@@ -652,6 +665,33 @@ mod tests {
         });
         assert!(out.iter().all(|r| r.is_ok()));
         assert!(!breaker.is_open());
+    }
+
+    #[test]
+    fn open_breaker_still_isolates_a_permanent_poison_text() {
+        // Previous window failed transiently (breaker open). This window is healthy except for
+        // one text the embedder rejects with a 4xx: only that row may fail.
+        let mut breaker = RetryBreaker { open: true };
+        let texts: Vec<String> = (0..64).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let out = run_with(&refs, policy(4), &mut breaker, |t| {
+            if t.contains(&"t40") {
+                Err(permanent_err())
+            } else {
+                Ok(t.iter().map(|x| vec_for(x)).collect())
+            }
+        });
+        let failed: Vec<usize> = out
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.is_err())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(failed, vec![40]);
+        assert!(
+            !breaker.is_open(),
+            "a window with successes closes the breaker"
+        );
     }
 
     #[test]

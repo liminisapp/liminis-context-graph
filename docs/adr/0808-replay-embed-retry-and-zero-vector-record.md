@@ -54,7 +54,7 @@ Two gaps compounded this (#799: a cold replay of ~80k mutations against a local 
 | Attempts per request | `LCG_REPLAY_EMBED_RETRIES`, 0–10, default 4 (0 disables retry and splitting) |
 | One backoff wait | `LCG_REPLAY_EMBED_BACKOFF_MS` (1–60000, default 500), capped by `LCG_REPLAY_EMBED_BACKOFF_MAX_MS` (1–300000, default 10000, ≥ base) |
 | Slow work per window | At most `(retries+1)·(depth+2)+depth` *transiently failing* calls across the whole split tree, `depth = ⌈log₂ rows⌉` (46 for 64 rows at defaults). Successes and permanent errors are free — prompt, and structurally ≤ `2n-1`. Once spent, the rest of the window fails with no further calls |
-| Dead embedder | If every request of a window failed transiently, the next window gets one attempt, no retry, no split, until a window succeeds — about one timeout per window, the pre-change cost, instead of hours |
+| Dead embedder | If every request of a window failed transiently, the next window gets one attempt, no retry, no split, until a window succeeds — about one timeout per window, the pre-change cost, from the second window on (the first window of an outage, and the first after each recovery, can spend its whole budget, about 23 minutes at the defaults); a permanent error still splits while the breaker is open |
 | Cancellation | Backoff sleeps in 100 ms slices polling `cancel_fn`; a cancelled window is dropped with nothing counted or recorded. A healthy window adds no `cancel_fn` polls |
 
 Worst case for one request: `(retries+1)·LCG_EMBEDDING_TIMEOUT_MS + Σ backoff` — about 160 s with
@@ -117,8 +117,11 @@ failures" in `ReplayStats`, while the new field is the *current persisted* count
 
 - A replay against an intermittently failing embedder completes with `embeddings_recompute_failed
   == 0` and no zero vectors, instead of zero-filling whole windows; one poison text costs one row.
-- Retrying makes a replay against a *persistently* failing embedder somewhat slower per window, up
-  to the budget above, before the breaker returns it to about the old cost.
+- Retrying makes a replay against a *persistently* failing embedder slower: the first window of a
+  dead-embedder run (and the first window after each recovery) can spend its whole transient-call
+  budget — up to `budget × timeout`, about 23 minutes for a 64-row window at the defaults — before
+  the breaker drops later windows to about the old cost of one timeout each. An intermittent outage
+  can pay that budget repeatedly.
 - Operators can see how many rows are degraded, and which, after any replay or recovery; repair
   tooling has a stable list/remove contract to build on.
 - Identity stamping is unchanged: `embeddings_recompute_had_no_failures()` still gates stamping the

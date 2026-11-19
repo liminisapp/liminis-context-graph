@@ -60,7 +60,8 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `LCG_REPLAY_EMBED_RETRIES` (default 4; 0 disables retry and splitting),
   `LCG_REPLAY_EMBED_BACKOFF_MS` (500) and `LCG_REPLAY_EMBED_BACKOFF_MAX_MS` (10000), validated at
   startup (an invalid value is fatal and names itself), plus a per-window budget and a
-  cross-window breaker so a dead embedder costs about one timeout per window. Rows that still end
+  cross-window breaker so a dead embedder costs about one timeout per window after the first
+  window (the first window of an outage can spend its whole budget, about 23 minutes at the defaults). Rows that still end
   up with a fallback zero vector are recorded durably per group, in the same transaction as the
   row, and `knowledge_status` reports `wal_groups.<gid>.zero_vector_rows`
   (`{"total", "by_kind": {name, fact, summary, content}}`, always present, exact, survives a

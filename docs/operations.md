@@ -751,9 +751,14 @@ Splitting does not multiply that: a window may spend at most
 where `depth = ⌈log₂ rows⌉` (46 for a 64-row window at the defaults; successful and
 permanently-failing calls are not counted). When the budget is spent the rest of the window fails
 without further calls. If an entire window fails transiently (the embedder is down) the next
-window gets one attempt with no retry or split, until a window succeeds again, so a dead embedder
-costs about one timeout per window — what it cost before #808. A cancel or shutdown during a
-backoff aborts the window within about 100 ms.
+window gets one attempt with no retry or split (a permanent error such as a 4xx still splits, to
+isolate a poison text), until a window succeeds again, so from then on a dead embedder costs about
+one timeout per window — what it cost before #808. The **first** window of a dead-embedder run, and
+the first window after each recovery, is not covered by the breaker: it can spend its whole
+transient-call budget, up to `budget × LCG_EMBEDDING_TIMEOUT_MS` (46 × 30 s, about 23 minutes, for a
+64-row window at the defaults). An intermittent outage can pay that again after every recovery.
+Lower `LCG_REPLAY_EMBED_RETRIES` or `LCG_EMBEDDING_TIMEOUT_MS` to shrink it. A cancel or shutdown
+during a backoff aborts the window within about 100 ms.
 
 **`wal_groups.<gid>.zero_vector_rows`.** `knowledge_status` reports, per group, how many rows are
 currently stored with a fallback zero vector because the embedder failed, with a breakdown by the
