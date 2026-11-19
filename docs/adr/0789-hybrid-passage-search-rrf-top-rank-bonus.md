@@ -1,6 +1,6 @@
 # ADR-0789: Hybrid Passage Search — BM25 + Vector with RRF and a Top-Rank Bonus
 
-**Status**: Accepted — the default stays `vector` pending measurement (see Decision 6)
+**Status**: Accepted — hybrid ships opt-in; the default stays `vector` because the v2 eval showed no gain (see the measurement section)
 **Date**: 2026-11-18
 **Issue**: #789 (builds on ADR-0629's evidence and similarity floor, ADR-0752's `origins` filter, ADR-0754's eval, ADR-0790's embedder roles)
 
@@ -42,8 +42,8 @@ only dilute. So the change has to be measured per category, not adopted on faith
      either list wins"; the 5:2 ratio is kept. Agreement across lists is already rewarded by RRF's
      sum, so the bonus does not stack. At these weights the bonus reorders near-ties and lets a
      rank-1 hit overtake a double hit only when the latter sits far down both lists.
-   - The weights are named constants (`TOP1_BONUS_FRACTION`, `TOP3_BONUS_FRACTION`) to be tuned on
-     v1/v2 once measured.
+   - The weights are named constants (`TOP1_BONUS_FRACTION`, `TOP3_BONUS_FRACTION`) not yet
+     tuned: the v1/v2 run could not distinguish the bonus from plain RRF.
 6. **Score and `min_score` semantics.** In hybrid mode `score` is the fused score and a new
    `similarity` (cosine, `Option<f64>`, skipped when absent) reports the vector retriever's value.
    `min_score` floors only the vector list before fusion (the ADR-0629 pattern); lexical-only hits are
@@ -61,23 +61,39 @@ only dilute. So the change has to be measured per category, not adopted on faith
    configurations `lcg-passages-hybrid-rrf` and `lcg-passages-hybrid-bonus` send `mode: "hybrid"`
    with `top_rank_bonus` false and true, so a default flip can never silently change the baseline.
 
-## Measurement status and the keep-or-drop record (FR-015)
+## Measurement and the keep-or-drop record (FR-015)
 
-The acceptance gates (SC-001 to SC-005, SC-008) need a v2 and v1 run with a real embedder sidecar, an
-extraction cassette and, for the grounded-recall column, a Sonnet judge. The implementation
-environment had no embedder sidecar or API key (the harness refuses mock or hash embedders), so **no
-numbers were produced here.** Therefore:
+The maintainer ran `lcg-passages`, `lcg-passages-hybrid-rrf` and `lcg-passages-hybrid-bonus` on head
+`b70eef75` (2026-11-19, PR #798 comment): k = 10, release build, extraction replayed from the Haiku
+4.5 cassettes, Sonnet 4.6 judge. v2 is `meridian-notebook-2` / `meridian-questions-3` (244 questions,
+BGE-base v1.5 sidecar embedder); v1 is `fernhill-notebook-1` (40 questions, `nomic-embed-text`). v2
+labels are still provisional (#788). The full reports are kept locally by the maintainer.
 
-| Lever | Status | Evidence |
+nDCG@10 on v2:
+
+| config | overall | direct | paraphrase | temporal | answer | multi-hop | passage | p50 |
+|---|---|---|---|---|---|---|---|---|
+| `lcg-passages` (vector) | **0.568** | 0.756 | 0.150 | **0.628** | **0.789** | **0.662** | 0.477 | 24 ms |
+| `lcg-passages-hybrid-rrf` | 0.527 | 0.749 | 0.070 | 0.568 | 0.748 | 0.609 | 0.484 | 27 ms |
+| `lcg-passages-hybrid-bonus` | 0.531 | 0.739 | 0.070 | 0.578 | 0.740 | 0.613 | 0.513 | 26 ms |
+
+Paired differences, vector minus hybrid, overall nDCG@10: vs `hybrid-rrf` +0.041 [+0.014, +0.067];
+vs `hybrid-bonus` +0.037 [+0.012, +0.063]. Paraphrase: +0.080 [+0.004, +0.159]. On v1 the overall
+difference is +0.011 [-0.069, +0.093] (noise), and paraphrase drops there too (0.781 to 0.619).
+Hybrid raised direct recall on v2 (0.838 to 0.912) but lowered MRR, and it ranked derived pages above
+their primary note more often (0.31 to 0.46) and the stale note above the current one more often
+(0.650 to 0.775 rrf, 0.800 bonus).
+
+| Lever | Verdict | Evidence |
 |---|---|---|
-| RRF fusion of BM25 + vector | **Shipped opt-in, not default** | Pending: run `lcg-passages`, `lcg-passages-hybrid-rrf`, `lcg-passages-hybrid-bonus` on v2 and v1 |
-| Top-rank bonus | **Shipped opt-in, not default** | Pending: same run; the bonus is its own row (SC-008) |
+| RRF fusion of BM25 + vector | **Not adopted as the default; kept opt-in** | SC-001 and SC-002 fail on v2: overall nDCG is lower beyond its CI, and paraphrase halves. SC-003 fails: answer does not improve (0.789 to 0.748). SC-004 holds (p50 27 ms). The lexical list stays because #797 consumes it |
+| Top-rank bonus | **Kept opt-in, not shown to help** | Indistinguishable from plain RRF on v2 and v1 (0.531 vs 0.527; identical on v1), so the 0.25 / 0.10 fractions cannot be tuned from this data and remain untuned starting values |
 
-The default stays `vector` as FR-005 requires when the gate has not passed. Flipping it is a
-one-line change (the default in `PassageSearchMode::default_from_env`) plus the numbers in this
-table. A lever that does not help on the run is dropped, and a category that regresses beyond its CI
-(paraphrase is the expected risk, temporal must not regress) blocks the flip. The bonus constants are
-tuned on that same run.
+The default stays `vector`, as FR-005 requires when the gate has not passed. The likely cause is
+equal-weight RRF over two retrievers of unequal quality: on paraphrase questions BM25's top hits are
+lexical decoys that are pulled above good vector hits. Weighted fusion (a smaller BM25 weight, or
+counting BM25 only when it agrees with a vector hit) and belief-aware ranking are the follow-up
+experiments, not part of this PR. Reproduce the run with:
 
 ```
 cargo run --release -p lcg-eval -- retrieval --corpus crates/eval/fixtures/retrieval-v2 \
