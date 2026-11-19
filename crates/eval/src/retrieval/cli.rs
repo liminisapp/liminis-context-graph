@@ -64,6 +64,24 @@ pub const VARIANTS_PASSAGE_CONFIGS: [&str; 2] = [
     "lcg-passages-hybrid-belief-variants",
 ];
 
+/// Opt-in graph-aware configurations (issue #797): `knowledge_graph_search` per ablation stage,
+/// and the fairer `lcg-entities-facts-rrf` variant. Accepted by `--configs` but not part of the
+/// default run, so the default report, its row count and every existing ranking are unchanged.
+pub const GRAPH_CONFIGS: [&str; 4] = [
+    "lcg-graph-seeds",
+    "lcg-graph-expand",
+    "lcg-graph",
+    "lcg-entities-facts-rrf",
+];
+
+/// Whether `--configs` accepts `c`: a default configuration or an opt-in passage, variants or graph one.
+pub fn is_known_config(c: &str) -> bool {
+    ALL_CONFIGS.contains(&c)
+        || HYBRID_PASSAGE_CONFIGS.contains(&c)
+        || VARIANTS_PASSAGE_CONFIGS.contains(&c)
+        || GRAPH_CONFIGS.contains(&c)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalArgs {
     pub corpus: PathBuf,
@@ -144,6 +162,9 @@ OPTIONS:
     --expander-http <URL>      Query-expansion LLM endpoint for the spawned service (default:
     --expander-uds <SOCKET>    LCG_EXPANSION_URL, else the embedder's sidecar under the same loopback-only rule). Used by the
                                lcg-passages-expand* configurations.
+                               Opt-in graph-aware configurations (#797): lcg-graph,
+                               lcg-graph-seeds, lcg-graph-expand (ablation stages) and
+                               lcg-entities-facts-rrf (fairer entities+facts merge).
     --service-bin <PATH>       liminis-context-graph binary to spawn (default: alongside lcg-eval,
                                else `liminis-context-graph` on PATH).
     --embedder-http <URL>      Real embedder for the spawned service (required for LCG configs
@@ -249,15 +270,13 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
                 let v = val("--configs")?;
                 let mut list = Vec::new();
                 for c in v.split(',').map(str::trim).filter(|c| !c.is_empty()) {
-                    if !ALL_CONFIGS.contains(&c)
-                        && !HYBRID_PASSAGE_CONFIGS.contains(&c)
-                        && !VARIANTS_PASSAGE_CONFIGS.contains(&c)
-                    {
+                    if !is_known_config(c) {
                         return Err(format!(
-                            "unknown configuration '{c}' (expected one of: {}, {}, {})",
+                            "unknown configuration '{c}' (expected one of: {}, {}, {}, {})",
                             ALL_CONFIGS.join(", "),
                             HYBRID_PASSAGE_CONFIGS.join(", "),
-                            VARIANTS_PASSAGE_CONFIGS.join(", ")
+                            VARIANTS_PASSAGE_CONFIGS.join(", "),
+                            GRAPH_CONFIGS.join(", ")
                         ));
                     }
                     if !list.iter().any(|x| x == c) {
@@ -387,6 +406,35 @@ mod tests {
 
     fn p(a: &[&str]) -> Result<RetrievalMode, String> {
         parse_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn graph_configs_are_opt_in_and_accepted() {
+        match p(&[
+            "--configs",
+            "lcg-passages,lcg-graph,lcg-graph-seeds,lcg-entities-facts-rrf",
+        ])
+        .unwrap()
+        {
+            RetrievalMode::Run(a) => assert_eq!(
+                a.configs,
+                vec![
+                    "lcg-passages",
+                    "lcg-graph",
+                    "lcg-graph-seeds",
+                    "lcg-entities-facts-rrf"
+                ]
+            ),
+            _ => panic!(),
+        }
+        for c in GRAPH_CONFIGS {
+            assert!(
+                !ALL_CONFIGS.contains(&c),
+                "{c} must not join the default run"
+            );
+        }
+        let e = p(&["--configs", "lcg-grahp"]).unwrap_err();
+        assert!(e.contains("lcg-graph-expand"), "{e}");
     }
 
     #[test]

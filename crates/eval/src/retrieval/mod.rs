@@ -50,6 +50,9 @@ pub struct RankedResult {
     pub model_calls: Option<u64>,
     /// Non-model lookup RPCs made to resolve results (counted, never hidden).
     pub lookup_calls: u64,
+    /// Every service RPC this query made, the main reads included (issue #797); `None` for a
+    /// system that is not an LCG service (qmd).
+    pub service_calls: Option<u64>,
     /// Returned hits that carried no evidence text (qmd hits without a snippet). They stay in the
     /// ranking as empty evidence, are judged unsupported, and are counted so the report can say so.
     pub evidence_gaps: u64,
@@ -302,6 +305,7 @@ pub async fn score_config(
     let mut scores: Vec<QuestionScore> = Vec::new();
     let mut latencies = Vec::new();
     let mut calls: Vec<Option<u64>> = Vec::new();
+    let mut service: Vec<Option<u64>> = Vec::new();
     let mut lookup_calls = 0;
     let mut evidence_gaps = 0;
     let mut errors = Vec::new();
@@ -317,6 +321,7 @@ pub async fn score_config(
         };
         latencies.push(res.latency.as_secs_f64() * 1000.0);
         calls.push(res.model_calls);
+        service.push(res.service_calls);
         lookup_calls += res.lookup_calls;
         evidence_gaps += res.evidence_gaps;
 
@@ -372,6 +377,11 @@ pub async fn score_config(
     } else {
         None
     };
+    let service_calls_per_query = if service.iter().all(Option::is_some) && !service.is_empty() {
+        Some(service.iter().flatten().sum::<u64>() as f64 / service.len() as f64)
+    } else {
+        None
+    };
     Status::Ran(Box::new(ConfigRun {
         scores,
         overall,
@@ -379,6 +389,7 @@ pub async fn score_config(
         latency_p50_ms: percentile(&latencies, 50.0),
         latency_p95_ms: percentile(&latencies, 95.0),
         model_calls_per_query,
+        service_calls_per_query,
         lookup_calls,
         evidence_gaps,
         query_errors: errors,
@@ -684,11 +695,27 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                         map: map.clone(),
                         belief: false,
                     }),
-                    _ => Box::new(lcg::LcgEntitiesFacts {
+                    "lcg-entities-facts-belief" => Box::new(lcg::LcgEntitiesFacts {
                         t: transport.clone(),
                         map: map.clone(),
                         belief: true,
                     }),
+                    "lcg-entities-facts-rrf" => Box::new(lcg::LcgEntitiesFactsRrf {
+                        t: transport.clone(),
+                        map: map.clone(),
+                    }),
+                    "lcg-graph" | "lcg-graph-seeds" | "lcg-graph-expand" => {
+                        Box::new(lcg::LcgGraph {
+                            t: transport.clone(),
+                            map: map.clone(),
+                            stages: lcg::GraphStages::from_config(id)
+                                .expect("matched a graph config id"),
+                        })
+                    }
+                    // `--configs` only accepts known ids, so this is a wiring bug, not user input.
+                    other => {
+                        return Err(format!("no retriever is wired for configuration '{other}'"))
+                    }
                 };
                 let (slot_id, r): (String, Box<dyn Retriever>) = match &profile {
                     Some(p) if multi => {
@@ -870,6 +897,7 @@ mod tests {
                     notes: vec!["a".into()],
                     evidence: vec![],
                     model_calls: None,
+                    service_calls: None,
                     lookup_calls: 0,
                     evidence_gaps: 0,
                     latency: Duration::from_millis(1),
@@ -987,6 +1015,7 @@ mod tests {
                     notes: self.notes.clone(),
                     evidence: self.evidence.clone(),
                     model_calls: Some(1),
+                    service_calls: None,
                     lookup_calls: 0,
                     evidence_gaps: 0,
                     latency: Duration::from_millis(5),

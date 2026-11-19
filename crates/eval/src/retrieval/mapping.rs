@@ -8,6 +8,9 @@
 //!   ingest-time `episode uuid → note` table. ADR-0012 either-endpoint inference is never used.
 //!   Evidence = the fact string. A fact with no producing episode maps to no note.
 //!
+//! * **Graph-search results** (issue #797) are facts or passages, each mapped by the rule above for
+//!   its kind.
+//!
 //! All mappers return notes in rank order **with duplicates**; `metrics::dedupe_truncate` keeps the
 //! first occurrence, so a note's rank is that of its best-ranked result.
 
@@ -143,6 +146,58 @@ pub fn edge_groups(edges: &[Value], episode_note: &HashMap<String, String>) -> V
             set.into_iter().collect()
         })
         .collect()
+}
+
+/// Results of `knowledge_graph_search` (issue #797) → per-result note sets and evidence texts, in
+/// rank order. A `fact` maps through its producing episodes (`fact.episodes`, else
+/// `belief.producing_episode_uuids`) exactly as [`edge_groups`] does; a `passage` through its
+/// `source_description` as [`map_passages`] does. Fact evidence is `from → to: fact` from the
+/// last step of its evidence path (the bare fact when there is no path); passage evidence is its
+/// text.
+pub fn map_graph_results(
+    results: &[Value],
+    episode_note: &HashMap<String, String>,
+) -> (Vec<Vec<String>>, Vec<String>) {
+    let mut groups = Vec::with_capacity(results.len());
+    let mut evidence = Vec::with_capacity(results.len());
+    for r in results {
+        match r["kind"].as_str() {
+            Some("fact") => {
+                let f = &r["fact"];
+                let carrier = serde_json::json!({"episodes": f["episodes"], "belief": r["belief"]});
+                let set: BTreeSet<String> = edge_producers(&carrier)
+                    .into_iter()
+                    .filter_map(|ep| episode_note.get(ep).cloned())
+                    .collect();
+                groups.push(set.into_iter().collect());
+                let fact = f["fact"].as_str().unwrap_or("");
+                let last = r["evidence"]["path"]
+                    .as_array()
+                    .and_then(|p| p.last())
+                    .filter(|s| s["from_name"].is_string() && s["to_name"].is_string());
+                evidence.push(match last {
+                    Some(s) => format!(
+                        "{} \u{2192} {}: {fact}",
+                        s["from_name"].as_str().unwrap_or(""),
+                        s["to_name"].as_str().unwrap_or("")
+                    ),
+                    None => fact.to_string(),
+                });
+            }
+            _ => {
+                let p = &r["passage"];
+                evidence.push(p["content"].as_str().unwrap_or("").to_string());
+                groups.push(
+                    p["source_description"]
+                        .as_str()
+                        .and_then(note_of_source_description)
+                        .map(|n| vec![n.to_string()])
+                        .unwrap_or_default(),
+                );
+            }
+        }
+    }
+    (groups, evidence)
 }
 
 /// Splits a markdown note into chunks no larger than `max_tokens` (approximate), breaking at

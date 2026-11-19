@@ -11,7 +11,10 @@ use serde_json::{json, Value};
 
 use lcg_eval::retrieval::evidence_judge::{CachedEvidenceJudge, EvidenceJudge};
 use lcg_eval::retrieval::fixture::{self, Category, Fixture};
-use lcg_eval::retrieval::lcg::{self, IngestMap, LcgEntitiesFacts, LcgPassages, RpcTransport};
+use lcg_eval::retrieval::lcg::{
+    self, GraphStages, IngestMap, LcgEntitiesFacts, LcgEntitiesFactsRrf, LcgGraph, LcgPassages,
+    RpcTransport,
+};
 use lcg_eval::retrieval::qmd::{self, ProcessRunner, QmdOutput, QmdRetriever, QmdRunner, Skipped};
 use lcg_eval::retrieval::report::{IngestCost, Reading, Report, RunMeta, Status};
 use lcg_eval::retrieval::{evaluate, resolve, Slot};
@@ -112,6 +115,26 @@ impl RpcTransport for FakeLcg {
             }
             "knowledge_find_entities" => Ok(json!({"nodes": []})),
             "knowledge_find_relationships" => Ok(json!({"edges": []})),
+            // Graph-aware search (#797): passages only (the fake has no graph), answered lexically.
+            "knowledge_graph_search" => {
+                assert_eq!(
+                    p["num_results"], K,
+                    "every configuration must use the shared k"
+                );
+                assert!(p["stages"].is_string(), "the ablation stage is always sent");
+                let docs: Vec<(String, String)> = self.chunks.lock().unwrap().clone();
+                let results: Vec<Value> = lexical_rank(p["query"].as_str().unwrap(), &docs, K)
+                    .into_iter()
+                    .map(|(sd, text)| {
+                        json!({"kind": "passage",
+                               "passage": {"source_description": sd, "content": text},
+                               "evidence": {"lists": [{"list": "passages", "rank": 1, "score": 1.0}]}})
+                    })
+                    .collect();
+                let count = results.len();
+                Ok(json!({"results": results, "count": count, "seeds": [],
+                          "stats": {"embed_calls": 1, "passage_mode": "vector"}}))
+            }
             other => Err(format!("unexpected method {other}")),
         };
         Box::pin(async move { out })
@@ -395,6 +418,80 @@ async fn full_comparison_produces_one_table_with_every_configuration_at_one_k() 
     assert_eq!(j["configs"][0]["model_calls_per_query"], 1.0);
     assert!(j["configs"][2]["model_calls_per_query"].is_null());
     assert!(md.contains("n/a (not exposed)"));
+}
+
+/// Issue #797: the opt-in graph configurations run beside `lcg-passages`, get paired comparisons
+/// against it, report calls per query, and add the graph notes section.
+#[tokio::test]
+async fn graph_configurations_report_rows_pairs_and_calls_per_query() {
+    let fx = fixture::load(&fixture_dir()).unwrap();
+    let transport: Arc<dyn RpcTransport> = Arc::new(FakeLcg::new());
+    let map: Arc<IngestMap> = Arc::new(lcg::ingest(transport.as_ref(), &fx).await.unwrap());
+    let mut slots = vec![Slot::Run(Box::new(LcgPassages {
+        t: transport.clone(),
+    }) as Box<dyn lcg_eval::retrieval::Retriever>)];
+    for id in ["lcg-graph-seeds", "lcg-graph-expand", "lcg-graph"] {
+        slots.push(Slot::Run(Box::new(LcgGraph {
+            t: transport.clone(),
+            map: map.clone(),
+            stages: GraphStages::from_config(id).unwrap(),
+        })));
+    }
+    slots.push(Slot::Run(Box::new(LcgEntitiesFactsRrf {
+        t: transport.clone(),
+        map: map.clone(),
+    })));
+    let configs = evaluate(&fx, K, slots, None, "no judge").await;
+    let r = Report {
+        meta: meta(&fx),
+        ingest: IngestCost::default(),
+        configs,
+    };
+    let md = r.render_markdown();
+    for id in [
+        "lcg-graph-seeds",
+        "lcg-graph-expand",
+        "lcg-graph",
+        "lcg-entities-facts-rrf",
+    ] {
+        assert!(
+            md.contains(&format!("| `{id}` |")),
+            "{id} row missing:\n{md}"
+        );
+    }
+    assert!(
+        md.contains("| `lcg-passages` | `lcg-graph` |")
+            || md.contains("| `lcg-graph` | `lcg-passages` |"),
+        "paired comparison against lcg-passages missing:\n{md}"
+    );
+    assert!(md.contains("## Graph-aware search (#797)"), "{md}");
+    assert!(md.contains("service calls/query"));
+    let j = r.to_json();
+    let row = |id: &str| {
+        j["configs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row("lcg-graph")["service_calls_per_query"], 1.0);
+    assert_eq!(row("lcg-graph")["model_calls_per_query"], 1.0);
+    assert_eq!(
+        row("lcg-entities-facts-rrf")["service_calls_per_query"],
+        2.0
+    );
+    assert_eq!(row("lcg-passages")["service_calls_per_query"], 1.0);
+    // The fake answers the graph read with the same lexical passages as passage search, so the
+    // two rank identically: the graph row is wired to the same notes.
+    let Status::Ran(p) = &r.configs[0].status else {
+        panic!()
+    };
+    let Status::Ran(g) = &r.configs[3].status else {
+        panic!()
+    };
+    assert_eq!(p.overall.ndcg, g.overall.ndcg);
 }
 
 #[tokio::test]

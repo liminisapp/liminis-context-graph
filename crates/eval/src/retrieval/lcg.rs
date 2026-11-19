@@ -27,7 +27,7 @@ type UnixStream = tokio::io::DuplexStream;
 use super::fixture::Fixture;
 use super::mapping::{
     chunk_markdown, edge_groups, edge_producers, entity_groups, map_edges, map_entities,
-    map_passages,
+    map_graph_results, map_passages,
 };
 use super::{RankedResult, Retriever};
 
@@ -681,6 +681,7 @@ impl Retriever for LcgPassages {
                 notes,
                 evidence,
                 model_calls: Some(1),
+                service_calls: Some(1),
                 lookup_calls: 0,
                 evidence_gaps: 0,
                 latency,
@@ -972,7 +973,175 @@ impl Retriever for LcgEntitiesFacts {
                 notes,
                 evidence,
                 model_calls: Some(2),
+                service_calls: Some(2 + lookup_calls),
                 lookup_calls,
+                evidence_gaps: 0,
+                latency,
+            })
+        })
+    }
+}
+
+/// Which `knowledge_graph_search` stages an `lcg-graph*` configuration runs (FR-018 ablation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphStages {
+    Seeds,
+    Expand,
+    Full,
+}
+
+impl GraphStages {
+    /// `lcg-graph-seeds` / `lcg-graph-expand` / `lcg-graph`.
+    pub fn from_config(id: &str) -> Option<Self> {
+        match id {
+            "lcg-graph-seeds" => Some(Self::Seeds),
+            "lcg-graph-expand" => Some(Self::Expand),
+            "lcg-graph" => Some(Self::Full),
+            _ => None,
+        }
+    }
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Seeds => "lcg-graph-seeds",
+            Self::Expand => "lcg-graph-expand",
+            Self::Full => "lcg-graph",
+        }
+    }
+    /// The request's `stages` value.
+    pub fn param(self) -> &'static str {
+        match self {
+            Self::Seeds => "seeds",
+            Self::Expand => "expand",
+            Self::Full => "full",
+        }
+    }
+}
+
+/// `lcg-graph` and its ablation rows (issue #797): one `knowledge_graph_search` call per query.
+/// Model calls come from the response's `stats.embed_calls`, not a constant.
+pub struct LcgGraph {
+    pub t: Arc<dyn RpcTransport>,
+    pub map: Arc<IngestMap>,
+    pub stages: GraphStages,
+}
+
+impl Retriever for LcgGraph {
+    fn id(&self) -> &str {
+        self.stages.id()
+    }
+    fn description(&self) -> String {
+        let what = match self.stages {
+            GraphStages::Seeds => "seeds only (passages mentioning the linked entities)",
+            GraphStages::Expand => "seeds + 2-hop expansion (supporting passages and facts)",
+            GraphStages::Full => "full fusion (supporting passages + plain passages + facts, RRF)",
+        };
+        format!(
+            "knowledge_graph_search stages={}: {what}; believed-only default; plain-passage list is vector-only until #789",
+            self.stages.param()
+        )
+    }
+    fn retrieve<'a>(&'a self, q: &'a str, k: usize) -> BoxFuture<'a, Result<RankedResult, String>> {
+        Box::pin(async move {
+            let t0 = Instant::now();
+            let r = self
+                .t
+                .call(
+                    "knowledge_graph_search",
+                    json!({"query": q, "num_results": k, "group_ids": [EVAL_GROUP],
+                           "stages": self.stages.param()}),
+                )
+                .await?;
+            let latency = t0.elapsed();
+            let (groups, evidence) =
+                map_graph_results(&items(&r, "results"), &self.map.episode_note);
+            Ok(RankedResult {
+                notes: groups.into_iter().flatten().collect(),
+                evidence,
+                model_calls: r["stats"]["embed_calls"].as_u64(),
+                service_calls: Some(1),
+                lookup_calls: 0,
+                evidence_gaps: 0,
+                latency,
+            })
+        })
+    }
+}
+
+/// Notes an entity contributes to `lcg-entities-facts-rrf`: at most this many, so one popular
+/// entity cannot flood the ranking with every note that mentions it.
+pub const RRF_NOTES_PER_ENTITY: usize = 2;
+
+/// `lcg-entities-facts-rrf` (issue #797, FR-019): the same two reads as `lcg-entities-facts`,
+/// merged fairly. Each read asks for the full k; each entity contributes at most
+/// [`RRF_NOTES_PER_ENTITY`] notes; unmapped results take no slot; and the two note lists are fused
+/// with RRF (k = 60) instead of strictly alternated, so a note both reads found rises. The
+/// original configuration is unchanged, so historical numbers stay comparable.
+pub struct LcgEntitiesFactsRrf {
+    pub t: Arc<dyn RpcTransport>,
+    pub map: Arc<IngestMap>,
+}
+
+/// First occurrence wins: a note list with duplicates removed, as metrics would see it.
+fn dedupe_first(notes: impl IntoIterator<Item = String>) -> Vec<(String, f64)> {
+    let mut seen = std::collections::HashSet::new();
+    notes
+        .into_iter()
+        .filter(|n| seen.insert(n.clone()))
+        .map(|n| (n, 0.0))
+        .collect()
+}
+
+impl Retriever for LcgEntitiesFactsRrf {
+    fn id(&self) -> &str {
+        "lcg-entities-facts-rrf"
+    }
+    fn description(&self) -> String {
+        format!(
+            "knowledge_find_entities + knowledge_find_relationships (k each, believed_only=true), \
+             ≤{RRF_NOTES_PER_ENTITY} notes per entity, empty results skipped, note lists fused with RRF"
+        )
+    }
+    fn retrieve<'a>(&'a self, q: &'a str, k: usize) -> BoxFuture<'a, Result<RankedResult, String>> {
+        Box::pin(async move {
+            let t0 = Instant::now();
+            let ents = self
+                .t
+                .call(
+                    "knowledge_find_entities",
+                    json!({"query": q, "num_results": k, "min_similarity": 0.0, "group_ids": [EVAL_GROUP]}),
+                )
+                .await?;
+            let facts = self
+                .t
+                .call(
+                    "knowledge_find_relationships",
+                    json!({"query": q, "num_results": k, "min_similarity": 0.0,
+                           "group_ids": [EVAL_GROUP], "believed_only": true}),
+                )
+                .await?;
+            let latency = t0.elapsed();
+
+            let ent_nodes = items(&ents, "nodes");
+            let (_, ent_evidence) = map_entities(&ent_nodes, &self.map.entity_notes);
+            let ent_notes = dedupe_first(
+                entity_groups(&ent_nodes, &self.map.entity_notes)
+                    .into_iter()
+                    .flat_map(|g| g.into_iter().take(RRF_NOTES_PER_ENTITY)),
+            );
+            let edges = items(&facts, "edges");
+            let fact_evidence = map_edges(&edges, &self.map.episode_note).evidence;
+            let fact_notes = dedupe_first(
+                edge_groups(&edges, &self.map.episode_note)
+                    .into_iter()
+                    .flatten(),
+            );
+            let notes = lcg_core::search::rrf_fuse(&[&ent_notes, &fact_notes]);
+            Ok(RankedResult {
+                notes,
+                evidence: interleave(&ent_evidence, &fact_evidence),
+                model_calls: Some(2),
+                service_calls: Some(2),
+                lookup_calls: 0,
                 evidence_gaps: 0,
                 latency,
             })
@@ -1416,6 +1585,112 @@ mod tests {
         assert_eq!(fact_call.1["num_results"], 3);
         assert_eq!(per_read_budget(10), 5);
         assert_eq!(per_read_budget(1), 1);
+    }
+
+    #[tokio::test]
+    async fn graph_retriever_sends_stages_and_maps_facts_and_passages() {
+        let t = Arc::new(FakeTransport::new(|m, _| match m {
+            "knowledge_graph_search" => Ok(json!({"results":[
+                {"kind":"passage","passage":{"content":"P","source_description":"note-c:note-c#0"}},
+                {"kind":"fact","fact":{"uuid":"f1","fact":"F"},
+                 "belief":{"producing_episode_uuids":["ep1"]},
+                 "evidence":{"path":[{"from_name":"A","to_name":"B"}]}},
+                {"kind":"fact","fact":{"uuid":"f2","fact":"G","episodes":["ep2"]},"evidence":{}}
+            ],"count":3,"stats":{"embed_calls":1}})),
+            other => Err(format!("unexpected {other}")),
+        }));
+        for (id, stages) in [
+            ("lcg-graph", "full"),
+            ("lcg-graph-seeds", "seeds"),
+            ("lcg-graph-expand", "expand"),
+        ] {
+            let rt = LcgGraph {
+                t: t.clone(),
+                map: map(),
+                stages: GraphStages::from_config(id).unwrap(),
+            };
+            assert_eq!(rt.id(), id);
+            let r = rt.retrieve("q", 7).await.unwrap();
+            assert_eq!(r.notes, vec!["note-c", "note-a", "note-b"]);
+            assert_eq!(r.evidence, vec!["P", "A \u{2192} B: F", "G"]);
+            assert_eq!(r.model_calls, Some(1), "from stats.embed_calls");
+            assert_eq!(r.service_calls, Some(1));
+            let log = t.log.lock().unwrap();
+            let last = &log.last().unwrap().1;
+            assert_eq!(last["stages"], stages);
+            assert_eq!(last["num_results"], 7);
+            assert_eq!(last["group_ids"], json!([EVAL_GROUP]));
+        }
+        assert!(GraphStages::from_config("lcg-passages").is_none());
+    }
+
+    #[tokio::test]
+    async fn entities_facts_rrf_reads_full_k_caps_entities_and_fuses() {
+        let mut m = IngestMap::default();
+        m.episode_note.insert("ep1".into(), "note-a".into());
+        m.entity_notes.insert(
+            "hub".into(),
+            ["n1", "n2", "n3", "n4"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        m.entity_notes
+            .insert("e2".into(), ["note-a".to_string()].into_iter().collect());
+        let t = Arc::new(FakeTransport::new(|m, _| match m {
+            "knowledge_find_entities" => Ok(json!({"nodes":[
+                {"uuid":"unmapped","name":"U"},
+                {"uuid":"hub","name":"H"},
+                {"uuid":"e2","name":"E2"}]})),
+            "knowledge_find_relationships" => Ok(json!({"edges":[
+                {"uuid":"f1","fact":"F","belief":{"producing_episode_uuids":["ep1"]}}]})),
+            other => Err(format!("unexpected {other}")),
+        }));
+        let rt = LcgEntitiesFactsRrf {
+            t: t.clone(),
+            map: Arc::new(m),
+        };
+        let r = rt.retrieve("q", 10).await.unwrap();
+        // note-a is found by both reads, so it rises to the top; the hub contributes only 2.
+        assert_eq!(r.notes[0], "note-a", "{:?}", r.notes);
+        assert!(r.notes.contains(&"n1".to_string()) && r.notes.contains(&"n2".to_string()));
+        assert!(!r.notes.contains(&"n3".to_string()), "{:?}", r.notes);
+        assert_eq!(r.service_calls, Some(2));
+        let log = t.log.lock().unwrap();
+        for (_, p) in log.iter() {
+            assert_eq!(p["num_results"], 10, "each read asks for the full k");
+        }
+        let facts = log
+            .iter()
+            .find(|(m, _)| m == "knowledge_find_relationships")
+            .unwrap();
+        assert_eq!(facts.1["believed_only"], true);
+    }
+
+    #[tokio::test]
+    async fn existing_retrievers_report_their_service_calls() {
+        let t = Arc::new(FakeTransport::new(|m, _| match m {
+            "knowledge_search_passages" => Ok(json!({"passages":[]})),
+            "knowledge_find_entities" => Ok(json!({"nodes":[]})),
+            "knowledge_find_relationships" => Ok(json!({"edges":[{"uuid":"f1","fact":"F"}]})),
+            "knowledge_get_edges_by_uuids" => Ok(json!({"edges":[]})),
+            other => Err(format!("unexpected {other}")),
+        }));
+        let p = LcgPassages { t: t.clone() }.retrieve("q", 5).await.unwrap();
+        assert_eq!(p.service_calls, Some(1));
+        let ef = LcgEntitiesFacts {
+            t: t.clone(),
+            map: map(),
+            belief: false,
+        }
+        .retrieve("q", 5)
+        .await
+        .unwrap();
+        assert_eq!(
+            ef.service_calls,
+            Some(3),
+            "two reads plus the fallback lookup"
+        );
     }
 
     #[tokio::test]

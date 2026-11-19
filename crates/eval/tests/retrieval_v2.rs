@@ -1131,6 +1131,27 @@ impl RpcTransport for FakeLcg {
                     .collect();
                 Ok(json!({"passages": passages}))
             }
+            // Graph-aware search (#797): the fake has no graph, so it answers with the same
+            // lexical passages, in the read's result shape.
+            "knowledge_graph_search" => {
+                let q = words(p["query"].as_str().unwrap());
+                let chunks = self.chunks.lock().unwrap();
+                let mut scored: Vec<(usize, &Doc)> = chunks
+                    .iter()
+                    .map(|c| (c.2.intersection(&q).count(), c))
+                    .filter(|(s, _)| *s > 0)
+                    .collect();
+                scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1 .0.cmp(&b.1 .0)));
+                let results: Vec<Value> = scored
+                    .into_iter()
+                    .take(K)
+                    .map(|(_, c)| {
+                        json!({"kind": "passage",
+                               "passage": {"source_description": c.0, "content": c.1}})
+                    })
+                    .collect();
+                Ok(json!({"results": results, "stats": {"embed_calls": 1}}))
+            }
             _ => Ok(json!({})),
         };
         Box::pin(async move { out })
@@ -1162,6 +1183,7 @@ impl Retriever for NoteLexical {
             notes: top.iter().map(|(_, n)| n.0.clone()).collect(),
             evidence: top.iter().map(|(_, n)| n.1.clone()).collect(),
             model_calls: None,
+            service_calls: None,
             lookup_calls: 0,
             evidence_gaps: 0,
             latency: Duration::from_millis(1),

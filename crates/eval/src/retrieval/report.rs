@@ -74,6 +74,8 @@ pub struct ConfigRun {
     pub latency_p95_ms: Option<f64>,
     /// Query-time model calls per query; `None` = not exposed by the system.
     pub model_calls_per_query: Option<f64>,
+    /// Service RPCs per query, main reads included (issue #797); `None` = not an LCG service.
+    pub service_calls_per_query: Option<f64>,
     pub lookup_calls: u64,
     /// Returned hits with no evidence text, judged unsupported (see `RankedResult::evidence_gaps`).
     pub evidence_gaps: u64,
@@ -581,6 +583,36 @@ impl Report {
         self.meta.category_counts.values().sum()
     }
 
+    /// Notes on the opt-in graph-aware configurations (issue #797), printed only when one ran or
+    /// was requested: what each ablation row means, the plain-passage mode, the fairer
+    /// entities+facts variant, and the reranker (#796) status (FR-019, FR-020).
+    fn graph_section(&self, o: &mut String) {
+        let ids: Vec<&str> = self
+            .configs
+            .iter()
+            .map(|c| c.id.split('@').next().unwrap_or(&c.id))
+            .collect();
+        let graph = ids.iter().any(|i| i.starts_with("lcg-graph"));
+        let rrf = ids.contains(&"lcg-entities-facts-rrf");
+        if !graph && !rrf {
+            return;
+        }
+        let _ = writeln!(o, "## Graph-aware search (#797)\n");
+        if graph {
+            let _ = writeln!(o, "- `lcg-graph*` drive `knowledge_graph_search` (one service call, one query embedding, no LLM). Ablation rows: `lcg-graph-seeds` = passages mentioning the linked seed entities only; `lcg-graph-expand` = + two-hop expansion (supporting passages and facts); `lcg-graph` = + plain passage search, fused with RRF.");
+            let _ = writeln!(o, "- The plain-passage list inside `lcg-graph` is **vector-only** on this build (hybrid BM25 passage search is #789). Each response reports it as `stats.passage_mode`.");
+            let _ = writeln!(o, "- `knowledge_graph_search` is believed-only by default: superseded facts and passages are neither returned nor traversed.");
+            let _ = writeln!(
+                o,
+                "- Local reranker (#796): **not measured** — it has not landed on this build."
+            );
+        }
+        if rrf {
+            let _ = writeln!(o, "- `lcg-entities-facts-rrf` is a fairer merge of the same two reads as `lcg-entities-facts`: each read asks for k (not ceil(k/2)), each entity contributes at most 2 notes (no hub flooding in note-id order), unmapped results take no slot, and the two note lists are fused with RRF instead of strictly alternated. `lcg-entities-facts` itself is unchanged, so historical numbers stay comparable.");
+        }
+        let _ = writeln!(o);
+    }
+
     fn disclaimer(&self) -> String {
         let corpus = if self.meta.private {
             "The corpus is a private notebook: these results describe that notebook and its question set only, not retrieval in general"
@@ -944,6 +976,7 @@ impl Report {
 
         self.origin_section(&mut o);
         self.variants_section(&mut o);
+        self.graph_section(&mut o);
 
         let _ = writeln!(o, "## Hypotheses\n");
         let (h1, h2) = self.hypotheses();
@@ -964,12 +997,15 @@ impl Report {
 
         let _ = writeln!(o, "\n## Cost\n");
         let _ = writeln!(o, "Per query, **warm** (indices built and one unmeasured warm-up pass before timing). qmd runs as one process per query, so its latency is **per-process** (it includes model load) and it gets a single warm-up query rather than a full pass.\n");
-        let _ = writeln!(o, "| config | p50 ms | p95 ms | model calls/query | lookup calls | query errors | grounded judge |");
-        let _ = writeln!(o, "|---|---|---|---|---|---|---|");
+        let _ = writeln!(o, "| config | p50 ms | p95 ms | model calls/query | service calls/query | lookup calls | query errors | grounded judge |");
+        let _ = writeln!(o, "|---|---|---|---|---|---|---|---|");
         for (c, r) in self.ran() {
             let calls = r
                 .model_calls_per_query
                 .map_or("n/a (not exposed)".to_string(), |v| format!("{v:.1}"));
+            let service = r
+                .service_calls_per_query
+                .map_or("n/a".to_string(), |v| format!("{v:.1}"));
             let g = match &r.grounded {
                 Grounded::Judged {
                     paid_calls,
@@ -981,7 +1017,7 @@ impl Report {
             };
             let _ = writeln!(
                 o,
-                "| `{}` | {} | {} | {calls} | {} | {} | {g} |",
+                "| `{}` | {} | {} | {calls} | {service} | {} | {} | {g} |",
                 c.id,
                 ms(r.latency_p50_ms),
                 ms(r.latency_p95_ms),
@@ -1485,6 +1521,7 @@ impl Report {
                         "origins": origins,
                         "latency_p50_ms": r.latency_p50_ms, "latency_p95_ms": r.latency_p95_ms,
                         "model_calls_per_query": r.model_calls_per_query,
+                        "service_calls_per_query": r.service_calls_per_query,
                         "lookup_calls": r.lookup_calls,
                         "evidence_gaps": r.evidence_gaps,
                         "query_errors": if m.private {
@@ -1604,6 +1641,7 @@ mod tests {
             latency_p50_ms: Some(12.0),
             latency_p95_ms: Some(30.0),
             model_calls_per_query: None,
+            service_calls_per_query: None,
             lookup_calls: 0,
             evidence_gaps: 0,
             query_errors: vec![],
@@ -1852,6 +1890,46 @@ mod tests {
         r.configs[1].status = Status::Skipped("qmd not installed".into());
         assert_eq!(r.hypotheses(), (Reading::CannotRead, Reading::CannotRead));
         assert!(r.render_markdown().contains("cannot be read"));
+    }
+
+    #[test]
+    fn graph_section_appears_only_for_graph_configs_and_shows_service_calls() {
+        let mut r = report();
+        let md = r.render_markdown();
+        assert!(
+            !md.contains("## Graph-aware search"),
+            "no graph config, no section"
+        );
+        assert!(md.contains("service calls/query"));
+        let mut c = r.configs[0].clone();
+        c.id = "lcg-graph".into();
+        if let Status::Ran(run) = &mut c.status {
+            run.service_calls_per_query = Some(1.0);
+            run.model_calls_per_query = Some(1.0);
+        }
+        r.configs.push(c);
+        let mut e = r.configs[0].clone();
+        e.id = "lcg-entities-facts-rrf".into();
+        r.configs.push(e);
+        let md = r.render_markdown();
+        for s in [
+            "## Graph-aware search (#797)",
+            "`lcg-graph-seeds` = passages mentioning",
+            "vector-only",
+            "Local reranker (#796): **not measured**",
+            "`lcg-entities-facts-rrf` is a fairer merge",
+            "| `lcg-graph` |",
+        ] {
+            assert!(md.contains(s), "missing {s:?} in:\n{md}");
+        }
+        let j = r.to_json();
+        let row = j["configs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == "lcg-graph")
+            .unwrap();
+        assert_eq!(row["service_calls_per_query"], 1.0);
     }
 
     #[test]

@@ -349,6 +349,7 @@ impl Retriever for QmdRetriever {
                 notes,
                 evidence,
                 model_calls: None,
+                service_calls: None,
                 lookup_calls: 0,
                 evidence_gaps,
                 latency,
