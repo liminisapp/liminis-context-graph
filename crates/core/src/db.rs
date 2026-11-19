@@ -2402,16 +2402,51 @@ impl<'db> Conn<'db> {
         if let Some(t) = live_at_us {
             params["t_ms"] = serde_json::json!(t.div_euclid(1000));
         }
-        let rows = self.query_params(&cypher, params)?;
-        Ok(rows
-            .into_iter()
+        let row_out = |r: &[Value]| {
+            (
+                value_as_string(&r[0]),
+                episode_origin_info_from_cols(&r[1], &r[2], &r[3], &r[4]),
+            )
+        };
+        if let Ok(rows) = self.query_params(&cypher, params.clone()) {
+            return Ok(rows.iter().map(|r| row_out(r)).collect());
+        }
+        // lbug fails the whole query, rather than yielding NULL, on a vector of the wrong length
+        // (as `expand_frontier_scored` notes). Fall back to the same filtered match returning the
+        // embeddings, and rank in Rust with the same order: similarity descending (unscorable
+        // last), uuid tie-break, then the same limit.
+        let fallback = format!(
+            "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
+             WHERE n.uuid = $uuid AND coalesce(ep.origin, '') IN $origins {live} \
+             WITH DISTINCT ep \
+             RETURN ep.uuid, coalesce(ep.origin, ''), ep.doc_id, ep.superseded_at, ep.group_id, \
+             ep.content_embedding"
+        );
+        if let Some(o) = params.as_object_mut() {
+            o.remove("emb");
+            o.remove("limit");
+        }
+        let mut scored: Vec<(Option<f64>, String, crate::origin::EpisodeOriginInfo)> = self
+            .query_params(&fallback, params)?
+            .iter()
             .map(|r| {
+                let (uuid, info) = row_out(r);
                 (
-                    value_as_string(&r[0]),
-                    episode_origin_info_from_cols(&r[1], &r[2], &r[3], &r[4]),
+                    rust_cosine(embedding, &value_as_float_array(&r[5])),
+                    uuid,
+                    info,
                 )
             })
-            .collect())
+            .collect();
+        scored.sort_by(|a, b| {
+            let (x, y) = (
+                a.0.unwrap_or(f64::NEG_INFINITY),
+                b.0.unwrap_or(f64::NEG_INFINITY),
+            );
+            y.total_cmp(&x).then_with(|| a.1.cmp(&b.1))
+        });
+        scored.truncate(limit);
+        Ok(scored.into_iter().map(|(_, u, i)| (u, i)).collect())
     }
 
     /// Entities among `entity_uuids` with at least one live primary or external mention — the
@@ -8105,6 +8140,17 @@ mod graph_search_primitive_tests {
             .entity_mentions_ranked("a", &q, &corroborating, None, 0)
             .unwrap()
             .is_empty());
+        // A query of another dimension makes lbug's in-query cosine fail. The Rust fallback keeps
+        // the same filters and limit and returns the rows, unscored and so in uuid order, rather
+        // than failing the whole graph search.
+        let got = c
+            .entity_mentions_ranked("a", &[1.0, 0.0], &corroborating, Some(june_us), 2)
+            .unwrap();
+        assert_eq!(ids(got), vec!["m-best", "m-far"]);
+        let got = c
+            .entity_mentions_ranked("a", &[1.0, 0.0], &corroborating, Some(june_us), 10)
+            .unwrap();
+        assert_eq!(ids(got), vec!["m-best", "m-far", "m-good"]);
     }
 
     #[test]
