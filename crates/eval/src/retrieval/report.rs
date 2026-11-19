@@ -1915,7 +1915,9 @@ mod tests {
         for s in [
             "## Graph-aware search (#797)",
             "`lcg-graph-seeds` = passages mentioning",
-            "vector-only",
+            // Text only the graph section writes (the passage-mode bullet), not the unrelated
+            // `lcg-passages is vector-only` sentence every report carries.
+            "`belief_aware: true` (#789)",
             "Local reranker (#796): **not measured**",
             "`lcg-entities-facts-rrf` is a fairer merge",
             "| `lcg-graph` |",

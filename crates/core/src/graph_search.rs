@@ -1474,8 +1474,9 @@ pub fn split_fanout<T>(
 /// queries). Its cut is by `rn.uuid` across the whole frontier, so when it hits the cap one hub
 /// could take every row and starve the other frontier entities. In that case each entity is
 /// refetched on its own with an equal share of the same budget (`cap / frontier`, at least one),
-/// so no entity loses edges to another's. Within one entity the cut is still by uuid: relevance
-/// needs the fact embeddings these rows carry, and the per-entity fan-out ranks by it next.
+/// so no entity loses edges to another's. Within one entity the cut is still by uuid, because it
+/// happens before relevance is scored (one `fact_similarities` query over the rows that survive);
+/// the per-entity fan-out then ranks by relevance.
 fn fetch_frontier(
     conn: &Conn<'_>,
     emb: &[f32],

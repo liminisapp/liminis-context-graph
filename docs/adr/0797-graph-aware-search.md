@@ -166,7 +166,8 @@ belief state, and a four-step variable-length pattern through the fact node is u
   hit each frontier entity is refetched on its own with an equal share of the same budget
   (reported as `frontier_rows`, plus `entity_rows` for any entity that still overflows its share):
   a hub cannot starve the other frontier entities. Within one entity the cut stays by uuid, since
-  relevance needs the embeddings those rows carry; the 20-per-entity fan-out ranks by it next. The 200-fact trim keeps whole paths: a fact is kept, best score first, only
+  the cut happens before relevance is scored (one scoring query over the surviving rows); the
+  20-per-entity fan-out ranks by relevance next. The 200-fact trim keeps whole paths: a fact is kept, best score first, only
   together with every edge on its path, and an entity reached only through a trimmed edge is no
   longer reached. Cutting by score alone would orphan hop-2 facts, since hop decay can score their
   weakly worded bridge below them, and leave evidence naming an edge the response omits. Citation-only edges (every producer derived / answer) never take one of these slots. They have their own budget of 20 per entity, reported as `per_entity_citations`. They do not count toward the 200-fact cap, and they are kept only while the walk edges before them survive. They can neither rank nor carry the walk, so a hub full of on-topic agent restatements cannot crowd its primary edges out. Every cap that cut something is reported in `stats.truncations`; a direction holding exactly the row cap is not a cut (one row past the cap is fetched to tell). A self-loop fact is returned once per hop, not once per direction.
