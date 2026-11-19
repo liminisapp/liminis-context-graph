@@ -2249,6 +2249,54 @@ async fn parity_search_passages_empty_query() {
     assert_err_resp(&v, 41, -32000);
 }
 
+/// Issue #802 (FR-012): `queries` is optional; an empty db with variants is still a well-formed,
+/// empty passage response, and `[]` / `null` behave exactly like absent.
+#[tokio::test]
+async fn parity_search_passages_optional_queries_empty_db() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    for (id, extra) in [
+        (42, serde_json::json!(["another phrasing", "keywords"])),
+        (43, serde_json::json!([])),
+        (44, serde_json::Value::Null),
+    ] {
+        let v = dispatch_val(
+            id,
+            "knowledge_search_passages",
+            serde_json::json!({
+                "query": "test passage", "num_results": 5, "min_score": 0.0, "queries": extra
+            }),
+            state.clone(),
+        )
+        .await;
+        assert_ok_resp(&v, id);
+        assert_eq!(v["result"]["count"], 0, "{v}");
+        assert!(v["result"]["passages"].is_array(), "{v}");
+    }
+}
+
+/// Issue #802: malformed `queries` is a -32000 error, never a silent drop.
+#[tokio::test]
+async fn parity_search_passages_rejects_invalid_queries() {
+    let (db, _dir) = make_db(4);
+    let state = make_state_with_mock_embed(db);
+    for (id, bad) in [
+        (45, serde_json::json!(["a", "b", "c", "d", "e", "f"])),
+        (46, serde_json::json!([""])),
+        (47, serde_json::json!("not an array")),
+        (48, serde_json::json!([42])),
+    ] {
+        let v = dispatch_val(
+            id,
+            "knowledge_search_passages",
+            serde_json::json!({"query": "test passage", "queries": bad}),
+            state.clone(),
+        )
+        .await;
+        assert_err_resp(&v, id, -32000);
+    }
+}
+
 // ── Tier 1b: knowledge_list_entities ─────────────────────────────────────────
 
 #[tokio::test]

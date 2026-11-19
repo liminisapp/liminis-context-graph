@@ -526,13 +526,29 @@ pub fn registry() -> Vec<ToolSpec> {
                            (issue #752) of its episode, and `origins` restricts results to \
                            episodes of those origins (e.g. exclude an agent's own derived \
                            pages); the filter runs after the nearest-neighbour probe, which is \
-                           oversampled, so fewer than `num_results` can come back.",
+                           oversampled, so fewer than `num_results` can come back. \
+                           Supply `queries` (up to 5 extra phrasings of `query`) when a direct \
+                           search came back thin, or when the question describes something \
+                           rather than naming it: the note that answers it often shares few \
+                           words with the question. Good variants are keywords the note itself \
+                           would use, a likely name for the thing described, and a \
+                           one-sentence hypothetical answer. Every variant is searched with the \
+                           same filters and `min_score`, and the results are fused into one \
+                           list in which `query` counts double. With `queries`, each result \
+                           carries `matched_queries`: indices into `[query, ...queries]` of the \
+                           queries that retrieved it (0 is `query`). Without `queries` the \
+                           response is unchanged.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Search text (required, non-empty)."},
+                        "query": {"type": "string", "description": "Search text (required, non-empty). The primary query."},
+                        "queries": {
+                            "type": "array", "maxItems": 5,
+                            "items": {"type": "string", "minLength": 1},
+                            "description": "Optional extra query variants, at most 5, each non-empty, at most 2000 characters in total. Use when a direct search came back thin or the question describes something rather than naming it. Good variants: keywords the note would use, a likely name for the thing described, a one-sentence hypothetical answer."
+                        },
                         "num_results": {
                             "type": "integer", "minimum": 1, "maximum": 100, "default": 10,
                             "description": "Maximum number of passages to return (clamped 1-100)."
@@ -2097,6 +2113,44 @@ mod tests {
             Some(&vec![json!("group_id")]),
             "group_id must be the sole required field"
         );
+    }
+
+    #[test]
+    fn search_passages_documents_query_variants() {
+        // Issue #802, FR-011: the schema documents `queries` and the description says when to
+        // supply them and what good variants are.
+        let spec = registry()
+            .into_iter()
+            .find(|t| t.name == "knowledge_search_passages")
+            .expect("knowledge_search_passages is registered");
+        let schema = (spec.input_schema)();
+        let q = &schema["properties"]["queries"];
+        assert_eq!(q["type"], "array");
+        assert_eq!(q["maxItems"], 5);
+        assert_eq!(q["items"]["type"], "string");
+        assert!(
+            !schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| r == "queries"),
+            "queries is optional"
+        );
+        for needle in [
+            "queries",
+            "came back thin",
+            "describes something",
+            "keywords the note itself",
+            "likely name",
+            "hypothetical answer",
+            "matched_queries",
+        ] {
+            assert!(
+                spec.description.contains(needle),
+                "description must mention {needle:?}: {}",
+                spec.description
+            );
+        }
     }
 
     #[test]
