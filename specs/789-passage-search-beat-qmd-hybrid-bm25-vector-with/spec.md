@@ -3,6 +3,16 @@
 **Feature Branch**: `fabrik/issue-789`
 **Created**: 2026-11-18
 **Status**: Specified
+
+> **Revised during implementation (2026-11-19): read this before checking the code against the requirements below.**
+> The spec below is the original as specified and is kept unchanged for the record. The shipped design departs from it on the maintainer's instruction, as recorded in
+> [ADR-0789](../../docs/adr/0789-hybrid-passage-search-rrf-top-rank-bonus.md) (which is authoritative where the two differ):
+>
+> - **FR-002, SC-003 and SC-008 (top-rank bonus): dropped.** The bonus was indistinguishable from plain RRF on both v1 and v2, so `apply_top_rank_bonus` and the `top_rank_bonus` parameter were removed. Hybrid is a single `mode`, with a weighted RRF (the lexical list weighs `LEXICAL_RRF_WEIGHT`, below the vector list) in place of the equal-weight fusion FR-001 describes.
+> - **Belief-aware ranking (Out of Scope, original step 3): delivered.** After the maintainer's v2 eval showed unweighted hybrid ranking derived and superseded notes above their primary and current ones, `belief_aware` re-ranking was added: a derived page ranks below the primary note it cites, and a superseded passage below its successor. It defaults on in `hybrid` and off in `vector`. The `explain` trace, query expansion and reranking remain out of scope.
+> - **FR-005 / SC-001 to SC-005 (default mode): unchanged outcome.** The default stays `vector`. The first design measured below vector on v2 (see the ADR); the revised design is not yet measured.
+> - **FR-004, FR-006 to FR-012, FR-014 and `lexical_passage_list` (FR-011): unchanged.**
+
 **Input**: User description: "Passage search: beat qmd. Hybrid BM25+vector with RRF, belief-aware ranking, optional query expansion, explain trace
 
 ## Problem
