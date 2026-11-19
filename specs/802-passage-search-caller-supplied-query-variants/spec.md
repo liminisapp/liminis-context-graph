@@ -196,7 +196,7 @@ Once graph search (#797) has landed, `knowledge_graph_search` accepts `queries` 
 - **FR-003**: `queries` MUST be validated: at most 5 entries, each a non-empty (non-whitespace) string, with a bounded total length. Violations MUST produce a validation error identifying which rule was broken. Values are never silently truncated or dropped.
 - **FR-004**: When variants are supplied, all queries (primary first) MUST be embedded in a single batched call as query-role embeddings.
 - **FR-005**: For each query, the mode's normal retrieval MUST run, including any stages enabled for that mode.
-- **FR-006**: Per-query results MUST be combined with weighted reciprocal-rank fusion in which the primary query has a higher weight than a variant. The primary weight MUST be a single named, documented constant (initial value 2, as in qmd), with variants weighted 1.
+- **FR-006**: Per-query results MUST be combined with weighted reciprocal-rank fusion in which the primary query has a higher weight than a variant. The primary weight MUST be a single named, documented constant (`PRIMARY_QUERY_WEIGHT`, initial value 2, as in qmd). The variants MUST share a fixed total budget (`VARIANT_BUDGET_WEIGHT`, initial value 1) split equally across the variants actually searched, so that together they never outweigh the primary query (its share of the total weight is at least 2/3 for 1–5 variants). *Revised after the first v2 measurement: the original wording gave every variant weight 1, which let 5 variants outweigh the primary 5:2 and cost 0.046 overall nDCG@10; see ADR-0802, decision 4.*
 - **FR-007**: When a rerank stage is enabled (#796), it MUST run once on the fused candidate set, scored against the primary query only, never once per variant. If the rerank stage is not present in the code at implementation time, this requirement is deferred to that stage.
 - **FR-008**: Every existing filter (`believed_only`, `as_of`, origin filters, group scoping) MUST apply to every per-query retrieval. Variants MUST NOT surface any result the same filters would exclude for the primary query.
 - **FR-009**: Each result in a request that used variants MUST report which queries matched it, as indices into `[query, ...queries]`. A result matched by several queries lists all of them, in ascending order.
@@ -227,7 +227,7 @@ Once graph search (#797) has landed, `knowledge_graph_search` accepts `queries` 
 - **SC-001**: With `queries` absent, 100% of the existing test suite passes unchanged and responses are byte-identical.
 - **SC-002**: On v2, paraphrase nDCG@10 for `lcg-passages-variants` is higher than `lcg-passages`, with the paired interval's lower bound above zero.
 - **SC-003**: On v2, no other question category regresses beyond noise, meaning no category's paired interval lies wholly below zero against `lcg-passages`.
-- **SC-004**: p50 latency of `lcg-passages-variants` at 5 variants is at most 100 ms on the v2 corpus, and p95 is reported.
+- **SC-004**: p50 and p95 latency of `lcg-passages-variants` at 5 variants on the v2 corpus are reported. *The original "p50 at most 100 ms" bar was dropped by the maintainer on 2026-11-19, since these are deliberate agent searches; the measured p50 is about 140 ms.*
 - **SC-005**: The leak check passes on the committed fixture: 0 variants contain a relevant note's title or key-fact string verbatim.
 - **SC-006**: In unit tests, a primary-only result ranks ahead of a variant-only result at the same rank, 100% of the time, and every filter is shown to apply to every variant.
 - **SC-007**: Every validation rule (more than 5, empty or whitespace entry, over the length bound, wrong type) has a test that asserts an error.
@@ -236,7 +236,7 @@ Once graph search (#797) has landed, `knowledge_graph_search` accepts `queries` 
 ## Assumptions
 
 - Variants are provided by the calling agent. LCG never generates them, which satisfies the maintainer's preference for no query-time LLM by default.
-- The primary-query weight is 2 and variants weigh 1, taken from qmd. The weight is a named constant so it can be tuned without an API change.
+- The primary-query weight is 2, taken from qmd, and the variants share a fixed total budget of 1, split equally (see FR-006 and ADR-0802, decision 4; the original "each variant weighs 1" was superseded). Both are named constants so they can be tuned without an API change.
 - The initial total-length bound (all variants combined) is generous enough for a short sentence per variant, so around 2,000 characters. The exact value is a design choice and is documented where the validation is defined.
 - "Regresses beyond noise" (SC-003) means a category's paired interval against `lcg-passages` lies wholly below zero. Categories with intervals spanning zero count as noise.
 - #789 (hybrid) and #796 (rerank) are not yet merged. This work targets whatever retrieval modes exist when it is implemented; the hybrid and rerank parts apply only if those stages are present. The merge bar is measured on the vector configuration.
