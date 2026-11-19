@@ -532,12 +532,16 @@ pub fn registry() -> Vec<ToolSpec> {
                            rather than naming it: the note that answers it often shares few \
                            words with the question. Good variants are keywords the note itself \
                            would use, a likely name for the thing described, and a \
-                           one-sentence hypothetical answer. Every variant is searched with the \
-                           same filters and `min_score`, and the results are fused into one \
-                           list in which `query` counts double. With `queries`, each result \
-                           carries `matched_queries`: indices into `[query, ...queries]` of the \
-                           queries that retrieved it (0 is `query`). Without `queries` the \
-                           response is unchanged.",
+                           one-sentence hypothetical answer. Every variant runs the request's \
+                           whole search (its `mode`, filters and `min_score`; in hybrid mode a \
+                           variant's keywords reach BM25) and the rankings are fused into one \
+                           list in which `query` always keeps at least two thirds of the \
+                           weight, so variants widen the candidates but never outvote it; \
+                           `belief_aware` ranking then runs once on the fused list. With \
+                           `queries`, `score` is the fused rank score, `similarity` the best \
+                           cosine, and each result carries `matched_queries`: indices into \
+                           `[query, ...queries]` of the queries that retrieved it (0 is \
+                           `query`). Without `queries` the response is unchanged.",
             scope: Scope::Read,
             input_schema: || {
                 json!({

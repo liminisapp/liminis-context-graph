@@ -331,11 +331,17 @@ async fn min_score_floor_applies_to_every_variant() {
     )
     .await;
     assert!(names(&low).len() > 1, "{low}");
-    // `score` is a cosine similarity, never the RRF score.
-    for p in low["passages"].as_array().unwrap() {
-        let s = p["score"].as_f64().unwrap();
-        assert!((0.0..=1.0 + 1e-6).contains(&s), "{p}");
+    // With variants `score` is the fused rank score, in rank order; the cosine is `similarity`.
+    let passages = low["passages"].as_array().unwrap();
+    for p in passages {
+        let sim = p["similarity"].as_f64().unwrap();
+        assert!((0.0..=1.0 + 1e-6).contains(&sim), "{p}");
     }
+    let scores: Vec<f64> = passages
+        .iter()
+        .map(|p| p["score"].as_f64().unwrap())
+        .collect();
+    assert!(scores.windows(2).all(|w| w[0] >= w[1]), "{scores:?}");
 }
 
 #[tokio::test]

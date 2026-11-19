@@ -178,9 +178,21 @@ case-insensitive, needles under 8 characters are skipped, and text the question 
 a leak. It catches verbatim leaks only, not paraphrased ones. With no `query-variants.jsonl`, the
 `lcg-passages-variants` row is reported as skipped.
 
-The report's "Query variants vs `lcg-passages`" section gives per-category paired nDCG@k differences with
-intervals, p50/p95, and the merge-bar reading: paraphrase interval above zero, no category wholly below zero,
-p50 at most 100 ms.
+The committed v2 fixture (244 questions, 1,194 variants) was written by Sonnet 4.6 from each question's text
+alone through this exchange; `--check` finds no leaks. About one variant in ten is a hypothetical answer with a
+placeholder (`[date]`, `[Name]`), which adds a noise token and will not match note text.
+
+Every variants config sends the *same request as its base config* plus `queries`, so each query runs that
+pipeline (vector, or BM25 + vector) and the per-query rankings are fused (primary weight 2, the variants
+sharing a total of 1). The report's "Query variants vs `<base>`" section, one per variants config
+(`lcg-passages-variants` against `lcg-passages`, `lcg-passages-hybrid-belief-variants` against
+`lcg-passages-hybrid-belief`), gives per-category paired nDCG@k differences with intervals, p50/p95, and the
+merge-bar reading: paraphrase interval above zero, no category wholly below zero, p50 at most 100 ms.
+
+First v2 result (vector-only, per-variant weight 1, head `a0c7e95f`): variants lowered overall nDCG@10 from
+0.568 to 0.522 (paraphrase 0.150 to 0.085, multi-hop 0.662 to 0.552, p50 24 ms to 141 ms). That is why variants
+now run the request's whole pipeline, share a fixed weight budget and fuse concurrently (ADR-0802); it is not
+yet re-measured.
 
 ## Caveats the report repeats
 

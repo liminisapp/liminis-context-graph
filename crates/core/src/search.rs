@@ -1158,17 +1158,16 @@ pub async fn hybrid_edge_search_scored(
 mod tests {
     use super::*;
 
-    fn list(ids: &[&str]) -> Vec<(String, f64)> {
-        ids.iter().map(|u| (u.to_string(), 0.0)).collect()
-    }
-
     #[test]
     fn weighted_fusion_ranks_primary_only_ahead_of_variant_only_at_same_rank() {
         // Both are rank 0 in their own list; "z" sorts after "a" by uuid, so a UUID tie-break
         // alone would put the variant-only hit first. The weight must overrule it.
         let primary = list(&["z"]);
         let variant = list(&["a"]);
-        let fused = rrf_fuse_weighted(&[(PRIMARY_QUERY_WEIGHT, &primary), (1.0, &variant)]);
+        let fused = rrf_fuse_weighted(&[
+            (PRIMARY_QUERY_WEIGHT, &primary),
+            (variant_weight(1), &variant),
+        ]);
         let order: Vec<&str> = fused.iter().map(|(u, _)| u.as_str()).collect();
         assert_eq!(order, vec!["z", "a"]);
     }
@@ -1259,6 +1258,36 @@ mod tests {
             sanitize_fts_query(&long).split(' ').count(),
             MAX_FTS_QUERY_TOKENS
         );
+    }
+
+    #[test]
+    fn the_primary_share_of_the_weight_is_at_least_two_thirds_for_any_variant_count() {
+        for n in 1..=crate::query_variants::MAX_QUERY_VARIANTS {
+            let total = PRIMARY_QUERY_WEIGHT + variant_weight(n) * n as f64;
+            assert!(
+                PRIMARY_QUERY_WEIGHT / total >= 2.0 / 3.0 - 1e-12,
+                "n = {n}: primary share {}",
+                PRIMARY_QUERY_WEIGHT / total
+            );
+            // The variants' total weight is the fixed budget, however many there are.
+            assert!((variant_weight(n) * n as f64 - VARIANT_BUDGET_WEIGHT).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn variants_that_all_agree_cannot_outrank_the_primary_top_hit() {
+        // Every variant puts "v" at rank 0; the primary puts "p" at rank 0. Even with the
+        // maximum five agreeing variants, the primary's own top hit stays first.
+        for n in 1..=crate::query_variants::MAX_QUERY_VARIANTS {
+            let primary = list(&["p"]);
+            let variant = list(&["v"]);
+            let mut lists: Vec<(f64, &[(String, f64)])> = vec![(PRIMARY_QUERY_WEIGHT, &primary)];
+            for _ in 0..n {
+                lists.push((variant_weight(n), &variant));
+            }
+            let fused = rrf_fuse_weighted(&lists);
+            assert_eq!(fused[0].0, "p", "n = {n}");
+        }
     }
 
     #[test]
@@ -1558,6 +1587,7 @@ mod tests {
             attributes: "{}".into(),
             origin: "primary".into(),
             similarity: None,
+            matched_queries: None,
         };
         let mk = |superseded_at_us| crate::belief::EpisodeSupersession {
             superseded_at_us,

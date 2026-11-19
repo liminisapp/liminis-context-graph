@@ -81,7 +81,12 @@ target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2
    Commit `query-variants.jsonl`. It is stamped with the questions hash, so any edit to
    `questions.jsonl` makes it stale (regenerate). `--replies` refuses to write if a reply is missing or
    invalid or any variant contains a relevant note's title or key fact verbatim. Then run the eval with
-   `lcg-passages-variants` to measure the merge bar.
+   `lcg-passages-variants`, and the opt-in `lcg-passages-belief-variants` and
+   `lcg-passages-hybrid-belief-variants`, to measure the merge bar.
+
+   **Committed fixture:** 244 questions, 1,194 variants, written by Sonnet 4.6 from the question text only
+   (`--export-prompts` / `--replies` exchange, no API key); `--check` reports no leaks against questions hash
+   `c110fc2cb5090cea`.
 
 `cargo test -p lcg-eval --test retrieval_v2` checks the skeleton against the scenario, the pipeline
 against a template-prose test double, and (once rendered) the checked-in prose against the skeleton.

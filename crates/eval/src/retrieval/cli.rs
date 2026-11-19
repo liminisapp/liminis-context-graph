@@ -34,6 +34,13 @@ pub const HYBRID_PASSAGE_CONFIGS: [&str; 4] = [
     "lcg-passages-hybrid-belief",
 ];
 
+/// Opt-in caller-supplied-variants configs on top of those (#802): every query runs the same
+/// pipeline as the base config, so each is read against it. Needs `query-variants.jsonl`.
+pub const VARIANTS_PASSAGE_CONFIGS: [&str; 2] = [
+    "lcg-passages-belief-variants",
+    "lcg-passages-hybrid-belief-variants",
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalArgs {
     pub corpus: PathBuf,
@@ -92,6 +99,10 @@ OPTIONS:
                                baseline), (#789) lcg-passages-hybrid (BM25 + vector, weighted RRF),
                                lcg-passages-hybrid-belief (the same plus belief-aware ranking),
                                lcg-passages-belief (vector plus belief-aware ranking).
+                               Opt-in (#802, need query-variants.jsonl): lcg-passages-belief-variants
+                               and lcg-passages-hybrid-belief-variants (the same, with the variants
+                               run through that pipeline and fused once; each is read against its
+                               variants-less base).
     --service-bin <PATH>       liminis-context-graph binary to spawn (default: alongside lcg-eval,
                                else `liminis-context-graph` on PATH).
     --embedder-http <URL>      Real embedder for the spawned service (required for LCG configs
@@ -193,11 +204,15 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
                 let v = val("--configs")?;
                 let mut list = Vec::new();
                 for c in v.split(',').map(str::trim).filter(|c| !c.is_empty()) {
-                    if !ALL_CONFIGS.contains(&c) && !HYBRID_PASSAGE_CONFIGS.contains(&c) {
+                    if !ALL_CONFIGS.contains(&c)
+                        && !HYBRID_PASSAGE_CONFIGS.contains(&c)
+                        && !VARIANTS_PASSAGE_CONFIGS.contains(&c)
+                    {
                         return Err(format!(
-                            "unknown configuration '{c}' (expected one of: {}, {})",
+                            "unknown configuration '{c}' (expected one of: {}, {}, {})",
                             ALL_CONFIGS.join(", "),
-                            HYBRID_PASSAGE_CONFIGS.join(", ")
+                            HYBRID_PASSAGE_CONFIGS.join(", "),
+                            VARIANTS_PASSAGE_CONFIGS.join(", ")
                         ));
                     }
                     if !list.iter().any(|x| x == c) {
@@ -376,6 +391,22 @@ mod tests {
         }
         assert!(usage().contains("lcg-passages-variants"));
         assert!(p(&["--configs", "lcg-passages-variant"]).is_err());
+        match p(&[
+            "--configs",
+            "lcg-passages-hybrid-belief,lcg-passages-hybrid-belief-variants,lcg-passages-belief-variants",
+        ])
+        .unwrap()
+        {
+            RetrievalMode::Run(a) => assert_eq!(a.configs.len(), 3),
+            _ => panic!(),
+        }
+        // Opt-in: not in the default run.
+        match p(&[]).unwrap() {
+            RetrievalMode::Run(a) => {
+                assert!(!a.configs.iter().any(|c| c.contains("belief-variants")))
+            }
+            _ => panic!(),
+        }
     }
 
     #[test]

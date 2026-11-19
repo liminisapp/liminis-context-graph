@@ -456,12 +456,11 @@ fn default_service_bin() -> PathBuf {
     PathBuf::from("liminis-context-graph")
 }
 
-/// The config id of the caller-supplied-variants passage search (#802).
-pub const VARIANTS_CONFIG: &str = "lcg-passages-variants";
-
 fn skipped_slot(id: &str, reason: &str) -> Slot {
     let description = match id {
-        VARIANTS_CONFIG => "knowledge_search_passages with caller-supplied query variants",
+        v if lcg::PassageMode::from_variants_id(v).is_some() => {
+            "knowledge_search_passages with caller-supplied query variants"
+        }
         "qmd" => "qmd query --no-rerank",
         "qmd-rerank" => "qmd query with reranker",
         other => other,
@@ -511,7 +510,11 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
     }
     // Query variants (#802): validated before the service is spawned or anything is ingested. A
     // missing file makes the config a skipped row; a stale or leaking one aborts the run.
-    let query_variants = if a.configs.iter().any(|c| c == VARIANTS_CONFIG) {
+    let query_variants = if a
+        .configs
+        .iter()
+        .any(|c| lcg::PassageMode::from_variants_id(c).is_some())
+    {
         variants::load_variants(&a.corpus, &fx)?
     } else {
         None
@@ -627,9 +630,10 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                         t: transport.clone(),
                         mode: lcg::PassageMode::HybridBelief,
                     }),
-                    VARIANTS_CONFIG => match &query_variants {
+                    v if lcg::PassageMode::from_variants_id(v).is_some() => match &query_variants {
                         Some(vf) => Box::new(lcg::LcgVariants {
                             t: transport.clone(),
+                            mode: lcg::PassageMode::from_variants_id(v).expect("checked above"),
                             variants: vf.clone(),
                         }),
                         None => {

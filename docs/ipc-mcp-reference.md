@@ -942,21 +942,29 @@ describes something rather than naming it.
 Variants are trimmed; `query` is not. A variant equal (after trimming, case-sensitive) to `query` or to
 an earlier variant is dropped before searching, so repeating a phrase never boosts a result.
 
-**Execution.** `[query, ...queries]` are embedded in one batched query-role call. Each is searched with the
-*same* `group_ids`, `origins`, probe size and `min_score` as a single-query search, so a variant can never
-surface a passage that filters would exclude for `query`. The per-query ranked lists are fused with weighted
-Reciprocal Rank Fusion (`weight / (rank + 60)`, UUID tie-break): `query` weighs **2** (`PRIMARY_QUERY_WEIGHT`,
-the qmd choice), each variant **1**. The first `num_results` of the fused list are returned.
+**Execution.** `[query, ...queries]` are embedded in one batched query-role call. Each query then runs the
+request's **whole retrieval pipeline**, concurrently and each on its own connection: the same `mode`
+(`vector`, or `hybrid` with BM25 + vector fused per query, so a variant's keywords reach BM25), `group_ids`,
+`origins`, probe size and `min_score`. A variant therefore can never surface a passage that the filters would
+exclude for `query`. The per-query rankings are then fused with weighted Reciprocal Rank Fusion
+(`weight / (rank + 60)`, UUID tie-break): `query` weighs **2** (`PRIMARY_QUERY_WEIGHT`, the qmd choice) and the
+variants **share a total weight of 1** (`VARIANT_BUDGET_WEIGHT`, split equally: 1 each for one variant, 0.2
+each for five). However many variants there are, `query` keeps at least **2/3** of the weight, so variants
+widen the candidate set but together can never outvote the primary query. Belief-aware ranking (`belief_aware`;
+default on in `hybrid`, off in `vector`) runs **once, on the fused candidates**, never per variant. The first
+`num_results` of the result are returned.
 
 **Response.** With `queries`, every passage also carries **`matched_queries`**: ascending indices into the
 *caller's* `[query, ...queries]` of the queries that retrieved it (0 is `query`; a dropped duplicate's index is
-simply absent). `score` stays the cosine similarity, the best across the queries that matched, so
-`min_score` keeps its meaning, but the list is in fused order and is **not necessarily score-monotone**.
+simply absent). `score` is the **fused rank score** (rank-ordered, so it stays monotone through belief
+demotion), and `similarity` is the best cosine across the vector legs that matched the passage (absent for a
+lexical-only hit), exactly as in hybrid mode. `min_score` floors each query's vector list before fusion.
 Without `queries` (or with `[]` / `null`) the response is byte-for-byte what it was before: no
 `matched_queries` key.
 
-`believed_only` / `as_of` are relationship-read parameters, not passage-search ones, so nothing here
-changes belief handling. Rerank-on-fused-candidates and `knowledge_graph_search` `queries` are follow-ups
+Why a fixed variant budget: with one weight per variant, five variants outweighed `query` 5 : 2, and on the v2
+retrieval eval that cost 0.046 overall nDCG@10 (ADR-0802). Rerank-on-fused-candidates and
+`knowledge_graph_search` `queries` are follow-ups
 ([ADR-0802](adr/0802-caller-supplied-query-variants-weighted-rrf.md)).
 
 ### Notebook health: `knowledge_lint` (issue #755)

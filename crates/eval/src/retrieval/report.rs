@@ -124,13 +124,16 @@ pub struct Report {
 const VARIANTS_SUFFIX: &str = "-variants";
 
 /// Whether `id` is a variants config (see [`VARIANTS_SUFFIX`]), profiled or not.
-fn is_variants_config(id: &str) -> bool {
-    id.split('@').next().unwrap_or(id).ends_with(VARIANTS_SUFFIX)
+pub(crate) fn is_variants_config(id: &str) -> bool {
+    id.split('@')
+        .next()
+        .unwrap_or(id)
+        .ends_with(VARIANTS_SUFFIX)
 }
 
 /// The config a variants config is read against: the same id without the suffix, with any
 /// `@<profile>` kept. `None` for a config that is not a variants config.
-fn variants_base_id(id: &str) -> Option<String> {
+pub(crate) fn variants_base_id(id: &str) -> Option<String> {
     let (head, profile) = match id.split_once('@') {
         Some((h, p)) => (h, Some(p)),
         None => (id, None),
@@ -1493,8 +1496,33 @@ mod tests {
     #[test]
     fn the_passages_note_is_not_vector_only_when_variants_ran() {
         let md = variants_report((0.7, 0.2), (0.7, 0.6), 40.0).render_markdown();
-        assert!(md.contains("adds the fixture's caller-supplied query variants"), "{md}");
-        assert!(!report().render_markdown().contains("caller-supplied query variants"));
+        assert!(
+            md.contains("adds the fixture's caller-supplied query variants"),
+            "{md}"
+        );
+        assert!(!report()
+            .render_markdown()
+            .contains("caller-supplied query variants"));
+    }
+
+    #[test]
+    fn a_variants_config_is_read_against_its_own_base() {
+        for (id, base) in [
+            ("lcg-passages-variants", "lcg-passages"),
+            ("lcg-passages-belief-variants", "lcg-passages-belief"),
+            (
+                "lcg-passages-hybrid-belief-variants",
+                "lcg-passages-hybrid-belief",
+            ),
+            ("lcg-passages-variants@bge", "lcg-passages@bge"),
+        ] {
+            assert!(is_variants_config(id), "{id}");
+            assert_eq!(variants_base_id(id).as_deref(), Some(base), "{id}");
+        }
+        for id in ["lcg-passages", "lcg-passages-hybrid-belief", "qmd"] {
+            assert!(!is_variants_config(id), "{id}");
+            assert_eq!(variants_base_id(id), None, "{id}");
+        }
     }
 
     #[test]
