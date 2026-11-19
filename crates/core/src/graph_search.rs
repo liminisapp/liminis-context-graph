@@ -72,6 +72,11 @@ pub const EDGE_BM25_LIMIT: usize = 100;
 pub const EDGE_BM25_BONUS: f64 = 0.15;
 /// Maximum supporting-passage candidates fetched and scored.
 pub const PASSAGE_CANDIDATE_CAP: usize = 300;
+/// Most mention episodes fetched for one entity. A hub mentioned more often has its mentions
+/// fetched ranked by query relevance and filtered in the query, so no request loads them all.
+pub const MENTIONS_PER_ENTITY: usize = 50;
+/// Most hub entities whose mentions are fetched (one ranked query each), best score first.
+pub const MAX_HUB_MENTION_QUERIES: usize = 10;
 /// Largest accepted `num_results`.
 pub const MAX_NUM_RESULTS: usize = 100;
 
@@ -203,10 +208,11 @@ pub struct GraphEvidence {
 /// Belief state of a passage, in the vocabulary of the edge `belief` annotation.
 #[derive(Debug, Clone, Serialize)]
 pub struct PassageBelief {
-    /// `believed`, `superseded` or `not_yet_ingested`. As with the edge state
-    /// ([`belief::BeliefState::NotYetIngested`], #785), `not_yet_ingested` covers both a passage
-    /// ingested after `as_of` and one whose document revision had not committed by then (a
-    /// pending revision is not yet evidence, however long ago it was written).
+    /// `believed`, `superseded`, `not_yet_ingested` (ingested after `as_of`) or
+    /// `pending_revision` (ingested by `as_of`, but its document revision had not committed by
+    /// then, so it is not yet evidence). The first three are the edge vocabulary. The fourth is
+    /// passage-only: an edge reports the same pending case as `not_yet_ingested`
+    /// ([`belief::BeliefState::NotYetIngested`], #785), because an edge has no revision of its own.
     pub state: &'static str,
     pub believed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -458,8 +464,11 @@ pub fn episode_live_at(ep: &EpisodePassage, t_us: i64) -> bool {
 
 fn passage_belief(ep: &EpisodePassage, t_us: i64) -> PassageBelief {
     let s = &ep.supersession;
-    let state = if ep.ingested_at_us.is_some_and(|i| i > t_us) || !s.visible_at(t_us) {
+    let state = if ep.ingested_at_us.is_some_and(|i| i > t_us) {
         "not_yet_ingested"
+    } else if !s.visible_at(t_us) {
+        // Ingested, but its document revision had not committed by `t`: not yet evidence.
+        "pending_revision"
     } else if s.superseded_at_us.is_some_and(|at| at <= t_us) {
         "superseded"
     } else {
@@ -674,8 +683,7 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
         .map(|(u, _)| u.clone())
         .collect();
     if !mention_entities.is_empty() {
-        st.db_queries += 1;
-        for (entity, ep, info) in conn.entity_mention_origins(&mention_entities)? {
+        for (entity, ep, info) in mention_rows(conn, p, emb, &reach, &mention_entities, &mut st)? {
             if !may_support_list_a(&info, p, t) {
                 continue;
             }
@@ -745,8 +753,17 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
     let mut list_plain: Vec<(String, f64)> = Vec::new();
     if p.stages == Stages::Full {
         st.db_queries += 1;
+        // The group and origin filters run after the ANN probe, so oversample whenever either is
+        // set: otherwise a minority group's passages are crowded out of the nearest neighbours by
+        // other groups' and list (b) comes back short or empty.
+        let limit = list_cap * 3;
+        let probe = if gids.is_some() || p.origins.is_some() {
+            limit.saturating_mul(crate::db::KIND_ANN_OVERSAMPLE)
+        } else {
+            limit
+        };
         let mut hits =
-            conn.vector_search_episodic_origins(emb, gids, list_cap * 3, p.origins.as_deref())?;
+            conn.vector_search_episodic_probed(emb, gids, limit, probe, p.origins.as_deref())?;
         for h in &mut hits {
             h.score = 1.0 - h.score;
         }
@@ -1140,6 +1157,66 @@ pub fn select_beam(
     }
     next.sort();
     next
+}
+
+/// Mention episodes of `entities` for list (a), bounded per entity. Entities mentioned at most
+/// [`MENTIONS_PER_ENTITY`] times are fetched in one batch, as before. A hub mentioned more often
+/// gets its [`MENTIONS_PER_ENTITY`] most query-relevant mentions that can count — corroborating,
+/// within `origins`, and not superseded at `as_of` when filtering — so neither a hub's size nor its
+/// superseded or derived mentions decide which of its notes compete. At most
+/// [`MAX_HUB_MENTION_QUERIES`] hubs are fetched, best score first. Both cuts are reported.
+fn mention_rows(
+    conn: &Conn<'_>,
+    p: &GraphSearchParams,
+    emb: &[f32],
+    reach: &BTreeMap<String, Reach>,
+    entities: &[String],
+    st: &mut GraphSearchStats,
+) -> Result<Vec<(String, String, crate::origin::EpisodeOriginInfo)>, Error> {
+    st.db_queries += 1;
+    let counts = conn.entity_mention_counts(entities)?;
+    let (mut small, mut hubs): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    for e in entities {
+        match counts.get(e).copied().unwrap_or(0) {
+            0 => {}
+            n if n <= MENTIONS_PER_ENTITY => small.push(e.clone()),
+            _ => hubs.push(e.clone()),
+        }
+    }
+    small.sort();
+    let mut out = Vec::new();
+    if !small.is_empty() {
+        st.db_queries += 1;
+        out.extend(conn.entity_mention_origins(&small)?);
+    }
+    if !hubs.is_empty() {
+        st.truncate("mentions_per_entity", MENTIONS_PER_ENTITY);
+        let score = |u: &String| reach.get(u).map_or(0.0, |r| r.score);
+        hubs.sort_by(|a, b| by_score_then_key((score(a), a), (score(b), b)));
+        if hubs.len() > MAX_HUB_MENTION_QUERIES {
+            hubs.truncate(MAX_HUB_MENTION_QUERIES);
+            st.truncate("mention_hubs", MAX_HUB_MENTION_QUERIES);
+        }
+        let allowed: Vec<Origin> = [
+            Origin::Primary,
+            Origin::External,
+            Origin::Derived,
+            Origin::Answer,
+        ]
+        .into_iter()
+        .filter(|o| o.is_corroborating() && p.origins.as_ref().is_none_or(|f| f.contains(o)))
+        .collect();
+        let live_at = p.believed_only.then_some(p.as_of_us);
+        for hub in hubs {
+            st.db_queries += 1;
+            for (ep, info) in
+                conn.entity_mentions_ranked(&hub, emb, &allowed, live_at, MENTIONS_PER_ENTITY)?
+            {
+                out.push((hub.clone(), ep, info));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// One frontier entity's steps after fan-out, in their given (relevance) order: at most `cap`
@@ -1763,6 +1840,16 @@ mod tests {
         assert!(episode_live_at(&ep(Some(20), Some(10), false), 19));
         assert!(!episode_live_at(&ep(Some(20), Some(10), false), 20));
         assert!(!episode_live_at(&ep(None, Some(10), true), 100));
+        // A pending document revision, ingested long ago, is its own state — not "not yet
+        // ingested" — and is not believed.
+        let pending = passage_belief(&ep(None, Some(10), true), 100);
+        assert_eq!(pending.state, "pending_revision");
+        assert!(!pending.believed);
+        // Ingested after `as_of` wins over a pending revision.
+        assert_eq!(
+            passage_belief(&ep(None, Some(10), true), 5).state,
+            "not_yet_ingested"
+        );
         assert_eq!(
             passage_belief(&ep(Some(20), Some(10), false), 25).state,
             "superseded"

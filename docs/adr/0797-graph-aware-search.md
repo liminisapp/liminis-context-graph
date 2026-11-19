@@ -36,11 +36,14 @@ embeddings. Rather than thread a precomputed embedding through the hot paths tha
 share (and argue byte-identical output), the new module `graph_search.rs` embeds once with
 `EmbedRole::Query` and calls the `Conn`-level primitives those functions already use
 (`fts_search_entities_kind`, `vector_search_entities_kind`, `vector_search_entities_by_summary_kind`,
-`fts_search_edges`, `vector_search_episodic_origins`). FR-002 then holds by construction. The only
-shared-code change is mechanical: the belief lookups of `handlers::apply_belief` moved into
-`belief::load_context`, so both reads evaluate belief from the same code (same queries, same order).
+`fts_search_edges`, and the passage ANN query). FR-002 then holds by construction. The shared-code
+changes are mechanical:
+- the belief lookups of `handlers::apply_belief` moved into `belief::load_context`, so both reads
+  evaluate belief from the same code (same queries, same order);
+- `vector_search_episodic_origins` now delegates to `vector_search_episodic_probed`, with its probe
+  size computed exactly as before.
 
-Four additive `Conn` primitives were needed:
+Seven additive `Conn` primitives were needed:
 
 - `entities_by_lookup_keys` — one `lookup_key IN $keys` probe with **no scan fallback and no
   self-heal write**. `resolve_entities_by_name_any_kind` scans the group and writes on a miss, so it
@@ -55,6 +58,11 @@ Four additive `Conn` primitives were needed:
   `warrant`, `fact_embedding`, and the far endpoint's name, group and tombstone status.
 - `get_episode_passages` — passage fields plus origin, the full supersession/revision state,
   `ingested_at` and optionally `content_embedding`.
+- `vector_search_episodic_probed` — the passage ANN query with an explicit probe size, so list (b)
+  can oversample under `group_ids` (§6).
+- `entity_mention_counts` and `entity_mentions_ranked` — the per-entity mention bound (§6): a count
+  per entity, and one hub's most query-relevant qualifying mentions, capped, with the filters in the
+  query.
 
 ### 3. Seeds: four lists, RRF, then an evidence gate
 
@@ -145,10 +153,12 @@ EpisodeSupersession::live_at(t) && ingested_at ≤ t` (visible revision, not sup
 by t), and uses it for both supporting and plain passages. `EpisodeOriginInfo::is_live` — which
 ignores pending document revisions — is not used for passages. Document supersession folds into
 `superseded_at = max(recorded, effective)`, so a future-effective supersession stays believed with no
-special case. Passages carry a `{state, believed, supersession?}` annotation in the edge vocabulary.
-As for edges (#785), `not_yet_ingested` covers both a passage ingested after `as_of` and one whose
-document revision had not committed by then; a separate `pending_revision` state was rejected so the
-two vocabularies stay one.
+special case. Passages carry a `{state, believed, supersession?}` annotation. Its state is one of
+`believed`, `superseded` and `not_yet_ingested` (ingested after `as_of`), all in the edge
+vocabulary, or the passage-only `pending_revision`. That last one means the passage was ingested by
+`as_of`, but its document revision had not committed by then, so it is not yet evidence. An edge has
+no revision of its own and keeps reporting that case as `not_yet_ingested` (#785). A passage can say
+which case it is, so it does.
 
 ### 6. Fusion and the origin rule
 
@@ -165,22 +175,28 @@ RRF (k = 60) over three lists, each capped at `max(3k, 30)`, keyed `p:<episode>`
   episodes are checked on origin and supersession, which the mention lookup returns. A pending
   revision or a not-yet-ingested mention is only caught after the cap, and that is rare.
 
-  **Known cost, open until v2 latency is measured: the mention lookup is unbounded.** The 300 cap
-  applies after one `MENTIONS` lookup that returns every mention of every reached entity (up to the
-  seeds plus about 300 far endpoints), so its row count scales with how often hubs are mentioned, not
-  with k, and `stats.truncations` does not report it. Bounding it — a per-entity limit, or mentions
-  for seeds and beam entities only — would choose *which* mentions compete before their cosine is
-  known, and paraphrase questions depend on the one relevant note among many mentions surviving. So
-  the choice is left to the v2 p50 and paraphrase rows rather than guessed at here.
+  **The mention lookup is bounded per entity.** One count query splits the reached entities.
+  - **Entities with at most 50 mentions** are fetched in one batch.
+  - **Hubs, mentioned more often,** get one query each that returns their **50 most query-relevant
+    mentions** (`array_cosine_similarity` of `content_embedding` against the query, uuid
+    tie-break). The query also filters, so only corroborating, in-`origins` mentions not superseded
+    at `as_of` qualify.
+  - **At most 10 hubs** are fetched, best score first.
+
+  So no request loads every mention of a hub. A hub's superseded or derived mentions take none of
+  its 50 slots. And the relevance that later scores a mention also decides which of a hub's mentions
+  compete, which is what paraphrase questions need: the one relevant note among many mentions
+  survives. Both cuts are reported in `stats.truncations` (`mentions_per_entity`, `mention_hubs`).
+  The ranked query's supersession bound is rounded down to the millisecond, so it
+  can only keep an episode the exact liveness check later drops.
 - **(b) `passages`** — plain vector passage search with the same embedding, over-drawn 3×, liveness
-  applied. Vector-only until #789's hybrid passage list lands (`stats.passage_mode`). It calls the
-  same `vector_search_episodic_origins` primitive as `knowledge_search_passages`, so it inherits
-  that read's recall limit: the group filter runs after the ANN probe, and the probe is oversampled
-  only under `origins`. In a multi-group database whose other groups crowd the requested one out of
-  the nearest neighbours, list (b) comes back short. This is deliberate for now, since FR-015 asks
-  for the ranking `knowledge_search_passages` provides. The fix belongs in the shared primitive,
-  for both reads, and changing it here would alter the existing read (FR-002). The single-group v2
-  eval does not exercise it.
+  applied. Vector-only until #789's hybrid passage list lands (`stats.passage_mode`). The group
+  and origin filters run after the ANN probe. So whenever `group_ids` or `origins` is set, the
+  probe is oversampled 10×: otherwise, in a multi-group database, other groups' passages crowd the
+  requested group's out of the nearest neighbours and the list comes back short or empty. The
+  ranking is the same as `knowledge_search_passages`', over a larger candidate pool. That read itself is
+  unchanged (FR-002): it still oversamples only under `origins`. Its own minority-group recall is a
+  candidate follow-up, through the new `vector_search_episodic_probed` primitive this read uses.
 - **(c) `facts`** — the selected facts by path score.
 
 **Derived content cites but never corroborates (ADR-0752).** A `derived`/`answer` passage never

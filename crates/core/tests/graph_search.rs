@@ -57,6 +57,7 @@ const Q_ORIGIN: &str = "Kestrel Labs rate";
 const Q_LEGACY: &str = "Old Ledger";
 const Q_BRIDGE: &str = "Heron Desk price";
 const Q_WREN: &str = "Wren Mill price";
+const Q_BROOK: &str = "Brook Hall price";
 
 fn query_map() -> HashMap<String, Vec<f32>> {
     let mut m = HashMap::new();
@@ -65,7 +66,7 @@ fn query_map() -> HashMap<String, Vec<f32>> {
     multi[SUPPLY] = 0.3;
     m.insert(Q_MULTI.to_string(), multi);
     for q in [
-        Q_HUB, Q_DECAY, Q_BELIEF, Q_ORIGIN, Q_LEGACY, Q_BRIDGE, Q_WREN,
+        Q_HUB, Q_DECAY, Q_BELIEF, Q_ORIGIN, Q_LEGACY, Q_BRIDGE, Q_WREN, Q_BROOK,
     ] {
         m.insert(q.to_string(), axis(PRICE));
     }
@@ -132,6 +133,48 @@ fn episode(c: &Conn<'_>, e: Ep<'_>) {
         })
         .unwrap();
     }
+}
+
+/// A primary episode in `group`, mentioning `mentions`, with an explicit origin.
+fn episode_in(
+    c: &Conn<'_>,
+    group: &str,
+    uuid: &str,
+    emb: Vec<f32>,
+    origin: Option<&str>,
+    mentions: &[&str],
+) {
+    c.insert_episodic(&EpisodicRow {
+        uuid: uuid.into(),
+        name: uuid.into(),
+        group_id: group.into(),
+        created_at: "2026-01-01 00:00:00".into(),
+        source: "text".into(),
+        source_description: format!("{uuid}.md"),
+        content: uuid.into(),
+        content_embedding: emb,
+        valid_at: "2026-01-01 00:00:00".into(),
+        ingested_at: "2026-01-01 00:00:00".into(),
+        attributes: "{}".into(),
+        origin: origin.map(str::to_string),
+        ..Default::default()
+    })
+    .unwrap();
+    for m in mentions {
+        c.insert_mentions_edge(&MentionsEdge {
+            episodic_uuid: uuid.into(),
+            entity_uuid: m.to_string(),
+            group_id: group.into(),
+        })
+        .unwrap();
+    }
+}
+
+/// `axis(main)` tilted toward `axis(tilt)` by `w` (cosine to `axis(main)` falls as `w` grows).
+fn tilted(main: usize, tilt: usize, w: f32) -> Vec<f32> {
+    let mut v = axis(main);
+    v[tilt] = w;
+    v
 }
 
 fn simple_ep(c: &Conn<'_>, uuid: &str, content: &str, emb: Vec<f32>, mentions: &[&str]) {
@@ -581,15 +624,22 @@ struct Fx {
 }
 
 fn fixture_with(populate: bool, with_derived: bool) -> Fx {
+    fixture_built(|c| {
+        if populate {
+            build(c, with_derived);
+        }
+    })
+}
+
+/// A fixture populated by `populate` alone (for tests that need a graph of their own shape).
+fn fixture_built(populate: impl FnOnce(&Conn<'_>)) -> Fx {
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap());
     {
         let c = db.connect().unwrap();
         c.init_schema(DIM).unwrap();
         c.build_indices_and_constraints().unwrap();
-        if populate {
-            build(&c, with_derived);
-        }
+        populate(&c);
     }
     let inner: Arc<dyn Embedder> = Arc::new(NameMapEmbedder::new(DIM, query_map()));
     let embedder = Arc::new(CountingEmbedder::new(inner));
@@ -1099,6 +1149,89 @@ async fn edge_whose_only_live_producer_is_derived_is_citation_only() {
         find(&r, "p:ep-lark").is_some(),
         "and it carries the walk to Lark Yard: {:?}",
         keys(&r)
+    );
+}
+
+#[tokio::test]
+async fn plain_passages_of_a_minority_group_are_not_crowded_out_by_other_groups() {
+    // 100 passages in another group are all nearer the query than the one passage in the
+    // requested group, so an un-oversampled probe (3 × 30 = 90) would see only the other group.
+    let fx = fixture_built(|c| {
+        for i in 0..100 {
+            episode_in(
+                c,
+                H,
+                &format!("ep-h-{i:03}"),
+                tilted(UPTIME, NOISE, 0.001 * i as f32),
+                None,
+                &[],
+            );
+        }
+        episode_in(c, G, "ep-g-target", tilted(UPTIME, NOISE, 1.3), None, &[]);
+    });
+    let r = search(&fx, json!({"query": Q_NONE, "group_ids": [G]})).await;
+    assert_eq!(r["stats"]["no_seeds"], true);
+    assert!(
+        find(&r, "p:ep-g-target").is_some(),
+        "the requested group's passage must survive the group filter: {:?}",
+        keys(&r)
+    );
+    assert!(
+        keys(&r).iter().all(|k| !k.starts_with("p:ep-h-")),
+        "nothing from the other group: {:?}",
+        keys(&r)
+    );
+}
+
+#[tokio::test]
+async fn hub_mentions_are_bounded_ranked_by_relevance_and_filtered_before_the_cut() {
+    // Brook Hall is mentioned 111 times: 60 off-topic primary notes, 50 on-topic derived pages,
+    // and one on-topic primary note whose uuid sorts last. A per-entity cut in uuid order, or one
+    // that let derived pages take slots, would drop that note.
+    let fx = fixture_built(|c| {
+        entity(c, "brook", "Brook Hall", G, SUMMARY);
+        for i in 0..60 {
+            episode_in(c, G, &format!("m-{i:02}"), axis(NOISE), None, &["brook"]);
+        }
+        for i in 0..50 {
+            episode_in(
+                c,
+                G,
+                &format!("d-{i:02}"),
+                axis(PRICE),
+                Some("derived"),
+                &["brook"],
+            );
+        }
+        episode_in(c, G, "zz-relevant", axis(PRICE), None, &["brook"]);
+    });
+    let r = search(
+        &fx,
+        json!({"query": Q_BROOK, "group_ids": [G], "num_results": 5, "stages": "seeds"}),
+    )
+    .await;
+    assert!(
+        seed_uuids(&r).contains(&"brook".to_string()),
+        "{}",
+        r["seeds"]
+    );
+    assert_eq!(
+        rank(&r, "p:zz-relevant"),
+        Some(0),
+        "the one on-topic primary note wins: {:?}",
+        keys(&r)
+    );
+    assert!(
+        keys(&r).iter().all(|k| !k.starts_with("p:d-")),
+        "derived mentions never rank: {:?}",
+        keys(&r)
+    );
+    let cut = r["stats"]["truncations"].as_array().unwrap();
+    assert!(
+        cut.iter()
+            .any(|t| t["cap"] == "mentions_per_entity" && t["limit"] == 50),
+        "the per-entity bound is reported: {}",
+        r["stats"]
     );
 }
 

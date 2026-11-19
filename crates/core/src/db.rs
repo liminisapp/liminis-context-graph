@@ -2333,6 +2333,87 @@ impl<'db> Conn<'db> {
             .collect())
     }
 
+    /// The number of distinct episodes mentioning each of `entity_uuids` (an entity with no
+    /// mention is absent). Graph-aware search (issue #797) uses it to tell hub entities, whose
+    /// mentions it fetches capped and ranked, from the rest, which it fetches in one batch.
+    pub fn entity_mention_counts(
+        &self,
+        entity_uuids: &[String],
+    ) -> Result<HashMap<String, usize>, Error> {
+        if entity_uuids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) WHERE n.uuid IN $uuids \
+             RETURN n.uuid, count(DISTINCT ep.uuid)",
+            serde_json::json!({ "uuids": entity_uuids }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (value_as_string(&r[0]), value_as_usize(&r[1])))
+            .collect())
+    }
+
+    /// At most `limit` episodes mentioning one entity, most similar to `embedding` first
+    /// (`array_cosine_similarity` against `content_embedding`, uuid tie-break), restricted to the
+    /// stored origins in `origins` and — when `live_at_us` is given — to episodes not superseded
+    /// by then. Graph-aware search (issue #797) uses it for hub entities: the filters run in the
+    /// query, so superseded or derived mentions never take one of the `limit` slots, and the
+    /// query relevance that later scores a mention also decides which mentions are fetched.
+    /// The supersession bound is rounded down to the millisecond, so it can only keep an episode
+    /// the caller's exact liveness check later drops, never drop one that check would keep.
+    pub fn entity_mentions_ranked(
+        &self,
+        entity_uuid: &str,
+        embedding: &[f32],
+        origins: &[crate::origin::Origin],
+        live_at_us: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<(String, crate::origin::EpisodeOriginInfo)>, Error> {
+        if limit == 0 || origins.is_empty() || embedding.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut names: Vec<&str> = origins.iter().map(|o| o.as_str()).collect();
+        // A never-stamped episode is stored as NULL (or "" after a dump round trip).
+        if origins.contains(&crate::origin::Origin::Primary) {
+            names.push("");
+        }
+        let live = if live_at_us.is_some() {
+            "AND (ep.superseded_at IS NULL OR ep.superseded_at > epoch_ms($t_ms))"
+        } else {
+            ""
+        };
+        // `embedding.len()` is an integer, so formatting it into the cast is injection-safe.
+        let cypher = format!(
+            "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
+             WHERE n.uuid = $uuid AND coalesce(ep.origin, '') IN $origins {live} \
+             WITH DISTINCT ep \
+             RETURN ep.uuid, coalesce(ep.origin, ''), ep.doc_id, ep.superseded_at, ep.group_id, \
+             array_cosine_similarity(ep.content_embedding, CAST($emb, 'FLOAT[{dim}]')) AS sim \
+             ORDER BY sim DESC, ep.uuid ASC LIMIT $limit",
+            dim = embedding.len()
+        );
+        let mut params = serde_json::json!({
+            "uuid": entity_uuid,
+            "origins": names,
+            "emb": embedding,
+            "limit": limit as i64,
+        });
+        if let Some(t) = live_at_us {
+            params["t_ms"] = serde_json::json!(t.div_euclid(1000));
+        }
+        let rows = self.query_params(&cypher, params)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    value_as_string(&r[0]),
+                    episode_origin_info_from_cols(&r[1], &r[2], &r[3], &r[4]),
+                )
+            })
+            .collect())
+    }
+
     /// Entities among `entity_uuids` with at least one live primary or external mention — the
     /// set a derived or answer episode may not rewrite or merge into (FR-010).
     pub fn entities_with_corroborating_mention(
@@ -3268,12 +3349,28 @@ impl<'db> Conn<'db> {
         limit: usize,
         origins: Option<&[crate::origin::Origin]>,
     ) -> Result<Vec<PassageResult>, Error> {
-        let where_clause = episodic_where_clause(group_ids, origins);
         let probe = if origins.is_some() {
             limit.saturating_mul(KIND_ANN_OVERSAMPLE)
         } else {
             limit
         };
+        self.vector_search_episodic_probed(embedding, group_ids, limit, probe, origins)
+    }
+
+    /// [`Self::vector_search_episodic_origins`] with an explicit ANN `probe` size (at least
+    /// `limit`). The group and origin filters run after the probe, so a caller that scopes to a
+    /// minority group passes a larger probe to keep that group from being crowded out of the
+    /// nearest neighbours by others (graph-aware search, issue #797). Returns at most `limit`.
+    pub fn vector_search_episodic_probed(
+        &self,
+        embedding: &[f32],
+        group_ids: Option<&[&str]>,
+        limit: usize,
+        probe: usize,
+        origins: Option<&[crate::origin::Origin]>,
+    ) -> Result<Vec<PassageResult>, Error> {
+        let probe = probe.max(limit);
+        let where_clause = episodic_where_clause(group_ids, origins);
         let cypher = format!(
             "CALL QUERY_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx', $emb, $probe) \
              WITH node, distance {where_clause} \
@@ -6280,7 +6377,7 @@ pub(crate) fn compute_lookup_key(group_id: &str, kind: &str, name: &str) -> Stri
 /// ANN-probe oversampling factor when a `kind` predicate is applied after the vector index probe
 /// (issue #615): the probe returns its top-`k` nearest rows *before* the predicate runs, so a
 /// rare kind would otherwise be crowded out of the candidate pool by nearer rows of other kinds.
-const KIND_ANN_OVERSAMPLE: usize = 10;
+pub(crate) const KIND_ANN_OVERSAMPLE: usize = 10;
 
 /// `WHERE` clause shared by the two Episodic passage queries (vector and BM25, issue #789
 /// FR-006): an optional group filter (an empty `group_ids` means no filter, as it always has for
@@ -7752,6 +7849,102 @@ mod graph_search_primitive_tests {
         let (rows, truncated) = c.expand_frontier(&["a".into()], None, 2).unwrap();
         assert!(truncated);
         assert_eq!(rows.len(), 3, "two outgoing (cut) plus the one incoming");
+    }
+
+    fn mention(conn: &Conn<'_>, ep: &str, emb: Vec<f32>, origin: Option<&str>, sup: Option<&str>) {
+        conn.insert_episodic(&crate::types::EpisodicRow {
+            uuid: ep.into(),
+            name: ep.into(),
+            group_id: "g".into(),
+            created_at: "2026-01-01 00:00:00".into(),
+            source: "text".into(),
+            source_description: format!("{ep}.md"),
+            content: ep.into(),
+            content_embedding: emb,
+            valid_at: "2026-01-01 00:00:00".into(),
+            ingested_at: "2026-01-01 00:00:00".into(),
+            attributes: "{}".into(),
+            origin: origin.map(str::to_string),
+            superseded_at: sup.map(str::to_string),
+            superseded_by_kind: sup.map(|_| "episode".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        conn.insert_mentions_edge(&crate::types::MentionsEdge {
+            episodic_uuid: ep.into(),
+            entity_uuid: "a".into(),
+            group_id: "g".into(),
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn hub_mentions_are_counted_capped_ranked_and_filtered_in_the_query() {
+        use crate::origin::Origin;
+        let (_d, db) = graph();
+        let c = db.connect().unwrap();
+        let q = vec![1.0, 0.0, 0.0, 0.0];
+        mention(&c, "m-best", vec![1.0, 0.0, 0.0, 0.0], None, None);
+        mention(&c, "m-good", vec![0.8, 0.6, 0.0, 0.0], None, None);
+        mention(&c, "m-far", vec![0.0, 1.0, 0.0, 0.0], None, None);
+        mention(
+            &c,
+            "m-derived",
+            vec![1.0, 0.0, 0.0, 0.0],
+            Some("derived"),
+            None,
+        );
+        mention(
+            &c,
+            "m-old",
+            vec![1.0, 0.0, 0.0, 0.0],
+            None,
+            Some("2026-03-01 00:00:00"),
+        );
+
+        let counts = c.entity_mention_counts(&["a".into(), "b".into()]).unwrap();
+        assert_eq!(counts.get("a"), Some(&5));
+        assert!(
+            !counts.contains_key("b"),
+            "an entity with no mention is absent"
+        );
+
+        let ids = |rows: Vec<(String, crate::origin::EpisodeOriginInfo)>| -> Vec<String> {
+            rows.into_iter().map(|(u, _)| u).collect()
+        };
+        let corroborating = [Origin::Primary, Origin::External];
+        // 2026-06-01: after m-old's correction. Derived and superseded take no slot.
+        let june_us = 1_780_272_000_000_000;
+        let got = c
+            .entity_mentions_ranked("a", &q, &corroborating, Some(june_us), 2)
+            .unwrap();
+        assert_eq!(
+            ids(got),
+            vec!["m-best", "m-good"],
+            "most relevant first, capped"
+        );
+        let got = c
+            .entity_mentions_ranked("a", &q, &corroborating, Some(june_us), 10)
+            .unwrap();
+        assert_eq!(ids(got), vec!["m-best", "m-good", "m-far"]);
+        // 2026-02-01: before the correction, m-old is live and as relevant as m-best.
+        let feb_us = 1_769_904_000_000_000;
+        let got = c
+            .entity_mentions_ranked("a", &q, &corroborating, Some(feb_us), 10)
+            .unwrap();
+        assert_eq!(ids(got), vec!["m-best", "m-old", "m-good", "m-far"]);
+        // No liveness bound: superseded mentions count; derived only when allowed.
+        let got = c
+            .entity_mentions_ranked("a", &q, &[Origin::Primary, Origin::Derived], None, 10)
+            .unwrap();
+        assert_eq!(
+            ids(got),
+            vec!["m-best", "m-derived", "m-old", "m-good", "m-far"]
+        );
+        assert!(c
+            .entity_mentions_ranked("a", &q, &corroborating, None, 0)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

@@ -562,7 +562,7 @@ search.
    "score": 0.0328,                      // fused RRF score: ordering only
    "fact": {...},                        // kind = fact: the relationship, with `episodes`
    "passage": {...},                     // kind = passage: as knowledge_search_passages; score = similarity
-   "belief": {...},                      // facts: the full belief annotation; passages: {state, believed, supersession?}
+   "belief": {...},                      // facts: the full belief annotation; passages: {state, believed, supersession?} (state may be pending_revision)
    "support": {...}, "corroboration": 1, // facts: as knowledge_find_relationships
    "evidence": {
      "lists": [{"list": "supporting" | "passages" | "facts", "rank": 1, "score": 0.61}],
@@ -586,12 +586,21 @@ The path is in traversal order, from the seed outward, regardless of each edge's
 A `matched` vector kind is reported only when its similarity is at least 0.5; the raw
 `bm25_score`, `name_similarity` and `summary_similarity` are always reported. `stats.truncations`
 names any cap that cut the walk or the candidate pool. Every sort breaks ties by uuid, so the same
-graph, parameters and embedding give the same results in the same order. A passage's
-`not_yet_ingested` state, like a fact's, covers both a passage ingested after `as_of` and one whose
-document revision had not committed by then. Plain passage search (list (b)) uses the same
-nearest-neighbour probe as `knowledge_search_passages`, so its group filter likewise runs after the
-probe: in a database where other groups' passages crowd the requested group's out of the nearest
-neighbours, list (b) can return fewer passages than asked for. See ADR-0797.
+graph, parameters and embedding give the same results in the same order.
+
+A passage's `belief.state` is one of:
+- `believed`, `superseded` or `not_yet_ingested` (ingested after `as_of`), in the fact vocabulary;
+- `pending_revision`: ingested by `as_of`, but its document revision had not committed by then. A
+  fact reports that case as `not_yet_ingested`.
+
+Plain passage search (list (b)) filters by group and origin after its nearest-neighbour probe, so the
+probe is oversampled 10× whenever `group_ids` or `origins` is set. That keeps a small group's
+passages from being crowded out by other groups'. `knowledge_search_passages` itself is unchanged.
+
+Mentions are fetched with a per-entity bound. An entity mentioned more than 50 times contributes its
+50 most query-relevant live, corroborating mentions, and at most 10 such entities are fetched, best
+first. Both cuts are reported in `stats.truncations` (`mentions_per_entity`, `mention_hubs`). See
+ADR-0797.
 
 ### group_ids semantics: omitted vs. empty
 
