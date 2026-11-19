@@ -146,6 +146,9 @@ by t), and uses it for both supporting and plain passages. `EpisodeOriginInfo::i
 ignores pending document revisions — is not used for passages. Document supersession folds into
 `superseded_at = max(recorded, effective)`, so a future-effective supersession stays believed with no
 special case. Passages carry a `{state, believed, supersession?}` annotation in the edge vocabulary.
+As for edges (#785), `not_yet_ingested` covers both a passage ingested after `as_of` and one whose
+document revision had not committed by then; a separate `pending_revision` state was rejected so the
+two vocabularies stay one.
 
 ### 6. Fusion and the origin rule
 
@@ -165,7 +168,14 @@ RRF (k = 60) over three lists, each capped at `max(3k, 30)`, keyed `p:<episode>`
   known, and paraphrase questions depend on the one relevant note among many mentions surviving. So
   the choice is left to the v2 p50 and paraphrase rows rather than guessed at here.
 - **(b) `passages`** — plain vector passage search with the same embedding, over-drawn 3×, liveness
-  applied. Vector-only until #789's hybrid passage list lands (`stats.passage_mode`).
+  applied. Vector-only until #789's hybrid passage list lands (`stats.passage_mode`). It calls the
+  same `vector_search_episodic_origins` primitive as `knowledge_search_passages`, so it inherits
+  that read's recall limit: the group filter runs after the ANN probe, and the probe is oversampled
+  only under `origins`. In a multi-group database whose other groups crowd the requested one out of
+  the nearest neighbours, list (b) comes back short. This is deliberate for now, since FR-015 asks
+  for the ranking `knowledge_search_passages` provides. The fix belongs in the shared primitive,
+  for both reads, and changing it here would alter the existing read (FR-002). The single-group v2
+  eval does not exercise it.
 - **(c) `facts`** — the selected facts by path score.
 
 **Derived content cites but never corroborates (ADR-0752).** A `derived`/`answer` passage never

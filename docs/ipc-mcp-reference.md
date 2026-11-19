@@ -584,7 +584,12 @@ The path is in traversal order, from the seed outward, regardless of each edge's
 A `matched` vector kind is reported only when its similarity is at least 0.5; the raw
 `bm25_score`, `name_similarity` and `summary_similarity` are always reported. `stats.truncations`
 names any cap that cut the walk or the candidate pool. Every sort breaks ties by uuid, so the same
-graph, parameters and embedding give the same results in the same order. See ADR-0797.
+graph, parameters and embedding give the same results in the same order. A passage's
+`not_yet_ingested` state, like a fact's, covers both a passage ingested after `as_of` and one whose
+document revision had not committed by then. Plain passage search (list (b)) uses the same
+nearest-neighbour probe as `knowledge_search_passages`, so its group filter likewise runs after the
+probe: in a database where other groups' passages crowd the requested group's out of the nearest
+neighbours, list (b) can return fewer passages than asked for. See ADR-0797.
 
 ### group_ids semantics: omitted vs. empty
 

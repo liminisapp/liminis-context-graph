@@ -203,7 +203,10 @@ pub struct GraphEvidence {
 /// Belief state of a passage, in the vocabulary of the edge `belief` annotation.
 #[derive(Debug, Clone, Serialize)]
 pub struct PassageBelief {
-    /// `believed`, `superseded` or `not_yet_ingested`.
+    /// `believed`, `superseded` or `not_yet_ingested`. As with the edge state
+    /// ([`belief::BeliefState::NotYetIngested`], #785), `not_yet_ingested` covers both a passage
+    /// ingested after `as_of` and one whose document revision had not committed by then (a
+    /// pending revision is not yet evidence, however long ago it was written).
     pub state: &'static str,
     pub believed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
