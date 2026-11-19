@@ -7681,7 +7681,12 @@ mod graph_search_primitive_tests {
         assert_eq!(e1.edge.episodes, vec!["ep-e1".to_string()]);
         assert_eq!(e1.edge.fact_embedding.len(), DIM);
         assert_eq!(e1.far_name, "Beta");
-        assert!(rows.iter().find(|r| r.edge.uuid == "e3").unwrap().far_merged);
+        assert!(
+            rows.iter()
+                .find(|r| r.edge.uuid == "e3")
+                .unwrap()
+                .far_merged
+        );
         assert!(!e1.far_merged);
     }
 

@@ -1,0 +1,1070 @@
+//! Issue #797 / ADR-0797: `knowledge_graph_search`, the graph-aware composite read.
+//!
+//! The fixture is inserted directly through `Conn` so every embedding is chosen by hand: the
+//! query embedder is a `NameMapEmbedder` (wrapped in a `CountingEmbedder`), and each entity
+//! name, summary, fact and episode gets a vector on a named axis. "Relevant" therefore means
+//! "on the query's axis", which keeps every ranking assertion deterministic.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::{Arc, Mutex};
+
+use arc_swap::ArcSwapOption;
+use lcg_core::{
+    app_state::{AppState, OntologyDriftState},
+    db::{Conn, Db},
+    dedup_adapter::PassthroughDedupAdapter,
+    embedder::{CountingEmbedder, Embedder, NameMapEmbedder},
+    extractor::ConfigurableExtractor,
+    handlers,
+    ipc::IpcRequest,
+    telemetry::NoopSink,
+    types::{EntityRow, EpisodicRow, MentionsEdge, RelatesToEdge},
+};
+use serde_json::{json, Value};
+use tempfile::TempDir;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
+
+const DIM: usize = 8;
+const G: &str = "notes";
+const H: &str = "elsewhere";
+
+// Axes: what each embedding dimension "means" in this fixture.
+const PRICE: usize = 0;
+const SUPPLY: usize = 1;
+const ROSTER: usize = 2;
+const STATUS: usize = 3;
+const UPTIME: usize = 4;
+const NOISE: usize = 5;
+const NAME: usize = 6;
+const SUMMARY: usize = 7;
+
+fn axis(i: usize) -> Vec<f32> {
+    let mut v = vec![0.0; DIM];
+    v[i] = 1.0;
+    v
+}
+
+const Q_MULTI: &str = "what does Cedar Core's supplier charge?";
+const Q_HUB: &str = "Orbit Hub price";
+const Q_DECAY: &str = "Delta Seed price";
+const Q_PARA: &str = "the initiative covering shift rostering";
+const Q_NAME: &str = "Marlin Core status";
+const Q_NONE: &str = "zebra quantum";
+const Q_BELIEF: &str = "Policy Desk decision";
+const Q_ORIGIN: &str = "Kestrel Labs rate";
+const Q_LEGACY: &str = "Old Ledger";
+
+fn query_map() -> HashMap<String, Vec<f32>> {
+    let mut m = HashMap::new();
+    let mut multi = vec![0.0; DIM];
+    multi[PRICE] = 0.8;
+    multi[SUPPLY] = 0.3;
+    m.insert(Q_MULTI.to_string(), multi);
+    for q in [Q_HUB, Q_DECAY, Q_BELIEF, Q_ORIGIN, Q_LEGACY] {
+        m.insert(q.to_string(), axis(PRICE));
+    }
+    m.insert(Q_PARA.to_string(), axis(ROSTER));
+    m.insert(Q_NAME.to_string(), axis(STATUS));
+    m.insert(Q_NONE.to_string(), axis(UPTIME));
+    m
+}
+
+// ── Fixture builders ──────────────────────────────────────────────────────────
+
+fn entity(c: &Conn<'_>, uuid: &str, name: &str, group: &str, summary_axis: usize) {
+    c.insert_entity(&EntityRow {
+        uuid: uuid.into(),
+        name: name.into(),
+        group_id: group.into(),
+        labels: vec!["Entity".into()],
+        created_at: "2026-01-01 00:00:00".into(),
+        ingested_at: "2026-01-01 00:00:00".into(),
+        name_embedding: axis(NAME),
+        summary: format!("{name} entity"),
+        summary_embedding: axis(summary_axis),
+        attributes: "{}".into(),
+        ..Default::default()
+    })
+    .unwrap();
+}
+
+struct Ep<'a> {
+    uuid: &'a str,
+    content: &'a str,
+    emb: Vec<f32>,
+    origin: Option<&'a str>,
+    ingested: &'a str,
+    superseded: Option<(&'a str, &'a str)>, // (at, kind)
+    mentions: &'a [&'a str],
+}
+
+fn episode(c: &Conn<'_>, e: Ep<'_>) {
+    c.insert_episodic(&EpisodicRow {
+        uuid: e.uuid.into(),
+        name: e.uuid.into(),
+        group_id: G.into(),
+        created_at: "2026-01-01 00:00:00".into(),
+        source: "text".into(),
+        source_description: format!("{}.md", e.uuid),
+        content: e.content.into(),
+        content_embedding: e.emb,
+        valid_at: "2026-01-01 00:00:00".into(),
+        ingested_at: e.ingested.into(),
+        attributes: "{}".into(),
+        origin: e.origin.map(str::to_string),
+        superseded_at: e.superseded.map(|(at, _)| at.to_string()),
+        superseded_by_kind: e.superseded.map(|(_, k)| k.to_string()),
+        superseded_by: e.superseded.map(|_| "replacement".to_string()),
+        ..Default::default()
+    })
+    .unwrap();
+    for m in e.mentions {
+        c.insert_mentions_edge(&MentionsEdge {
+            episodic_uuid: e.uuid.into(),
+            entity_uuid: m.to_string(),
+            group_id: G.into(),
+        })
+        .unwrap();
+    }
+}
+
+fn simple_ep(c: &Conn<'_>, uuid: &str, content: &str, emb: Vec<f32>, mentions: &[&str]) {
+    episode(
+        c,
+        Ep {
+            uuid,
+            content,
+            emb,
+            origin: None,
+            ingested: "2026-01-01 00:00:00",
+            superseded: None,
+            mentions,
+        },
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fact(
+    c: &Conn<'_>,
+    uuid: &str,
+    src: &str,
+    dst: &str,
+    name: &str,
+    text: &str,
+    emb: Vec<f32>,
+    episodes: &[&str],
+    ingested: &str,
+) {
+    c.insert_relates_to_edge(&RelatesToEdge {
+        uuid: uuid.into(),
+        name: name.into(),
+        source_node_uuid: src.into(),
+        target_node_uuid: dst.into(),
+        group_id: G.into(),
+        fact: text.into(),
+        fact_embedding: emb,
+        created_at: "2026-01-01 00:00:00".into(),
+        ingested_at: ingested.into(),
+        attributes: "{}".into(),
+        episodes: episodes.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
+    })
+    .unwrap();
+}
+
+const T0: &str = "2026-01-01 00:00:00";
+const T_CORR: &str = "2026-03-01 00:00:00";
+
+/// The whole fixture. `with_derived` adds a derived page restating Kestrel's rate fact.
+fn build(c: &Conn<'_>, with_derived: bool) {
+    // Multi-hop: Cedar Core -SUPPLIED_BY-> Fable Supply -CHARGES-> Unit Pricing.
+    entity(c, "cedar", "Cedar Core", G, SUMMARY);
+    entity(c, "fable", "Fable Supply", G, SUMMARY);
+    entity(c, "pricing", "Unit Pricing", G, SUMMARY);
+    simple_ep(
+        c,
+        "ep-cedar",
+        "Cedar Core is supplied by Fable Supply.",
+        axis(SUPPLY),
+        &["cedar", "fable"],
+    );
+    // States the price, never mentions Cedar Core.
+    simple_ep(
+        c,
+        "ep-fable",
+        "Fable Supply charges $87 per unit.",
+        axis(PRICE),
+        &["fable", "pricing"],
+    );
+    fact(
+        c,
+        "e-supply",
+        "cedar",
+        "fable",
+        "SUPPLIED_BY",
+        "Cedar Core is supplied by Fable Supply",
+        axis(SUPPLY),
+        &["ep-cedar"],
+        T0,
+    );
+    fact(
+        c,
+        "e-price",
+        "fable",
+        "pricing",
+        "CHARGES",
+        "Fable Supply charges $87 per unit",
+        axis(PRICE),
+        &["ep-fable"],
+        T0,
+    );
+    // Cross-group: highly relevant, but its far endpoint lives in another group.
+    entity(c, "foreign", "Foreign Corp", H, SUMMARY);
+    simple_ep(
+        c,
+        "ep-foreign",
+        "Foreign Corp pricing memo.",
+        axis(NOISE),
+        &["cedar"],
+    );
+    fact(
+        c,
+        "e-cross",
+        "cedar",
+        "foreign",
+        "PRICED_BY",
+        "Cedar Core is priced by Foreign Corp",
+        axis(PRICE),
+        &["ep-foreign"],
+        T0,
+    );
+
+    // Paraphrase / exact name: Marlin Core's summary is about scheduling.
+    entity(c, "marlin", "Marlin Core", G, ROSTER);
+    let mut marlin_emb = axis(STATUS);
+    marlin_emb[ROSTER] = 0.5;
+    simple_ep(
+        c,
+        "ep-marlin",
+        "Marlin Core rollout notes.",
+        marlin_emb,
+        &["marlin"],
+    );
+
+    // No entity at all: an uptime note mentioning nothing.
+    simple_ep(
+        c,
+        "ep-uptime",
+        "Uptime was 99.9% last quarter.",
+        axis(UPTIME),
+        &[],
+    );
+
+    // Hub: one relevant edge among many unrelated ones.
+    entity(c, "orbit", "Orbit Hub", G, SUMMARY);
+    entity(c, "target", "Target Node", G, SUMMARY);
+    simple_ep(
+        c,
+        "ep-orbit-price",
+        "Orbit Hub price sheet.",
+        axis(PRICE),
+        &["orbit", "target"],
+    );
+    fact(
+        c,
+        "e-orbit-price",
+        "orbit",
+        "target",
+        "PRICED_AT",
+        "Orbit Hub is priced at target",
+        axis(PRICE),
+        &["ep-orbit-price"],
+        T0,
+    );
+    for i in 1..=5 {
+        let s = format!("spoke{i}");
+        entity(c, &s, &format!("Spoke {i}"), G, SUMMARY);
+        let ep = format!("ep-{s}");
+        simple_ep(
+            c,
+            &ep,
+            "Orbit Hub links somewhere.",
+            axis(NOISE),
+            &["orbit", s.as_str()],
+        );
+        fact(
+            c,
+            &format!("e-{s}"),
+            "orbit",
+            &s,
+            "LINKS",
+            &format!("Orbit Hub links to Spoke {i}"),
+            axis(NOISE),
+            &[ep.as_str()],
+            T0,
+        );
+    }
+
+    // Hop decay: Delta Seed -> Near Point (relevant, hop 1); Delta -> Bridge -> Far (hop 2).
+    entity(c, "delta", "Delta Seed", G, SUMMARY);
+    entity(c, "near", "Near Point", G, SUMMARY);
+    entity(c, "bridge", "Bridge Point", G, SUMMARY);
+    entity(c, "far", "Far Point", G, SUMMARY);
+    simple_ep(c, "ep-near", "near", axis(NOISE), &["delta", "near"]);
+    simple_ep(c, "ep-bridge", "bridge", axis(NOISE), &["delta", "bridge"]);
+    simple_ep(c, "ep-far", "far", axis(NOISE), &["bridge", "far"]);
+    fact(
+        c,
+        "e-near",
+        "delta",
+        "near",
+        "QUOTES",
+        "Delta Seed quotes a cost at Near Point",
+        axis(PRICE),
+        &["ep-near"],
+        T0,
+    );
+    fact(
+        c,
+        "e-bridge",
+        "delta",
+        "bridge",
+        "USES",
+        "Delta Seed uses Bridge Point",
+        axis(SUPPLY),
+        &["ep-bridge"],
+        T0,
+    );
+    fact(
+        c,
+        "e-far",
+        "bridge",
+        "far",
+        "QUOTES",
+        "Bridge Point quotes a cost at Far Point",
+        axis(PRICE),
+        &["ep-far"],
+        T0,
+    );
+
+    // Belief: a decision corrected later, and one superseded only in the far future.
+    entity(c, "desk", "Policy Desk", G, SUMMARY);
+    entity(c, "va", "Vendor A", G, SUMMARY);
+    entity(c, "vb", "Vendor B", G, SUMMARY);
+    entity(c, "vc", "Vendor C", G, SUMMARY);
+    episode(
+        c,
+        Ep {
+            uuid: "ep-old",
+            content: "Policy Desk chose Vendor A.",
+            emb: axis(PRICE),
+            origin: None,
+            ingested: T0,
+            superseded: Some((T_CORR, "episode")),
+            mentions: &["desk", "va"],
+        },
+    );
+    episode(
+        c,
+        Ep {
+            uuid: "ep-new",
+            content: "Correction: Policy Desk chose Vendor B.",
+            emb: axis(PRICE),
+            origin: None,
+            ingested: T_CORR,
+            superseded: None,
+            mentions: &["desk", "vb"],
+        },
+    );
+    episode(
+        c,
+        Ep {
+            uuid: "ep-future",
+            content: "Policy Desk also uses Vendor C.",
+            emb: axis(PRICE),
+            origin: None,
+            ingested: T0,
+            superseded: Some(("2099-01-01 00:00:00", "document")),
+            mentions: &["desk", "vc"],
+        },
+    );
+    fact(
+        c,
+        "e-old",
+        "desk",
+        "va",
+        "CHOSE",
+        "Policy Desk chose Vendor A",
+        axis(PRICE),
+        &["ep-old"],
+        T0,
+    );
+    fact(
+        c,
+        "e-new",
+        "desk",
+        "vb",
+        "CHOSE",
+        "Policy Desk chose Vendor B",
+        axis(PRICE),
+        &["ep-new"],
+        T_CORR,
+    );
+    fact(
+        c,
+        "e-future",
+        "desk",
+        "vc",
+        "USES",
+        "Policy Desk uses Vendor C",
+        axis(PRICE),
+        &["ep-future"],
+        T0,
+    );
+
+    // Origin: a primary rate fact, optionally restated by a derived page.
+    entity(c, "kestrel", "Kestrel Labs", G, SUMMARY);
+    entity(c, "ratecard", "Rate Card", G, SUMMARY);
+    simple_ep(
+        c,
+        "ep-kp",
+        "Kestrel Labs rate card: $40/h.",
+        axis(PRICE),
+        &["kestrel", "ratecard"],
+    );
+    fact(
+        c,
+        "e-k1",
+        "kestrel",
+        "ratecard",
+        "HAS_RATE",
+        "Kestrel Labs has rate $40/h",
+        axis(PRICE),
+        &["ep-kp"],
+        T0,
+    );
+    if with_derived {
+        episode(
+            c,
+            Ep {
+                uuid: "ep-kd",
+                content: "Summary: Kestrel Labs charges $40/h.",
+                emb: axis(PRICE),
+                origin: Some("derived"),
+                ingested: T0,
+                superseded: None,
+                mentions: &["kestrel", "ratecard"],
+            },
+        );
+        fact(
+            c,
+            "e-k2",
+            "kestrel",
+            "ratecard",
+            "HAS_RATE",
+            "Kestrel Labs has rate $40/h",
+            axis(PRICE),
+            &["ep-kd"],
+            T0,
+        );
+    }
+
+    // Legacy edge: no producing episode, no warrant.
+    entity(c, "ledger", "Old Ledger", G, SUMMARY);
+    entity(c, "archive", "Archive Box", G, SUMMARY);
+    fact(
+        c,
+        "e-legacy",
+        "ledger",
+        "archive",
+        "STORED_IN",
+        "Old Ledger is stored in Archive Box",
+        axis(PRICE),
+        &[],
+        T0,
+    );
+}
+
+struct Fx {
+    state: Arc<AppState>,
+    embedder: Arc<CountingEmbedder>,
+    _dir: TempDir,
+}
+
+fn fixture_with(populate: bool, with_derived: bool) -> Fx {
+    let dir = TempDir::new().unwrap();
+    let db = Arc::new(Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap());
+    {
+        let c = db.connect().unwrap();
+        c.init_schema(DIM).unwrap();
+        c.build_indices_and_constraints().unwrap();
+        if populate {
+            build(&c, with_derived);
+        }
+    }
+    let inner: Arc<dyn Embedder> = Arc::new(NameMapEmbedder::new(DIM, query_map()));
+    let embedder = Arc::new(CountingEmbedder::new(inner));
+    let state = Arc::new(AppState {
+        db: ArcSwapOption::from(Some(db)),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: embedder.clone(),
+        extractor: Arc::new(ConfigurableExtractor::new(vec![])),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(RwLock::new(())),
+        sink: Arc::new(NoopSink),
+        db_path: "test.db".to_string(),
+        wal_root: None,
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writers: Arc::new(Mutex::new(HashMap::new())),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: None,
+        indices_built: Arc::new(AtomicBool::new(true)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: None,
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
+    });
+    Fx {
+        state,
+        embedder,
+        _dir: dir,
+    }
+}
+
+fn fixture() -> Fx {
+    fixture_with(true, true)
+}
+
+async fn raw(fx: &Fx, params: Value) -> Value {
+    let req = IpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: json!(1),
+        method: "knowledge_graph_search".to_string(),
+        params,
+    };
+    serde_json::to_value(handlers::dispatch(req, Arc::clone(&fx.state), None).await).unwrap()
+}
+
+async fn search(fx: &Fx, params: Value) -> Value {
+    let v = raw(fx, params).await;
+    assert!(v.get("error").is_none(), "graph search errored: {v}");
+    v["result"].clone()
+}
+
+fn results(r: &Value) -> &Vec<Value> {
+    r["results"].as_array().unwrap()
+}
+
+/// `p:<uuid>` / `f:<uuid>` keys of the results, in order.
+fn keys(r: &Value) -> Vec<String> {
+    results(r)
+        .iter()
+        .map(|x| match x["kind"].as_str().unwrap() {
+            "fact" => format!("f:{}", x["fact"]["uuid"].as_str().unwrap()),
+            _ => format!("p:{}", x["passage"]["uuid"].as_str().unwrap()),
+        })
+        .collect()
+}
+
+fn find<'a>(r: &'a Value, key: &str) -> Option<&'a Value> {
+    let i = keys(r).iter().position(|k| k == key)?;
+    Some(&results(r)[i])
+}
+
+fn rank(r: &Value, key: &str) -> Option<usize> {
+    keys(r).iter().position(|k| k == key)
+}
+
+fn path_edges(x: &Value) -> Vec<String> {
+    x["evidence"]["path"]
+        .as_array()
+        .map(|p| {
+            p.iter()
+                .map(|s| s["edge_uuid"].as_str().unwrap().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn seed_uuids(r: &Value) -> Vec<String> {
+    r["seeds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["uuid"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn list_names(x: &Value) -> Vec<String> {
+    x["evidence"]["lists"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["list"].as_str().unwrap().to_string())
+        .collect()
+}
+
+// ── Story 1: multi-hop ────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn multi_hop_reaches_the_note_that_never_names_the_seed() {
+    let fx = fixture();
+    let r = search(&fx, json!({"query": Q_MULTI, "group_ids": [G]})).await;
+    assert!(
+        seed_uuids(&r).contains(&"cedar".to_string()),
+        "{}",
+        r["seeds"]
+    );
+    let cedar = r["seeds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["uuid"] == "cedar")
+        .unwrap();
+    assert!(cedar["matched"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("name")));
+    assert!(
+        !cedar["matched"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("name_vector")),
+        "ANN filler below the floor is not reported as a match: {cedar}"
+    );
+
+    let note =
+        find(&r, "p:ep-fable").unwrap_or_else(|| panic!("ep-fable not in top k: {:?}", keys(&r)));
+    assert_eq!(path_edges(note), vec!["e-supply", "e-price"]);
+    assert_eq!(note["evidence"]["seeds"][0]["uuid"], "cedar");
+    assert_eq!(
+        note["evidence"]["supporting_episodes"][0]["source_description"],
+        "ep-fable.md"
+    );
+
+    let price = find(&r, "f:e-price").expect("the price fact is returned");
+    assert_eq!(path_edges(price), vec!["e-supply", "e-price"]);
+    assert_eq!(price["evidence"]["path"][1]["hop"], 2);
+    assert_eq!(price["evidence"]["path"][0]["from_name"], "Cedar Core");
+    assert_eq!(price["evidence"]["path"][1]["to_name"], "Unit Pricing");
+    // The price note is the best passage for the question.
+    let first_passage = keys(&r).into_iter().find(|k| k.starts_with("p:")).unwrap();
+    assert_eq!(first_passage, "p:ep-fable", "{:?}", keys(&r));
+}
+
+#[tokio::test]
+async fn hub_seed_ranks_the_relevant_edge_above_unrelated_ones() {
+    let fx = fixture();
+    let r = search(
+        &fx,
+        json!({"query": Q_HUB, "group_ids": [G], "num_results": 20}),
+    )
+    .await;
+    let relevant = rank(&r, "f:e-orbit-price").expect("relevant edge returned");
+    for i in 1..=5 {
+        if let Some(other) = rank(&r, &format!("f:e-spoke{i}")) {
+            assert!(
+                relevant < other,
+                "relevant edge must outrank spoke {i}: {:?}",
+                keys(&r)
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn one_hop_fact_ranks_at_least_as_high_as_an_equally_relevant_two_hop_fact() {
+    let fx = fixture();
+    let r = search(
+        &fx,
+        json!({"query": Q_DECAY, "group_ids": [G], "stages": "expand"}),
+    )
+    .await;
+    let near = rank(&r, "f:e-near").expect("hop-1 fact returned");
+    let far = rank(&r, "f:e-far").expect("hop-2 fact returned");
+    assert!(near < far, "{:?}", keys(&r));
+    assert_eq!(
+        path_edges(find(&r, "f:e-far").unwrap()),
+        vec!["e-bridge", "e-far"]
+    );
+}
+
+// ── Story 2: paraphrase and exact names ───────────────────────────────────────
+
+#[tokio::test]
+async fn role_description_seeds_the_entity_through_its_summary() {
+    let fx = fixture();
+    let r = search(&fx, json!({"query": Q_PARA, "group_ids": [G]})).await;
+    let seeds = r["seeds"].as_array().unwrap();
+    assert_eq!(
+        seeds.len(),
+        1,
+        "only the summary match passes the gate: {seeds:?}"
+    );
+    assert_eq!(seeds[0]["uuid"], "marlin");
+    assert!(seeds[0]["matched"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("summary_vector")));
+    let note = find(&r, "p:ep-marlin").expect("Marlin's note in the top k");
+    assert_eq!(note["evidence"]["seeds"][0]["uuid"], "marlin");
+    assert_eq!(note["evidence"]["via"]["kind"], "mention");
+}
+
+#[tokio::test]
+async fn exact_name_is_seeded_and_reported_as_a_name_match() {
+    let fx = fixture();
+    let r = search(&fx, json!({"query": Q_NAME, "group_ids": [G]})).await;
+    let marlin = r["seeds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["uuid"] == "marlin")
+        .expect("Marlin Core seeded");
+    assert!(marlin["matched"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("name")));
+    assert_eq!(
+        r["seeds"][0]["uuid"], "marlin",
+        "the exact match is the top seed"
+    );
+}
+
+#[tokio::test]
+async fn query_linking_no_entity_returns_plain_passages() {
+    let fx = fixture();
+    let r = search(&fx, json!({"query": Q_NONE, "group_ids": [G]})).await;
+    assert_eq!(r["stats"]["no_seeds"], true, "{}", r["seeds"]);
+    assert!(r["seeds"].as_array().unwrap().is_empty());
+    assert!(r["count"].as_u64().unwrap() > 0);
+    assert_eq!(keys(&r)[0], "p:ep-uptime");
+    for x in results(&r) {
+        assert_eq!(x["kind"], "passage");
+        assert_eq!(list_names(x), vec!["passages"]);
+        assert!(x["evidence"].get("seeds").is_none() && x["evidence"].get("path").is_none());
+    }
+}
+
+// ── Story 3: belief time ──────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn corrected_fact_is_neither_returned_nor_traversed_by_default() {
+    let fx = fixture();
+    let r = search(
+        &fx,
+        json!({"query": Q_BELIEF, "group_ids": [G], "num_results": 50}),
+    )
+    .await;
+    assert_eq!(r["stats"]["believed_only"], true);
+    assert!(find(&r, "f:e-old").is_none(), "{:?}", keys(&r));
+    assert!(find(&r, "p:ep-old").is_none(), "{:?}", keys(&r));
+    for x in results(&r) {
+        assert!(!path_edges(x).contains(&"e-old".to_string()), "{x}");
+    }
+    let new = find(&r, "f:e-new").expect("the correction's fact is returned");
+    assert_eq!(new["belief"]["state"], "believed");
+    // Future-effective document supersession: still believed now (ADR-0707).
+    let future = find(&r, "f:e-future").expect("future-superseded fact still believed");
+    assert_eq!(future["belief"]["believed"], true);
+}
+
+#[tokio::test]
+async fn as_of_before_the_correction_flips_which_fact_is_believed() {
+    let fx = fixture();
+    let r = search(
+        &fx,
+        json!({"query": Q_BELIEF, "group_ids": [G], "num_results": 50, "as_of": "2026-02-01T00:00:00Z"}),
+    )
+    .await;
+    assert!(find(&r, "f:e-old").is_some(), "{:?}", keys(&r));
+    assert!(find(&r, "f:e-new").is_none(), "{:?}", keys(&r));
+    assert!(find(&r, "p:ep-new").is_none(), "not yet ingested at as_of");
+}
+
+#[tokio::test]
+async fn believed_only_false_returns_superseded_facts_with_their_state() {
+    let fx = fixture();
+    let r = search(
+        &fx,
+        json!({"query": Q_BELIEF, "group_ids": [G], "num_results": 50, "believed_only": false}),
+    )
+    .await;
+    assert_eq!(r["stats"]["believed_only"], false);
+    let old = find(&r, "f:e-old").expect("superseded fact returned when not filtering");
+    assert_eq!(old["belief"]["state"], "superseded");
+    assert_eq!(old["belief"]["believed"], false);
+    assert_eq!(old["belief"]["supersession"]["cause"], "corrected");
+    if let Some(p) = find(&r, "p:ep-old") {
+        assert_eq!(p["belief"]["state"], "superseded");
+    }
+}
+
+// ── Story 4: evidence ─────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn every_result_has_evidence_that_resolves_to_real_graph_objects() {
+    let fx = fixture();
+    let r = search(&fx, json!({"query": Q_MULTI, "group_ids": [G]})).await;
+    let db = fx.state.db.load_full().unwrap();
+    let c = db.connect().unwrap();
+    let mut multi_list = false;
+    for x in results(&r) {
+        let lists = list_names(x);
+        assert!(!lists.is_empty(), "{x}");
+        multi_list |= lists.len() > 1;
+        let ev = &x["evidence"];
+        if let Some(seeds) = ev["seeds"].as_array() {
+            let uuids: Vec<String> = seeds
+                .iter()
+                .map(|s| s["uuid"].as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(c.get_entities_by_uuids(&uuids).unwrap().len(), uuids.len());
+            assert!(seeds
+                .iter()
+                .all(|s| !s["matched"].as_array().unwrap().is_empty()));
+        }
+        let path = path_edges(x);
+        if !path.is_empty() {
+            assert_eq!(c.get_relates_to_by_uuids(&path).unwrap().len(), path.len());
+        }
+        if let Some(eps) = ev["supporting_episodes"].as_array() {
+            let uuids: Vec<String> = eps
+                .iter()
+                .map(|e| e["uuid"].as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(
+                c.get_episode_passages(&uuids, false).unwrap().len(),
+                uuids.len()
+            );
+        }
+        if x["kind"] == "fact"
+            && x["fact"]["episodes"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        {
+            assert!(ev["supporting_episodes"].as_array().is_some(), "{x}");
+            assert!(!path.is_empty(), "a graph-reached fact names its path");
+        }
+    }
+    assert!(
+        multi_list,
+        "some result was returned by several lists: {:?}",
+        keys(&r)
+    );
+    let fable = find(&r, "p:ep-fable").unwrap();
+    let names = list_names(fable);
+    assert!(
+        names.contains(&"supporting".into()) && names.contains(&"passages".into()),
+        "{names:?}"
+    );
+}
+
+// ── Story 5: origin ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn origin_filter_keeps_derived_content_out_of_every_stage() {
+    let fx = fixture();
+    let r = search(
+        &fx,
+        json!({"query": Q_ORIGIN, "group_ids": [G], "num_results": 50, "origins": ["primary", "external"]}),
+    )
+    .await;
+    let s = r.to_string();
+    assert!(
+        !s.contains("ep-kd"),
+        "derived page must not appear anywhere: {s}"
+    );
+    assert!(
+        !s.contains("e-k2"),
+        "derived edge must not appear anywhere: {s}"
+    );
+    assert!(find(&r, "f:e-k1").is_some());
+}
+
+#[tokio::test]
+async fn derived_restatement_cites_but_does_not_change_the_facts_rank() {
+    let with = fixture_with(true, true);
+    let without = fixture_with(true, false);
+    let params = json!({"query": Q_ORIGIN, "group_ids": [G], "num_results": 50,
+                        "as_of": "2026-06-01T00:00:00Z"});
+    let a = search(&with, params.clone()).await;
+    let b = search(&without, params).await;
+    let fa = find(&a, "f:e-k1").expect("primary fact returned");
+    let fb = find(&b, "f:e-k1").expect("primary fact returned");
+    assert_eq!(
+        fa["score"], fb["score"],
+        "derived restatement must add no rank"
+    );
+    assert!(
+        find(&a, "f:e-k2").is_none(),
+        "a derived-only edge is never ranked"
+    );
+    assert_eq!(fa["corroboration"], 1);
+    let cites: Vec<&Value> = fa["evidence"]["supporting_episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["uuid"] == "ep-kd")
+        .collect();
+    assert_eq!(cites.len(), 1, "the derived page is attached as a citation");
+    assert_eq!(cites[0]["corroborating"], false);
+    assert_eq!(cites[0]["origin"], "derived");
+    // Never in the supporting list.
+    if let Some(p) = find(&a, "p:ep-kd") {
+        assert!(!list_names(p).contains(&"supporting".to_string()));
+    }
+}
+
+// ── Story 7: one model call ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn exactly_one_embed_call_per_request() {
+    let fx = fixture();
+    let before = fx.embedder.call_count();
+    let r = search(&fx, json!({"query": Q_MULTI})).await;
+    assert_eq!(fx.embedder.call_count() - before, 1);
+    assert_eq!(r["stats"]["embed_calls"], 1);
+    assert!(r["stats"]["db_queries"].as_u64().unwrap() > 0);
+    assert_eq!(r["stats"]["passage_mode"], "vector");
+}
+
+// ── Edge cases ────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn empty_graph_returns_an_empty_list() {
+    let fx = fixture_with(false, false);
+    let r = search(&fx, json!({"query": Q_MULTI})).await;
+    assert_eq!(r["count"], 0);
+    assert_eq!(r["stats"]["no_seeds"], true);
+}
+
+#[tokio::test]
+async fn empty_group_list_matches_nothing() {
+    let fx = fixture();
+    let before = fx.embedder.call_count();
+    let r = search(&fx, json!({"query": Q_MULTI, "group_ids": []})).await;
+    assert_eq!(r["count"], 0);
+    assert_eq!(
+        fx.embedder.call_count(),
+        before,
+        "nothing to search, nothing embedded"
+    );
+}
+
+#[tokio::test]
+async fn invalid_input_is_rejected() {
+    let fx = fixture();
+    for params in [
+        json!({"query": ""}),
+        json!({"query": "   "}),
+        json!({}),
+        json!({"query": "x", "stages": "everything"}),
+        json!({"query": "x", "believed_only": "yes"}),
+        json!({"query": "x", "origins": []}),
+    ] {
+        let v = raw(&fx, params.clone()).await;
+        assert!(v.get("error").is_some(), "{params} must be rejected: {v}");
+    }
+}
+
+#[tokio::test]
+async fn traversal_never_leaves_the_requested_groups() {
+    let fx = fixture();
+    let scoped = search(
+        &fx,
+        json!({"query": Q_MULTI, "group_ids": [G], "num_results": 50}),
+    )
+    .await;
+    assert!(
+        !scoped.to_string().contains("e-cross"),
+        "{:?}",
+        keys(&scoped)
+    );
+    let all = search(&fx, json!({"query": Q_MULTI, "num_results": 50})).await;
+    assert!(
+        find(&all, "f:e-cross").is_some(),
+        "unscoped, the edge is reachable"
+    );
+}
+
+#[tokio::test]
+async fn legacy_edge_is_traversable_and_returned_without_a_passage() {
+    let fx = fixture();
+    let r = search(&fx, json!({"query": Q_LEGACY, "group_ids": [G]})).await;
+    let f = find(&r, "f:e-legacy").expect("legacy fact returned");
+    assert_eq!(f["belief"]["state"], "legacy");
+    assert!(f["evidence"].get("supporting_episodes").is_none(), "{f}");
+    assert_eq!(path_edges(f), vec!["e-legacy"]);
+}
+
+#[tokio::test]
+async fn k_larger_than_the_pool_is_not_padded_and_items_are_unique() {
+    let fx = fixture();
+    let r = search(
+        &fx,
+        json!({"query": Q_LEGACY, "group_ids": [G], "num_results": 100}),
+    )
+    .await;
+    let k = keys(&r);
+    assert!(k.len() < 100);
+    assert_eq!(r["count"].as_u64().unwrap() as usize, k.len());
+    let mut dedup = k.clone();
+    dedup.sort();
+    dedup.dedup();
+    assert_eq!(dedup.len(), k.len(), "each item appears once");
+}
+
+#[tokio::test]
+async fn identical_requests_give_identical_results() {
+    let fx = fixture();
+    let params = json!({"query": Q_MULTI, "as_of": "2026-06-01T00:00:00Z"});
+    let a = search(&fx, params.clone()).await;
+    let b = search(&fx, params).await;
+    assert_eq!(a.to_string(), b.to_string());
+}
+
+// ── Ablation ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn stages_switch_the_fused_lists() {
+    let fx = fixture();
+    let seeds = search(
+        &fx,
+        json!({"query": Q_MULTI, "group_ids": [G], "stages": "seeds"}),
+    )
+    .await;
+    assert_eq!(seeds["stats"]["stages"], "seeds");
+    assert_eq!(seeds["stats"]["hops"], 0);
+    assert!(results(&seeds)
+        .iter()
+        .all(|x| x["kind"] == "passage" && list_names(x) == vec!["supporting".to_string()]));
+    // Seeds-only cannot reach the price note, which never mentions a seed... unless a seed
+    // happens to be mentioned in it; Fable Supply is not a seed here.
+    assert!(!seed_uuids(&seeds).contains(&"fable".to_string()));
+    assert!(find(&seeds, "p:ep-fable").is_none(), "{:?}", keys(&seeds));
+
+    let expand = search(
+        &fx,
+        json!({"query": Q_MULTI, "group_ids": [G], "stages": "expand"}),
+    )
+    .await;
+    assert!(results(&expand)
+        .iter()
+        .all(|x| !list_names(x).contains(&"passages".to_string())));
+    assert!(results(&expand).iter().any(|x| x["kind"] == "fact"));
+    assert!(find(&expand, "p:ep-fable").is_some());
+
+    let full = search(&fx, json!({"query": Q_MULTI, "group_ids": [G]})).await;
+    assert_eq!(full["stats"]["stages"], "full");
+    assert!(results(&full)
+        .iter()
+        .any(|x| list_names(x).contains(&"passages".to_string())));
+}

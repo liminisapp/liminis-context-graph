@@ -130,7 +130,8 @@ pub struct SeedEvidence {
     pub kind: String,
     /// Fused seed score, normalised so the best seed scores 1.0.
     pub score: f64,
-    /// Which lists matched it: `name`, `bm25`, `name_vector`, `summary_vector`.
+    /// Which lists matched it: `name` (exact), `bm25`, `name_vector`, `summary_vector` (a vector
+    /// list counts only at or above [`SEED_SIM_FLOOR`]).
     pub matched: Vec<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bm25_score: Option<f64>,
@@ -378,11 +379,9 @@ fn relevance(query: &[f32], v: &[f32]) -> f64 {
 /// A fact's relevance: cosine of its embedding plus a bonus for its rank in the global fact
 /// BM25 list (`None` when it is not in that list).
 pub fn edge_relevance(cosine: f64, bm25_rank: Option<usize>) -> f64 {
-    let bonus = bm25_rank
-        .filter(|r| *r < EDGE_BM25_LIMIT)
-        .map_or(0.0, |r| {
-            EDGE_BM25_BONUS * (1.0 - r as f64 / EDGE_BM25_LIMIT as f64)
-        });
+    let bonus = bm25_rank.filter(|r| *r < EDGE_BM25_LIMIT).map_or(0.0, |r| {
+        EDGE_BM25_BONUS * (1.0 - r as f64 / EDGE_BM25_LIMIT as f64)
+    });
     cosine + bonus
 }
 
@@ -503,11 +502,7 @@ fn offer(sources: &mut BTreeMap<String, Source>, ep: &str, s: Source) {
 
 // ── The pipeline ──────────────────────────────────────────────────────────────
 
-fn run(
-    conn: &Conn<'_>,
-    p: &GraphSearchParams,
-    emb: &[f32],
-) -> Result<GraphSearchResponse, Error> {
+fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearchResponse, Error> {
     let mut st = new_stats(p, 1);
     let t = p.as_of_us;
     let gid_refs: Option<Vec<&str>> = p
@@ -769,7 +764,9 @@ fn run(
         let origin = info.map_or(Origin::Primary, |i| i.origin);
         SupportingEpisode {
             uuid: uuid.to_string(),
-            source_description: info.map(|i| i.source_description.clone()).unwrap_or_default(),
+            source_description: info
+                .map(|i| i.source_description.clone())
+                .unwrap_or_default(),
             origin: origin.as_str(),
             corroborating: corroborating_default.unwrap_or(origin.is_corroborating()),
         }
@@ -790,13 +787,12 @@ fn run(
             .collect();
         if let Some(uuid) = hit.uuid.strip_prefix("f:") {
             let f = &facts[uuid];
-            let mut eps: Vec<SupportingEpisode> = f
-                .fe
-                .edge
-                .episodes
-                .iter()
-                .map(|u| supporting(u, None))
-                .collect();
+            let mut eps: Vec<SupportingEpisode> =
+                f.fe.edge
+                    .episodes
+                    .iter()
+                    .map(|u| supporting(u, None))
+                    .collect();
             if let Some(cites) = citations.get(&key_of(&f.fe.edge)) {
                 eps.extend(cites.iter().map(|u| supporting(u, Some(false))));
             }
@@ -877,10 +873,13 @@ fn seed_stage(
     // Vector lists keep only finite similarities: a zero-filled (un-backfilled) summary
     // embedding yields NaN and so contributes nothing.
     let finite_only = |l: Vec<(String, f64)>| -> Vec<(String, f64)> {
-        l.into_iter().filter(|(_, d)| (1.0 - d).is_finite()).collect()
+        l.into_iter()
+            .filter(|(_, d)| (1.0 - d).is_finite())
+            .collect()
     };
     st.db_queries += 2;
-    let name_vec = finite_only(conn.vector_search_entities_kind(emb, gids, None, SEED_CANDIDATES)?);
+    let name_vec =
+        finite_only(conn.vector_search_entities_kind(emb, gids, None, SEED_CANDIDATES)?);
     let sum_vec = finite_only(conn.vector_search_entities_by_summary_kind(
         emb,
         gids,
@@ -1002,10 +1001,13 @@ fn seed_stage(
             if h.raw[1].is_some() {
                 matched.push("bm25");
             }
-            if h.raw[2].is_some() {
+            // ANN always fills its list (#613), so a vector list counts as a match only when
+            // its similarity clears the seed floor; the raw similarities are reported anyway.
+            let floor_ok = |d: Option<f64>| sim(d).is_some_and(|s| s >= SEED_SIM_FLOOR);
+            if floor_ok(h.raw[2]) {
                 matched.push("name_vector");
             }
-            if h.raw[3].is_some() {
+            if floor_ok(h.raw[3]) {
                 matched.push("summary_vector");
             }
             let evidence = SeedEvidence {
@@ -1139,12 +1141,8 @@ fn expand(
             if p.believed_only && !annotation.believed {
                 continue;
             }
-            let own: Vec<&EpisodePassage> = fe
-                .edge
-                .episodes
-                .iter()
-                .filter_map(|u| eps.get(u))
-                .collect();
+            let own: Vec<&EpisodePassage> =
+                fe.edge.episodes.iter().filter_map(|u| eps.get(u)).collect();
             if let Some(filter) = p.origins.as_deref() {
                 let ok = if fe.edge.episodes.is_empty() {
                     filter.contains(&Origin::Primary)
@@ -1290,7 +1288,9 @@ mod tests {
         assert!(!grams.iter().any(|g| g.contains('?') || g.contains('\'')));
         // Shortest first.
         assert_eq!(grams[0], "what");
-        assert!(grams.iter().all(|g| g.split(' ').count() <= MAX_NGRAM_WORDS));
+        assert!(grams
+            .iter()
+            .all(|g| g.split(' ').count() <= MAX_NGRAM_WORDS));
     }
 
     #[test]
@@ -1299,12 +1299,18 @@ mod tests {
         let long: String = (0..100).map(|i| format!("w{i} ")).collect();
         assert_eq!(query_ngrams(&long).len(), MAX_NGRAMS);
         assert!(query_ngrams("  ?! ").is_empty());
-        assert_eq!(query_ngrams("Fable\u{2019}s price"), vec!["fable", "price", "fable price"]);
+        assert_eq!(
+            query_ngrams("Fable\u{2019}s price"),
+            vec!["fable", "price", "fable price"]
+        );
     }
 
     #[test]
     fn fts_terms_keep_only_alphanumeric_words() {
-        assert_eq!(fts_terms("Cedar Core → Fable's $87/unit"), "Cedar Core Fable s 87 unit");
+        assert_eq!(
+            fts_terms("Cedar Core → Fable's $87/unit"),
+            "Cedar Core Fable s 87 unit"
+        );
         assert_eq!(fts_terms("→ ?"), "");
     }
 
@@ -1366,8 +1372,14 @@ mod tests {
         assert!(episode_live_at(&ep(Some(20), Some(10), false), 19));
         assert!(!episode_live_at(&ep(Some(20), Some(10), false), 20));
         assert!(!episode_live_at(&ep(None, Some(10), true), 100));
-        assert_eq!(passage_belief(&ep(Some(20), Some(10), false), 25).state, "superseded");
-        assert_eq!(passage_belief(&ep(None, Some(10), false), 5).state, "not_yet_ingested");
+        assert_eq!(
+            passage_belief(&ep(Some(20), Some(10), false), 25).state,
+            "superseded"
+        );
+        assert_eq!(
+            passage_belief(&ep(None, Some(10), false), 5).state,
+            "not_yet_ingested"
+        );
         let b = passage_belief(&ep(Some(20), Some(10), false), 15);
         assert_eq!(b.state, "believed");
         assert!(b.believed);
@@ -1383,13 +1395,58 @@ mod tests {
             root: 0,
             path: vec![],
         };
-        offer(&mut m, "p", src(0.2, Via::Mention { entity_uuid: "z".into() }));
-        offer(&mut m, "p", src(0.5, Via::Mention { entity_uuid: "y".into() }));
-        offer(&mut m, "p", src(0.1, Via::Fact { edge_uuid: "a".into() }));
+        offer(
+            &mut m,
+            "p",
+            src(
+                0.2,
+                Via::Mention {
+                    entity_uuid: "z".into(),
+                },
+            ),
+        );
+        offer(
+            &mut m,
+            "p",
+            src(
+                0.5,
+                Via::Mention {
+                    entity_uuid: "y".into(),
+                },
+            ),
+        );
+        offer(
+            &mut m,
+            "p",
+            src(
+                0.1,
+                Via::Fact {
+                    edge_uuid: "a".into(),
+                },
+            ),
+        );
         assert_eq!(m["p"].score, 0.5);
-        offer(&mut m, "p", src(0.5, Via::Fact { edge_uuid: "b".into() }));
+        offer(
+            &mut m,
+            "p",
+            src(
+                0.5,
+                Via::Fact {
+                    edge_uuid: "b".into(),
+                },
+            ),
+        );
         assert!(matches!(&m["p"].via, Via::Fact { edge_uuid } if edge_uuid == "b"));
-        offer(&mut m, "p", src(0.5, Via::Fact { edge_uuid: "c".into() }));
+        offer(
+            &mut m,
+            "p",
+            src(
+                0.5,
+                Via::Fact {
+                    edge_uuid: "c".into(),
+                },
+            ),
+        );
         assert!(matches!(&m["p"].via, Via::Fact { edge_uuid } if edge_uuid == "b"));
     }
 

@@ -428,10 +428,13 @@ pub(crate) struct BeliefContext {
 impl BeliefContext {
     /// The belief row of `uuid`, or an empty (legacy-shaped) row when the edge no longer exists.
     pub fn row(&self, uuid: &str) -> EdgeBeliefRow {
-        self.rows.get(uuid).cloned().unwrap_or_else(|| EdgeBeliefRow {
-            uuid: uuid.to_string(),
-            ..Default::default()
-        })
+        self.rows
+            .get(uuid)
+            .cloned()
+            .unwrap_or_else(|| EdgeBeliefRow {
+                uuid: uuid.to_string(),
+                ..Default::default()
+            })
     }
 
     /// The full `belief` annotation of `row` evaluated at `t_us`.
