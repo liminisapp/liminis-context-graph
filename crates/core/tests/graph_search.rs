@@ -1856,12 +1856,18 @@ async fn evidence_never_discloses_a_producer_outside_the_callers_filter() {
             .map(|e| e["uuid"].as_str().unwrap().to_string())
             .collect()
     };
+    let listed = |r: &Value| find(r, "f:e-ship").unwrap()["fact"]["episodes"].clone();
     let q = json!({"query": "Iris Port price", "group_ids": [G], "num_results": 50});
     let r = search(&fx, q.clone()).await;
     assert_eq!(
         cited(&r),
         vec!["ep-live"],
         "the corrected producer is not disclosed"
+    );
+    assert_eq!(
+        listed(&r),
+        json!(["ep-live"]),
+        "nor named in the edge itself"
     );
     let mut all = q;
     all["believed_only"] = json!(false);
@@ -1871,6 +1877,7 @@ async fn evidence_never_discloses_a_producer_outside_the_callers_filter() {
         vec!["ep-live", "ep-gone"],
         "both, when not filtering"
     );
+    assert_eq!(listed(&r), json!(["ep-live", "ep-gone"]));
 }
 
 #[tokio::test]
@@ -1931,6 +1938,39 @@ async fn rerank_judges_a_fact_by_a_live_producer_not_just_its_first() {
         keys(&r)[0],
         "f:e-ship",
         "a believed fact is not demoted for a superseded sibling producer: {:?}",
+        keys(&r)
+    );
+}
+
+#[tokio::test]
+async fn rerank_demotes_what_this_read_reports_as_not_believed() {
+    // At an `as_of` before the correction, `ep-new` is not yet ingested: returned only because
+    // belief filtering is off, and reported `not_yet_ingested`. Its episode row alone (never
+    // superseded) reads as current, but the blend must still treat it as not believed.
+    let fx = fixture();
+    let mock = Arc::new(lcg_core::rerank::MockReranker::new(|_, d| {
+        if d.contains("chose Vendor B") {
+            10.0
+        } else if d.contains("chose Vendor A") {
+            9.9
+        } else {
+            0.0
+        }
+    }));
+    install_reranker(&fx, Some(mock));
+    let r = search(
+        &fx,
+        json!({"query": Q_BELIEF, "group_ids": [G], "num_results": 50, "believed_only": false,
+               "as_of": "2026-02-01T00:00:00Z", "rerank": true}),
+    )
+    .await;
+    assert_eq!(r["stats"]["rerank"]["applied"], true);
+    let new = find(&r, "p:ep-new").expect("returned when not filtering");
+    assert_eq!(new["belief"]["state"], "not_yet_ingested");
+    let (old, new) = (rank(&r, "p:ep-old").unwrap(), rank(&r, "p:ep-new").unwrap());
+    assert!(
+        old < new,
+        "the believed note outranks one not yet ingested: {:?}",
         keys(&r)
     );
 }

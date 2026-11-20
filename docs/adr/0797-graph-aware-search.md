@@ -407,7 +407,7 @@ difference.
   ends above its replacement (qmd-rerank loses temporal, 0.529 → 0.335, because its reranker
   ignores time). Candidates are keyed by episode, so a replacement is recognised whether it
   arrives as a passage or as a fact it produced. `stats.rerank` reports `{applied, candidates,
-  reason?, elapsed_ms?}`; a missing reranker (`not_configured`), a failed call or a failed
+  reason?, elapsed_ms?}`; an empty fused list (`no_candidates`), a missing reranker (`not_configured`), a failed call or a failed
   supersession lookup (`unavailable`) leave the fused order, cut to `k`. Eval rows:
   `lcg-graph-rerank` and `lcg-graph-seeds-rerank`, read against `lcg-passages-belief-rerank`.
 - **Caller `queries` (#802) are not passed into list (b) yet.** List (b) runs its vector and BM25

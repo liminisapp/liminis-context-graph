@@ -448,6 +448,39 @@ fn time_us(valid_at: Option<&str>, created_at: &str) -> Option<i64> {
     valid_at.and_then(to_us).or_else(|| to_us(created_at))
 }
 
+/// The supersession row that stands for a result in #796's blend. Normally the episode's own
+/// (a passage's, or a fact's chosen producer's), so a replacement is still recognised through
+/// `superseded_by`. But the result's own belief, as this read evaluated it at `as_of`, wins
+/// whenever that row would read as current while the result is not believed: a fact whose edge
+/// is superseded although its producer is live, or a passage `not_yet_ingested` or
+/// `pending_revision` at `as_of` (which the row alone cannot express). Such a result gets a row
+/// that marks it superseded at `as_of`, so the blend demotes it and the ranking agrees with the
+/// `belief` the result reports.
+fn candidate_belief(
+    x: &GraphSearchResult,
+    row: Option<&belief::EpisodeSupersession>,
+    as_of_us: i64,
+) -> Option<belief::EpisodeSupersession> {
+    let believed = x.belief["believed"].as_bool().unwrap_or(true);
+    let row_current =
+        passage_rerank::belief_state(row, as_of_us) != passage_rerank::BeliefState::Superseded;
+    if believed || !row_current {
+        return row.cloned();
+    }
+    let mut demoted = row.cloned().unwrap_or(belief::EpisodeSupersession {
+        superseded_at_us: None,
+        kind: None,
+        superseded_by: None,
+        reason: None,
+        group_id: String::new(),
+        doc_id: None,
+        revision_id_present: false,
+        revision_committed_at_us: None,
+    });
+    demoted.superseded_at_us = Some(as_of_us);
+    Some(demoted)
+}
+
 /// The final rerank stage (#796, steer of 2026-11-19): the top `pool` fused results are scored
 /// by #796's cross-encoder and blended with their fused rank, belief and recency by
 /// [`passage_rerank::blend`] — the same client, blend weights and superseded handling as
@@ -575,7 +608,7 @@ async fn rerank_stage(
                 (None, Some(f)) => time_us(f.valid_at.as_deref(), &f.created_at),
                 (None, None) => None,
             },
-            belief: ep.as_ref().and_then(|u| supersession.get(u).cloned()),
+            belief: candidate_belief(x, ep.as_ref().and_then(|u| supersession.get(u)), as_of_us),
         })
         .collect();
     // Belief is judged at the request's `as_of` (now by default), as everywhere else in this read.
@@ -1282,7 +1315,12 @@ fn run(
             results.push(GraphSearchResult {
                 kind: "fact",
                 score: hit.rrf_score,
-                fact: Some(f.fe.edge.clone()),
+                // The edge's own `episodes` list is filtered by the same rule as
+                // `supporting_episodes`, so a producer the caller's filter hides is named nowhere.
+                fact: Some(RelatesToEdge {
+                    episodes: f.fe.edge.episodes.iter().filter(shown).cloned().collect(),
+                    ..f.fe.edge.clone()
+                }),
                 passage: None,
                 belief: serde_json::to_value(&f.belief).unwrap_or_default(),
                 support: sup.map(|s| s.support.clone()),

@@ -179,7 +179,8 @@ OPTIONS:
                                Neither flag is valid with --connect: set them on the daemon.
     --reranker-uds <SOCKET>    Reach the cross-encoder reranker (POST /v1/rerank) over this Unix
                                socket. Default: the embedder's sidecar. Only used by
-                               knowledge_search_passages when a call (or LCG_RERANK=on) opts in.
+                               knowledge_search_passages and knowledge_graph_search when a
+                               call (or LCG_RERANK=on) opts in.
     --reranker-http <URL>      Reach the reranker over this HTTP base URL.
                                (--reranker-uds and --reranker-http are mutually exclusive.)
     --expander-uds <SOCKET>    Reach the query-expansion LLM (an OpenAI-compatible
