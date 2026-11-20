@@ -436,6 +436,7 @@ async fn graph_configurations_report_rows_pairs_and_calls_per_query() {
             t: transport.clone(),
             map: map.clone(),
             stages: GraphStages::from_config(id).unwrap(),
+            rerank: false,
         })));
     }
     slots.push(Slot::Run(Box::new(LcgEntitiesFactsRrf {

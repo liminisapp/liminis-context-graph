@@ -678,6 +678,16 @@ pub fn registry() -> Vec<ToolSpec> {
                             "description": "Also return `seed_trace`: every seed candidate, its \
                                              rank in each candidate list and why it was or was \
                                              not seeded. Diagnostic; does not change the results."
+                        },
+                        "rerank": {
+                            "type": "boolean",
+                            "description": "Rescore the top fused candidates (50 by default) with \
+                                             the local cross-encoder (#796) and blend it with the \
+                                             fused rank, belief and recency; a superseded item \
+                                             never ends above its replacement. Omitted: the \
+                                             workspace default (LCG_RERANK). Reported in \
+                                             `stats.rerank`; degrades to the fused order if the \
+                                             reranker is unavailable."
                         }
                     },
                     "required": ["query"]
@@ -2414,6 +2424,7 @@ mod tests {
             "as_of",
             "stages",
             "explain",
+            "rerank",
         ] {
             assert!(props.get(key).is_some(), "missing property {key}");
         }

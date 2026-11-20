@@ -112,13 +112,14 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   evidence. Plain passages are collected broadly, each its own RRF list: #789's belief-aware vector
   search for the instructed query (`passages`) and, when the embedding profile has a query
   instruction, for the bare query too (`passages_raw`; both vectors come from one `embed_batch`),
-  plus BM25 over passage text (`passages_lexical`). `explain: true` returns a
+  plus BM25 over passage text (`passages_lexical`). `rerank: true` adds #796's cross-encoder stage over the top fused candidates, reusing its client and blend, with belief applied after it (`stats.rerank`). `explain: true` returns a
   `seed_trace` of every seed candidate and why it was or was not seeded, and `stats.timings_ms`
   gives the time per stage. The MCP registry grows to 55 tools (read scope: 20). No existing read,
   schema or WAL format changes.
 - **Retrieval eval: graph configurations (#797).** `lcg-eval retrieval --configs` accepts the opt-in
-  `lcg-graph`, `lcg-graph-seeds`, `lcg-graph-expand` and `lcg-entities-facts-rrf` (a fairer merge of
-  the entity and fact reads); the default configuration set and every existing ranking are
+  `lcg-graph`, `lcg-graph-seeds`, `lcg-graph-expand`, `lcg-entities-facts-rrf` (a fairer merge of
+  the entity and fact reads), and `lcg-graph-rerank` / `lcg-graph-seeds-rerank` (with #796's rerank
+  stage); the default configuration set and every existing ranking are
   unchanged. The cost table gains service calls per query. `LCG_EVAL_GRAPH_TRACE=<file>` appends
   every graph response, with its seed trace, to a JSONL file. Every report with two or more
   configurations, the default run included, gains a **Headroom: per-question oracle** section: the

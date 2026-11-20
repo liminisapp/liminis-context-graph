@@ -673,10 +673,17 @@ impl Report {
             let _ = writeln!(o, "- `lcg-graph*` drive `knowledge_graph_search` (one service call, one embedding model call, no LLM). Ablation rows: `lcg-graph-seeds` = passages mentioning the linked seed entities only; `lcg-graph-expand` = + two-hop expansion (supporting passages and facts); `lcg-graph` = + plain passage search, fused with RRF.");
             let _ = writeln!(o, "- `lcg-graph` fuses plain passages as separate lists: `knowledge_search_passages`' ranking (`mode: \"vector\"`, `belief_aware: true` (#789)) for the instructed query, the same for the bare query when the embedding profile has a query instruction (both vectors from one model call), and BM25 over passage text. Each response reports them as `stats.passage_lists`.");
             let _ = writeln!(o, "- `knowledge_graph_search` is believed-only by default: superseded facts and passages are neither returned nor traversed.");
-            let _ = writeln!(
-                o,
-                "- Local reranker (#796): **not measured** — it has not landed on this build."
-            );
+            if ids
+                .iter()
+                .any(|i| i.starts_with("lcg-graph") && i.ends_with("-rerank"))
+            {
+                let _ = writeln!(o, "- `lcg-graph-rerank` / `lcg-graph-seeds-rerank` add #796's rerank stage: the top fused candidates (50 by default) are rescored by the cross-encoder and blended with fused rank, belief and recency, with belief applied after the cross-encoder so a superseded item never sits above its replacement. Read each against its row without rerank, and `lcg-graph-rerank` against `lcg-passages-belief-rerank`.");
+            } else {
+                let _ = writeln!(
+                    o,
+                    "- Local reranker (#796): **not measured in this run** — add `lcg-graph-rerank` to `--configs`."
+                );
+            }
         }
         if rrf {
             let _ = writeln!(o, "- `lcg-entities-facts-rrf` is a fairer merge of the same two reads as `lcg-entities-facts`: each read asks for k (not ceil(k/2)), each entity contributes at most 2 notes (no hub flooding in note-id order), unmapped results take no slot, and the two note lists are fused with RRF instead of strictly alternated. `lcg-entities-facts` itself is unchanged, so historical numbers stay comparable.");
@@ -2116,7 +2123,7 @@ mod tests {
             // Text only the graph section writes (the passage-mode bullet), not the unrelated
             // `lcg-passages is vector-only` sentence every report carries.
             "`belief_aware: true` (#789)",
-            "Local reranker (#796): **not measured**",
+            "Local reranker (#796): **not measured in this run**",
             "`lcg-entities-facts-rrf` is a fairer merge",
             "| `lcg-graph` |",
         ] {

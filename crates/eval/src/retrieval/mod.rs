@@ -704,12 +704,18 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                         t: transport.clone(),
                         map: map.clone(),
                     }),
-                    "lcg-graph" | "lcg-graph-seeds" | "lcg-graph-expand" => {
+                    "lcg-graph"
+                    | "lcg-graph-seeds"
+                    | "lcg-graph-expand"
+                    | "lcg-graph-rerank"
+                    | "lcg-graph-seeds-rerank" => {
+                        let (stages, rerank) =
+                            lcg::LcgGraph::config(id).expect("matched a graph config id");
                         Box::new(lcg::LcgGraph {
                             t: transport.clone(),
                             map: map.clone(),
-                            stages: lcg::GraphStages::from_config(id)
-                                .expect("matched a graph config id"),
+                            stages,
+                            rerank,
                         })
                     }
                     // `--configs` only accepts known ids, so this is a wiring bug, not user input.

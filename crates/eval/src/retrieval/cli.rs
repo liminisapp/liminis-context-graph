@@ -67,11 +67,15 @@ pub const VARIANTS_PASSAGE_CONFIGS: [&str; 2] = [
 /// Opt-in graph-aware configurations (issue #797): `knowledge_graph_search` per ablation stage,
 /// and the fairer `lcg-entities-facts-rrf` variant. Accepted by `--configs` but not part of the
 /// default run, so the default report, its row count and every existing ranking are unchanged.
-pub const GRAPH_CONFIGS: [&str; 4] = [
+pub const GRAPH_CONFIGS: [&str; 6] = [
     "lcg-graph-seeds",
     "lcg-graph-expand",
     "lcg-graph",
     "lcg-entities-facts-rrf",
+    // With #796's rerank stage on top; they need a reranker reachable from the service, exactly
+    // like the `lcg-passages-*rerank` rows.
+    "lcg-graph-rerank",
+    "lcg-graph-seeds-rerank",
 ];
 
 /// Whether `--configs` accepts `c`: a default configuration or an opt-in passage, variants or graph one.
@@ -164,7 +168,9 @@ OPTIONS:
                                lcg-passages-expand* configurations.
                                Opt-in graph-aware configurations (#797): lcg-graph,
                                lcg-graph-seeds, lcg-graph-expand (ablation stages) and
-                               lcg-entities-facts-rrf (fairer entities+facts merge).
+                               lcg-entities-facts-rrf (fairer entities+facts merge),
+                               lcg-graph-rerank and lcg-graph-seeds-rerank (#796 rerank on top;
+                               need a reranker, as the lcg-passages-*rerank rows do).
     --service-bin <PATH>       liminis-context-graph binary to spawn (default: alongside lcg-eval,
                                else `liminis-context-graph` on PATH).
     --embedder-http <URL>      Real embedder for the spawned service (required for LCG configs

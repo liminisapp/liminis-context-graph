@@ -521,6 +521,7 @@ changes.
 | `believed_only` | **true** | **Different from `knowledge_find_relationships`, where belief is opt-in.** By default the read traverses and returns only facts believed now, and only passages live now. `false` returns no-longer-believed results too, each with its belief state. |
 | `as_of` | now | Evaluate belief at this instant (RFC 3339); same meaning as on the other belief-aware reads (ADR-0705/0707). A document superseded with a future effective date stays believed until then. |
 | `stages` | `full` | Ablation switch: `seeds`, `expand` or `full` (below). |
+| `rerank` | workspace default (`LCG_RERANK`, off) | Rescore the top fused candidates (`LCG_RERANK_CANDIDATES`, 50 by default) with #796's cross-encoder and blend it with the fused rank, belief and recency, as `knowledge_search_passages` does. A passage is scored on its text, a fact on `from → to: fact`. Belief applies after the cross-encoder: a superseded item never ends above its replacement. Reported in `stats.rerank` (`{applied, candidates, reason?, elapsed_ms?}`); if the reranker is not configured or fails, the fused order is returned. Scored results carry `rerank_score`. |
 | `explain` | `false` | Also return `seed_trace`: every seed candidate, its rank in each candidate list, its similarities, whether it was seeded and why. A diagnostic; the results are unchanged. |
 
 **Pipeline**
@@ -599,7 +600,8 @@ search.
  "stats": {"stages", "passage_mode", "passage_lists": ["passages", "passages_raw", "passages_lexical"],
            "query_vectors": 2, "believed_only", "as_of", "embed_calls": 1, "db_queries",
            "seed_candidates", "seeds", "expanded_edges", "hops", "truncated", "truncations": [{"cap", "limit"}],
-           "no_seeds", "timings_ms": {"embed", "seeds", "expand", "supporting", "passages", "fusion", "total"}}}
+           "no_seeds", "timings_ms": {"embed", "seeds", "expand", "supporting", "passages", "fusion", "rerank", "total"},
+           "rerank": {"applied", "candidates", "reason"?, "elapsed_ms"?}}}   // rerank: only when requested
 ```
 
 `stats.query_vectors` is 2 when the bare and the instructed query were both embedded (from one

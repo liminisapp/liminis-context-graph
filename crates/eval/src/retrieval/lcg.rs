@@ -1039,11 +1039,34 @@ pub struct LcgGraph {
     pub t: Arc<dyn RpcTransport>,
     pub map: Arc<IngestMap>,
     pub stages: GraphStages,
+    /// `-rerank` rows: the same read with #796's rerank stage on (`rerank: true`).
+    pub rerank: bool,
+}
+
+impl LcgGraph {
+    /// `(stages, rerank)` for a graph configuration id: `lcg-graph`, `lcg-graph-seeds`,
+    /// `lcg-graph-expand`, and the rerank rows `lcg-graph-rerank` / `lcg-graph-seeds-rerank`.
+    pub fn config(id: &str) -> Option<(GraphStages, bool)> {
+        match id {
+            "lcg-graph-rerank" => Some((GraphStages::Full, true)),
+            "lcg-graph-seeds-rerank" => Some((GraphStages::Seeds, true)),
+            other => GraphStages::from_config(other).map(|s| (s, false)),
+        }
+    }
+
+    fn id_str(&self) -> &'static str {
+        match (self.stages, self.rerank) {
+            (GraphStages::Full, true) => "lcg-graph-rerank",
+            (GraphStages::Seeds, true) => "lcg-graph-seeds-rerank",
+            (GraphStages::Expand, true) => "lcg-graph-expand-rerank",
+            (s, false) => s.id(),
+        }
+    }
 }
 
 impl Retriever for LcgGraph {
     fn id(&self) -> &str {
-        self.stages.id()
+        self.id_str()
     }
     fn description(&self) -> String {
         let what = match self.stages {
@@ -1051,8 +1074,13 @@ impl Retriever for LcgGraph {
             GraphStages::Expand => "seeds + 2-hop expansion (supporting passages and facts)",
             GraphStages::Full => "full fusion (supporting passages + plain passages + facts, RRF)",
         };
+        let rerank = if self.rerank {
+            " + #796 rerank of the top fused candidates (cross-encoder blended with fused rank, belief and recency)"
+        } else {
+            ""
+        };
         format!(
-            "knowledge_graph_search stages={}: {what}; believed-only default; plain-passage list is knowledge_search_passages mode=vector, belief_aware=true",
+            "knowledge_graph_search stages={}: {what}{rerank}; believed-only default; plain-passage list is knowledge_search_passages mode=vector, belief_aware=true",
             self.stages.param()
         )
     }
@@ -1066,9 +1094,27 @@ impl Retriever for LcgGraph {
             if trace.is_some() {
                 req["explain"] = json!(true);
             }
+            // Always explicit, as on the passage rows: an inherited `LCG_RERANK=on` in the service
+            // must not rerank the rows that are meant to be read without the stage.
+            req["rerank"] = json!(self.rerank);
             let t0 = Instant::now();
             let r = self.t.call("knowledge_graph_search", req).await?;
             let latency = t0.elapsed();
+            // As for #796's passage rows: a rerank row whose stage did not apply is a failed
+            // query, never scored as first-stage results. `no_candidates` is a genuine empty answer.
+            let applied = r["stats"]["rerank"]["applied"].as_bool() == Some(true);
+            if self.rerank
+                && !applied
+                && r["stats"]["rerank"]["reason"].as_str() != Some("no_candidates")
+            {
+                return Err(format!(
+                    "rerank did not apply ({}); refusing to score fused results as {}",
+                    r["stats"]["rerank"]["reason"]
+                        .as_str()
+                        .unwrap_or("no `stats.rerank` report in the response"),
+                    self.id_str()
+                ));
+            }
             if let Some(path) = trace {
                 // A diagnostic must never fail the measured query: report and carry on.
                 if let Err(e) = append_trace(
@@ -1083,7 +1129,10 @@ impl Retriever for LcgGraph {
             Ok(RankedResult {
                 notes: groups.into_iter().flatten().collect(),
                 evidence,
-                model_calls: r["stats"]["embed_calls"].as_u64(),
+                // The query embedding, plus one cross-encoder call when the stage applied.
+                model_calls: r["stats"]["embed_calls"]
+                    .as_u64()
+                    .map(|n| n + u64::from(applied)),
                 service_calls: Some(1),
                 lookup_calls: 0,
                 evidence_gaps: 0,
@@ -1641,6 +1690,7 @@ mod tests {
                 t: t.clone(),
                 map: map(),
                 stages: GraphStages::from_config(id).unwrap(),
+                rerank: false,
             };
             assert_eq!(rt.id(), id);
             let r = rt.retrieve("q", 7).await.unwrap();
@@ -1653,8 +1703,60 @@ mod tests {
             assert_eq!(last["stages"], stages);
             assert_eq!(last["num_results"], 7);
             assert_eq!(last["group_ids"], json!([EVAL_GROUP]));
+            assert_eq!(
+                last["rerank"], false,
+                "pinned off, whatever the service default"
+            );
         }
         assert!(GraphStages::from_config("lcg-passages").is_none());
+    }
+
+    #[tokio::test]
+    async fn graph_rerank_rows_send_rerank_and_refuse_an_unapplied_stage() {
+        let applied = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let a2 = Arc::clone(&applied);
+        let t = Arc::new(FakeTransport::new(move |m, _| match m {
+            "knowledge_graph_search" => {
+                let ok = a2.load(std::sync::atomic::Ordering::SeqCst);
+                let rerank = if ok {
+                    json!({"applied": true, "candidates": 1})
+                } else {
+                    json!({"applied": false, "candidates": 0, "reason": "not_configured"})
+                };
+                Ok(json!({"results":[
+                    {"kind":"passage","passage":{"content":"P","source_description":"note-c:note-c#0"}}
+                ],"count":1,"stats":{"embed_calls":1,"rerank":rerank}}))
+            }
+            other => Err(format!("unexpected {other}")),
+        }));
+        let map = Arc::new(IngestMap::default());
+        for (id, stages) in [
+            ("lcg-graph-rerank", "full"),
+            ("lcg-graph-seeds-rerank", "seeds"),
+        ] {
+            let (s, rerank) = LcgGraph::config(id).unwrap();
+            assert!(rerank);
+            let rt = LcgGraph {
+                t: t.clone(),
+                map: map.clone(),
+                stages: s,
+                rerank,
+            };
+            assert_eq!(rt.id(), id);
+            applied.store(true, std::sync::atomic::Ordering::SeqCst);
+            let r = rt.retrieve("q", 5).await.unwrap();
+            assert_eq!(r.model_calls, Some(2), "embed + cross-encoder");
+            let last = t.log.lock().unwrap().last().unwrap().1.clone();
+            assert_eq!(last["rerank"], true);
+            assert_eq!(last["stages"], stages);
+            applied.store(false, std::sync::atomic::Ordering::SeqCst);
+            let e = rt.retrieve("q", 5).await.unwrap_err();
+            assert!(e.contains("not_configured"), "{e}");
+        }
+        assert_eq!(
+            LcgGraph::config("lcg-graph"),
+            Some((GraphStages::Full, false))
+        );
     }
 
     #[tokio::test]

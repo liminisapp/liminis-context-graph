@@ -72,6 +72,8 @@ configuration's ranking are unchanged.
 | `lcg-graph-expand` | Ablation row: `stages=expand` — seeds + expansion, no plain passage list. |
 | `lcg-graph-seeds` | Ablation row: `stages=seeds` — only passages that mention a linked seed entity. |
 | `lcg-entities-facts-rrf` | A fairer merge of the same two reads as `lcg-entities-facts` (below). |
+| `lcg-graph-rerank` | `lcg-graph` with #796's rerank stage on top (`rerank: true`): the top 50 fused candidates rescored by the cross-encoder, belief applied after it. Needs a reranker, like the `lcg-passages-*rerank` rows; a query whose stage did not apply is reported as failed. |
+| `lcg-graph-seeds-rerank` | `lcg-graph-seeds` with the same rerank stage. |
 
 Read the three `lcg-graph*` rows together: `seeds` → `expand` is what traversal adds, `expand` →
 `full` is what fusing in plain passage search adds. `full` collects plain passages broadly, each as
@@ -85,8 +87,11 @@ its own RRF list:
 Each response reports them as `stats.passage_lists`, and `stats.query_vectors` is 2 when the bare
 query was embedded too. The `passages` list is what `lcg-passages` measures, so `lcg-graph`
 against `lcg-passages` shows what the graph stages and the broader passage collection add
-together; `lcg-passages-raw` (cosine only) shows what the belief rules add. The local reranker
-(#796) has not landed, so the report states it was not measured.
+together; `lcg-passages-raw` (cosine only) shows what the belief rules add. Every graph row sends
+`rerank` explicitly, so an inherited `LCG_RERANK=on` never reranks the rows meant to be read without
+it. Read `lcg-graph-rerank` against its row without rerank (`lcg-graph`) and against
+`lcg-passages-belief-rerank`, the passage-only rerank row; run them in one invocation so the
+headroom section's oracle covers all three.
 
 **Latency budget and tuning.** The ≤ 100 ms target was dropped (steer of 2026-11-19). The budget
 is p50 ≤ 500 ms including the rerank stage once #796 lands. Any new tuning constant is tuned on v2
@@ -129,7 +134,7 @@ target/release/lcg-eval retrieval \
   --replay-cassette crates/eval/fixtures/retrieval-v2/cassette.jsonl \
   --service-bin target/release/liminis-context-graph \
   --embedder-http http://127.0.0.1:8080 --k 10 --no-grounded \
-  --configs lcg-passages,lcg-passages-raw,lcg-graph-seeds,lcg-graph-expand,lcg-graph,lcg-entities-facts-rrf \
+  --configs lcg-passages,lcg-passages-raw,lcg-passages-belief,lcg-passages-belief-rerank,lcg-graph-seeds,lcg-graph-expand,lcg-graph,lcg-graph-rerank,lcg-graph-seeds-rerank,lcg-entities-facts-rrf \
   --out retrieval-report-797
 ```
 

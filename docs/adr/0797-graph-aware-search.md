@@ -392,12 +392,26 @@ difference.
   sends `as_of`, which the default passage read does not take. BM25 enters as its own RRF list
   rather than through #789's weighted-RRF hybrid list. Moving the seed and edge FTS legs' private
   `fts_terms` sanitiser to `sanitize_fts_query` is a follow-up.
-- #796's reranker plugs in as one final stage: `run` keeps the whole fused candidate list until the
-  cut to `k`, and the reranker reorders its head there (steer: start at the top 40, blended with the
-  fusion rank as #796 does). Belief ordering is applied **after** the rerank, so a superseded
-  passage never lands above its replacement — qmd-rerank loses temporal (0.529 → 0.335) because
-  its reranker ignores time. That stage, and the `lcg-graph-rerank` / `lcg-graph-seeds-rerank`
-  eval configs, wait for #796 (PR #800) to merge.
+- **Rerank stage (#796, steer of 2026-11-20).** `rerank: true` (or the workspace default,
+  `LCG_RERANK`) adds #796's stage as the final arbiter, reused rather than re-implemented: the
+  same `Reranker` client, `passage_rerank::blend` and `assemble`, with the same position-aware
+  blend weights and candidate count (`LCG_RERANK_CANDIDATES`, 50 by default). The pipeline is run
+  for the whole pool (`num_results` raised to the pool size, so the list caps grow with it), the
+  cross-encoder scores the top fused candidates — a passage on its text, a fact on
+  `from → to: fact` — and the result is cut back to `k`. Belief is applied **after** the
+  cross-encoder, exactly as #796 does: each candidate carries the supersession row of its own
+  episode (a passage) or its producing episode (a fact), the superseded factor scales its whole
+  blended score, and a superseded item is moved below any replacement in the head, so it never
+  ends above its replacement (qmd-rerank loses temporal, 0.529 → 0.335, because its reranker
+  ignores time). Candidates are keyed by episode, so a replacement is recognised whether it
+  arrives as a passage or as a fact it produced. `stats.rerank` reports `{applied, candidates,
+  reason?, elapsed_ms?}`; a missing reranker (`not_configured`), a failed call or a failed
+  supersession lookup (`unavailable`) leave the fused order, cut to `k`. Eval rows:
+  `lcg-graph-rerank` and `lcg-graph-seeds-rerank`, read against `lcg-passages-belief-rerank`.
+- **Caller `queries` (#802) are not passed into list (b) yet.** List (b) runs its vector and BM25
+  lists directly, not through `knowledge_search_passages`, so adopting #802's weighted variant
+  fusion means embedding the variants too (more model calls) and adding one list per variant. That
+  is a follow-up, not a one-line change.
 
 ## Rejected alternatives
 
