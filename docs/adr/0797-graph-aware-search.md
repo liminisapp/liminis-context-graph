@@ -103,8 +103,9 @@ Merged tombstones are dropped; under `origins`, a seed needs a matching live men
 (`origin_reads::entity_support`). The same check gates a far endpoint during expansion. Unlike the
 per-edge and passage checks, this one always requires the mention to be live at `as_of`, even with
 `believed_only: false`: an entity whose only matching mentions have been superseded is neither
-seeded nor walked into. It is the conservative side, and it applies only when `origins` is set
-and belief filtering is off. The top **5** by RRF are kept, scored relative to the best (1.0);
+seeded nor walked into. The check runs whenever `origins` is set; it is only *stricter than the
+rest of the read* when belief filtering is also off, since under the default every check already
+requires liveness at `as_of`. It is the conservative side. The top **5** by RRF are kept, scored relative to the best (1.0);
 up to 3 summary-vector seeds may follow (below), so a response carries **at most 8** seeds.
 There is **no fuzzy name matcher**: near-miss names are covered by BM25 and the name vector. A
 vector list is reported in a seed's `matched` only at or above the 0.5 floor, so filler is never

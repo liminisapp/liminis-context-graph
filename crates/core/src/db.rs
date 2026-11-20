@@ -4735,16 +4735,18 @@ impl<'db> Conn<'db> {
         self.expand_frontier_impl(frontier, group_ids, row_cap, None)
     }
 
-    /// [`Self::expand_frontier`] that scores each fact against `query` inside the query
-    /// (`array_cosine_similarity`) and returns that as [`FrontierEdge::fact_similarity`] instead
-    /// of shipping every `fact_embedding` back: the frontier is the hot part of graph-aware
-    /// search, and the embeddings dominated its cost. `fact_embedding` is left empty.
+    /// [`Self::expand_frontier`] plus each fact's cosine against `query`, returned as
+    /// [`FrontierEdge::fact_similarity`] instead of shipping every `fact_embedding` back: the
+    /// frontier is the hot part of graph-aware search, and the embeddings dominated its cost.
+    /// `fact_embedding` is left empty.
     ///
-    /// lbug's `array_cosine_similarity` fails the whole query, rather than yielding `NULL`, on a
-    /// stored vector of the wrong length (an unembedded legacy fact) or a query of another
-    /// dimension. So on any error this falls back to the unscored lookup and computes the cosine
-    /// in Rust: same rows, same order, same scores, only slower. A fact that cannot be scored
-    /// (empty or zero embedding) gets `None`.
+    /// The frontier rows come from the ordinary (unscored) lookup; the scores come from one
+    /// [`Self::fact_similarities`] query over the surviving uuids. That is where the fallback
+    /// lives: lbug's `array_cosine_similarity` fails the whole query, rather than yielding `NULL`,
+    /// on a stored vector of the wrong length (an unembedded legacy fact) or a query of another
+    /// dimension, so on an error `fact_similarities` fetches the embeddings and computes the
+    /// cosine in Rust — same scores, only slower. A fact that cannot be scored (empty or zero
+    /// embedding) gets `None`.
     pub fn expand_frontier_scored(
         &self,
         frontier: &[String],
