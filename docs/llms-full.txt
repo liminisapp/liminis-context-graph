@@ -1614,7 +1614,9 @@ summary_vector_rank?, name_similarity?, summary_similarity?, seeded, reason}`. R
 `merged`, `no_row`, `origin_filter` or `seed_cap` otherwise.
 
 A result returned only by plain passage search has no `seeds`, `path` or `via`. A fact or passage
-reached several ways appears once and keeps its best path (`alternate_paths` counts the others).
+reached several ways appears once and keeps its best path (`alternate_paths` counts the other
+routes, including reaching a fact from both its endpoints in one hop; the walk doubling back along its
+own path is not counted).
 The path is in traversal order, from the seed outward, regardless of each edge's stored direction.
 A `matched` vector kind is reported only when its similarity is at least 0.5, except that a seed
 admitted from the summary-vector list on relative evidence always names `summary_vector`; the raw

@@ -322,7 +322,7 @@ from list (b) only has no seeds or path. `stats` reports the stage, passage mode
 `passage_lists`, `query_vectors`, `embed_calls` (1), `db_queries`, candidate/seed/edge counts, hops,
 truncations, `no_seeds`, and
 `timings_ms` — wall-clock milliseconds for `embed`, `seeds`, `expand`, `supporting`, `passages`,
-`fusion` and `total`. Timings are reported, never ranked on, so they are the one part of the
+`fusion`, `rerank` (0 unless the stage ran) and `total`. Timings are reported, never ranked on, so they are the one part of the
 response that differs between two identical requests.
 
 Every sort breaks ties by key or uuid; hash-map iteration never reaches output order.
@@ -400,7 +400,8 @@ difference.
   cross-encoder scores the top fused candidates — a passage on its text, a fact on
   `from → to: fact` — and the result is cut back to `k`. Belief is applied **after** the
   cross-encoder, exactly as #796 does: each candidate carries the supersession row of its own
-  episode (a passage) or its producing episode (a fact), the superseded factor scales its whole
+  episode (a passage) or, for a fact, a producing episode still live at `as_of` when it has one
+  (else its first), judged at the request's `as_of`; the superseded factor scales its whole
   blended score, and a superseded item is moved below any replacement in the head, so it never
   ends above its replacement (qmd-rerank loses temporal, 0.529 → 0.335, because its reranker
   ignores time). Candidates are keyed by episode, so a replacement is recognised whether it

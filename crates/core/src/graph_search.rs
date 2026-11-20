@@ -221,7 +221,9 @@ pub struct GraphEvidence {
     pub via: Option<Via>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warrant: Option<String>,
-    /// Further paths that reached the same item (the best one is `path`).
+    /// Further routes that reached the same item (the best one is `path`). Reaching a fact from
+    /// both of its endpoints in one hop counts as a second route: each end was reached by its own
+    /// path from a seed. The walk doubling back along its own path does not count.
     pub alternate_paths: usize,
 }
 
@@ -409,7 +411,16 @@ pub async fn graph_search(
     r.stats.timings_ms.embed = ms(embed);
     if rerank {
         let started = Instant::now();
-        let report = rerank_stage(db, stages, &params.query, &mut r.results, pool, k).await;
+        let report = rerank_stage(
+            db,
+            stages,
+            &params.query,
+            params.as_of_us,
+            &mut r.results,
+            pool,
+            k,
+        )
+        .await;
         r.stats.timings_ms.rerank = ms(started.elapsed());
         r.stats.rerank = Some(report);
         r.count = r.results.len();
@@ -445,10 +456,12 @@ fn time_us(valid_at: Option<&str>, created_at: &str) -> Option<i64> {
 /// episode for a fact, and is applied after the cross-encoder: a superseded item's whole blended
 /// score is scaled down, and it is moved below any replacement in the head. Every failure
 /// degrades to the fused order, reported in `stats.rerank`; the search itself never fails here.
+#[allow(clippy::too_many_arguments)]
 async fn rerank_stage(
     db: Arc<Db>,
     stages: Option<Arc<SearchStages>>,
     query: &str,
+    as_of_us: i64,
     results: &mut Vec<GraphSearchResult>,
     pool: usize,
     k: usize,
@@ -487,16 +500,16 @@ async fn rerank_stage(
             (None, None) => String::new(),
         })
         .collect();
-    // The episode whose belief stands for each result: the passage's own, or a fact's producer.
-    let episodes: Vec<Option<String>> = head
+    // Every episode whose belief may stand for a result: the passage's own, or all of a fact's
+    // producers (the one that stands is chosen once their supersession rows are known).
+    let lookup: Vec<String> = head
         .iter()
-        .map(|x| match (&x.passage, &x.fact) {
-            (Some(p), _) => Some(p.uuid.clone()),
-            (None, Some(f)) => f.episodes.first().cloned(),
-            (None, None) => None,
+        .flat_map(|x| match (&x.passage, &x.fact) {
+            (Some(p), _) => vec![p.uuid.clone()],
+            (None, Some(f)) => f.episodes.clone(),
+            (None, None) => vec![],
         })
         .collect();
-    let lookup: Vec<String> = episodes.iter().flatten().cloned().collect();
     let sup_fut = async {
         tokio::task::spawn_blocking(move || {
             let conn = db.connect()?;
@@ -524,6 +537,28 @@ async fn rerank_stage(
         Ok(Ok(m)) => m,
         _ => return finish(results, "unavailable", true),
     };
+    // The episode whose belief stands for each result, judged at the request's `as_of`: a
+    // passage's own; for a fact, a producer still live then if it has one (a fact believed
+    // through any live producer must not be demoted for a superseded sibling producer),
+    // otherwise its first producer.
+    let live = |u: &String| {
+        supersession.get(u).is_some_and(|s| {
+            passage_rerank::belief_state(Some(s), as_of_us) == passage_rerank::BeliefState::Current
+        })
+    };
+    let episodes: Vec<Option<String>> = head
+        .iter()
+        .map(|x| match (&x.passage, &x.fact) {
+            (Some(p), _) => Some(p.uuid.clone()),
+            (None, Some(f)) => f
+                .episodes
+                .iter()
+                .find(|u| live(u))
+                .or_else(|| f.episodes.first())
+                .cloned(),
+            (None, None) => None,
+        })
+        .collect();
     let cands: Vec<passage_rerank::Candidate> = head
         .iter()
         .zip(&logits)
@@ -543,8 +578,8 @@ async fn rerank_stage(
             belief: ep.as_ref().and_then(|u| supersession.get(u).cloned()),
         })
         .collect();
-    let now = chrono::Utc::now().timestamp_micros();
-    let blended = passage_rerank::blend(&cands, now, blend_cfg);
+    // Belief is judged at the request's `as_of` (now by default), as everywhere else in this read.
+    let blended = passage_rerank::blend(&cands, as_of_us, blend_cfg);
     for b in &blended {
         results[b.index].rerank_score = Some(logits[b.index]);
     }

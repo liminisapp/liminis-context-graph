@@ -1872,3 +1872,65 @@ async fn evidence_never_discloses_a_producer_outside_the_callers_filter() {
         "both, when not filtering"
     );
 }
+
+#[tokio::test]
+async fn rerank_judges_a_fact_by_a_live_producer_not_just_its_first() {
+    // The fact's first producer was corrected away, but it is still believed through the second.
+    let fx = fixture_built(|c| {
+        entity(c, "iris", "Iris Port", G, SUMMARY);
+        entity(c, "jade", "Jade Dock", G, SUMMARY);
+        episode(
+            c,
+            Ep {
+                uuid: "ep-gone",
+                content: "Iris Port ships to Jade Dock (old note).",
+                emb: axis(PRICE),
+                origin: None,
+                ingested: T0,
+                superseded: Some((T_CORR, "episode")),
+                mentions: &["iris", "jade"],
+            },
+        );
+        simple_ep(
+            c,
+            "ep-live",
+            "Iris Port ships to Jade Dock.",
+            axis(PRICE),
+            &["iris", "jade"],
+        );
+        fact(
+            c,
+            "e-ship",
+            "iris",
+            "jade",
+            "SHIPS_TO",
+            "Iris Port ships to Jade Dock at list price",
+            axis(PRICE),
+            &["ep-gone", "ep-live"],
+            T0,
+        );
+    });
+    // The cross-encoder slightly prefers the fact over the live note.
+    let mock = Arc::new(lcg_core::rerank::MockReranker::new(|_, d| {
+        if d.contains('→') {
+            10.0
+        } else if d.contains("Iris Port") {
+            9.9
+        } else {
+            0.0
+        }
+    }));
+    install_reranker(&fx, Some(mock));
+    let r = search(
+        &fx,
+        json!({"query": "Iris Port price", "group_ids": [G], "rerank": true}),
+    )
+    .await;
+    assert_eq!(r["stats"]["rerank"]["applied"], true);
+    assert_eq!(
+        keys(&r)[0],
+        "f:e-ship",
+        "a believed fact is not demoted for a superseded sibling producer: {:?}",
+        keys(&r)
+    );
+}
