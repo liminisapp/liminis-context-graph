@@ -1699,7 +1699,7 @@ mod tests {
         }));
         let p = LcgPassages {
             t: t.clone(),
-            mode: PassageMode::Vector,
+            mode: PassageMode::Default,
         }
         .retrieve("q", 5)
         .await

@@ -429,7 +429,7 @@ async fn graph_configurations_report_rows_pairs_and_calls_per_query() {
     let map: Arc<IngestMap> = Arc::new(lcg::ingest(transport.as_ref(), &fx).await.unwrap());
     let mut slots = vec![Slot::Run(Box::new(LcgPassages {
         t: transport.clone(),
-        mode: lcg::PassageMode::Vector,
+        mode: lcg::PassageMode::Default,
     }) as Box<dyn lcg_eval::retrieval::Retriever>)];
     for id in ["lcg-graph-seeds", "lcg-graph-expand", "lcg-graph"] {
         slots.push(Slot::Run(Box::new(LcgGraph {

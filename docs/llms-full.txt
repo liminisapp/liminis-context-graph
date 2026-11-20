@@ -5164,10 +5164,10 @@ Read the three `lcg-graph*` rows together: `seeds` → `expand` is what traversa
 `full` is what fusing in plain passage search adds. The plain-passage list inside `lcg-graph` is
 `knowledge_search_passages` with `mode: "vector"` and `belief_aware: true` (#789), the best passage
 list measured on v2. Hybrid passage search scored below vector on v2 and is not used. Each response
-reports the mode as `stats.passage_mode` (`vector_belief`). So `lcg-graph` against
-`lcg-passages` measures the graph stages **and** the belief rules together. Compare it with
-`lcg-passages-belief` too, which has the same belief rules and no graph, to see what the graph
-stages add on their own. The local reranker (#796) has not
+reports the mode as `stats.passage_mode` (`vector_belief`). Since #806 that is the shipped default
+`lcg-passages` measures, so `lcg-graph` against `lcg-passages` shows what the graph stages add on
+their own; `lcg-passages-raw` (cosine only) shows what the belief rules add. The local reranker
+(#796) has not
 landed, so the report states it was not measured.
 
 **Diagnosing seed linking.** Set `LCG_EVAL_GRAPH_TRACE=<file.jsonl>` to have every `lcg-graph*`
@@ -5204,7 +5204,7 @@ target/release/lcg-eval retrieval \
   --replay-cassette crates/eval/fixtures/retrieval-v2/cassette.jsonl \
   --service-bin target/release/liminis-context-graph \
   --embedder-http http://127.0.0.1:8080 --k 10 --no-grounded \
-  --configs lcg-passages,lcg-passages-belief,lcg-graph-seeds,lcg-graph-expand,lcg-graph,lcg-entities-facts-rrf \
+  --configs lcg-passages,lcg-passages-raw,lcg-graph-seeds,lcg-graph-expand,lcg-graph,lcg-entities-facts-rrf \
   --out retrieval-report-797
 ```
 
