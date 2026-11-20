@@ -1524,6 +1524,8 @@ async fn k_larger_than_the_pool_is_not_padded_and_items_are_unique() {
     )
     .await;
     let k = keys(&r);
+    // Not vacuous: the legacy fact is found, and fewer than k items exist.
+    assert!(k.contains(&"f:e-legacy".to_string()), "{k:?}");
     assert!(k.len() < 100);
     assert_eq!(r["count"].as_u64().unwrap() as usize, k.len());
     let mut dedup = k.clone();
@@ -1630,6 +1632,13 @@ async fn stages_switch_the_fused_lists() {
     .await;
     assert_eq!(seeds["stats"]["stages"], "seeds");
     assert_eq!(seeds["stats"]["hops"], 0);
+    // Not vacuous: Cedar Core is seeded and its own note is returned.
+    assert!(
+        seed_uuids(&seeds).contains(&"cedar".to_string()),
+        "{}",
+        seeds["seeds"]
+    );
+    assert!(find(&seeds, "p:ep-cedar").is_some(), "{:?}", keys(&seeds));
     assert!(results(&seeds)
         .iter()
         .all(|x| x["kind"] == "passage" && list_names(x) == vec!["supporting".to_string()]));

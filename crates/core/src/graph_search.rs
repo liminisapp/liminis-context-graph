@@ -1906,8 +1906,14 @@ fn expand(
             steps.sort_by(|a, b| {
                 by_score_then_key((a.rel, &a.fe.edge.uuid), (b.rel, &b.fe.edge.uuid))
             });
-            let (kept, cut_primary, cut_citations) =
-                split_fanout(steps, |s| s.citation_only, PER_ENTITY_FANOUT);
+            // A step that cannot carry the walk — citation-only, or (with `believed_only: false`)
+            // not believed at `as_of` — goes on the separate budget, so a hub's superseded or
+            // derived facts can never take the slots its walkable believed edges need.
+            let (kept, cut_primary, cut_citations) = split_fanout(
+                steps,
+                |s| s.citation_only || !s.belief.believed,
+                PER_ENTITY_FANOUT,
+            );
             steps = kept;
             if cut_primary {
                 st.truncate("per_entity_fanout", PER_ENTITY_FANOUT);

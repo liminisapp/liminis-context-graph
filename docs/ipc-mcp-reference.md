@@ -545,7 +545,8 @@ changes.
    hop, the 10 best newly reached entities of hop 1 form the hop-2 frontier, the walk keeps at most 200 facts (each kept
    with every edge on its path, so evidence never names a dropped edge), and an edge is never
    walked twice. An edge produced only by derived or answer pages takes none of these slots. It
-   has its own budget of 20 per entity (`per_entity_citations`), it is kept only to be cited, and it
+   has its own budget of 20 per entity (`per_entity_citations`), shared with facts that are not
+   believed (returned under `believed_only: false`, never walked); it is kept only to be cited, and it
    carries the walk nowhere. A fact that is not believed is never a step, so a path breaks at a
    superseded edge; with `believed_only: false` such a fact can be returned, but the walk never
    continues through it. Legacy and warranted edges are believed and traversable, but have no
