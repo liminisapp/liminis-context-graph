@@ -4788,11 +4788,16 @@ impl<'db> Conn<'db> {
             dim = query.len()
         );
         let params = serde_json::json!({ "uuids": uuids, "emb": query });
-        if let Ok(rows) = self.query_params(&cypher, params) {
-            return Ok(rows
-                .into_iter()
-                .filter_map(|r| Some((value_as_string(&r[0]), value_as_finite_f64(&r[1])?)))
-                .collect());
+        match self.query_params(&cypher, params) {
+            Ok(rows) => {
+                return Ok(rows
+                    .into_iter()
+                    .filter_map(|r| Some((value_as_string(&r[0]), value_as_finite_f64(&r[1])?)))
+                    .collect())
+            }
+            // Expected for a query of another dimension; logged so any other failure is visible
+            // rather than hidden behind the (slower) fallback, which would surface it again.
+            Err(e) => scored_fallback_note("fact_similarities", &e),
         }
         let rows = self.query_params(
             "MATCH (rn:RelatesToNode_) WHERE rn.uuid IN $uuids RETURN rn.uuid, rn.fact_embedding",
@@ -4927,8 +4932,9 @@ impl<'db> Conn<'db> {
         uuids: &[String],
         query: &[f32],
     ) -> Result<Vec<EpisodePassage>, Error> {
-        if let Ok(r) = self.get_episode_passages_impl(uuids, false, Some(query)) {
-            return Ok(r);
+        match self.get_episode_passages_impl(uuids, false, Some(query)) {
+            Ok(r) => return Ok(r),
+            Err(e) => scored_fallback_note("get_episode_passages_scored", &e),
         }
         let mut rows = self.get_episode_passages_impl(uuids, true, None)?;
         for r in &mut rows {
@@ -6335,6 +6341,24 @@ pub struct EpisodePassage {
 /// formatting it in is injection-safe.
 fn cosine_col(col: &str, dim: usize) -> String {
     format!("array_cosine_similarity({col}, CAST($emb, 'FLOAT[{dim}]'))")
+}
+
+/// Notes, once per process and call site, that an in-query cosine failed and the Rust fallback
+/// ran. A dimension mismatch is the expected cause; anything else is now visible in the log
+/// instead of being silently swallowed (a real I/O or lock failure also fails the fallback query,
+/// which then returns the error).
+fn scored_fallback_note(site: &'static str, e: &Error) {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    if let Ok(mut seen) = SEEN.lock() {
+        if seen.contains(&site) {
+            return;
+        }
+        seen.push(site);
+    }
+    eprintln!(
+        "[liminis-context-graph] {site}: in-query cosine failed, using the Rust fallback: {e}"
+    );
 }
 
 /// [`cosine_similarity`] as a finite `f64`; `None` for empty, mismatched or degenerate vectors.

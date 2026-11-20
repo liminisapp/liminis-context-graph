@@ -369,7 +369,7 @@ impl Report {
             "## Headroom: per-question oracle
 "
         );
-        let _ = writeln!(o, "The oracle takes, for each question, the best nDCG@{} any configuration in this run reached, then averages. It is an upper bound for a composite that always picked the right retriever, not a configuration. `gap` is the oracle minus the configuration, over the same questions; `captured` is the configuration as a share of the oracle.
+        let _ = writeln!(o, "The oracle takes, for each question, the best nDCG@{} any configuration in this run reached, then averages. It is an upper bound for a composite that always picked the right retriever, not a configuration. `gap` is the oracle minus the configuration and `captured` the configuration as a share of the oracle, both over the questions that configuration scored (`scored`): a failed query is excluded, not counted as 0.
 ", self.meta.k);
         let _ = writeln!(
             o,
@@ -377,20 +377,24 @@ impl Report {
 ",
             self.meta.k, oracle.n
         );
-        let _ = writeln!(o, "| config | nDCG@{} | gap | captured |", self.meta.k);
-        let _ = writeln!(o, "|---|---|---|---|");
+        let _ = writeln!(
+            o,
+            "| config | nDCG@{} | gap | captured | scored |",
+            self.meta.k
+        );
+        let _ = writeln!(o, "|---|---|---|---|---|");
         for (c, r) in &ran {
-            let mean = mean_over(&r.scores, &oracle.questions);
+            let Some((mean, orc, n)) = matched_means(&r.scores, &oracle.questions, &oracle) else {
+                let _ = writeln!(o, "| `{}` | — | — | — | 0/{} |", c.id, oracle.n);
+                continue;
+            };
             let _ = writeln!(
                 o,
-                "| `{}` | {mean:.3} | {:.3} | {:.0}% |",
+                "| `{}` | {mean:.3} | {:.3} | {:.0}% | {n}/{} |",
                 c.id,
-                overall - mean,
-                if overall > 0.0 {
-                    100.0 * mean / overall
-                } else {
-                    0.0
-                }
+                orc - mean,
+                if orc > 0.0 { 100.0 * mean / orc } else { 0.0 },
+                oracle.n
             );
         }
         let _ = writeln!(
@@ -408,7 +412,9 @@ impl Report {
                 .collect();
             let best = ran
                 .iter()
-                .map(|(c, r)| (c.id.as_str(), mean_over(&r.scores, &qs)))
+                .filter_map(|(c, r)| {
+                    matched_means(&r.scores, &qs, &oracle).map(|(m, _, _)| (c.id.as_str(), m))
+                })
                 .fold(None, |b: Option<(&str, f64)>, (id, m)| match b {
                     Some((_, bm)) if bm >= m => b,
                     _ => Some((id, m)),
@@ -1687,6 +1693,8 @@ pub struct Oracle {
     /// Ids of the questions the oracle is defined on.
     pub questions: std::collections::BTreeSet<String>,
     pub category_of: BTreeMap<String, Category>,
+    /// The oracle's nDCG@k per question.
+    pub best: BTreeMap<String, f64>,
     pub n: usize,
 }
 
@@ -1720,25 +1728,34 @@ pub fn oracle_ndcg(runs: &[&[QuestionScore]]) -> Oracle {
             .collect(),
         questions: best.keys().cloned().collect(),
         category_of: best.iter().map(|(q, (c, _))| (q.clone(), *c)).collect(),
+        best: best.iter().map(|(q, (_, v))| (q.clone(), *v)).collect(),
         n,
     }
 }
 
-/// A run's mean nDCG@k over `questions`; a question the run did not score counts as 0, so every
-/// configuration is averaged over the same question set as the oracle.
-fn mean_over(scores: &[QuestionScore], questions: &std::collections::BTreeSet<String>) -> f64 {
-    if questions.is_empty() {
-        return 0.0;
-    }
-    let by_id: BTreeMap<&str, f64> = scores
+/// A run against the oracle, over the questions in `questions` that this run scored: `(run mean,
+/// oracle mean, n)`, `None` when it scored none. A failed query is excluded rather than counted
+/// as 0 (ADR-0754: failed queries are excluded from means), and the oracle is averaged over the
+/// same questions, so `gap` and `captured` compare like with like.
+fn matched_means(
+    scores: &[QuestionScore],
+    questions: &std::collections::BTreeSet<String>,
+    oracle: &Oracle,
+) -> Option<(f64, f64, usize)> {
+    let pairs: Vec<(f64, f64)> = scores
         .iter()
-        .filter_map(|q| q.ndcg.map(|v| (q.id.as_str(), v)))
+        .filter(|q| questions.contains(&q.id))
+        .filter_map(|q| Some((q.ndcg?, *oracle.best.get(&q.id)?)))
         .collect();
-    questions
-        .iter()
-        .map(|q| by_id.get(q.as_str()).copied().unwrap_or(0.0))
-        .sum::<f64>()
-        / questions.len() as f64
+    if pairs.is_empty() {
+        return None;
+    }
+    let n = pairs.len() as f64;
+    Some((
+        pairs.iter().map(|p| p.0).sum::<f64>() / n,
+        pairs.iter().map(|p| p.1).sum::<f64>() / n,
+        pairs.len(),
+    ))
 }
 
 #[cfg(test)]
@@ -2070,9 +2087,18 @@ mod tests {
         assert!((o.overall.unwrap() - 0.8).abs() < 1e-12);
         assert_eq!(o.by_category[&Category::Direct], 1.0);
         assert_eq!(o.by_category[&Category::Paraphrase], 0.6);
-        // Each run over the oracle's questions: a = 0.5, b = 0.55.
-        assert!((mean_over(&a, &o.questions) - 0.5).abs() < 1e-12);
-        assert!((mean_over(&b, &o.questions) - 0.55).abs() < 1e-12);
+        // Each run over the oracle's questions: a = 0.5, b = 0.55, both scoring all 2.
+        let (ma, oa, na) = matched_means(&a, &o.questions, &o).unwrap();
+        assert!((ma - 0.5).abs() < 1e-12 && (oa - 0.8).abs() < 1e-12 && na == 2);
+        let (mb, _, _) = matched_means(&b, &o.questions, &o).unwrap();
+        assert!((mb - 0.55).abs() < 1e-12);
+        // A run that failed q2 is compared over q1 alone, not scored 0 on q2.
+        let c = vec![
+            qs("q1", Category::Direct, Some(0.5)),
+            qs("q2", Category::Paraphrase, None),
+        ];
+        let (mc, oc, nc) = matched_means(&c, &o.questions, &o).unwrap();
+        assert!((mc - 0.5).abs() < 1e-12 && (oc - 1.0).abs() < 1e-12 && nc == 1);
         assert_eq!(oracle_ndcg(&[]).overall, None);
     }
 
@@ -2090,7 +2116,13 @@ mod tests {
         r.configs.push(c);
         let md = r.render_markdown();
         assert!(md.contains("## Headroom: per-question oracle"), "{md}");
-        assert!(md.contains("| `lcg-graph` |"), "{md}");
+        // Inside the headroom section, not the metrics or cost tables that also name the config.
+        let section = &md[md.find("## Headroom").unwrap()..];
+        let section = &section[..section[3..].find("\n## ").map_or(section.len(), |i| i + 3)];
+        assert!(
+            section.contains("| config | nDCG@") && section.contains("| `lcg-graph` | "),
+            "{section}"
+        );
         assert!(
             md.contains("| category | oracle | best config | best |"),
             "{md}"
@@ -2125,7 +2157,6 @@ mod tests {
             "`belief_aware: true` (#789)",
             "Local reranker (#796): **not measured in this run**",
             "`lcg-entities-facts-rrf` is a fairer merge",
-            "| `lcg-graph` |",
         ] {
             assert!(md.contains(s), "missing {s:?} in:\n{md}");
         }

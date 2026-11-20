@@ -1500,21 +1500,29 @@ async fn empty_group_list_matches_nothing() {
 #[tokio::test]
 async fn invalid_input_is_rejected() {
     let fx = fixture();
-    for params in [
-        json!({"query": ""}),
-        json!({"query": "   "}),
-        json!({}),
-        json!({"query": "x", "stages": "everything"}),
-        json!({"query": "x", "believed_only": "yes"}),
-        json!({"query": "x", "origins": []}),
-        json!({"query": "x", "num_results": 0}),
+    // Each case must fail for its own reason: the error names the offending parameter.
+    for (params, names) in [
+        (json!({"query": ""}), "query"),
+        (json!({"query": "   "}), "query"),
+        (json!({}), "query"),
+        (json!({"query": "x", "stages": "everything"}), "stages"),
+        (
+            json!({"query": "x", "believed_only": "yes"}),
+            "believed_only",
+        ),
+        (json!({"query": "x", "origins": []}), "origins"),
+        (json!({"query": "x", "num_results": 0}), "num_results"),
         // A wrongly typed `group_ids` must not silently widen the search to every group.
-        json!({"query": "x", "group_ids": 5}),
-        json!({"query": "x", "group_ids": {"a": 1}}),
-        json!({"query": "x", "group_ids": [5]}),
+        (json!({"query": "x", "group_ids": 5}), "group_ids"),
+        (json!({"query": "x", "group_ids": {"a": 1}}), "group_ids"),
+        (json!({"query": "x", "group_ids": [5]}), "group_ids"),
     ] {
         let v = raw(&fx, params.clone()).await;
-        assert!(v.get("error").is_some(), "{params} must be rejected: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains(names),
+            "{params} must be rejected for `{names}`: {v}"
+        );
     }
 }
 
@@ -1722,6 +1730,11 @@ async fn rerank_reorders_the_fused_pool_and_reports_the_stage() {
         plain["stats"].get("rerank").is_none(),
         "absent unless requested"
     );
+    assert_ne!(
+        keys(&plain).first().map(String::as_str),
+        Some("p:ep-uptime"),
+        "control: fusion alone does not put the uptime note first"
+    );
 
     // The cross-encoder loves the uptime note, which plain fusion ranks low or not at all.
     let mock = Arc::new(lcg_core::rerank::MockReranker::new(|_, d| {
@@ -1807,6 +1820,41 @@ async fn rerank_applies_belief_after_the_cross_encoder() {
     assert!(
         new < old,
         "superseded must not sit above its correction: {:?}",
+        keys(&r)
+    );
+
+    // Control: with the superseded factor at 1 (no belief demotion) the cross-encoder's
+    // preference wins, so the ordering above is the belief step's doing, not the logits'.
+    use lcg_core::search_stages::{SearchStages, SearchStagesConfig};
+    let mut blend = lcg_core::passage_rerank::BlendConfig::cross_encoder_only();
+    blend.superseded_factor = 1.0;
+    let mock = Arc::new(lcg_core::rerank::MockReranker::new(|_, d| {
+        if d.contains("chose Vendor A") {
+            10.0
+        } else if d.contains("chose Vendor B") {
+            9.9
+        } else {
+            0.0
+        }
+    }));
+    fx.state.set_search_stages(SearchStages::new(
+        SearchStagesConfig {
+            blend,
+            ..Default::default()
+        },
+        Some(mock as Arc<dyn lcg_core::rerank::Reranker>),
+        None,
+    ));
+    let r = search(
+        &fx,
+        json!({"query": Q_BELIEF, "group_ids": [G], "num_results": 50,
+               "believed_only": false, "rerank": true}),
+    )
+    .await;
+    let (new, old) = (rank(&r, "p:ep-new").unwrap(), rank(&r, "p:ep-old").unwrap());
+    assert!(
+        old < new,
+        "control: without demotion the logits decide: {:?}",
         keys(&r)
     );
 }

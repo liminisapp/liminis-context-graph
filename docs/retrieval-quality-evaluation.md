@@ -94,7 +94,7 @@ it. Read `lcg-graph-rerank` against its row without rerank (`lcg-graph`) and aga
 headroom section's oracle covers all three.
 
 **Latency budget and tuning.** The ≤ 100 ms target was dropped (steer of 2026-11-19). The budget
-is p50 ≤ 500 ms including the rerank stage once #796 lands. Any new tuning constant is tuned on v2
+is p50 ≤ 500 ms including the rerank stage (`lcg-graph-rerank`). Any new tuning constant is tuned on v2
 only. **v1 is the holdout**: run it for the final settings and do not tune on it. The
 broad-collection lists add no tuned constant.
 
