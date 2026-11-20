@@ -246,8 +246,8 @@ where
     F: Fn(&[&str]) -> Result<Vec<Vec<f32>>, Error>,
 {
     fn fail_range(&mut self, lo: usize, hi: usize, msg: &str, transient: bool) {
-        for i in lo..hi {
-            self.results[i] = Some(Err(msg.to_string()));
+        for slot in &mut self.results[lo..hi] {
+            *slot = Some(Err(msg.to_string()));
         }
         if transient {
             self.transient_failures += hi - lo;
