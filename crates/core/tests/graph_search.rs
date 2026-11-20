@@ -459,6 +459,27 @@ fn build(c: &Conn<'_>, with_derived: bool) {
         &["ep-new"],
         T_CORR,
     );
+    // Reachable only through the superseded e-old (Policy Desk -> Vendor A -> Vendor X), so it
+    // tests that the walk never continues past a fact no longer believed.
+    entity(c, "vx", "Vendor X", G, SUMMARY);
+    simple_ep(
+        c,
+        "ep-vx",
+        "Vendor A resells through Vendor X.",
+        axis(NOISE),
+        &["va", "vx"],
+    );
+    fact(
+        c,
+        "e-vx",
+        "va",
+        "vx",
+        "RESELLS_VIA",
+        "Vendor A resells through Vendor X at list price",
+        axis(PRICE),
+        &["ep-vx"],
+        T0,
+    );
     fact(
         c,
         "e-future",
@@ -942,6 +963,11 @@ async fn corrected_fact_is_neither_returned_nor_traversed_by_default() {
     for x in results(&r) {
         assert!(!path_edges(x).contains(&"e-old".to_string()), "{x}");
     }
+    assert!(
+        find(&r, "f:e-vx").is_none(),
+        "only reachable through the corrected fact: {:?}",
+        keys(&r)
+    );
     let new = find(&r, "f:e-new").expect("the correction's fact is returned");
     assert_eq!(new["belief"]["state"], "believed");
     // Future-effective document supersession: still believed now (ADR-0707).
@@ -960,6 +986,11 @@ async fn as_of_before_the_correction_flips_which_fact_is_believed() {
     assert!(find(&r, "f:e-old").is_some(), "{:?}", keys(&r));
     assert!(find(&r, "f:e-new").is_none(), "{:?}", keys(&r));
     assert!(find(&r, "p:ep-new").is_none(), "not yet ingested at as_of");
+    // Positive control for the traversal tests below: while e-old is believed, the walk goes
+    // through it to Vendor X.
+    let vx = find(&r, "f:e-vx")
+        .unwrap_or_else(|| panic!("reached through believed e-old: {:?}", keys(&r)));
+    assert_eq!(path_edges(vx), vec!["e-old", "e-vx"]);
 }
 
 #[tokio::test]
@@ -984,8 +1015,9 @@ async fn believed_only_false_returns_superseded_facts_with_their_state() {
     });
     assert_eq!(p["belief"]["state"], "superseded");
     assert_eq!(p["belief"]["believed"], false);
-    // Returned, but never a traversal step: a path may end at the superseded fact (the fact
-    // itself, or a passage it produced), never continue past it.
+    // Returned, but never a traversal step: Vendor X's fact is reachable only through e-old, so
+    // it must not come back, and a path may end at e-old but never continue past it.
+    assert!(find(&r, "f:e-vx").is_none(), "{:?}", keys(&r));
     for x in results(&r) {
         let path = x["evidence"]["path"]
             .as_array()

@@ -650,7 +650,7 @@ pub fn registry() -> Vec<ToolSpec> {
                         "query": {"type": "string", "description": "Search text (required, non-empty)."},
                         "num_results": {
                             "type": "integer", "minimum": 1, "maximum": 100, "default": 10,
-                            "description": "Maximum number of results (clamped 1-100). Never padded."
+                            "description": "Maximum number of results, 1-100 (0 is rejected; larger values are capped at 100). Never padded."
                         },
                         "group_ids": group_ids_prop(),
                         "origins": origins_prop(),

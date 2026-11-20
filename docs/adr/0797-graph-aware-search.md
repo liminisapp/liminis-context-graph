@@ -29,7 +29,7 @@ searches, not thousands a second. The budget is now **p50 ≤ 500 ms including t
 The working name `knowledge_search` was too close to `knowledge_search_passages`; the chosen name says
 what is different. It is a `read`-scope MCP tool, `ReadOnly` in the write policy, holds no lock (the
 search-read convention), and uses the shared missing-index retry. Its params reuse the existing names:
-`query` (required, non-empty), `num_results` (default 10, clamped 1–100, never padded), `group_ids`
+`query` (required, non-empty), `num_results` (default 10; 0 or a non-integer is rejected, values above 100 are capped at 100; never padded), `group_ids`
 (the `_preserve_empty` semantics of `find_entities`: omitted = all, `[]` = nothing), `origins`,
 `believed_only`, `as_of`, plus `stages` (§7).
 
@@ -100,7 +100,11 @@ gibberish would seed the walk. A fused candidate is admitted only on real eviden
   candidates.
 
 Merged tombstones are dropped; under `origins`, a seed needs a matching live mention
-(`origin_reads::entity_support`). The top **5** by RRF are kept, scored relative to the best (1.0);
+(`origin_reads::entity_support`). The same check gates a far endpoint during expansion. Unlike the
+per-edge and passage checks, this one always requires the mention to be live at `as_of`, even with
+`believed_only: false`: an entity whose only matching mentions have been superseded is neither
+seeded nor walked into. It is the conservative side, and it applies only when `origins` is set
+and belief filtering is off. The top **5** by RRF are kept, scored relative to the best (1.0);
 up to 3 summary-vector seeds may follow (below), so a response carries **at most 8** seeds.
 There is **no fuzzy name matcher**: near-miss names are covered by BM25 and the name vector. A
 vector list is reported in a seed's `matched` only at or above the 0.5 floor, so filler is never

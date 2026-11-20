@@ -1029,10 +1029,13 @@ fn run(
             .collect();
         if let Some(uuid) = hit.uuid.strip_prefix("f:") {
             let f = &facts[uuid];
+            // A producing episode that no longer exists (absent from every fetch) is not
+            // evidence: it is left out rather than reported as a primary, corroborating source.
             let mut eps: Vec<SupportingEpisode> =
                 f.fe.edge
                     .episodes
                     .iter()
+                    .filter(|u| ep_info.contains_key(u.as_str()))
                     .map(|u| supporting(u, None))
                     .collect();
             if let Some(cites) = citations.get(&key_of(&f.fe.edge)) {
