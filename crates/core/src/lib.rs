@@ -49,6 +49,7 @@ pub mod reprocess_relations;
 pub mod rerank;
 pub mod schema;
 pub mod search;
+pub mod search_config;
 pub mod search_stages;
 pub mod sha256_hex;
 pub mod sidecar_client;

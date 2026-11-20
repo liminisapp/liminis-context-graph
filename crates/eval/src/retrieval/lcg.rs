@@ -282,7 +282,8 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     // `lcg-passages` measures the shipped default (#806): an operator's passage-search overrides
     // must not leak into the child and silently change what it measures.
     cmd.env_remove("LCG_PASSAGE_SEARCH_MODE")
-        .env_remove("LCG_PASSAGE_BELIEF_AWARE");
+        .env_remove("LCG_PASSAGE_BELIEF_AWARE")
+        .env_remove("LCG_SEARCH_MIN_SCORE");
     let mut child = cmd.spawn().map_err(|e| {
         format!(
             "cannot start service '{}': {e} (pass --service-bin, or build with `cargo build --release -p lcg-service`)",

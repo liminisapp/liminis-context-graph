@@ -1509,6 +1509,23 @@ async fn async_main(
         }
     }
 
+    // Issue #812 / ADR-0812: resolve, validate, log and install the default `min_score` for
+    // `knowledge_search_passages` (`LCG_SEARCH_MIN_SCORE`) once, before any database open or the
+    // socket bind. Strict like the tuning knobs above (and unlike `LCG_PASSAGE_SEARCH_MODE`): a
+    // typo must not silently leave the wrong relevance floor in place.
+    match lcg_core::search_config::SearchConfig::from_env() {
+        Ok(cfg) => {
+            lcg_core::search_config::install(cfg.min_score);
+            eprintln!("liminis-context-graph: {}", cfg.describe());
+        }
+        Err(e) => {
+            eprintln!("liminis-context-graph: FATAL {e}");
+            drop(telemetry_sink);
+            sink_drain_handle.await.ok();
+            return Err(e.to_string().into());
+        }
+    }
+
     // Issue #742 / ADR-0742: resolve, validate, log and install the per-group write allow-list
     // (`--writable-groups` / `LCG_WRITABLE_GROUPS`) once, before migration and the socket bind.
     // Same strict-env stance as the tuning knobs above: a bad value is fatal, never silently
