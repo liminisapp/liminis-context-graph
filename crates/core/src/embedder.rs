@@ -1104,11 +1104,35 @@ fn is_transient_status(code: u16) -> bool {
     code >= 500 || code == 429
 }
 
+/// Whether a reqwest error is the response *body* failing to arrive — a connection reset or a
+/// body truncated after the headers (a sidecar or proxy restarting mid-response) — as opposed to a
+/// body that arrived whole but is not valid JSON. reqwest reports the former as `is_body()` or, via
+/// `.json()`/`.bytes()`, as a `Decode` error whose source chain holds the underlying hyper or I/O
+/// error; a genuine parse failure's chain holds a `serde_json::Error` instead and stays permanent.
+fn is_body_transport_failure(re: &reqwest::Error) -> bool {
+    if re.is_body() {
+        return true;
+    }
+    if !re.is_decode() {
+        return false;
+    }
+    let mut src = std::error::Error::source(re);
+    while let Some(e) = src {
+        if e.is::<hyper::Error>() || e.is::<std::io::Error>() {
+            return true;
+        }
+        src = e.source();
+    }
+    false
+}
+
 /// Classifies an embedder error as [`EmbedErrorClass::Transient`] or `Permanent` for the replay
 /// recompute retry policy (issue #808, ADR-0808).
 ///
 /// - HTTP path (structured `Error::Http`): transient when the reqwest error is a timeout,
-///   connect or request-send failure ([`is_transport_error`]'s set), or its status is 5xx/429.
+///   connect or request-send failure ([`is_transport_error`]'s set), its status is 5xx/429, or the
+///   response body failed to arrive (reset/truncated, [`is_body_transport_failure`]); a complete
+///   but unparseable body is permanent.
 /// - UDS path (flattened `Error::Ipc(String)`): transient for the stable
 ///   `UDS connect` / `UDS HTTP/1.1 handshake` / `UDS send request` prefixes
 ///   ([`is_transport_error`]), for `UDS read response body` (a connection reset or truncated body
@@ -1120,7 +1144,9 @@ fn is_transient_status(code: u16) -> bool {
 pub fn classify_embed_error(e: &Error) -> EmbedErrorClass {
     let transient = match e {
         Error::Http(re) => {
-            is_transport_error(e) || re.status().is_some_and(|s| is_transient_status(s.as_u16()))
+            is_transport_error(e)
+                || re.status().is_some_and(|s| is_transient_status(s.as_u16()))
+                || is_body_transport_failure(re)
         }
         Error::Ipc(msg) => {
             is_transport_error(e)
@@ -1773,6 +1799,61 @@ mod tests {
                 .unwrap_err();
             assert_eq!(classify_embed_error(&Error::Http(err)), class, "{line}");
         }
+    }
+
+    /// Serves a `200` whose body is `body` but whose `content-length` claims `claimed` bytes
+    /// (`claimed > body.len()` → the connection closes mid-body).
+    async fn canned_body_server(claimed: usize, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {claimed}\r\nconnection: close\r\n\r\n"
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(body.as_bytes()).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn classify_http_truncated_body_is_transient_but_bad_json_is_permanent() {
+        // Connection closes mid-body (sidecar/proxy restart): reqwest surfaces it as a `Decode`
+        // error whose source chain holds the hyper incomplete-body error — transient.
+        let url = canned_body_server(100, "{\"da").await;
+        let err = reqwest::Client::new()
+            .post(&url)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            classify_embed_error(&Error::Http(err)),
+            EmbedErrorClass::Transient
+        );
+
+        // A complete body that is not valid JSON is a real parse failure — retrying cannot help.
+        let url = canned_body_server(4, "nope").await;
+        let err = reqwest::Client::new()
+            .post(&url)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            classify_embed_error(&Error::Http(err)),
+            EmbedErrorClass::Permanent
+        );
     }
 
     #[tokio::test]
