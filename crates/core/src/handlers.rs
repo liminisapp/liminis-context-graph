@@ -2509,16 +2509,22 @@ fn parse_graph_search_params(p: &Value) -> Result<crate::graph_search::GraphSear
         as_of_us: belief.as_of_us,
         stages,
         explain,
+        rerank: false,
     })
 }
 
 /// `knowledge_graph_search` (issue #797): one read fusing entity linking, neighbourhood
 /// expansion, belief time, vector and FTS. Holds no lock, like the other search reads.
 async fn handle_graph_search(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
-    let params = parse_graph_search_params(&req.params)?;
+    let mut params = parse_graph_search_params(&req.params)?;
+    // `rerank` (#796 stage): absent or null takes the workspace default, as on passage search.
+    let stages = state.search_stages.load_full();
+    params.rerank = optional_bool_param(&req.params["rerank"], "rerank")?
+        .unwrap_or_else(|| stages.as_ref().is_some_and(|s| s.config.rerank_default));
     let result = crate::graph_search::graph_search(
         load_db(&state)?,
         Arc::clone(&state.embedder),
+        stages.clone(),
         params.clone(),
     )
     .await;
@@ -2530,6 +2536,7 @@ async fn handle_graph_search(req: &IpcRequest, state: Arc<AppState>) -> Result<V
                 crate::graph_search::graph_search(
                     load_db(&state)?,
                     Arc::clone(&state.embedder),
+                    stages,
                     params,
                 )
                 .await

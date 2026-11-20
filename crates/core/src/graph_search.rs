@@ -34,7 +34,10 @@ use crate::db::{compute_lookup_key, Conn, Db, EpisodePassage, FrontierEdge};
 use crate::embedder::{EmbedRole, Embedder};
 use crate::error::Error;
 use crate::origin::Origin;
+use crate::passage_rerank;
 use crate::search::rrf_fuse_scored;
+use crate::search_stages::{SearchStages, DEFAULT_RERANK_CANDIDATES};
+use crate::staged_search::StageReport;
 use crate::types::{EntityRow, PassageResult, RelatesToEdge};
 
 // ── Tuning constants (internal defaults; see ADR-0797) ────────────────────────
@@ -139,6 +142,8 @@ pub struct GraphSearchParams {
     pub stages: Stages,
     /// Report every seed candidate and why it was admitted or rejected (`seed_trace`).
     pub explain: bool,
+    /// Rerank the top fused candidates with #796's cross-encoder stage (see [`rerank_stage`]).
+    pub rerank: bool,
 }
 
 // ── Response types ────────────────────────────────────────────────────────────
@@ -251,6 +256,9 @@ pub struct GraphSearchResult {
     pub support: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub corroboration: Option<usize>,
+    /// Cross-encoder logit (#796), present only on a result the rerank stage scored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f64>,
     pub evidence: GraphEvidence,
 }
 
@@ -291,6 +299,8 @@ pub struct StageTimings {
     pub supporting: f64,
     pub passages: f64,
     pub fusion: f64,
+    /// The rerank stage (cross-encoder call, supersession lookup and blend); 0 when not run.
+    pub rerank: f64,
     pub total: f64,
 }
 
@@ -340,6 +350,10 @@ pub struct GraphSearchStats {
     pub truncations: Vec<Truncation>,
     pub no_seeds: bool,
     pub timings_ms: StageTimings,
+    /// The rerank stage's outcome, present only when `rerank` was requested: `{applied,
+    /// candidates, reason?, elapsed_ms?}`, as `knowledge_search_passages` reports it (#796).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank: Option<serde_json::Value>,
 }
 
 /// The `knowledge_graph_search` response (ADR-0020 envelope plus `seeds` and `stats`).
@@ -361,23 +375,190 @@ pub struct GraphSearchResponse {
 pub async fn graph_search(
     db: Arc<Db>,
     embedder: Arc<dyn Embedder>,
+    stages: Option<Arc<SearchStages>>,
     params: GraphSearchParams,
 ) -> Result<GraphSearchResponse, Error> {
     if matches!(&params.group_ids, Some(g) if g.is_empty()) {
         // `group_ids: []` matches no group (#413): nothing to embed or look up.
-        return Ok(empty_response(&params, 0));
+        let mut r = empty_response(&params, 0);
+        if params.rerank {
+            r.stats.rerank = Some(skipped_rerank("no_candidates"));
+        }
+        return Ok(r);
     }
     let t0 = Instant::now();
     let (embedding, raw) = embed_query(embedder.as_ref(), &params.query).await?;
     let embed = t0.elapsed();
+    // With rerank, the pipeline builds the whole rerank pool (at least `k`) and the stage cuts it
+    // to `k` afterwards.
+    let k = params.num_results;
+    let pool = stages
+        .as_ref()
+        .map_or(DEFAULT_RERANK_CANDIDATES, |s| s.config.rerank_candidates);
+    let mut run_params = params.clone();
+    if params.rerank {
+        run_params.num_results = pool.max(k);
+    }
+    let rerank = params.rerank;
+    let db2 = Arc::clone(&db);
     let mut r = tokio::task::spawn_blocking(move || -> Result<GraphSearchResponse, Error> {
-        let conn = db.connect()?;
-        run(&conn, &params, &embedding, raw.as_deref())
+        let conn = db2.connect()?;
+        run(&conn, &run_params, &embedding, raw.as_deref())
     })
     .await??;
     r.stats.timings_ms.embed = ms(embed);
+    if rerank {
+        let started = Instant::now();
+        let report = rerank_stage(db, stages, &params.query, &mut r.results, pool, k).await;
+        r.stats.timings_ms.rerank = ms(started.elapsed());
+        r.stats.rerank = Some(report);
+        r.count = r.results.len();
+    }
     r.stats.timings_ms.total = ms(t0.elapsed());
     Ok(r)
+}
+
+fn skipped_rerank(reason: &'static str) -> serde_json::Value {
+    StageReport {
+        applied: false,
+        count: 0,
+        reason: Some(reason),
+        elapsed_ms: None,
+    }
+    .to_json("candidates")
+}
+
+/// `valid_at`, falling back to `created_at`, as epoch microseconds (the recency input of #796's
+/// blend).
+fn time_us(valid_at: Option<&str>, created_at: &str) -> Option<i64> {
+    let to_us = |s: &str| {
+        crate::db::parse_timestamp_str(s).map(|d| (d.unix_timestamp_nanos() / 1_000) as i64)
+    };
+    valid_at.and_then(to_us).or_else(|| to_us(created_at))
+}
+
+/// The final rerank stage (#796, steer of 2026-11-19): the top `pool` fused results are scored
+/// by #796's cross-encoder and blended with their fused rank, belief and recency by
+/// [`passage_rerank::blend`] — the same client, blend weights and superseded handling as
+/// `knowledge_search_passages` — then cut to `k`. A passage is scored on its text; a fact on
+/// `from → to: fact`. Belief comes from the episode itself for a passage and from its producing
+/// episode for a fact, and is applied after the cross-encoder: a superseded item's whole blended
+/// score is scaled down, and it is moved below any replacement in the head. Every failure
+/// degrades to the fused order, reported in `stats.rerank`; the search itself never fails here.
+async fn rerank_stage(
+    db: Arc<Db>,
+    stages: Option<Arc<SearchStages>>,
+    query: &str,
+    results: &mut Vec<GraphSearchResult>,
+    pool: usize,
+    k: usize,
+) -> serde_json::Value {
+    let started = Instant::now();
+    let finish = |results: &mut Vec<GraphSearchResult>, reason: &'static str, timed: bool| {
+        results.truncate(k);
+        StageReport {
+            applied: false,
+            count: 0,
+            reason: Some(reason),
+            elapsed_ms: timed.then(|| started.elapsed().as_millis() as u64),
+        }
+        .to_json("candidates")
+    };
+    if results.is_empty() {
+        return finish(results, "no_candidates", false);
+    }
+    let Some(reranker) = stages.as_ref().and_then(|s| s.reranker.clone()) else {
+        return finish(results, "not_configured", false);
+    };
+    let blend_cfg = stages.as_ref().map(|s| s.config.blend).unwrap_or_default();
+    let head_len = pool.min(results.len());
+    let head = &results[..head_len];
+    let documents: Vec<String> = head
+        .iter()
+        .map(|x| match (&x.passage, &x.fact) {
+            (Some(p), _) => p.content.clone(),
+            (None, Some(f)) => {
+                let step = x.evidence.path.last();
+                match step {
+                    Some(s) => format!("{} → {}: {}", s.from_name, s.to_name, f.fact),
+                    None => f.fact.clone(),
+                }
+            }
+            (None, None) => String::new(),
+        })
+        .collect();
+    // The episode whose belief stands for each result: the passage's own, or a fact's producer.
+    let episodes: Vec<Option<String>> = head
+        .iter()
+        .map(|x| match (&x.passage, &x.fact) {
+            (Some(p), _) => Some(p.uuid.clone()),
+            (None, Some(f)) => f.episodes.first().cloned(),
+            (None, None) => None,
+        })
+        .collect();
+    let lookup: Vec<String> = episodes.iter().flatten().cloned().collect();
+    let sup_fut = async {
+        tokio::task::spawn_blocking(move || {
+            let conn = db.connect()?;
+            conn.get_episode_supersession(&lookup)
+        })
+        .await
+    };
+    let (logits, supersession) = futures::join!(reranker.rerank(query, &documents), sup_fut);
+    let logits = match logits {
+        Ok(l) if l.len() == head_len => l,
+        Ok(l) => {
+            eprintln!(
+                "[liminis-context-graph] graph rerank returned {} scores for {head_len} documents",
+                l.len()
+            );
+            return finish(results, "unavailable", true);
+        }
+        Err(e) => {
+            eprintln!("[liminis-context-graph] graph rerank failed: {e}");
+            return finish(results, "unavailable", true);
+        }
+    };
+    // Without belief data the blend cannot demote superseded items: degrade, as #796 does.
+    let supersession = match supersession {
+        Ok(Ok(m)) => m,
+        _ => return finish(results, "unavailable", true),
+    };
+    let cands: Vec<passage_rerank::Candidate> = head
+        .iter()
+        .zip(&logits)
+        .zip(&episodes)
+        .map(|((x, logit), ep)| passage_rerank::Candidate {
+            // Keyed by episode, so a replacement episode (`superseded_by`) is recognised whether
+            // it arrives as a passage or as a fact it produced.
+            uuid: ep
+                .clone()
+                .unwrap_or_else(|| x.fact.as_ref().map(|f| f.uuid.clone()).unwrap_or_default()),
+            logit: *logit,
+            time_us: match (&x.passage, &x.fact) {
+                (Some(p), _) => time_us(p.valid_at.as_deref(), &p.created_at),
+                (None, Some(f)) => time_us(f.valid_at.as_deref(), &f.created_at),
+                (None, None) => None,
+            },
+            belief: ep.as_ref().and_then(|u| supersession.get(u).cloned()),
+        })
+        .collect();
+    let now = chrono::Utc::now().timestamp_micros();
+    let blended = passage_rerank::blend(&cands, now, blend_cfg);
+    for b in &blended {
+        results[b.index].rerank_score = Some(logits[b.index]);
+    }
+    let head_order: Vec<usize> = blended.iter().map(|b| b.index).collect();
+    let order = passage_rerank::assemble(&head_order, head_len, results.len(), k);
+    let mut slots: Vec<Option<GraphSearchResult>> = results.drain(..).map(Some).collect();
+    results.extend(order.into_iter().filter_map(|i| slots[i].take()));
+    StageReport {
+        applied: true,
+        count: head_len,
+        reason: None,
+        elapsed_ms: Some(started.elapsed().as_millis() as u64),
+    }
+    .to_json("candidates")
 }
 
 /// Embeds the query for every vector leg in one model call, returning `(instructed, bare)`.
@@ -444,6 +625,7 @@ fn new_stats(p: &GraphSearchParams, embed_calls: usize) -> GraphSearchStats {
         truncations: vec![],
         no_seeds: true,
         timings_ms: StageTimings::default(),
+        rerank: None,
     }
 }
 
@@ -1050,6 +1232,7 @@ fn run(
                 belief: serde_json::to_value(&f.belief).unwrap_or_default(),
                 support: sup.map(|s| s.support.clone()),
                 corroboration: sup.map(|s| s.corroboration),
+                rerank_score: None,
                 evidence: GraphEvidence {
                     lists: lists_ev,
                     seeds: seed_ev(f.root),
@@ -1074,6 +1257,7 @@ fn run(
                 belief: serde_json::to_value(passage_belief(ep, t)).unwrap_or_default(),
                 support: None,
                 corroboration: None,
+                rerank_score: None,
                 evidence: GraphEvidence {
                     lists: lists_ev,
                     seeds: src.map(|s| seed_ev(s.root)).unwrap_or_default(),
@@ -2161,6 +2345,7 @@ mod tests {
             as_of_us: 0,
             stages: Stages::Full,
             explain: false,
+            rerank: false,
         };
         // A batched cut of 4 rows by uuid keeps e1..e4 and drops z's only edge.
         let (batched, cut) = c.expand_frontier(&frontier, None, 4).unwrap();
@@ -2363,6 +2548,7 @@ mod tests {
             as_of_us: 0,
             stages: Stages::Full,
             explain: false,
+            rerank: false,
         };
         let all = [
             Origin::Primary,

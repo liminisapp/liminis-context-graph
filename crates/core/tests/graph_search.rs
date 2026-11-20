@@ -1697,3 +1697,116 @@ async fn stages_switch_the_fused_lists() {
         .iter()
         .any(|x| list_names(x).contains(&"passages".to_string())));
 }
+
+// ── Rerank stage (#796 on top of the graph read) ──────────────────────────────
+
+fn install_reranker(fx: &Fx, reranker: Option<Arc<lcg_core::rerank::MockReranker>>) {
+    use lcg_core::search_stages::{SearchStages, SearchStagesConfig};
+    fx.state.set_search_stages(SearchStages::new(
+        SearchStagesConfig {
+            // The cross-encoder alone orders the head (belief and recency still apply), so these
+            // tests pin the stage plumbing; the blend itself is #796's and tested there.
+            blend: lcg_core::passage_rerank::BlendConfig::cross_encoder_only(),
+            ..Default::default()
+        },
+        reranker.map(|r| r as Arc<dyn lcg_core::rerank::Reranker>),
+        None,
+    ));
+}
+
+#[tokio::test]
+async fn rerank_reorders_the_fused_pool_and_reports_the_stage() {
+    let fx = fixture();
+    let plain = search(&fx, json!({"query": Q_MULTI, "group_ids": [G]})).await;
+    assert!(
+        plain["stats"].get("rerank").is_none(),
+        "absent unless requested"
+    );
+
+    // The cross-encoder loves the uptime note, which plain fusion ranks low or not at all.
+    let mock = Arc::new(lcg_core::rerank::MockReranker::new(|_, d| {
+        if d.contains("Uptime") {
+            10.0
+        } else {
+            0.0
+        }
+    }));
+    install_reranker(&fx, Some(Arc::clone(&mock)));
+    let r = search(
+        &fx,
+        json!({"query": Q_MULTI, "group_ids": [G], "rerank": true}),
+    )
+    .await;
+    assert_eq!(mock.calls(), 1, "one cross-encoder call");
+    assert_eq!(r["stats"]["rerank"]["applied"], true, "{}", r["stats"]);
+    let pooled = r["stats"]["rerank"]["candidates"].as_u64().unwrap();
+    assert!(pooled as usize >= keys(&r).len(), "{}", r["stats"]);
+    assert!(keys(&r).len() <= 10, "cut back to num_results");
+    assert_eq!(keys(&r)[0], "p:ep-uptime", "{:?}", keys(&r));
+    assert!(results(&r)[0]["rerank_score"].as_f64().is_some());
+    // Facts are scored on `from → to: fact`.
+    assert!(
+        mock.last_documents()
+            .iter()
+            .any(|d| d.contains("Fable Supply → Unit Pricing:")),
+        "{:?}",
+        mock.last_documents()
+    );
+}
+
+#[tokio::test]
+async fn rerank_degrades_to_the_fused_order_when_unconfigured_or_failing() {
+    let fx = fixture();
+    let plain = keys(&search(&fx, json!({"query": Q_MULTI, "group_ids": [G]})).await);
+
+    let r = search(
+        &fx,
+        json!({"query": Q_MULTI, "group_ids": [G], "rerank": true}),
+    )
+    .await;
+    assert_eq!(r["stats"]["rerank"]["applied"], false);
+    assert_eq!(r["stats"]["rerank"]["reason"], "not_configured");
+    assert_eq!(keys(&r), plain);
+
+    install_reranker(
+        &fx,
+        Some(Arc::new(lcg_core::rerank::MockReranker::failing())),
+    );
+    let r = search(
+        &fx,
+        json!({"query": Q_MULTI, "group_ids": [G], "rerank": true}),
+    )
+    .await;
+    assert_eq!(r["stats"]["rerank"]["reason"], "unavailable");
+    assert_eq!(keys(&r), plain, "a failed stage never changes the results");
+}
+
+#[tokio::test]
+async fn rerank_applies_belief_after_the_cross_encoder() {
+    let fx = fixture();
+    // The cross-encoder slightly prefers the superseded decision; belief must still win.
+    let mock = Arc::new(lcg_core::rerank::MockReranker::new(|_, d| {
+        if d.contains("chose Vendor A") {
+            10.0
+        } else if d.contains("chose Vendor B") {
+            9.9
+        } else {
+            0.0
+        }
+    }));
+    install_reranker(&fx, Some(mock));
+    let r = search(
+        &fx,
+        json!({"query": Q_BELIEF, "group_ids": [G], "num_results": 50,
+               "believed_only": false, "rerank": true}),
+    )
+    .await;
+    assert_eq!(r["stats"]["rerank"]["applied"], true);
+    let new = rank(&r, "p:ep-new").expect("the correction is returned");
+    let old = rank(&r, "p:ep-old").expect("the superseded note is returned when not filtering");
+    assert!(
+        new < old,
+        "superseded must not sit above its correction: {:?}",
+        keys(&r)
+    );
+}
