@@ -442,10 +442,15 @@ object — and it acts before fusion and per path rather than as a post-filter o
   requests that omit `belief_aware`; an explicit request value always wins. With the switch off,
   `hybrid` gives weighted RRF without the rules, which is not the pre-#806 hybrid default (rules on).
   A non-boolean value is an invalid-params error. The removed `top_rank_bonus` parameter is ignored.
-- **`min_score`** (default 0.5, clamped 0–1) floors the *vector retriever's* cosine similarity
-  before fusion, as `min_similarity` does for entity search. A passage found only by the lexical
-  retriever is **not** excluded by it. This is a deliberate change in meaning from `vector` mode,
-  where `min_score` filters the single list.
+- **`min_score`** (default `LCG_SEARCH_MIN_SCORE`, else 0.5; clamped 0–1) floors the *vector
+  retriever's* cosine similarity before fusion, as `min_similarity` does for entity search. A
+  passage found only by the lexical retriever is **not** excluded by it. This is a deliberate change
+  in meaning from `vector` mode, where `min_score` filters the single list. When a request omits
+  `min_score` (or sends `null` or a non-number), the operator-configured default applies; an
+  explicit number, including `0.0`, always wins. The effective default is reported by
+  `knowledge_status` as `search_min_score_default` (additive, top-level, present in every status
+  response shape). `LCG_SEARCH_MIN_SCORE` is validated once at startup: an empty, non-numeric, NaN
+  or infinite value fails startup, and a finite out-of-range value is clamped to 0–1.
 - **Fallbacks.** A query with no lexical tokens (punctuation or stop words only), or no lexical
   match, returns the vector ranking. If the episode full-text index is missing or inconsistent
   (for example right after an lbug upgrade, before the index is rebuilt) hybrid search silently

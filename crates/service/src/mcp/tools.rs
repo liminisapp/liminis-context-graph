@@ -581,9 +581,13 @@ pub fn registry() -> Vec<ToolSpec> {
                         },
                         "min_score": {
                             "type": "number", "minimum": 0.0, "maximum": 1.0, "default": 0.5,
-                            "description": "Minimum cosine similarity (clamped 0.0-1.0). In hybrid \
-                                mode it floors only the vector retriever's candidates; a passage \
-                                found only by the lexical (BM25) retriever is not excluded by it."
+                            "description": "Minimum cosine similarity (clamped 0.0-1.0). When omitted, \
+                                the operator-configured default applies (LCG_SEARCH_MIN_SCORE; \
+                                0.5 if unset, reported as `search_min_score_default` by \
+                                knowledge_status). An explicit value, including 0.0, always \
+                                wins. In hybrid mode it floors only the vector retriever's \
+                                candidates; a passage found only by the lexical (BM25) retriever \
+                                is not excluded by it."
                         },
                         "mode": {
                             "type": "string", "enum": ["vector", "hybrid"],
