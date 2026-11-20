@@ -5892,7 +5892,7 @@ target/release/lcg-eval retrieval \
 |---|---|
 | `--corpus <DIR>` | Fixture directory (default `crates/eval/fixtures/retrieval`, v1; the full corpus is `crates/eval/fixtures/retrieval-v2`). |
 | `--k <N>` | Shared cut-off, 1–100 (default 10). |
-| `--configs <LIST>` | Subset of the six configuration ids, plus the opt-in [graph-aware configurations](#graph-aware-configurations-opt-in-797). |
+| `--configs <LIST>` | Any of the configuration ids: the six defaults, #796's stage rows (`lcg-passages-rerank`, `lcg-passages-belief-rerank`, `lcg-passages-expand`, `lcg-passages-expand-rerank`), the opt-in passage rows (`lcg-passages-raw`, `lcg-passages-belief`, `lcg-passages-hybrid`, `lcg-passages-hybrid-belief`), the query-variant rows (#802), and the opt-in [graph-aware configurations](#graph-aware-configurations-opt-in-797). |
 | `--service-bin`, `--embedder-http/--embedder-uds`, `--extractor-http/--extractor-uds` | How the spawned LCG service is configured. |
 | `--embedding-profile <LIST>` | Embedding [instruction profile(s)](configuration.md#embedding-instruction-profiles) to measure, e.g. `none,bge-v1.5`. See [Comparing embedding profiles](#comparing-embedding-profiles). |
 | `--replay-cassette <PATH>` / `--record-cassette <PATH>` | Replay or record ingest extraction ([cassettes](testing-and-evaluation.md#recordreplay-cassettes)) for a free, repeatable LCG ingest. |
@@ -6007,7 +6007,7 @@ model) are in [ADR-0796](adr/0796-passage-rerank-and-query-expansion.md#belief-a
   are returned and outrank the primary source.
 - **Hypotheses**: *YES*, *NO*, *not distinguishable from noise* or *cannot be read* (a side was
   skipped) for "LCG beats qmd on temporal/superseded" and "qmd beats LCG on paraphrase".
-- **Graph-aware search (#797)** (only when a graph configuration ran): what each ablation row
+- **Graph-aware search (#797)** (only when a graph configuration or `lcg-entities-facts-rrf` ran): what each ablation row
   means, the plain-passage mode, the `lcg-entities-facts-rrf` change, and the reranker status.
 - **Cost** (p50/p95 latency, model calls per query, service calls per query — every RPC the query
   made, the main reads included — and lookup calls), **Reproduction** (corpus/question versions and hashes, LCG build, qmd version and

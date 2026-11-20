@@ -1810,3 +1810,65 @@ async fn rerank_applies_belief_after_the_cross_encoder() {
         keys(&r)
     );
 }
+
+#[tokio::test]
+async fn evidence_never_discloses_a_producer_outside_the_callers_filter() {
+    // One fact with two primary producers: a live note and one corrected away at T_CORR.
+    let fx = fixture_built(|c| {
+        entity(c, "iris", "Iris Port", G, SUMMARY);
+        entity(c, "jade", "Jade Dock", G, SUMMARY);
+        simple_ep(
+            c,
+            "ep-live",
+            "Iris Port ships to Jade Dock.",
+            axis(PRICE),
+            &["iris", "jade"],
+        );
+        episode(
+            c,
+            Ep {
+                uuid: "ep-gone",
+                content: "Iris Port ships to Jade Dock (old note).",
+                emb: axis(PRICE),
+                origin: None,
+                ingested: T0,
+                superseded: Some((T_CORR, "episode")),
+                mentions: &["iris", "jade"],
+            },
+        );
+        fact(
+            c,
+            "e-ship",
+            "iris",
+            "jade",
+            "SHIPS_TO",
+            "Iris Port ships to Jade Dock at list price",
+            axis(PRICE),
+            &["ep-live", "ep-gone"],
+            T0,
+        );
+    });
+    let cited = |r: &Value| -> Vec<String> {
+        find(r, "f:e-ship").expect("the fact is returned")["evidence"]["supporting_episodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["uuid"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let q = json!({"query": "Iris Port price", "group_ids": [G], "num_results": 50});
+    let r = search(&fx, q.clone()).await;
+    assert_eq!(
+        cited(&r),
+        vec!["ep-live"],
+        "the corrected producer is not disclosed"
+    );
+    let mut all = q;
+    all["believed_only"] = json!(false);
+    let r = search(&fx, all).await;
+    assert_eq!(
+        cited(&r),
+        vec!["ep-live", "ep-gone"],
+        "both, when not filtering"
+    );
+}

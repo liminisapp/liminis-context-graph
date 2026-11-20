@@ -349,7 +349,7 @@ The report gains two sections; every existing section and ranking stays as it wa
   configuration's gap to it and the share it captures, and the best configuration per category.
   It appears in **any** run with two or more configurations, the default run included, because
   the headroom between retrievers is the point of the measurement, not a graph-only figure.
-- **Graph-aware search**, only when a graph configuration ran.
+- **Graph-aware search**, only when a graph configuration or `lcg-entities-facts-rrf` ran.
 
 Research found `lcg-entities-facts` unfair to the graph independently of this read (hub flooding in
 note-id order, empty groups taking turns, `ceil(k/2)` per read with heavy overlap, strict

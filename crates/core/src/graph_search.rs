@@ -852,6 +852,9 @@ struct EpInfo {
     /// Whether the episode may enter list (a) ([`supports_list_a`]), known exactly because the
     /// full row was fetched.
     admits_support: bool,
+    /// Within `origins` (if given) and, when filtering, live at `as_of`: may be disclosed in an
+    /// evidence trail. An episode outside the caller's filter is never shown, even as a citation.
+    citable: bool,
 }
 
 /// Whether an episode may enter list (a), the supporting passages: live at `t` when filtering,
@@ -860,6 +863,15 @@ fn supports_list_a(ep: &EpisodePassage, p: &GraphSearchParams, t: i64) -> bool {
     let live_ok = !p.believed_only || episode_live_at(ep, t);
     let origin_ok = p.origins.as_ref().is_none_or(|f| f.contains(&ep.origin));
     live_ok && origin_ok && ep.origin.is_corroborating()
+}
+
+/// Whether an episode may appear in an evidence trail at all: within `origins` when given, and
+/// live at `t` when filtering. Unlike [`supports_list_a`], derived / answer content is citable
+/// (it cites but never corroborates, ADR-0752).
+fn citable(ep: &EpisodePassage, p: &GraphSearchParams, t: i64) -> bool {
+    let live_ok = !p.believed_only || episode_live_at(ep, t);
+    let origin_ok = p.origins.as_ref().is_none_or(|f| f.contains(&ep.origin));
+    live_ok && origin_ok
 }
 
 /// [`supports_list_a`]'s necessary conditions, checkable from a mention row's origin info alone:
@@ -1055,6 +1067,7 @@ fn run(
                 source_description: ep.passage.source_description.clone(),
                 origin: ep.origin,
                 admits_support,
+                citable: citable(&ep, p, t),
             },
         );
         // Derived / answer content never corroborates (ADR-0752), so it never adds rank here.
@@ -1211,17 +1224,24 @@ fn run(
             .collect();
         if let Some(uuid) = hit.uuid.strip_prefix("f:") {
             let f = &facts[uuid];
-            // A producing episode that no longer exists (absent from every fetch) is not
-            // evidence: it is left out rather than reported as a primary, corroborating source.
+            // Only episodes the caller may see are disclosed: one that no longer exists (absent
+            // from every fetch), lies outside `origins`, or (when filtering) is not live at
+            // `as_of` is left out, even when another producer of the same fact qualifies.
+            let shown = |u: &&String| ep_info.get(u.as_str()).is_some_and(|i| i.citable);
             let mut eps: Vec<SupportingEpisode> =
                 f.fe.edge
                     .episodes
                     .iter()
-                    .filter(|u| ep_info.contains_key(u.as_str()))
+                    .filter(shown)
                     .map(|u| supporting(u, None))
                     .collect();
             if let Some(cites) = citations.get(&key_of(&f.fe.edge)) {
-                eps.extend(cites.iter().map(|u| supporting(u, Some(false))));
+                eps.extend(
+                    cites
+                        .iter()
+                        .filter(shown)
+                        .map(|u| supporting(u, Some(false))),
+                );
             }
             let sup = support.get(uuid);
             results.push(GraphSearchResult {
@@ -1305,6 +1325,7 @@ fn note_plain_passage(
             source_description: ep.passage.source_description.clone(),
             origin: ep.origin,
             admits_support: supports_list_a(ep, p, t),
+            citable: citable(ep, p, t),
         },
     );
     passages
@@ -2012,6 +2033,7 @@ fn expand(
                     source_description: e.passage.source_description.clone(),
                     origin: e.origin,
                     admits_support: supports_list_a(e, p, t),
+                    citable: citable(e, p, t),
                 },
             );
         }
