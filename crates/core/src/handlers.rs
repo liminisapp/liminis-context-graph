@@ -451,7 +451,20 @@ enum StatusOutcome {
     },
 }
 
+/// `knowledge_status` wrapper: adds the additive top-level `search_min_score_default` (issue
+/// #812) to every response shape (degraded, queryable, not-queryable) in one place.
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
+    let mut result = handle_knowledge_status_inner(state).await?;
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert(
+            "search_min_score_default".to_string(),
+            serde_json::json!(crate::search_config::default_min_score()),
+        );
+    }
+    Ok(result)
+}
+
+async fn handle_knowledge_status_inner(state: Arc<AppState>) -> Result<Value, Error> {
     // Workspace-wide ontology/drift (unchanged since #446/ADR-0446 Decision 3, FR-008/FR-004).
     let ontology_summary = {
         let drift = state
@@ -2175,7 +2188,10 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
         .ok_or_else(|| Error::Ipc("query is required and must be non-empty".to_string()))?
         .to_string();
     let num_results = (p["num_results"].as_u64().unwrap_or(10) as usize).clamp(1, 100);
-    let min_score = p["min_score"].as_f64().unwrap_or(0.5).clamp(0.0, 1.0);
+    let min_score = p["min_score"]
+        .as_f64()
+        .unwrap_or_else(crate::search_config::default_min_score)
+        .clamp(0.0, 1.0);
     let group_ids = extract_optional_group_ids(&p["group_ids"]);
     let origins = crate::origin::parse_origins_param(p)?;
     // Retrieval mode (issue #789, FR-003): an unknown or non-string value is a validation error,

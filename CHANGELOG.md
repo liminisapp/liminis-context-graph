@@ -9,6 +9,16 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+### Added
+
+- **`LCG_SEARCH_MIN_SCORE`: configurable default `min_score` for `knowledge_search_passages`
+  (#812, ADR-0812).** The default floor used when a request omits `min_score` was a hard-coded 0.5,
+  which can let unrelated passages through for some embedders (#811). Operators can now set it per
+  service. Unset keeps 0.5 and results are unchanged. Values outside 0.0–1.0 are clamped; an empty,
+  non-numeric, `NaN` or infinite value fails startup. An explicit request `min_score` (including
+  `0.0`) always wins, and it applies to both `vector` and `hybrid` modes. `knowledge_status` gains
+  an additive top-level `search_min_score_default` field.
+
 ### Changed
 
 - **Behaviour change: `knowledge_search_passages` is belief-aware by default (#806, ADR-0806).**

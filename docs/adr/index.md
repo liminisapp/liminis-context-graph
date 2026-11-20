@@ -168,6 +168,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0796](0796-passage-rerank-and-query-expansion.md) | Passage Rerank and Query Expansion — Two Opt-in Stages, a Belief-Aware Blend, and an Honest Evidence Gap | 2026-11-18 |
 | [0802](0802-caller-supplied-query-variants-weighted-rrf.md) | Caller-Supplied Query Variants, Fused with Weighted RRF | 2026-11-18 |
 | [0806](0806-belief-aware-passage-ranking-default.md) | Belief-Aware Passage Ranking Is the Default | 2026-11-19 |
+| [0812](0812-search-min-score-env-default.md) | Operator-Configurable Default `min_score` for Passage Search | 2026-11-19 |
 
 ## Historical numbering
 
