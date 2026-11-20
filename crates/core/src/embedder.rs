@@ -590,6 +590,22 @@ pub trait Embedder: Send + Sync {
         })
     }
 
+    /// Embeds `texts` exactly as given: no layer of this stack applies a role instruction to them
+    /// (#797). `knowledge_graph_search` uses it to embed the bare query and the query with the
+    /// profile's instruction in one batch, so it gets both vectors from one model call.
+    ///
+    /// The default is [`Embedder::embed_batch`], which is correct for every embedder that applies
+    /// no instruction itself. An embedder that applies one (the [`InstructedEmbedder`] decorator,
+    /// [`OaiEmbedder`] in `embedder` mode) overrides this, and a wrapper delegates to its inner
+    /// embedder.
+    fn embed_batch_plain<'a>(
+        &'a self,
+        texts: &'a [&'a str],
+        role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
+        self.embed_batch(texts, role)
+    }
+
     /// Embedding dimension. Used when pre-populating DB rows in tests/benches.
     fn dim(&self) -> usize {
         768
@@ -664,6 +680,15 @@ impl Embedder for InstructedEmbedder {
             let refs: Vec<&str> = applied.iter().map(|c| c.as_ref()).collect();
             self.inner.embed_batch(&refs, role).await
         })
+    }
+
+    // The decorator is the layer that applies the instruction, so the plain path skips it.
+    fn embed_batch_plain<'a>(
+        &'a self,
+        texts: &'a [&'a str],
+        role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
+        self.inner.embed_batch_plain(texts, role)
     }
 
     fn dim(&self) -> usize {
@@ -897,11 +922,21 @@ impl OaiEmbedder {
         texts: &[&str],
         role: EmbedRole,
     ) -> Result<Vec<Vec<f32>>, Error> {
+        self.do_embed_batch_with(texts, self.input_type_for(role))
+            .await
+    }
+
+    /// [`Self::do_embed_batch`] with the wire `input_type` given explicitly: `None` asks the
+    /// embedder to apply no role instruction (the plain path, #797).
+    async fn do_embed_batch_with(
+        &self,
+        texts: &[&str],
+        input_type: Option<&'static str>,
+    ) -> Result<Vec<Vec<f32>>, Error> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
         let chunk_size = resolve_embed_batch_size()?;
-        let input_type = self.input_type_for(role);
         let chunk_results =
             futures::future::try_join_all(texts.chunks(chunk_size).map(|chunk| async move {
                 let resp = self
@@ -1304,6 +1339,17 @@ impl Embedder for OaiEmbedder {
         Box::pin(self.do_embed_batch(texts, role))
     }
 
+    // In `embedder` mode the backend applies the instruction when sent `input_type`; the plain
+    // path sends none. In every other mode `input_type` is never sent, so this equals
+    // `embed_batch`.
+    fn embed_batch_plain<'a>(
+        &'a self,
+        texts: &'a [&'a str],
+        _role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
+        Box::pin(self.do_embed_batch_with(texts, None))
+    }
+
     fn dim(&self) -> usize {
         self.dim
     }
@@ -1483,6 +1529,16 @@ impl Embedder for CountingEmbedder {
         self.batch_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.embed_batch(texts, role)
+    }
+
+    fn embed_batch_plain<'a>(
+        &'a self,
+        texts: &'a [&'a str],
+        role: EmbedRole,
+    ) -> BoxFuture<'a, Result<Vec<Vec<f32>>, Error>> {
+        self.batch_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.embed_batch_plain(texts, role)
     }
 
     fn dim(&self) -> usize {
@@ -1894,6 +1950,25 @@ mod tests {
             ]
         );
         assert!(seen.iter().all(|(_, r)| *r == EmbedRole::Document));
+    }
+
+    // #797: the plain path sends every text exactly as given, so a caller that prefixes one copy
+    // itself gets the bare and the instructed vector from one batch, never a double prefix.
+    #[tokio::test]
+    async fn plain_batch_skips_the_decorators_instruction() {
+        let (e, rec) = instructed(InstructionProfile::BgeV15);
+        let prefix = e.instructions().query_prefix;
+        let instructed_text = format!("{prefix}hello");
+        e.embed_batch_plain(&["hello", &instructed_text], EmbedRole::Query)
+            .await
+            .unwrap();
+        e.embed("hello", EmbedRole::Query).await.unwrap();
+        let seen = rec.seen.lock().unwrap();
+        let got: Vec<&str> = seen.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            got,
+            ["hello", instructed_text.as_str(), instructed_text.as_str()]
+        );
     }
 
     // FR-014: a prefix never turns skipped/blank text into a real embed request payload.

@@ -320,6 +320,14 @@ pub struct GraphSearchStats {
     /// `belief_aware: true` (#789), the best passage list measured on v2, with belief evaluated at
     /// `as_of`.
     pub passage_mode: &'static str,
+    /// The plain-passage lists that ran (stage `full` only), in fusion order: `passages` (vector,
+    /// query embedded with the profile's query instruction), `passages_raw` (vector, bare query;
+    /// only when the profile has a query instruction) and `passages_lexical` (BM25).
+    pub passage_lists: Vec<&'static str>,
+    /// Query embeddings computed: 2 when the profile has a query instruction (the bare and the
+    /// instructed query, from one `embed_batch`), 1 otherwise, 0 when nothing was embedded.
+    /// `embed_calls` counts model calls and stays at 1 either way.
+    pub query_vectors: usize,
     pub believed_only: bool,
     pub as_of: String,
     pub embed_calls: usize,
@@ -348,8 +356,8 @@ pub struct GraphSearchResponse {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Runs the graph-aware search. One embed call; every lookup on one connection in one
-/// blocking task, holding no lock (the search-read convention).
+/// Runs the graph-aware search. One embed call (see [`embed_query`]); every lookup on one
+/// connection in one blocking task, holding no lock (the search-read convention).
 pub async fn graph_search(
     db: Arc<Db>,
     embedder: Arc<dyn Embedder>,
@@ -360,16 +368,52 @@ pub async fn graph_search(
         return Ok(empty_response(&params, 0));
     }
     let t0 = Instant::now();
-    let embedding = embedder.embed(&params.query, EmbedRole::Query).await?;
+    let (embedding, raw) = embed_query(embedder.as_ref(), &params.query).await?;
     let embed = t0.elapsed();
     let mut r = tokio::task::spawn_blocking(move || -> Result<GraphSearchResponse, Error> {
         let conn = db.connect()?;
-        run(&conn, &params, &embedding)
+        run(&conn, &params, &embedding, raw.as_deref())
     })
     .await??;
     r.stats.timings_ms.embed = ms(embed);
     r.stats.timings_ms.total = ms(t0.elapsed());
     Ok(r)
+}
+
+/// Embeds the query for every vector leg in one model call, returning `(instructed, bare)`.
+///
+/// With a query instruction in effect, one [`Embedder::embed_batch_plain`] of
+/// `[query, prefix + query]` returns both vectors (#797): the instructed one feeds every graph
+/// stage and list (b)'s `passages`, the bare one only list (b)'s `passages_raw`. The instruction
+/// helps paraphrase and hurts named-entity lookups on v2, so the read keeps both. The instructed
+/// text is exactly what `embed(query, Query)` would send, so the instructed vector, and every
+/// stage built on it, is unchanged. Without an instruction there is one vector and one `embed`.
+pub async fn embed_query(
+    embedder: &dyn Embedder,
+    query: &str,
+) -> Result<(Vec<f32>, Option<Vec<f32>>), Error> {
+    let prefix = embedder.instructions().query_prefix;
+    if prefix.is_empty() || query.trim().is_empty() {
+        return Ok((embedder.embed(query, EmbedRole::Query).await?, None));
+    }
+    let instructed = format!("{prefix}{query}");
+    let texts = [query, instructed.as_str()];
+    let mut v = embedder.embed_batch_plain(&texts, EmbedRole::Query).await?;
+    if v.len() != 2 {
+        return Err(Error::Ipc(format!(
+            "embedder returned {} vectors for 2 query texts",
+            v.len()
+        )));
+    }
+    let instructed = v.pop().unwrap_or_default();
+    let bare = v.pop().unwrap_or_default();
+    // An embedder that ignores the instruction gives one vector twice; a second list would only
+    // double-count it in the fusion.
+    Ok(if bare == instructed {
+        (instructed, None)
+    } else {
+        (instructed, Some(bare))
+    })
 }
 
 fn empty_response(p: &GraphSearchParams, embed_calls: usize) -> GraphSearchResponse {
@@ -386,6 +430,8 @@ fn new_stats(p: &GraphSearchParams, embed_calls: usize) -> GraphSearchStats {
     GraphSearchStats {
         stages: p.stages.as_str(),
         passage_mode: "vector_belief",
+        passage_lists: vec![],
+        query_vectors: embed_calls,
         believed_only: p.believed_only,
         as_of: belief::format_us(p.as_of_us),
         embed_calls,
@@ -678,8 +724,16 @@ fn offer(sources: &mut BTreeMap<String, Source>, ep: &str, s: Source) {
 
 // ── The pipeline ──────────────────────────────────────────────────────────────
 
-fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearchResponse, Error> {
+fn run(
+    conn: &Conn<'_>,
+    p: &GraphSearchParams,
+    emb: &[f32],
+    raw_emb: Option<&[f32]>,
+) -> Result<GraphSearchResponse, Error> {
     let mut st = new_stats(p, 1);
+    if raw_emb.is_some() {
+        st.query_vectors = 2;
+    }
     let t = p.as_of_us;
     let gid_refs: Option<Vec<&str>> = p
         .group_ids
@@ -840,67 +894,40 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
     st.timings_ms.supporting = lap(&mut clock);
 
     // ── List (b): plain passages ──
-    let mut list_plain: Vec<(String, f64)> = Vec::new();
+    // Collected broadly (#797): vector search with the instructed and (when the profile has an
+    // instruction) the bare query, plus BM25 for names. Each is its own list in the fusion.
+    let mut plain: Vec<(&'static str, Vec<(String, f64)>)> = Vec::new();
     if p.stages == Stages::Full {
-        st.db_queries += 1;
-        // The group and origin filters run after the ANN probe, so oversample whenever either is
-        // set: otherwise a minority group's passages are crowded out of the nearest neighbours by
-        // other groups' and list (b) comes back short or empty.
-        let limit = list_cap * 3;
-        let probe = if gids.is_some() || p.origins.is_some() {
-            limit.saturating_mul(crate::db::KIND_ANN_OVERSAMPLE)
-        } else {
-            limit
-        };
-        let mut hits =
-            conn.vector_search_episodic_probed(emb, gids, limit, probe, p.origins.as_deref())?;
-        for h in &mut hits {
-            h.score = 1.0 - h.score;
+        let mut vectors: Vec<(&'static str, &[f32])> = vec![("passages", emb)];
+        if let Some(raw) = raw_emb {
+            vectors.push(("passages_raw", raw));
         }
-        hits.retain(|h| h.score.is_finite());
-        // Belief-aware ranking (#789, `belief_aware: true`), evaluated at `as_of`: a derived page
-        // ranks below the primary note it cites, a superseded passage below its successor. It runs
-        // over the whole over-drawn candidate set before the liveness filter and the cut, as
-        // `knowledge_search_passages` does, so a demoted passage is replaced, not just reshuffled.
-        if hits.len() > 1 {
-            st.db_queries += 1;
+        for (name, v) in vectors {
+            let list = vector_passage_list(
+                conn,
+                p,
+                v,
+                gids,
+                list_cap,
+                &mut ep_info,
+                &mut passages,
+                &mut st,
+            )?;
+            plain.push((name, list));
         }
-        let hits = crate::search::apply_belief_ranking_at(conn, hits, t)?;
-        let uuids: Vec<String> = hits.iter().map(|h| h.uuid.clone()).collect();
-        let rows = if uuids.is_empty() {
-            vec![]
-        } else {
-            st.db_queries += 1;
-            conn.get_episode_passages(&uuids, false)?
-        };
-        let by_uuid: HashMap<String, EpisodePassage> = rows
-            .into_iter()
-            .map(|r| (r.passage.uuid.clone(), r))
-            .collect();
-        for h in hits {
-            let Some(ep) = by_uuid.get(&h.uuid) else {
-                continue;
-            };
-            if p.believed_only && !episode_live_at(ep, t) {
-                continue;
-            }
-            if list_plain.len() == list_cap {
-                break;
-            }
-            ep_info.insert(
-                h.uuid.clone(),
-                EpInfo {
-                    source_description: h.source_description.clone(),
-                    origin: ep.origin,
-                    admits_support: supports_list_a(ep, p, t),
-                },
-            );
-            list_plain.push((format!("p:{}", h.uuid), h.score));
-            passages
-                .entry(h.uuid.clone())
-                .or_insert_with(|| (ep.clone(), h.score));
-        }
+        let list = lexical_passage_list(
+            conn,
+            p,
+            emb,
+            gids,
+            list_cap,
+            &mut ep_info,
+            &mut passages,
+            &mut st,
+        )?;
+        plain.push(("passages_lexical", list));
     }
+    st.passage_lists = plain.iter().map(|(n, _)| *n).collect();
 
     st.timings_ms.passages = lap(&mut clock);
 
@@ -908,11 +935,10 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
     let named: Vec<(&'static str, &Vec<(String, f64)>)> = match p.stages {
         Stages::Seeds => vec![("supporting", &list_support)],
         Stages::Expand => vec![("supporting", &list_support), ("facts", &list_facts)],
-        Stages::Full => vec![
-            ("supporting", &list_support),
-            ("passages", &list_plain),
-            ("facts", &list_facts),
-        ],
+        Stages::Full => std::iter::once(("supporting", &list_support))
+            .chain(plain.iter().map(|(n, l)| (*n, l)))
+            .chain(std::iter::once(("facts", &list_facts)))
+            .collect(),
     };
     let lists: Vec<&[(String, f64)]> = named.iter().map(|(_, l)| l.as_slice()).collect();
     let ranks: Vec<HashMap<&str, usize>> = named
@@ -924,7 +950,11 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
                 .collect()
         })
         .collect();
-    let fused: Vec<_> = rrf_fuse_scored(&lists).into_iter().take(k).collect();
+    // The whole fused candidate list is kept until the cut to `k`: a final reranking stage
+    // (#796) slots in here, reordering the head of `fused` before the cut, with belief ordering
+    // applied after it so a superseded passage never lands above its replacement.
+    let fused = rrf_fuse_scored(&lists);
+    let fused: Vec<_> = fused.into_iter().take(k).collect();
 
     // Support tallies for the returned facts (same shape as `knowledge_find_relationships`).
     let fact_keys: Vec<crate::origin_reads::EdgeKey> = fused
@@ -1063,6 +1093,163 @@ fn run(conn: &Conn<'_>, p: &GraphSearchParams, emb: &[f32]) -> Result<GraphSearc
         stats: st,
         seed_trace,
     })
+}
+
+/// Passage rows and their query similarity, for every passage any list may return.
+type PassageRows = HashMap<String, (EpisodePassage, f64)>;
+
+/// Records a plain-list passage for evidence and result assembly, unless already known.
+fn note_plain_passage(
+    ep: &EpisodePassage,
+    sim: f64,
+    p: &GraphSearchParams,
+    t: i64,
+    ep_info: &mut HashMap<String, EpInfo>,
+    passages: &mut PassageRows,
+) {
+    let uuid = &ep.passage.uuid;
+    ep_info.insert(
+        uuid.clone(),
+        EpInfo {
+            source_description: ep.passage.source_description.clone(),
+            origin: ep.origin,
+            admits_support: supports_list_a(ep, p, t),
+        },
+    );
+    passages
+        .entry(uuid.clone())
+        .or_insert_with(|| (ep.clone(), sim));
+}
+
+/// One vector plain-passage list: `knowledge_search_passages`' default ranking (vector with
+/// belief-aware ranking, #789/#806) for `emb`, with belief evaluated at `as_of`.
+#[allow(clippy::too_many_arguments)]
+fn vector_passage_list(
+    conn: &Conn<'_>,
+    p: &GraphSearchParams,
+    emb: &[f32],
+    gids: Option<&[&str]>,
+    list_cap: usize,
+    ep_info: &mut HashMap<String, EpInfo>,
+    passages: &mut PassageRows,
+    st: &mut GraphSearchStats,
+) -> Result<Vec<(String, f64)>, Error> {
+    let t = p.as_of_us;
+    st.db_queries += 1;
+    // The group and origin filters run after the ANN probe, so oversample whenever either is
+    // set: otherwise a minority group's passages are crowded out of the nearest neighbours by
+    // other groups' and the list comes back short or empty.
+    let limit = list_cap * 3;
+    let probe = if gids.is_some() || p.origins.is_some() {
+        limit.saturating_mul(crate::db::KIND_ANN_OVERSAMPLE)
+    } else {
+        limit
+    };
+    let mut hits =
+        conn.vector_search_episodic_probed(emb, gids, limit, probe, p.origins.as_deref())?;
+    for h in &mut hits {
+        h.score = 1.0 - h.score;
+    }
+    hits.retain(|h| h.score.is_finite());
+    // Belief-aware ranking (#789, `belief_aware: true`), evaluated at `as_of`: a derived page
+    // ranks below the primary note it cites, a superseded passage below its successor. It runs
+    // over the whole over-drawn candidate set before the liveness filter and the cut, as
+    // `knowledge_search_passages` does, so a demoted passage is replaced, not just reshuffled.
+    if hits.len() > 1 {
+        st.db_queries += 1;
+    }
+    let hits = crate::search::apply_belief_ranking_at(conn, hits, t)?;
+    let uuids: Vec<String> = hits.iter().map(|h| h.uuid.clone()).collect();
+    let rows = if uuids.is_empty() {
+        vec![]
+    } else {
+        st.db_queries += 1;
+        conn.get_episode_passages(&uuids, false)?
+    };
+    let by_uuid: HashMap<String, EpisodePassage> = rows
+        .into_iter()
+        .map(|r| (r.passage.uuid.clone(), r))
+        .collect();
+    let mut list = Vec::new();
+    for h in hits {
+        let Some(ep) = by_uuid.get(&h.uuid) else {
+            continue;
+        };
+        if p.believed_only && !episode_live_at(ep, t) {
+            continue;
+        }
+        if list.len() == list_cap {
+            break;
+        }
+        note_plain_passage(ep, h.score, p, t, ep_info, passages);
+        list.push((format!("p:{}", h.uuid), h.score));
+    }
+    Ok(list)
+}
+
+/// The BM25 plain-passage list (#797, "for names"): #789's lexical passage leg
+/// ([`crate::search::lexical_passage_list`]: sanitised query, group and origin filters in the
+/// query, empty when the FTS index is unavailable), with the same belief-aware ranking and
+/// liveness rule as the vector lists. A passage's reported similarity is its cosine against
+/// the instructed query, as for every other passage this read returns.
+#[allow(clippy::too_many_arguments)]
+fn lexical_passage_list(
+    conn: &Conn<'_>,
+    p: &GraphSearchParams,
+    emb: &[f32],
+    gids: Option<&[&str]>,
+    list_cap: usize,
+    ep_info: &mut HashMap<String, EpInfo>,
+    passages: &mut PassageRows,
+    st: &mut GraphSearchStats,
+) -> Result<Vec<(String, f64)>, Error> {
+    let t = p.as_of_us;
+    st.db_queries += 1;
+    let hits = crate::search::lexical_passage_list(
+        conn,
+        &p.query,
+        gids,
+        p.origins.as_deref(),
+        list_cap * 3,
+    )?;
+    if hits.is_empty() {
+        return Ok(vec![]);
+    }
+    let uuids: Vec<String> = hits.iter().map(|(u, _)| u.clone()).collect();
+    st.db_queries += 1;
+    let by_uuid: HashMap<String, EpisodePassage> = conn
+        .get_episode_passages_scored(&uuids, emb)?
+        .into_iter()
+        .map(|r| (r.passage.uuid.clone(), r))
+        .collect();
+    let rows: Vec<PassageResult> = hits
+        .iter()
+        .filter(|(_, score)| score.is_finite())
+        .filter_map(|(u, score)| {
+            by_uuid.get(u).map(|ep| PassageResult {
+                score: *score,
+                ..ep.passage.clone()
+            })
+        })
+        .collect();
+    if rows.len() > 1 {
+        st.db_queries += 1;
+    }
+    let ranked = crate::search::apply_belief_ranking_at(conn, rows, t)?;
+    let mut list = Vec::new();
+    for h in ranked {
+        let ep = &by_uuid[&h.uuid];
+        if p.believed_only && !episode_live_at(ep, t) {
+            continue;
+        }
+        if list.len() == list_cap {
+            break;
+        }
+        let sim = ep.similarity.unwrap_or(0.0).max(0.0);
+        note_plain_passage(ep, sim, p, t, ep_info, passages);
+        list.push((format!("p:{}", h.uuid), h.score));
+    }
+    Ok(list)
 }
 
 /// Stage 1: entity linking.

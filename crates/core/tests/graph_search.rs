@@ -633,6 +633,11 @@ fn fixture_with(populate: bool, with_derived: bool) -> Fx {
 
 /// A fixture populated by `populate` alone (for tests that need a graph of their own shape).
 fn fixture_built(populate: impl FnOnce(&Conn<'_>)) -> Fx {
+    fixture_built_with(populate, Arc::new(NameMapEmbedder::new(DIM, query_map())))
+}
+
+/// [`fixture_built`] with the query embedder given (it is still wrapped in a `CountingEmbedder`).
+fn fixture_built_with(populate: impl FnOnce(&Conn<'_>), inner: Arc<dyn Embedder>) -> Fx {
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap());
     {
@@ -641,7 +646,6 @@ fn fixture_built(populate: impl FnOnce(&Conn<'_>)) -> Fx {
         c.build_indices_and_constraints().unwrap();
         populate(&c);
     }
-    let inner: Arc<dyn Embedder> = Arc::new(NameMapEmbedder::new(DIM, query_map()));
     let embedder = Arc::new(CountingEmbedder::new(inner));
     let state = Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
@@ -1098,7 +1102,11 @@ async fn derived_restatement_cites_but_does_not_change_the_facts_rank() {
     let p = find(&a, "p:ep-kd")
         .unwrap_or_else(|| panic!("derived page surfaces via plain passages: {:?}", keys(&a)));
     assert!(!list_names(p).contains(&"supporting".to_string()), "{p}");
-    assert_eq!(list_names(p), vec!["passages".to_string()], "{p}");
+    // Only plain passage search returned it: the vector lists and/or BM25 (#797), never a graph
+    // list.
+    let names = list_names(p);
+    assert!(names.contains(&"passages".to_string()), "{p}");
+    assert!(names.iter().all(|n| n.starts_with("passages")), "{p}");
 }
 
 #[tokio::test]
@@ -1324,6 +1332,55 @@ async fn exactly_one_embed_call_per_request() {
     assert_eq!(r["stats"]["embed_calls"], 1);
     assert!(r["stats"]["db_queries"].as_u64().unwrap() > 0);
     assert_eq!(r["stats"]["passage_mode"], "vector_belief");
+}
+
+/// #797: with a query instruction in effect, the read embeds the bare and the instructed query in
+/// one batch and runs a plain-passage vector list for each. Here the instructed query points
+/// nowhere useful (the NOISE axis) and the bare one at the uptime note, so only the bare list can
+/// find it.
+#[tokio::test]
+async fn an_instructed_profile_adds_a_bare_query_list_from_the_same_model_call() {
+    use lcg_core::embedder::{InstructedEmbedder, InstructionConfig, InstructionProfile};
+    let eff = InstructionConfig {
+        profile: InstructionProfile::BgeV15,
+        ..Default::default()
+    }
+    .resolve(None)
+    .unwrap();
+    let mut map = query_map();
+    map.insert(format!("{}{Q_NONE}", eff.query_prefix), axis(NOISE));
+    let inner: Arc<dyn Embedder> = Arc::new(InstructedEmbedder::new(
+        Arc::new(NameMapEmbedder::new(DIM, map)),
+        eff,
+    ));
+    let fx = fixture_built_with(|c| build(c, true), inner);
+
+    let r = search(&fx, json!({"query": Q_NONE, "group_ids": [G]})).await;
+    assert_eq!(fx.embedder.call_count(), 0, "no single-text embed");
+    assert_eq!(
+        fx.embedder.batch_call_count(),
+        1,
+        "one batch: one model call"
+    );
+    assert_eq!(r["stats"]["embed_calls"], 1);
+    assert_eq!(r["stats"]["query_vectors"], 2);
+    assert_eq!(
+        r["stats"]["passage_lists"],
+        json!(["passages", "passages_raw", "passages_lexical"])
+    );
+    let up = find(&r, "p:ep-uptime")
+        .unwrap_or_else(|| panic!("the bare-query list finds the uptime note: {:?}", keys(&r)));
+    assert!(list_names(up).contains(&"passages_raw".to_string()), "{up}");
+
+    // Without an instruction there is one vector, one `embed`, and no bare list.
+    let plain = fixture();
+    let r = search(&plain, json!({"query": Q_NONE, "group_ids": [G]})).await;
+    assert_eq!(plain.embedder.call_count(), 1);
+    assert_eq!(r["stats"]["query_vectors"], 1);
+    assert_eq!(
+        r["stats"]["passage_lists"],
+        json!(["passages", "passages_lexical"])
+    );
 }
 
 // ── Edge cases ────────────────────────────────────────────────────────────────
