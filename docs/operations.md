@@ -779,7 +779,12 @@ The record is a database table (`EmbeddingZeroRow`), written in the same transac
 it describes, so it cannot name a row that was rolled back or miss one that was stored. A full
 rebuild (`knowledge_rebuild_from_wal` with `force_clear`, or `knowledge_delete_by_group`) resets
 it to that rebuild's own failures. An incremental replay that later embeds a recorded row
-successfully, or deletes it, clears its entry. Repair is a separate tool (which lists the rows
+successfully, or deletes it, clears its entry. "Deletes it" covers a replayed delete that names
+the row by a `uuid` param or a `uuids` list, and a replayed group purge (a `gids` list), which
+clears every entry of those groups; a delete of a relationship hop only (`RelatesToNode_` hop
+deletes) removes no row, so it leaves entries alone, and a delete by any other shape (for example a
+free-form `knowledge_query_cypher` mutation) is not recognised and can leave a stale entry, which
+the repair tool removes. Repair is a separate tool (which lists the rows
 with `Conn::list_zero_vector_rows` and removes entries with `Conn::remove_zero_vector_rows`);
 until it exists, a full rebuild against a healthy embedder re-embeds everything.
 

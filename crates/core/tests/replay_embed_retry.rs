@@ -397,6 +397,30 @@ fn missing_record_table_does_not_cost_graph_rows() {
     assert_eq!(db.connect().unwrap().count_nodes("Entity").unwrap(), 3);
 }
 
+// A replayed group purge (`WHERE n.group_id IN $gids DETACH DELETE n`) clears the group's entries;
+// a row created after the purge in the same window is a new row and keeps its entry.
+#[test]
+fn group_purge_clears_entries_but_not_later_rows() {
+    let fx = Fixture::new();
+    let mut lines = n_rows(3, |i| format!("entity-{i}"));
+    lines.push(wal_line(
+        3,
+        "MATCH (e:Entity) WHERE e.group_id IN $gids DETACH DELETE e",
+        serde_json::json!({ "gids": [GROUP] }),
+    ));
+    lines.push(wal_line(4, NAME_TEMPLATE, entity_params(9, "after-purge")));
+    write_wal(&fx.wal_dir, &lines);
+    let db = fx.open();
+    let failing: RecomputeEmbedFn = Box::new(|_t: &[&str]| Err(status_err("400 Bad Request")));
+    replay(&fx, &db, failing, fast_policy(0), 64, 0);
+    let conn = db.connect().unwrap();
+    assert_eq!(conn.count_nodes("Entity").unwrap(), 1);
+    assert_eq!(
+        conn.list_zero_vector_rows(GROUP, None).unwrap(),
+        vec![(ZeroKind::Name, "u9".to_string())]
+    );
+}
+
 // A bulk delete carrying a `uuids` list (`WHERE n.uuid IN $uuids`) clears every listed entry.
 #[test]
 fn bulk_delete_with_uuids_list_clears_entries() {

@@ -1283,6 +1283,10 @@ fn resolve_embed_window_with(
                     });
                 }
             }
+            let gids = deleted_group_ids(&row.params_map);
+            if !gids.is_empty() {
+                row_effects[row_idx].push(ZeroEffect::ClearGroups { group_ids: gids });
+            }
         }
     }
 
@@ -1708,6 +1712,21 @@ fn deleted_uuids(params: &serde_json::Map<String, serde_json::Value>) -> Vec<Str
         out.extend(list.iter().filter_map(|v| v.as_str()).map(str::to_string));
     }
     out
+}
+
+/// Group ids a DELETE-form mutation purges wholesale: a `gids` list param
+/// (`WHERE n.group_id IN $gids DETACH DELETE n`, the `delete_*_by_group_ids` / group-purge forms).
+fn deleted_group_ids(params: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    params
+        .get("gids")
+        .and_then(|v| v.as_array())
+        .map(|l| {
+            l.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Returns true if a `MATCH`-prefixed `template` is DELETE-form (`MATCH ... DETACH DELETE` /

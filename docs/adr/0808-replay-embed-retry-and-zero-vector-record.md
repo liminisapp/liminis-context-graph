@@ -93,7 +93,10 @@ rebuilds the database.
   `SET`s that are skipped (`embeddings_skip_rows`) and `MATCH`-prefixed rows that matched nothing —
   none stored a zero vector because the embedder failed (#526).
 - **Stale entries**: a successful recompute of a recorded `(kind, uuid)`, or a delete-form row for
-  that uuid, emits a `Clear`. To avoid a per-row `DELETE` across an 80k-row clean replay, `Clear`s
+  that uuid (a `uuid` param or a `uuids` list), emits a `Clear`, and a delete-form row carrying a
+  `gids` list (a replayed group purge) emits a `ClearGroups` that drops every entry of those
+  groups. Other delete shapes are not recognised (a relationship-hop delete removes no row;
+  free-form Cypher can leave a stale entry for the repair tool to remove). To avoid a per-row `DELETE` across an 80k-row clean replay, `Clear`s
   are only produced when the group's record was non-empty at the start of the run or an `Add` has
   happened since.
 - **Full rebuild**: `group_purge::purge_groups` (shared by `knowledge_delete_by_group` and the
