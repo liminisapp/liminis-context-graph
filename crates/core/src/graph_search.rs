@@ -1353,8 +1353,14 @@ fn seed_stage(
             .flatten()
             .fold(None, |m: Option<f64>, s| Some(m.map_or(s, |m| m.max(s))))
     };
+    // The best similarity among candidates that can be seeded at all: a missing row or a
+    // `Merged` tombstone must not raise the bar the margin is measured from.
     let global_best = fused
         .iter()
+        .filter(|h| {
+            rows.get(&h.uuid)
+                .is_some_and(|r| !r.labels.iter().any(|l| l == "Merged"))
+        })
         .filter_map(|h| best_vec(&h.raw))
         .fold(f64::NEG_INFINITY, f64::max);
 
@@ -1916,13 +1922,16 @@ fn expand(
                 // cited, but it carries the walk nowhere: it neither reaches its far endpoint nor
                 // enters the beam. Otherwise an agent-written page asserting "A relates to B"
                 // would pull B's primary notes into the ranking — rank from derived content,
-                // which ADR-0752 forbids.
-                if !s.citation_only {
+                // which ADR-0752 forbids. Likewise a fact not believed at `as_of` is never a step:
+                // with `believed_only: false` it may still be *returned*, with its belief state,
+                // but the walk never continues through it (FR-013), so a path breaks at it.
+                let walks = !s.citation_only && s.belief.believed;
+                if walks {
                     hop_edges.push((score, s.fe.edge.uuid.clone(), s.fe.far_uuid.clone()));
                 }
 
                 // The reached entity keeps its best same-hop path; earlier hops win outright.
-                if !s.citation_only && !visited.contains(&s.fe.far_uuid) {
+                if walks && !visited.contains(&s.fe.far_uuid) {
                     let better = reach.get(&s.fe.far_uuid).is_none_or(|r| score > r.score);
                     if better {
                         reach.insert(

@@ -115,7 +115,9 @@ results, and entities and facts often resolve to the same notes, so after de-dup
 than k distinct notes remain (multi-hop questions need two); and the merge is strict alternation,
 using no score. `lcg-entities-facts-rrf` sends the same two reads but asks each for k, lets each
 entity contribute at most 2 notes, skips unmapped results, reads facts with `believed_only=true`, and
-fuses the two note lists with RRF so a note both reads found rises. `lcg-entities-facts` itself is
+fuses the two note lists with RRF so a note both reads found rises; the evidence the grounded judge
+reads is merged the same way. An entity's 2 notes are its first two by note id: the entity read
+returns no per-note relevance to choose by. `lcg-entities-facts` itself is
 untouched, so historical numbers stay comparable.
 
 Measure the issue's acceptance criteria on v2 with a real embedder (the BGE-base sidecar the

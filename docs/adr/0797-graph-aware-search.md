@@ -84,7 +84,12 @@ the pairs actually present among entities (one `DISTINCT` scan of `Entity`): eve
 the groups the capped lists happened to fill from, and no key for a kind a group lacks. The key list
 is capped at 2,048. A cut drops the longest n-grams across all pairs alike, never whole groups, and
 is reported as an `exact_name_keys` truncation. Callers that need the latency budget should pass
-`group_ids`; omitting them costs the extra scan.
+`group_ids`; omitting them costs the extra scan. **Known trade-off:** because short n-grams go
+first, a store with very many `(group, kind)` pairs probes generic single words before long
+multi-word names, and one with more than 2,048 pairs probes none (exact seeding is skipped, and
+only the truncation says so). Name BM25 and the name vector still link such queries. Ordering keys
+by n-gram length the other way, or scoping the probe to the candidate lists' groups first, is a
+candidate follow-up once a large multi-group store is measured.
 
 Because an ANN probe always fills its k (#613, #629), RRF alone would always produce seeds and
 gibberish would seed the walk. A fused candidate is admitted only on real evidence:
@@ -99,7 +104,9 @@ Merged tombstones are dropped; under `origins`, a seed needs a matching live men
 up to 3 summary-vector seeds may follow (below), so a response carries **at most 8** seeds.
 There is **no fuzzy name matcher**: near-miss names are covered by BM25 and the name vector. A
 vector list is reported in a seed's `matched` only at or above the 0.5 floor, so filler is never
-presented as evidence.
+presented as evidence. The one exception is a summary-vector seed (below): it was admitted on the
+summary list's relative evidence, so it always names `summary_vector`, whatever its absolute
+similarity (which is reported alongside).
 
 **Summary-vector seeds, on relative evidence (#797 steer, 2026-11-19).** The first v2 run scored
 `lcg-graph-seeds` at 0.000 on paraphrase. A seed trace (`explain: true`, below) over the 40
@@ -197,8 +204,10 @@ on the tool. With neither `believed_only` nor `as_of`, the read filters at "now"
 `parse_belief_query`'s rules apply unchanged (`as_of` alone implies filtering; `believed_only: false`
 annotates without filtering).
 
-When filtering, an edge that is not believed at `as_of` is never a traversal step, so a path breaks
-at a superseded intermediate edge. Legacy edges and warranted edges are believed and traversable.
+An edge that is not believed at `as_of` is never a traversal step, so a path breaks at a superseded
+intermediate edge. That holds with `believed_only: false` too: the edge may then be **returned**,
+with its belief state, but the walk does not continue through it, so nothing is reached or ranked
+on the strength of a fact no longer believed (FR-013). Legacy edges and warranted edges are believed and traversable.
 Facts carry the full `BeliefAnnotation`.
 
 Passages had no liveness filter anywhere. This read defines one, `episode_live_at(ep, t) =

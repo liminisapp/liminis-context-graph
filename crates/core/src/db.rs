@@ -6335,6 +6335,12 @@ fn rust_cosine(a: &[f32], b: &[f32]) -> Option<f64> {
     if a.is_empty() || a.len() != b.len() {
         return None;
     }
+    // A zero vector has no direction: `cosine_similarity` reports 0.0, but the in-query
+    // `array_cosine_similarity` yields NaN/NULL (unscored), so match that.
+    let zero = |v: &[f32]| v.iter().all(|x| *x == 0.0);
+    if zero(a) || zero(b) {
+        return None;
+    }
     let s = cosine_similarity(a, b) as f64;
     s.is_finite().then_some(s)
 }

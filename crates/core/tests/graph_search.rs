@@ -984,6 +984,23 @@ async fn believed_only_false_returns_superseded_facts_with_their_state() {
     });
     assert_eq!(p["belief"]["state"], "superseded");
     assert_eq!(p["belief"]["believed"], false);
+    // Returned, but never a traversal step: a path may end at the superseded fact (the fact
+    // itself, or a passage it produced), never continue past it.
+    for x in results(&r) {
+        let path = x["evidence"]["path"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for (i, s) in path.iter().enumerate() {
+            if s["edge_uuid"] == "e-old" {
+                assert_eq!(
+                    i + 1,
+                    path.len(),
+                    "walk continued through superseded e-old: {x}"
+                );
+            }
+        }
+    }
 }
 
 // ── Story 4: evidence ─────────────────────────────────────────────────────────
@@ -1416,6 +1433,11 @@ async fn invalid_input_is_rejected() {
         json!({"query": "x", "stages": "everything"}),
         json!({"query": "x", "believed_only": "yes"}),
         json!({"query": "x", "origins": []}),
+        json!({"query": "x", "num_results": 0}),
+        // A wrongly typed `group_ids` must not silently widen the search to every group.
+        json!({"query": "x", "group_ids": 5}),
+        json!({"query": "x", "group_ids": {"a": 1}}),
+        json!({"query": "x", "group_ids": [5]}),
     ] {
         let v = raw(&fx, params.clone()).await;
         assert!(v.get("error").is_some(), "{params} must be rejected: {v}");

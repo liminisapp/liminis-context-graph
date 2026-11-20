@@ -1068,10 +1068,13 @@ impl Retriever for LcgGraph {
             let r = self.t.call("knowledge_graph_search", req).await?;
             let latency = t0.elapsed();
             if let Some(path) = trace {
-                append_trace(
+                // A diagnostic must never fail the measured query: report and carry on.
+                if let Err(e) = append_trace(
                     &path,
                     &json!({"config": self.id(), "query": q, "response": r}),
-                )?;
+                ) {
+                    eprintln!("warning: {e}; trace line dropped");
+                }
             }
             let (groups, evidence) =
                 map_graph_results(&items(&r, "results"), &self.map.episode_note);
@@ -1157,9 +1160,16 @@ impl Retriever for LcgEntitiesFactsRrf {
                     .flatten(),
             );
             let notes = lcg_core::search::rrf_fuse(&[&ent_notes, &fact_notes]);
+            // The grounded judge reads the head of `evidence`, so merge it the way the notes are
+            // merged (RRF), not by the strict alternation `lcg-entities-facts` uses.
+            let ranked = |v: &[String]| -> Vec<(String, f64)> {
+                v.iter().map(|e| (e.clone(), 0.0)).collect()
+            };
+            let evidence: Vec<String> =
+                lcg_core::search::rrf_fuse(&[&ranked(&ent_evidence), &ranked(&fact_evidence)]);
             Ok(RankedResult {
                 notes,
-                evidence: interleave(&ent_evidence, &fact_evidence),
+                evidence,
                 model_calls: Some(2),
                 service_calls: Some(2),
                 lookup_calls: 0,

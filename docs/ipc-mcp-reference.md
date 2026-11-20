@@ -535,7 +535,9 @@ changes.
    within 0.03 of the best summary similarity and at least 0.03 above that list's median. Both
    tests are relative, so a query that matches no summary well (a flat list) adds none. There is no
    separate fuzzy matcher: near-miss names are covered by BM25 and the name vector. When nothing is
-   admitted the response has `stats.no_seeds: true` and the results are plain passage search.
+   admitted the response has `stats.no_seeds: true`; with `stages: "full"` (the default) the results
+   are then plain passage search, and with `seeds` or `expand`, which run no plain passage list,
+   they are empty.
 2. **Expansion** (`expand`, `full`). Up to two hops from the seeds, one batched lookup per hop. Each
    fact is scored by the cosine of its fact embedding against the query, plus a small bonus for its
    rank in a full-text search over facts, and decays by 0.6 per hop beyond the first, so a one-hop
@@ -545,7 +547,8 @@ changes.
    walked twice. An edge produced only by derived or answer pages takes none of these slots. It
    has its own budget of 20 per entity (`per_entity_citations`), it is kept only to be cited, and it
    carries the walk nowhere. A fact that is not believed is never a step, so a path breaks at a
-   superseded edge. Legacy and warranted edges are believed and traversable, but have no
+   superseded edge; with `believed_only: false` such a fact can be returned, but the walk never
+   continues through it. Legacy and warranted edges are believed and traversable, but have no
    supporting passage.
 3. **Fusion.** RRF over these lists: `supporting` — passages that produced the selected facts or
    mention the seed and reached entities, scored by `path_score^0.25 ×` their own similarity to
@@ -612,7 +615,8 @@ summary_vector_rank?, name_similarity?, summary_similarity?, seeded, reason}`. R
 A result returned only by plain passage search has no `seeds`, `path` or `via`. A fact or passage
 reached several ways appears once and keeps its best path (`alternate_paths` counts the others).
 The path is in traversal order, from the seed outward, regardless of each edge's stored direction.
-A `matched` vector kind is reported only when its similarity is at least 0.5; the raw
+A `matched` vector kind is reported only when its similarity is at least 0.5, except that a seed
+admitted from the summary-vector list on relative evidence always names `summary_vector`; the raw
 `bm25_score`, `name_similarity` and `summary_similarity` are always reported. `stats.truncations`
 names any cap that cut the walk or the candidate pool. Every sort breaks ties by uuid, so the same
 graph, parameters and embedding give the same results in the same order.

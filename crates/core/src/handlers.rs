@@ -2466,10 +2466,22 @@ fn parse_graph_search_params(p: &Value) -> Result<crate::graph_search::GraphSear
         Value::Null => 10,
         v => v
             .as_u64()
+            .filter(|n| *n > 0)
             .ok_or_else(|| Error::Ipc("num_results must be a positive integer".to_string()))?
             as usize,
     }
-    .clamp(1, crate::graph_search::MAX_NUM_RESULTS);
+    .min(crate::graph_search::MAX_NUM_RESULTS);
+    // A wrongly typed `group_ids` must not read as "omitted" (every group): on a read that walks
+    // the graph that would silently widen its scope.
+    match &p["group_ids"] {
+        Value::Null | Value::String(_) => {}
+        Value::Array(a) if a.iter().all(Value::is_string) => {}
+        _ => {
+            return Err(Error::Ipc(
+                "group_ids must be a string or an array of strings".to_string(),
+            ))
+        }
+    }
     let stages = match &p["stages"] {
         Value::Null => crate::graph_search::Stages::Full,
         Value::String(s) => crate::graph_search::Stages::parse(s)?,
