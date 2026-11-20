@@ -85,6 +85,7 @@ fn make_state(db: Arc<Db>, wal_root: std::path::PathBuf) -> Arc<AppState> {
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
+        search_stages: Default::default(),
     })
 }
 
