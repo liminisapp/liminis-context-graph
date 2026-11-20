@@ -238,6 +238,9 @@ struct Ctx<'a, F> {
     budget: u32,
     results: Vec<Option<RequestResult>>,
     transient_failures: usize,
+    /// The most recent embedder error, so ranges failed for want of budget (never attempted) can
+    /// still name the underlying cause.
+    last_error: Option<String>,
     cancelled: bool,
 }
 
@@ -280,12 +283,13 @@ where
                 return;
             }
             if self.budget == 0 {
-                self.fail_range(
-                    lo,
-                    hi,
-                    "embed retry call budget exhausted for this window",
-                    true,
-                );
+                let msg = match &self.last_error {
+                    Some(e) => format!(
+                        "embed retry call budget exhausted for this window (last error: {e})"
+                    ),
+                    None => "embed retry call budget exhausted for this window".to_string(),
+                };
+                self.fail_range(lo, hi, &msg, true);
                 return;
             }
             let (err_msg, class) = match (self.embed_fn)(&self.texts[lo..hi]) {
@@ -306,6 +310,7 @@ where
                 Err(e) => (e.to_string(), classify_embed_error(&e)),
             };
 
+            self.last_error = Some(err_msg.clone());
             // Only a *transient* failure — the slow kind: a timeout or a dead connection — spends
             // the window budget. Successes and permanent errors return promptly and are bounded
             // structurally (a permanent error splits at most once per tree node, so at most
@@ -317,12 +322,15 @@ where
                 // The budget is spent: the next loop iteration would fail this range without a
                 // call, so skip the (up to `cap_ms`) backoff sleep and fail it now.
                 if self.budget == 0 {
-                    self.fail_range(
-                        lo,
-                        hi,
-                        "embed retry call budget exhausted for this window",
-                        true,
-                    );
+                    // Keep the real embedder error — the only per-row diagnostic once the log
+                    // cap is reached. With retries off (configured, or an open breaker's single
+                    // probe) no *retry* budget was involved, so the error stands alone.
+                    let msg = if self.policy.retries == 0 {
+                        err_msg
+                    } else {
+                        format!("{err_msg} (window retry budget exhausted)")
+                    };
+                    self.fail_range(lo, hi, &msg, true);
                     return;
                 }
             }
@@ -397,6 +405,7 @@ where
         budget: effective.call_budget(texts.len()),
         results: (0..texts.len()).map(|_| None).collect(),
         transient_failures: 0,
+        last_error: None,
         cancelled: false,
     };
     ctx.solve(0, texts.len());
@@ -606,6 +615,33 @@ mod tests {
         assert!(out.iter().all(|r| r.is_err()));
         assert_eq!(calls.get(), policy(4).call_budget(64));
         assert!(breaker.is_open());
+    }
+
+    #[test]
+    fn failures_keep_the_real_embedder_error_when_the_budget_is_spent() {
+        let texts: Vec<String> = (0..64).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let real = "UDS send request: timed out after 30000ms";
+
+        // Dead embedder, retries on: the call that spends the budget keeps its error.
+        let (out, _) = run(&refs, policy(4), |_| Err(timeout_err()));
+        for r in &out {
+            let msg = r.as_ref().unwrap_err();
+            assert!(msg.contains(real), "{msg}");
+        }
+
+        // Retries off (single call) and an open breaker's single probe: no budget wording at all.
+        let (out, _) = run(&refs, policy(0), |_| Err(timeout_err()));
+        assert!(out.iter().all(|r| {
+            let m = r.as_ref().unwrap_err();
+            m.contains(real) && !m.contains("budget")
+        }));
+        let mut breaker = RetryBreaker { open: true };
+        let out = run_with(&refs, policy(4), &mut breaker, |_| Err(timeout_err()));
+        assert!(out.iter().all(|r| {
+            let m = r.as_ref().unwrap_err();
+            m.contains(real) && !m.contains("budget")
+        }));
     }
 
     #[test]
