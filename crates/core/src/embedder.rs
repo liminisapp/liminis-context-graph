@@ -143,6 +143,10 @@ async fn dial_uds(path: &str) -> Result<UdsSender, Error> {
 /// apart (issue #808) — the status code follows the prefix, e.g. `"... status 503 Service
 /// Unavailable"`.
 const UDS_STATUS_ERROR_PREFIX: &str = "UDS embedder returned status ";
+/// Prefix of the error produced when reading the response body fails after the headers arrived
+/// (a reset or truncated body — a sidecar crash/restart mid-response). Shared with
+/// `classify_embed_error`, which treats it as transient (issue #808).
+const UDS_BODY_ERROR_PREFIX: &str = "UDS read response body: ";
 
 /// Distinguishes a `send_request` failure (the held connection is dead — the
 /// sidecar restarted, idle-closed the socket, etc. — worth one re-dial) from
@@ -194,7 +198,7 @@ async fn send_and_read_uds(
         .into_body()
         .collect()
         .await
-        .map_err(|e| UdsAttemptError::Other(Error::Ipc(format!("UDS read response body: {e}"))))?
+        .map_err(|e| UdsAttemptError::Other(Error::Ipc(format!("{UDS_BODY_ERROR_PREFIX}{e}"))))?
         .to_bytes();
 
     serde_json::from_slice(&bytes)
@@ -1107,7 +1111,9 @@ fn is_transient_status(code: u16) -> bool {
 ///   connect or request-send failure ([`is_transport_error`]'s set), or its status is 5xx/429.
 /// - UDS path (flattened `Error::Ipc(String)`): transient for the stable
 ///   `UDS connect` / `UDS HTTP/1.1 handshake` / `UDS send request` prefixes
-///   ([`is_transport_error`]) and for `UDS embedder returned status N` with N ≥ 500 or N == 429.
+///   ([`is_transport_error`]), for `UDS read response body` (a connection reset or truncated body
+///   after the headers arrived, [`UDS_BODY_ERROR_PREFIX`]) and for
+///   `UDS embedder returned status N` with N ≥ 500 or N == 429.
 ///   The status message is built from [`UDS_STATUS_ERROR_PREFIX`], shared with the producer, and
 ///   pinned by tests.
 /// - Everything else is permanent.
@@ -1118,6 +1124,7 @@ pub fn classify_embed_error(e: &Error) -> EmbedErrorClass {
         }
         Error::Ipc(msg) => {
             is_transport_error(e)
+                || msg.starts_with(UDS_BODY_ERROR_PREFIX)
                 || msg
                     .strip_prefix(UDS_STATUS_ERROR_PREFIX)
                     .and_then(|rest| rest.split_whitespace().next())
@@ -1696,6 +1703,8 @@ mod tests {
             "UDS HTTP/1.1 handshake: unexpected eof",
             "UDS send request: connection closed",
             "UDS send request: timed out after 30000ms",
+            // Connection reset / truncated body after the headers arrived (sidecar restart).
+            "UDS read response body: connection reset by peer",
         ] {
             assert_eq!(
                 classify_embed_error(&Error::Ipc(msg.to_string())),
@@ -1710,7 +1719,6 @@ mod tests {
         for msg in [
             "embedding response shape mismatch: expected 2 vectors, got 1",
             "parse UDS embed response: expected value at line 1 column 1",
-            "UDS read response body: boom",
             "recomputed embedding has 3 components but the configured embedding dimension is 4",
         ] {
             assert_eq!(
