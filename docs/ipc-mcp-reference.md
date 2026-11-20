@@ -505,8 +505,10 @@ follows a relationship, so a question such as "what does Cedar Core's supplier c
 Cedar Core but never reaches the supplier's price, and a question that only describes an entity
 ("the initiative covering shift rostering") rarely reaches it. `knowledge_graph_search` composes
 them into one deterministic read: it links the query to seed entities, walks their relationships,
-applies belief time, and fuses what it finds with plain passage search. It makes **one** query
-embedding and **no** LLM call. It is opt-in: no existing read changes.
+applies belief time, and fuses what it finds with plain passage search. It makes **one** embedding
+model call and **no** LLM call. When the embedding profile has a query instruction, that one call
+embeds both the bare query and the instructed query (see Fusion). It is opt-in: no existing read
+changes.
 
 **Parameters**
 
@@ -545,14 +547,20 @@ embedding and **no** LLM call. It is opt-in: no existing read changes.
    carries the walk nowhere. A fact that is not believed is never a step, so a path breaks at a
    superseded edge. Legacy and warranted edges are believed and traversable, but have no
    supporting passage.
-3. **Fusion.** RRF over three lists: `supporting` — passages that produced the selected facts or
+3. **Fusion.** RRF over these lists: `supporting` — passages that produced the selected facts or
    mention the seed and reached entities, scored by `path_score^0.25 ×` their own similarity to
    the query, so a passage's own relevance decides and the path only tilts it; `passages` — plain
    passage search (`full` only): `knowledge_search_passages` with `mode: "vector"` and
    `belief_aware: true`, evaluated at `as_of`, reported as `stats.passage_mode: "vector_belief"`. A
    derived page ranks below the primary note it cites, and a superseded passage below its
-   successor; hybrid stays unused here, see ADR-0789. And `facts` — the selected facts by path
-   score. `seeds` fuses only the `supporting` list restricted to passages mentioning a seed.
+   successor. This list uses the query embedded with the profile's query instruction, as every
+   graph stage does. `passages_raw` (`full`, only when the profile has a query instruction) — the
+   same search for the **bare** query. The instruction helps descriptive questions but hurts
+   named-entity lookups, so the read keeps both. `passages_lexical` (`full`) — BM25 over passage
+   text, for names, with the same belief-aware ranking and liveness rule. And `facts` — the selected
+   facts by path score. `stats.passage_lists` names the plain lists that ran, in fusion order.
+   `seeds` fuses only the `supporting` list restricted to passages mentioning a seed; `expand` fuses
+   `supporting` and `facts`.
 
 **Derived content cites but never corroborates** (ADR-0752). A `derived` or `answer` passage never
 enters the `supporting` list, and a fact whose only producing episodes are derived or answer is
@@ -573,7 +581,7 @@ search.
    "belief": {...},                      // facts: the full belief annotation; passages: {state, believed, supersession?} (state may be pending_revision)
    "support": {...}, "corroboration": 1, // facts: as knowledge_find_relationships
    "evidence": {
-     "lists": [{"list": "supporting" | "passages" | "facts", "rank": 1, "score": 0.61}],
+     "lists": [{"list": "supporting" | "passages" | "passages_raw" | "passages_lexical" | "facts", "rank": 1, "score": 0.61}],
      "seeds": [{"uuid", "name", "group_id", "kind", "score", "matched": ["name", "bm25", "name_vector", "summary_vector"], ...}],
      "path": [{"edge_uuid", "relation", "fact", "from_uuid", "from_name", "to_uuid", "to_name", "hop"}],
      "supporting_episodes": [{"uuid", "source_description", "origin", "corroborating"}],
@@ -584,10 +592,15 @@ search.
  "count": 1,
  "seeds": [...],
  "seed_trace": [...],                   // only with explain: true
- "stats": {"stages", "passage_mode", "believed_only", "as_of", "embed_calls": 1, "db_queries",
+ "stats": {"stages", "passage_mode", "passage_lists": ["passages", "passages_raw", "passages_lexical"],
+           "query_vectors": 2, "believed_only", "as_of", "embed_calls": 1, "db_queries",
            "seed_candidates", "seeds", "expanded_edges", "hops", "truncated", "truncations": [{"cap", "limit"}],
            "no_seeds", "timings_ms": {"embed", "seeds", "expand", "supporting", "passages", "fusion", "total"}}}
 ```
+
+`stats.query_vectors` is 2 when the bare and the instructed query were both embedded (from one
+model call, so `embed_calls` is still 1) and 1 otherwise. A list's `score` in `evidence.lists` is that
+list's own raw score: a cosine for the vector lists, a BM25 score for `passages_lexical`.
 
 `stats.timings_ms` is wall-clock time per stage, in milliseconds. It is the one part of the response
 that differs between two identical requests; the results themselves are deterministic. A

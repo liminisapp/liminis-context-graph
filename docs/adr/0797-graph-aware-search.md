@@ -18,6 +18,10 @@ would have to orchestrate five RPCs and three embeddings itself.
 Constraints: no query-time LLM; one embed call (FR-006); p50 ≤ 100 ms at k = 10; no change to any
 existing read, response, default, schema or WAL format (FR-002); deterministic (FR-005).
 
+The maintainer later **dropped the 100 ms target** (steer of 2026-11-19): these are deliberate agent
+searches, not thousands a second. The budget is now **p50 ≤ 500 ms including the rerank stage**
+(§6, #796), and the read keeps reporting per-stage timings in `stats.timings_ms`.
+
 ## Decision
 
 ### 1. A new opt-in read, `knowledge_graph_search`
@@ -123,6 +127,11 @@ That was eight runs of a small grid, on a local harness that computes nDCG@10 as
 without the judge. So v2 gains on paraphrase and multi-hop from these two changes are partly
 in-sample. They are evidence the mechanism works, not an independent acceptance test. A held-out
 check needs either a v2 split fixed before tuning, or a fresh corpus.
+
+**The holdout rule from here on** (steer of 2026-11-19): any *new* constant — the rerank pool size,
+blend weights, list weights — is tuned on v2 only, and **v1 is the holdout**: v1 is reported for the
+final settings and never tuned on. The broad-collection change (§6(b)) adds no tuned constant: its
+new lists enter the fusion unweighted, at the same `max(3k, 30)` cap as every other list.
 
 **`explain: true`** adds `seed_trace` to the response: every fused candidate with its rank in each
 list, its similarities, whether it was seeded, and why (`exact_name`, `bm25_rank`, `vector`,
@@ -250,6 +259,25 @@ RRF (k = 60) over three lists, each capped at `max(3k, 30)`, keyed `p:<episode>`
   ranking is the same as `knowledge_search_passages`', over a larger candidate pool. That read itself is
   unchanged (FR-002): it still oversamples only under `origins`. Its own minority-group recall is a
   candidate follow-up, through the new `vector_search_episodic_probed` primitive this read uses.
+- **(b′) `passages_raw`** — the same vector list for the **bare** query, run only when the
+  embedding profile has a query instruction (steer of 2026-11-19, "collect broadly"). On v2 the
+  BGE instruction doubles vector paraphrase (0.150 → 0.281) but hurts named-entity passage lookups
+  (0.477 → 0.343), so the read keeps both instead of choosing. Both vectors come from **one** model
+  call: `embed_query` sends `[query, prefix + query]` through the new
+  `Embedder::embed_batch_plain`, which no layer of the stack instruction-prefixes (the
+  `InstructedEmbedder` decorator skips itself; `OaiEmbedder` in `embedder` mode sends no
+  `input_type`). The instructed text is exactly what `embed(query, Query)` sends, so the instructed
+  vector — and every graph stage built on it — is byte-identical to before. If the two vectors
+  come back identical, the bare list is dropped rather than double-counted. Under profile `none`
+  there is one vector and one `embed`, as before.
+- **(b″) `passages_lexical`** — BM25 over passage content, for names: #789's lexical leg
+  (`search::lexical_passage_list`, with `sanitize_fts_query`, the group and origin filters in the
+  query, and an empty list when the FTS index is unavailable), followed by the same belief-aware
+  ranking at `as_of` and the same liveness rule as the vector lists. Each passage still reports its
+  cosine against the instructed query as its similarity.
+
+  `stats.passage_lists` names the plain lists that ran, in fusion order, and `stats.query_vectors`
+  is 2 when the bare vector was computed. `embed_calls` stays 1.
 - **(c) `facts`** — the selected facts by path score.
 
 **Derived content cites but never corroborates (ADR-0752).** A `derived`/`answer` passage never
@@ -269,7 +297,8 @@ Every result carries `evidence`: the contributing lists with rank and raw score;
 results the root seed (with match kinds and raw BM25/similarities), the ordered path in traversal
 direction, supporting episodes (source and origin), `via` (fact or mention) and `warrant`. A result
 from list (b) only has no seeds or path. `stats` reports the stage, passage mode, belief settings,
-`embed_calls` (1), `db_queries`, candidate/seed/edge counts, hops, truncations, `no_seeds`, and
+`passage_lists`, `query_vectors`, `embed_calls` (1), `db_queries`, candidate/seed/edge counts, hops,
+truncations, `no_seeds`, and
 `timings_ms` — wall-clock milliseconds for `embed`, `seeds`, `expand`, `supporting`, `passages`,
 `fusion` and `total`. Timings are reported, never ranked on, so they are the one part of the
 response that differs between two identical requests.
@@ -277,7 +306,8 @@ response that differs between two identical requests.
 Every sort breaks ties by key or uuid; hash-map iteration never reaches output order.
 
 `stages` (`seeds` / `expand` / `full`, default `full`) switches stages off for ablation (FR-018):
-`seeds` fuses list (a) restricted to seed mentions; `expand` fuses (a) and (c); `full` adds (b). It
+`seeds` fuses list (a) restricted to seed mentions; `expand` fuses (a) and (c); `full` adds the plain
+lists (b), (b′) and (b″). It
 is exposed on IPC and MCP alike, so the two transports stay aligned; the other constants stay
 internal.
 
@@ -322,18 +352,30 @@ difference.
 
   The beam size barely matters (5 vs 10: 109 vs 115 ms before the scoring change). Batching the hub
   mention queries into one is the next lever, at the cost of loading all of a hub's mention rows.
+
+  The target is now p50 ≤ 500 ms including rerank (Context). The broad-collection lists (§6(b′),
+  (b″)) add a second vector probe, one FTS query and their row fetches, a few milliseconds each,
+  and no model call: the bare vector rides in the same embed batch. That cost is not yet measured
+  on v2.
 - The success criteria (SC-001–SC-007) need a run on v2 with a real embedder; they are not provable
   in unit tests, which use hand-chosen vectors.
 - #789 has merged with hybrid passage search opt-in, because it scored below vector on v2
   (ADR-0789). List (b) therefore keeps vector retrieval, with #789's belief-aware ranking layered on
   top (`belief_aware: true`, evaluated at `as_of`; §6). Since #806 (ADR-0806) that *is*
   `knowledge_search_passages`' shipped default, which the `lcg-passages` eval row measures. So
-  `lcg-graph` against `lcg-passages` isolates what the graph stages add; `lcg-passages-raw`
-  (cosine only) shows what the belief rules add on their own. List (b) still sends `as_of`, which
-  the default passage read does not take. Switching list (b) to the
-  weighted-RRF hybrid list, and the private `fts_terms` sanitiser to `sanitize_fts_query`, are
-  follow-ups to measure on the v2 rows, not assumed wins.
-- #796's reranker can sit on top as a final stage.
+  `lcg-graph`'s vector list `passages` matches what `lcg-passages` measures, but since the
+  broad-collection change `full` also fuses the bare-query and BM25 lists, so `lcg-graph` against
+  `lcg-passages` measures the graph stages *and* the broader passage collection together;
+  `lcg-passages-raw` (cosine only) shows what the belief rules add on their own. List (b) still
+  sends `as_of`, which the default passage read does not take. BM25 enters as its own RRF list
+  rather than through #789's weighted-RRF hybrid list. Moving the seed and edge FTS legs' private
+  `fts_terms` sanitiser to `sanitize_fts_query` is a follow-up.
+- #796's reranker plugs in as one final stage: `run` keeps the whole fused candidate list until the
+  cut to `k`, and the reranker reorders its head there (steer: start at the top 40, blended with the
+  fusion rank as #796 does). Belief ordering is applied **after** the rerank, so a superseded
+  passage never lands above its replacement — qmd-rerank loses temporal (0.529 → 0.335) because
+  its reranker ignores time. That stage, and the `lcg-graph-rerank` / `lcg-graph-seeds-rerank`
+  eval configs, wait for #796 (PR #800) to merge.
 
 ## Rejected alternatives
 

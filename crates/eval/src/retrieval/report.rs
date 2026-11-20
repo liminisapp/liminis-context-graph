@@ -670,8 +670,8 @@ impl Report {
         }
         let _ = writeln!(o, "## Graph-aware search (#797)\n");
         if graph {
-            let _ = writeln!(o, "- `lcg-graph*` drive `knowledge_graph_search` (one service call, one query embedding, no LLM). Ablation rows: `lcg-graph-seeds` = passages mentioning the linked seed entities only; `lcg-graph-expand` = + two-hop expansion (supporting passages and facts); `lcg-graph` = + plain passage search, fused with RRF.");
-            let _ = writeln!(o, "- The plain-passage list inside `lcg-graph` is `knowledge_search_passages` with `mode: \"vector\"` and `belief_aware: true` (#789), the best passage list measured on v2; hybrid scored below vector (ADR-0789). Each response reports it as `stats.passage_mode`.");
+            let _ = writeln!(o, "- `lcg-graph*` drive `knowledge_graph_search` (one service call, one embedding model call, no LLM). Ablation rows: `lcg-graph-seeds` = passages mentioning the linked seed entities only; `lcg-graph-expand` = + two-hop expansion (supporting passages and facts); `lcg-graph` = + plain passage search, fused with RRF.");
+            let _ = writeln!(o, "- `lcg-graph` fuses plain passages as separate lists: `knowledge_search_passages`' ranking (`mode: \"vector\"`, `belief_aware: true` (#789)) for the instructed query, the same for the bare query when the embedding profile has a query instruction (both vectors from one model call), and BM25 over passage text. Each response reports them as `stats.passage_lists`.");
             let _ = writeln!(o, "- `knowledge_graph_search` is believed-only by default: superseded facts and passages are neither returned nor traversed.");
             let _ = writeln!(
                 o,

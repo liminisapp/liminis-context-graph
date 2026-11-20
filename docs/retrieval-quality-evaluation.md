@@ -68,20 +68,30 @@ configuration's ranking are unchanged.
 
 | Configuration | What runs |
 |---|---|
-| `lcg-graph` | `knowledge_graph_search` (ADR-0797), full pipeline: seed entities → two-hop expansion → RRF over supporting passages, plain passages and facts. One service call and one query embedding per question; believed-only by default. |
+| `lcg-graph` | `knowledge_graph_search` (ADR-0797), full pipeline: seed entities → two-hop expansion → RRF over supporting passages, the plain passage lists and facts. One service call and one embedding model call per question; believed-only by default. |
 | `lcg-graph-expand` | Ablation row: `stages=expand` — seeds + expansion, no plain passage list. |
 | `lcg-graph-seeds` | Ablation row: `stages=seeds` — only passages that mention a linked seed entity. |
 | `lcg-entities-facts-rrf` | A fairer merge of the same two reads as `lcg-entities-facts` (below). |
 
 Read the three `lcg-graph*` rows together: `seeds` → `expand` is what traversal adds, `expand` →
-`full` is what fusing in plain passage search adds. The plain-passage list inside `lcg-graph` is
-`knowledge_search_passages` with `mode: "vector"` and `belief_aware: true` (#789), the best passage
-list measured on v2. Hybrid passage search scored below vector on v2 and is not used. Each response
-reports the mode as `stats.passage_mode` (`vector_belief`). Since #806 that is the shipped default
-`lcg-passages` measures, so `lcg-graph` against `lcg-passages` shows what the graph stages add on
-their own; `lcg-passages-raw` (cosine only) shows what the belief rules add. The local reranker
-(#796) has not
-landed, so the report states it was not measured.
+`full` is what fusing in plain passage search adds. `full` collects plain passages broadly, each as
+its own RRF list:
+- `passages`: `knowledge_search_passages`' default ranking (vector with `belief_aware: true`,
+  #789/#806) for the query embedded with the profile's query instruction;
+- `passages_raw`: the same for the bare query, only when the profile has a query instruction
+  (`bge-v1.5` does, `none` does not). Both vectors come from one model call;
+- `passages_lexical`: BM25 over passage text, for names.
+
+Each response reports them as `stats.passage_lists`, and `stats.query_vectors` is 2 when the bare
+query was embedded too. The `passages` list is what `lcg-passages` measures, so `lcg-graph`
+against `lcg-passages` shows what the graph stages and the broader passage collection add
+together; `lcg-passages-raw` (cosine only) shows what the belief rules add. The local reranker
+(#796) has not landed, so the report states it was not measured.
+
+**Latency budget and tuning.** The ≤ 100 ms target was dropped (steer of 2026-11-19). The budget
+is p50 ≤ 500 ms including the rerank stage once #796 lands. Any new tuning constant is tuned on v2
+only. **v1 is the holdout**: run it for the final settings and do not tune on it. The
+broad-collection lists add no tuned constant.
 
 **Diagnosing seed linking.** Set `LCG_EVAL_GRAPH_TRACE=<file.jsonl>` to have every `lcg-graph*`
 request sent with `explain: true` and its full response appended as one JSON line,
