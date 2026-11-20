@@ -580,7 +580,7 @@ search.
    "kind": "fact" | "passage",
    "score": 0.0328,                      // fused RRF score: ordering only
    "fact": {...},                        // kind = fact: the relationship, with `episodes`
-   "passage": {...},                     // kind = passage: as knowledge_search_passages; score = similarity
+   "passage": {...},                     // kind = passage: as knowledge_search_passages; score = cosine vs the instructed query
    "belief": {...},                      // facts: the full belief annotation; passages: {state, believed, supersession?} (state may be pending_revision)
    "support": {...}, "corroboration": 1, // facts: as knowledge_find_relationships
    "evidence": {

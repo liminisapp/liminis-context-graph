@@ -254,7 +254,7 @@ A client that never calls the new read — the Notes app over the socket, an MCP
 
 **Stage 1 — seed entities (entity linking)**
 
-- **FR-007**: The read MUST identify seed entities for the query by combining at least three kinds of evidence: exact/fuzzy name matching, BM25 over entity names and summaries, and vector similarity between the query and entity summaries.
+- **FR-007**: The read MUST identify seed entities for the query by combining at least three kinds of evidence: exact/fuzzy name matching, BM25 over entity names and summaries, and vector similarity between the query and entity summaries. *(As implemented, ADR-0797 §3: "fuzzy" name matching is provided by entity BM25 and the name vector; there is no separate fuzzy matcher.)*
 - **FR-008**: Seeds MUST be scored and capped, so that a query matching many entities still yields a bounded seed set.
 
 **Stage 2 — neighbourhood expansion**
@@ -302,7 +302,7 @@ All measured with `lcg-eval retrieval` on the v2 corpus (final, corrected labels
 - **SC-003**: `lcg-graph` overall nDCG@10 exceeds `lcg-passages`.
 - **SC-004**: `lcg-graph` temporal nDCG@10 is no worse than `lcg-passages`: the paired interval includes or exceeds zero.
 - **SC-005**: Direct, answer and passage nDCG@10 do not regress against `lcg-passages`: each paired interval includes or exceeds zero.
-- **SC-006**: `lcg-graph` warm p50 latency is ≤ 100 ms per query at k = 10, including the query embedding. The report shows service calls per query (target: 1) and model calls per query (target: 1).
+- **SC-006**: `lcg-graph` warm p50 latency is ≤ 100 ms per query at k = 10, including the query embedding. The report shows service calls per query (target: 1) and model calls per query (target: 1). *(Superseded by the maintainer steer of 2026-11-19: the 100 ms target is dropped; the budget is p50 ≤ 500 ms including the rerank stage. See ADR-0797, Context.)*
 - **SC-007**: The report shows ablation rows (seeds only, + expansion, + fusion), so each stage's gain per category is visible.
 - **SC-008**: Clients that don't call the new read see no difference: existing read, IPC-parity and MCP registry tests pass with only additive changes, and existing eval configurations produce unchanged rankings on the same corpus and build.
 - **SC-009**: Every `lcg-graph` result in the v2 run carries an evidence trail, and every graph-reached result names a seed, a path and (unless the edge is legacy or warranted) a supporting episode that exist in the graph.

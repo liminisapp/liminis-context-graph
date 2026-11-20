@@ -1157,6 +1157,47 @@ async fn derived_only_bridge_is_not_traversed_into_primary_passages() {
             "no result's path crosses the derived-only edge: {x}"
         );
     }
+
+    // Positive control: the same shape with a *primary* bridge note does carry the walk to
+    // Quill Partner, so the absences above are the origin rule at work, not an empty walk.
+    let ctl = fixture_built(|c| {
+        entity(c, "heron", "Heron Desk", G, SUMMARY);
+        entity(c, "quill", "Quill Partner", G, SUMMARY);
+        simple_ep(
+            c,
+            "ep-hd",
+            "Heron Desk buys from Quill Partner.",
+            axis(NOISE),
+            &["heron", "quill"],
+        );
+        simple_ep(
+            c,
+            "ep-quill",
+            "Quill Partner quote sheet.",
+            axis(NOISE),
+            &["quill"],
+        );
+        fact(
+            c,
+            "e-heron",
+            "heron",
+            "quill",
+            "BUYS_FROM",
+            "Heron Desk buys from Quill Partner at list price",
+            axis(PRICE),
+            &["ep-hd"],
+            T0,
+        );
+    });
+    let r = search(
+        &ctl,
+        json!({"query": Q_BRIDGE, "group_ids": [G], "num_results": 50, "stages": "expand"}),
+    )
+    .await;
+    assert!(find(&r, "f:e-heron").is_some(), "{:?}", keys(&r));
+    let quill = find(&r, "p:ep-quill")
+        .unwrap_or_else(|| panic!("a primary bridge reaches Quill's note: {:?}", keys(&r)));
+    assert_eq!(path_edges(quill), vec!["e-heron"]);
 }
 
 #[tokio::test]

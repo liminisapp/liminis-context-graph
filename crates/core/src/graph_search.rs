@@ -907,6 +907,7 @@ fn run(
                 conn,
                 p,
                 v,
+                emb,
                 gids,
                 list_cap,
                 &mut ep_info,
@@ -951,8 +952,11 @@ fn run(
         })
         .collect();
     // The whole fused candidate list is kept until the cut to `k`: a final reranking stage
-    // (#796) slots in here, reordering the head of `fused` before the cut, with belief ordering
-    // applied after it so a superseded passage never lands above its replacement.
+    // (#796) slots in here, reordering the head of `fused` before the cut. That stage must then
+    // re-apply belief ordering so a superseded passage never lands above its replacement. Today
+    // there is no post-fusion belief step: belief-aware ranking runs inside each plain list, and
+    // under the believed-only default superseded passages are filtered out of every list anyway.
+    // With `believed_only: false` the fused order across lists is not belief-adjusted.
     let fused = rrf_fuse_scored(&lists);
     let fused: Vec<_> = fused.into_iter().take(k).collect();
 
@@ -1122,12 +1126,16 @@ fn note_plain_passage(
 }
 
 /// One vector plain-passage list: `knowledge_search_passages`' default ranking (vector with
-/// belief-aware ranking, #789/#806) for `emb`, with belief evaluated at `as_of`.
+/// belief-aware ranking, #789/#806) for `emb`, with belief evaluated at `as_of`. The list ranks
+/// by its own cosine (against `emb`), but every passage reports its cosine against `instructed`
+/// as its similarity, as every other passage this read returns does, so `passage.score` means
+/// the same thing whichever list found it.
 #[allow(clippy::too_many_arguments)]
 fn vector_passage_list(
     conn: &Conn<'_>,
     p: &GraphSearchParams,
     emb: &[f32],
+    instructed: &[f32],
     gids: Option<&[&str]>,
     list_cap: usize,
     ep_info: &mut HashMap<String, EpInfo>,
@@ -1164,7 +1172,7 @@ fn vector_passage_list(
         vec![]
     } else {
         st.db_queries += 1;
-        conn.get_episode_passages(&uuids, false)?
+        conn.get_episode_passages_scored(&uuids, instructed)?
     };
     let by_uuid: HashMap<String, EpisodePassage> = rows
         .into_iter()
@@ -1181,7 +1189,8 @@ fn vector_passage_list(
         if list.len() == list_cap {
             break;
         }
-        note_plain_passage(ep, h.score, p, t, ep_info, passages);
+        let sim = ep.similarity.unwrap_or(0.0).max(0.0);
+        note_plain_passage(ep, sim, p, t, ep_info, passages);
         list.push((format!("p:{}", h.uuid), h.score));
     }
     Ok(list)
@@ -1445,40 +1454,48 @@ fn seed_stage(
     // nothing qualifies.
     let (quota, margin) = (SUMMARY_SEEDS, SUMMARY_SEED_MARGIN);
     if quota > 0 {
-        let best_sum = sum_vec.first().and_then(|(_, d)| sim(Some(*d)));
+        // The list's statistics are taken over the candidates that could be seeded at all —
+        // with a row, not a `Merged` tombstone, within `origins` — so a tombstone or a filtered
+        // entity at the top cannot raise the bar for every genuine summary match.
+        let eligible: Vec<(String, f64)> = sum_vec
+            .iter()
+            .filter(|(u, _)| {
+                rows.get(u)
+                    .is_some_and(|r| !r.labels.iter().any(|l| l == "Merged"))
+            })
+            .filter_map(|(u, d)| sim(Some(*d)).map(|s| (u.clone(), s)))
+            .collect();
+        let ok = origin_ok(eligible.iter().map(|(u, _)| u.clone()).collect(), st)?;
+        let eligible: Vec<(String, f64)> = eligible
+            .into_iter()
+            .filter(|(u, _)| {
+                let keep = ok.as_ref().is_none_or(|ok| ok.contains(u));
+                if !keep {
+                    decision.insert(u.clone(), ("origin_filter", false));
+                }
+                keep
+            })
+            .collect();
+        let best_sum = eligible.first().map(|(_, s)| *s);
         let median_sum = {
-            let mut v: Vec<f64> = sum_vec.iter().filter_map(|(_, d)| sim(Some(*d))).collect();
+            let mut v: Vec<f64> = eligible.iter().map(|(_, s)| *s).collect();
             v.sort_by(|a, b| a.total_cmp(b));
             v.get(v.len() / 2).copied()
         };
         let seeded: HashSet<String> = admitted.iter().map(|(h, _, _)| h.uuid.clone()).collect();
-        let pool: Vec<String> = sum_vec
+        let pool: Vec<String> = eligible
             .iter()
-            .filter(|(u, d)| {
+            .filter(|(u, s)| {
                 !seeded.contains(u)
-                    && rows
-                        .get(u)
-                        .is_some_and(|r| !r.labels.iter().any(|l| l == "Merged"))
-                    && sim(Some(*d)).is_some_and(|s| {
-                        best_sum.is_some_and(|b| s >= b - margin)
-                            && median_sum.is_some_and(|m| s >= m + margin)
-                    })
+                    && best_sum.is_some_and(|b| *s >= b - margin)
+                    && median_sum.is_some_and(|m| *s >= m + margin)
             })
             .map(|(u, _)| u.clone())
+            .take(quota)
             .collect();
-        let ok = origin_ok(pool.clone(), st)?;
-        let mut taken = 0;
         for u in pool {
-            if taken == quota {
-                break;
-            }
-            if ok.as_ref().is_some_and(|ok| !ok.contains(&u)) {
-                decision.insert(u, ("origin_filter", false));
-                continue;
-            }
             let h = by_uuid[u.as_str()];
             admitted.push(((*h).clone(), rows[&u].clone(), "summary_vector"));
-            taken += 1;
         }
     }
 

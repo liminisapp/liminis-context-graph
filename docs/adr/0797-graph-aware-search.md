@@ -224,7 +224,8 @@ which case it is, so it does.
 
 ### 6. Fusion and the origin rule
 
-RRF (k = 60) over three lists, each capped at `max(3k, 30)`, keyed `p:<episode>` / `f:<edge>`:
+RRF (k = 60) over up to five lists — (a), (b), (b′), (b″) and (c) below; `seeds` and `expand` use
+fewer (§7) — each capped at `max(3k, 30)`, keyed `p:<episode>` / `f:<edge>`:
 
 - **(a) `supporting`** — producing episodes of the selected facts (`rn.episodes` only, never ADR-0012
   `episode_uuids`) with the fact's path score, and MENTIONS episodes of the seeds and reached entities
@@ -288,6 +289,13 @@ RRF (k = 60) over three lists, each capped at `max(3k, 30)`, keyed `p:<episode>`
   `stats.passage_lists` names the plain lists that ran, in fusion order, and `stats.query_vectors`
   is 2 when the bare vector was computed. `embed_calls` stays 1.
 - **(c) `facts`** — the selected facts by path score.
+
+A returned passage's `score` is always its cosine against the instructed query, whichever list
+found it (each list still ranks by its own score, reported in `evidence.lists`). There is no
+belief step after fusion: belief-aware ranking runs inside each plain list, and under the
+believed-only default a superseded passage is in no list at all. With `believed_only: false` the
+fused order across lists is not belief-adjusted; the rerank stage (Consequences) must re-apply belief
+ordering after it reorders.
 
 **Derived content cites but never corroborates (ADR-0752).** A `derived`/`answer` passage never
 enters list (a); an edge whose surviving producers are all `derived`/`answer` is never ranked in list
