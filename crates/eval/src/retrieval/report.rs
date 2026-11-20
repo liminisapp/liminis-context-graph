@@ -329,6 +329,23 @@ fn redact_reason(why: &str, private: bool) -> String {
     }
 }
 
+/// p50 latency budget for a rerank-enabled passage search at k = 10 on Apple silicon (#796).
+pub const RERANK_P50_BUDGET_MS: f64 = 150.0;
+
+/// Outcome of the rerank stage's acceptance criteria (issue #796); see
+/// [`Report::rerank_acceptance`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RerankAcceptance {
+    pub paraphrase_gain: Option<bool>,
+    pub overall_not_lower: Option<bool>,
+    pub temporal_no_drop: Option<bool>,
+    pub p50_within_budget: Option<bool>,
+    pub paraphrase: Option<PairedDiff>,
+    pub overall: Option<PairedDiff>,
+    pub temporal: Option<PairedDiff>,
+    pub p50_ms: Option<f64>,
+}
+
 impl Report {
     fn ran(&self) -> Vec<(&ConfigOutcome, &ConfigRun)> {
         self.configs
@@ -616,6 +633,249 @@ impl Report {
         ))
     }
 
+    fn run_of(&self, id: &str) -> Option<&ConfigRun> {
+        self.ran()
+            .into_iter()
+            .find(|(c, _)| c.id == id)
+            .map(|(_, r)| r)
+    }
+
+    /// Paired nDCG@k difference `a − b` between two configurations that both ran.
+    fn stage_pair(&self, a: &str, b: &str, cat: Option<Category>) -> Option<PairedDiff> {
+        self.paired(
+            (a, self.run_of(a)?),
+            (b, self.run_of(b)?),
+            cat,
+            ("ndcg", NDCG),
+        )
+    }
+
+    /// The rerank stage's acceptance criteria (issue #796) against `lcg-passages`. `None` unless
+    /// both configurations ran. Each check is `None` when it cannot be read (a category without
+    /// enough shared questions, or no latency samples).
+    ///
+    /// With several embedding profiles the configuration ids carry a `@<profile>` suffix (see
+    /// `profiled_id`); this reads the first profile that has both. Use
+    /// [`Report::rerank_acceptance_for`] to pick one.
+    pub fn rerank_acceptance(&self) -> Option<RerankAcceptance> {
+        self.stage_suffixes()
+            .iter()
+            .find_map(|s| self.rerank_acceptance_for(s))
+    }
+
+    /// Id suffixes (`""`, or `@<profile>` when several embedding profiles were measured) under
+    /// which the `lcg-passages` baseline ran, in report order.
+    fn stage_suffixes(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for (c, _) in self.ran() {
+            // Any `lcg-passages*` configuration that can appear in the stage section counts: a run
+            // with the stage configs and a matching baseline (`lcg-passages-raw`) but without
+            // `lcg-passages` must still get its section.
+            let Some(rest) = c.id.strip_prefix("lcg-passages") else {
+                continue;
+            };
+            let (kind, suffix) = match rest.split_once('@') {
+                Some((k, profile)) => (k, format!("@{profile}")),
+                None => (rest, String::new()),
+            };
+            if ![
+                "",
+                "-raw",
+                "-belief",
+                "-rerank",
+                "-belief-rerank",
+                "-expand",
+                "-expand-rerank",
+            ]
+            .contains(&kind)
+            {
+                continue;
+            }
+            let suffix = suffix.as_str();
+            if !out.iter().any(|s| s == suffix) {
+                out.push(suffix.to_string());
+            }
+        }
+        out
+    }
+
+    /// The un-staged configuration a stage configuration should be paired with, so the paired delta
+    /// isolates the stage: the stage configs that pin a raw cosine first stage (`-rerank`,
+    /// `-expand`, `-expand-rerank`) pair with `lcg-passages-raw`, and `lcg-passages-belief-rerank`
+    /// (belief-aware first stage) with `lcg-passages-belief`. Since #806 `lcg-passages` is the
+    /// belief-aware default, so it is only the fallback when the matching baseline did not run.
+    fn baseline_for(&self, stage_base: &str, suffix: &str) -> String {
+        let preferred = if stage_base == "lcg-passages-belief-rerank" {
+            "lcg-passages-belief"
+        } else {
+            "lcg-passages-raw"
+        };
+        let preferred = format!("{preferred}{suffix}");
+        if self.run_of(&preferred).is_some() {
+            preferred
+        } else {
+            format!("lcg-passages{suffix}")
+        }
+    }
+
+    /// [`Report::rerank_acceptance`] for the configurations carrying id suffix `suffix`.
+    pub fn rerank_acceptance_for(&self, suffix: &str) -> Option<RerankAcceptance> {
+        // Pairs with the matching baseline; `run_of(base)?` below requires one to have run.
+        let base_id = self.baseline_for("lcg-passages-rerank", suffix);
+        let stage_id = format!("lcg-passages-rerank{suffix}");
+        let (base, stage) = (base_id.as_str(), stage_id.as_str());
+        self.run_of(base)?;
+        let run = self.run_of(stage)?;
+        let para = self.stage_pair(stage, base, Some(Category::Paraphrase));
+        let overall = self.stage_pair(stage, base, None);
+        let temporal = self.stage_pair(stage, base, Some(Category::Temporal));
+        Some(RerankAcceptance {
+            // SC-001: the paired interval is wholly above zero.
+            paraphrase_gain: para.map(|d| d.lo > 0.0),
+            // SC-002: overall nDCG@k is not lower (point estimate).
+            overall_not_lower: overall.map(|d| d.mean_diff >= 0.0),
+            // SC-003: the paired interval includes or exceeds zero, i.e. no supported drop.
+            temporal_no_drop: temporal.map(|d| d.hi >= 0.0),
+            // SC-004: p50 total latency within the 150 ms budget.
+            p50_within_budget: run.latency_p50_ms.map(|p| p <= RERANK_P50_BUDGET_MS),
+            paraphrase: para,
+            overall,
+            temporal,
+            p50_ms: run.latency_p50_ms,
+        })
+    }
+
+    /// "Passage stages" section (issue #796): each stage configuration against `lcg-passages` per
+    /// category with a paired interval, expansion on top of rerank, and the rerank acceptance
+    /// checks. Emitted only when a stage configuration ran.
+    fn stage_section(&self, o: &mut String) {
+        let suffixes = self.stage_suffixes();
+        let multi = suffixes.iter().any(|s| !s.is_empty());
+        for suffix in &suffixes {
+            self.stage_section_for(o, suffix, multi);
+        }
+    }
+
+    /// One "Passage stages" section for the configurations carrying id suffix `suffix`; `multi`
+    /// is true when several embedding profiles were measured, so the heading names the profile.
+    fn stage_section_for(&self, o: &mut String, suffix: &str, multi: bool) {
+        let ids: Vec<String> = [
+            "lcg-passages-rerank",
+            "lcg-passages-belief-rerank",
+            "lcg-passages-expand",
+            "lcg-passages-expand-rerank",
+        ]
+        .iter()
+        .map(|s| format!("{s}{suffix}"))
+        .collect();
+        let stages: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let base_id = self.baseline_for("lcg-passages-rerank", suffix);
+        let rerank_id = format!("lcg-passages-rerank{suffix}");
+        let bases: Vec<String> = ["lcg-passages-rerank", "lcg-passages-belief-rerank"]
+            .iter()
+            .chain(["lcg-passages-expand", "lcg-passages-expand-rerank"].iter())
+            .map(|s| self.baseline_for(s, suffix))
+            .collect();
+        // Emit the section when at least one stage ran together with its own matching baseline
+        // (a run of only `lcg-passages-belief-rerank` and `lcg-passages-belief` qualifies).
+        let any_pair = stages
+            .iter()
+            .zip(bases.iter())
+            .any(|(s, b)| self.run_of(s).is_some() && self.run_of(b).is_some());
+        if !any_pair {
+            return;
+        }
+        let heading = if multi {
+            format!(
+                "\n## Passage stages (rerank / query expansion) — embedding profile `{}`\n",
+                suffix.trim_start_matches('@')
+            )
+        } else {
+            "\n## Passage stages (rerank / query expansion)\n".to_string()
+        };
+        let _ = writeln!(o, "{heading}");
+        let _ = writeln!(
+            o,
+            "Paired nDCG@k difference, stage − baseline, per category ({:.0}% bootstrap interval). Each stage is switchable and measured on its own; expansion is also shown on top of rerank.\n",
+            LEVEL * 100.0
+        );
+        let _ = writeln!(
+            o,
+            "| stage | baseline | category | n | Δ nDCG@k | interval | reading |"
+        );
+        let _ = writeln!(o, "|---|---|---|---|---|---|---|");
+        let mut pairs: Vec<(&str, &str)> = stages
+            .iter()
+            .zip(bases.iter())
+            .map(|(s, b)| (*s, b.as_str()))
+            .collect();
+        pairs.push((stages[3], rerank_id.as_str()));
+        for (stage, base) in pairs {
+            if self.run_of(stage).is_none() || self.run_of(base).is_none() {
+                continue;
+            }
+            let mut cats: Vec<Option<Category>> = vec![None];
+            cats.extend(self.listed_categories().into_iter().map(Some));
+            for cat in cats {
+                match self.stage_pair(stage, base, cat) {
+                    None => {
+                        let _ = writeln!(
+                            o,
+                            "| `{stage}` | `{base}` | {} | <2 | n/a | n/a | not distinguishable from noise (too few shared questions) |",
+                            Self::cat_label(cat)
+                        );
+                    }
+                    Some(d) => {
+                        let reading = match d.verdict {
+                            Verdict::AHigher => format!("`{stage}` higher"),
+                            Verdict::BHigher => format!("`{base}` higher"),
+                            Verdict::Noise => Verdict::Noise.label().to_string(),
+                        };
+                        let _ = writeln!(
+                            o,
+                            "| `{stage}` | `{base}` | {} | {} | {:+.3} | [{:+.3}, {:+.3}] | {reading} |",
+                            Self::cat_label(cat),
+                            d.n,
+                            d.mean_diff,
+                            d.lo,
+                            d.hi
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(a) = self.rerank_acceptance_for(suffix) {
+            let mark = |v: Option<bool>| match v {
+                Some(true) => "met",
+                Some(false) => "**not met**",
+                None => "unreadable",
+            };
+            let _ = writeln!(o, "\nRerank acceptance (`{rerank_id}` vs `{base_id}`):\n");
+            let _ = writeln!(
+                o,
+                "- Paraphrase nDCG@k improves, paired interval above zero: {}.",
+                mark(a.paraphrase_gain)
+            );
+            let _ = writeln!(
+                o,
+                "- Overall nDCG@k does not drop (point estimate): {}.",
+                mark(a.overall_not_lower)
+            );
+            let _ = writeln!(
+                o,
+                "- Temporal nDCG@k: paired interval includes or exceeds zero (no supported drop): {}.",
+                mark(a.temporal_no_drop)
+            );
+            let _ = writeln!(
+                o,
+                "- p50 latency ≤ {RERANK_P50_BUDGET_MS:.0} ms{}: {}.",
+                a.p50_ms
+                    .map_or(String::new(), |p| format!(" (measured {p:.0} ms)")),
+                mark(a.p50_within_budget)
+            );
+        }
+    }
+
     pub fn render_markdown(&self) -> String {
         let m = &self.meta;
         let mut o = String::new();
@@ -699,6 +959,8 @@ impl Report {
             h2.md(),
             LEVEL * 100.0
         );
+
+        self.stage_section(&mut o);
 
         let _ = writeln!(o, "\n## Cost\n");
         let _ = writeln!(o, "Per query, **warm** (indices built and one unmeasured warm-up pass before timing). qmd runs as one process per query, so its latency is **per-process** (it includes model load) and it gets a single warm-up query rather than a full pass.\n");
@@ -1903,5 +2165,216 @@ mod tests {
         let md = r.render_markdown();
         assert!(md.contains("### multi-hop (n = 30)"), "{md}");
         assert!(r.to_json()["winners"].get("multi-hop").is_some());
+    }
+
+    fn staged_scores((t, p): (f64, f64)) -> Vec<QuestionScore> {
+        let mut v = cat_scores(Category::Temporal, N, t, Some(false));
+        v.extend(cat_scores(Category::Paraphrase, N, p, None));
+        v
+    }
+
+    /// `lcg-passages` and `lcg-passages-rerank` with the given (temporal, paraphrase) levels.
+    fn stage_report(base: (f64, f64), staged: (f64, f64), p50: f64) -> Report {
+        let mut r = report();
+        r.configs.clear();
+        let mut staged_status = run(staged_scores(staged));
+        if let Status::Ran(run) = &mut staged_status {
+            run.latency_p50_ms = Some(p50);
+        }
+        for (id, status) in [
+            ("lcg-passages", run(staged_scores(base))),
+            ("lcg-passages-rerank", staged_status),
+        ] {
+            r.configs.push(ConfigOutcome {
+                id: id.into(),
+                description: "d".into(),
+                status,
+            });
+        }
+        r
+    }
+
+    #[test]
+    fn rerank_acceptance_met_when_paraphrase_gains_and_temporal_holds() {
+        let r = stage_report((0.6, 0.15), (0.6, 0.5), 90.0);
+        let a = r.rerank_acceptance().expect("both configurations ran");
+        assert_eq!(a.paraphrase_gain, Some(true));
+        assert_eq!(a.overall_not_lower, Some(true));
+        assert_eq!(a.temporal_no_drop, Some(true));
+        assert_eq!(a.p50_within_budget, Some(true));
+        let md = r.render_markdown();
+        assert!(md.contains("## Passage stages"), "{md}");
+        assert!(
+            md.contains("`lcg-passages-rerank` | `lcg-passages` | paraphrase"),
+            "{md}"
+        );
+        assert!(
+            md.contains("Paraphrase nDCG@k improves, paired interval above zero: met."),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn rerank_acceptance_flags_a_temporal_collapse_and_a_blown_budget() {
+        // The qmd-rerank failure mode: paraphrase up, temporal wrecked, and slow.
+        let r = stage_report((0.63, 0.15), (0.29, 0.5), 400.0);
+        let a = r.rerank_acceptance().unwrap();
+        assert_eq!(a.paraphrase_gain, Some(true));
+        assert_eq!(a.temporal_no_drop, Some(false));
+        assert_eq!(a.p50_within_budget, Some(false));
+        let md = r.render_markdown();
+        assert!(md.contains("no supported drop): **not met**"), "{md}");
+        assert!(md.contains("measured 400 ms"), "{md}");
+    }
+
+    /// "Expansion on top of rerank" must compare `lcg-passages-expand-rerank` with
+    /// `lcg-passages-rerank`, not expand-only with rerank.
+    #[test]
+    fn expansion_on_top_of_rerank_compares_expand_rerank_with_rerank() {
+        let mut r = stage_report((0.6, 0.15), (0.6, 0.5), 90.0);
+        for id in ["lcg-passages-expand", "lcg-passages-expand-rerank"] {
+            r.configs.push(ConfigOutcome {
+                id: id.into(),
+                description: "d".into(),
+                status: run(staged_scores((0.6, 0.6))),
+            });
+        }
+        let md = r.render_markdown();
+        assert!(
+            md.contains("`lcg-passages-expand-rerank` | `lcg-passages-rerank` |"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("`lcg-passages-expand` | `lcg-passages-rerank` |"),
+            "{md}"
+        );
+    }
+
+    /// Stage configs pin a raw first stage, so they pair with `lcg-passages-raw` when it ran (and
+    /// the belief variant with `lcg-passages-belief`); `lcg-passages` is only the fallback.
+    #[test]
+    fn stages_pair_with_their_matching_baseline() {
+        let mut r = stage_report((0.6, 0.15), (0.6, 0.5), 90.0);
+        for (id, levels) in [
+            ("lcg-passages-raw", (0.5, 0.1)),
+            ("lcg-passages-belief", (0.7, 0.3)),
+            ("lcg-passages-belief-rerank", (0.8, 0.4)),
+        ] {
+            r.configs.push(ConfigOutcome {
+                id: id.into(),
+                description: "d".into(),
+                status: run(staged_scores(levels)),
+            });
+        }
+        let md = r.render_markdown();
+        assert!(
+            md.contains("`lcg-passages-rerank` | `lcg-passages-raw` |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("`lcg-passages-belief-rerank` | `lcg-passages-belief` |"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("`lcg-passages-rerank` | `lcg-passages` |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("Rerank acceptance (`lcg-passages-rerank` vs `lcg-passages-raw`)"),
+            "{md}"
+        );
+    }
+
+    /// A run with the stage configs and `lcg-passages-raw` but no `lcg-passages` still gets its
+    /// section, paired with the raw baseline.
+    #[test]
+    fn stage_section_is_emitted_without_lcg_passages() {
+        let mut r = report();
+        r.configs.clear();
+        for (id, levels) in [
+            ("lcg-passages-raw", (0.6, 0.15)),
+            ("lcg-passages-rerank", (0.6, 0.5)),
+        ] {
+            r.configs.push(ConfigOutcome {
+                id: id.into(),
+                description: "d".into(),
+                status: run(staged_scores(levels)),
+            });
+        }
+        let md = r.render_markdown();
+        assert!(md.contains("## Passage stages"), "{md}");
+        assert!(
+            md.contains("`lcg-passages-rerank` | `lcg-passages-raw` |"),
+            "{md}"
+        );
+        assert!(r.rerank_acceptance().is_some());
+    }
+
+    /// Only the belief variant and its baseline ran: the section is still emitted.
+    #[test]
+    fn stage_section_is_emitted_for_belief_rerank_with_belief_only() {
+        let mut r = report();
+        r.configs.clear();
+        for (id, levels) in [
+            ("lcg-passages-belief", (0.7, 0.3)),
+            ("lcg-passages-belief-rerank", (0.8, 0.4)),
+        ] {
+            r.configs.push(ConfigOutcome {
+                id: id.into(),
+                description: "d".into(),
+                status: run(staged_scores(levels)),
+            });
+        }
+        let md = r.render_markdown();
+        assert!(md.contains("## Passage stages"), "{md}");
+        assert!(
+            md.contains("`lcg-passages-belief-rerank` | `lcg-passages-belief` |"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn stage_section_is_absent_without_a_stage_configuration() {
+        let md = report().render_markdown();
+        assert!(!md.contains("Passage stages"));
+        assert!(report().rerank_acceptance().is_none());
+    }
+
+    #[test]
+    fn stage_section_survives_several_embedding_profiles() {
+        // With several profiles the ids are `<id>@<profile>`; the section and the rerank
+        // acceptance checks must still be produced, once per profile.
+        let mut r = report();
+        r.configs.clear();
+        for (profile, staged) in [("none", (0.6, 0.5)), ("bge-v1.5", (0.3, 0.5))] {
+            for (id, levels) in [
+                ("lcg-passages", (0.6, 0.15)),
+                ("lcg-passages-rerank", staged),
+            ] {
+                r.configs.push(ConfigOutcome {
+                    id: format!("{id}@{profile}"),
+                    description: "d".into(),
+                    status: run(staged_scores(levels)),
+                });
+            }
+        }
+        let md = r.render_markdown();
+        assert!(md.contains("embedding profile `none`"), "{md}");
+        assert!(md.contains("embedding profile `bge-v1.5`"), "{md}");
+        assert!(
+            md.contains("`lcg-passages-rerank@none` | `lcg-passages@none` | paraphrase"),
+            "{md}"
+        );
+        assert_eq!(
+            r.rerank_acceptance_for("@none").unwrap().temporal_no_drop,
+            Some(true)
+        );
+        assert_eq!(
+            r.rerank_acceptance_for("@bge-v1.5")
+                .unwrap()
+                .temporal_no_drop,
+            Some(false)
+        );
+        assert!(r.rerank_acceptance().is_some());
     }
 }

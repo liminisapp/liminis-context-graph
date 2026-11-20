@@ -21,4 +21,9 @@ enum LocalInferenceError: Error, Sendable, Equatable {
     /// The loaded model does not expose an output feature named `last_hidden_state`.
     /// Thrown at startup from `CoreMLEmbeddingActor.init`, never per-request.
     case embeddingOutputMissing(name: String)
+
+    /// The rerank model's inputs or output do not match what `CoreMLRerankActor` can drive
+    /// (issue #796). Thrown at startup; the sidecar then serves `/v1/rerank` as 503 and keeps
+    /// embeddings and completions running.
+    case rerankSchemaInvalid(String)
 }

@@ -13,13 +13,36 @@ pub const DEFAULT_EVIDENCE_CACHE: &str = "retrieval_evidence_cache.jsonl";
 /// The four headline configurations (FR-004), then the labelled extras: the belief-aware variant
 /// and `lcg-passages-variants` (#802, needs `query-variants.jsonl`; a skipped row without it).
 pub const HEADLINE_CONFIGS: [&str; 4] = ["lcg-passages", "lcg-entities-facts", "qmd", "qmd-rerank"];
-pub const ALL_CONFIGS: [&str; 6] = [
+/// The configurations a run measures by default.
+pub const DEFAULT_CONFIGS: [&str; 6] = [
     "lcg-passages",
     "lcg-passages-variants",
     "lcg-entities-facts",
     "qmd",
     "qmd-rerank",
     "lcg-entities-facts-belief",
+];
+/// Passage-search stage configurations (#796). Opt-in via `--configs`: they need a reranker /
+/// expansion LLM reachable from the spawned service (normally the CoreML sidecar), which a
+/// default run does not assume.
+pub const STAGE_CONFIGS: [&str; 4] = [
+    "lcg-passages-rerank",
+    "lcg-passages-belief-rerank",
+    "lcg-passages-expand",
+    "lcg-passages-expand-rerank",
+];
+/// Every accepted configuration id.
+pub const ALL_CONFIGS: [&str; 10] = [
+    "lcg-passages",
+    "lcg-passages-variants",
+    "lcg-entities-facts",
+    "qmd",
+    "qmd-rerank",
+    "lcg-entities-facts-belief",
+    "lcg-passages-rerank",
+    "lcg-passages-belief-rerank",
+    "lcg-passages-expand",
+    "lcg-passages-expand-rerank",
 ];
 
 /// Opt-in LCG passage-search variants (#789, #806), measured on one binary by sending `mode` and
@@ -56,6 +79,12 @@ pub struct RetrievalArgs {
     pub embedding_profiles: Vec<String>,
     pub extractor_http: Option<String>,
     pub extractor_uds: Option<String>,
+    /// Reranker / query-expansion endpoints for the spawned service (#796). Unset: the service
+    /// defaults to the embedder's sidecar (and `LCG_EXPANSION_URL` for expansion).
+    pub reranker_http: Option<String>,
+    pub reranker_uds: Option<String>,
+    pub expander_http: Option<String>,
+    pub expander_uds: Option<String>,
     pub replay_cassette: Option<String>,
     pub record_cassette: Option<String>,
     pub qmd_bin: PathBuf,
@@ -103,6 +132,18 @@ OPTIONS:
                                and lcg-passages-hybrid-belief-variants (the same, with the variants
                                run through that pipeline and fused once; each is read against its
                                variants-less base).
+                               Opt-in passage stages (#796): lcg-passages-rerank, lcg-passages-belief-rerank (rerank over a
+                               belief-aware first stage), lcg-passages-expand and
+                               lcg-passages-expand-rerank (issue #796; they need a reranker /
+                               expansion LLM reachable from the service, normally the CoreML
+                               sidecar, and are reported as failed queries if a stage cannot
+                               apply — never scored as first-stage results).
+    --reranker-http <URL>      Reranker endpoint for the spawned service (default: the embedder's
+    --reranker-uds <SOCKET>    sidecar when that is a Unix socket or a loopback URL; a remote
+                               --embedder-http is never reused, so name one). Used by the lcg-passages-*rerank configurations.
+    --expander-http <URL>      Query-expansion LLM endpoint for the spawned service (default:
+    --expander-uds <SOCKET>    LCG_EXPANSION_URL, else the embedder's sidecar under the same loopback-only rule). Used by the
+                               lcg-passages-expand* configurations.
     --service-bin <PATH>       liminis-context-graph binary to spawn (default: alongside lcg-eval,
                                else `liminis-context-graph` on PATH).
     --embedder-http <URL>      Real embedder for the spawned service (required for LCG configs
@@ -138,13 +179,17 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
     let mut a = RetrievalArgs {
         corpus: PathBuf::from(DEFAULT_FIXTURE_DIR),
         k: DEFAULT_K,
-        configs: ALL_CONFIGS.iter().map(|s| s.to_string()).collect(),
+        configs: DEFAULT_CONFIGS.iter().map(|s| s.to_string()).collect(),
         service_bin: None,
         embedder_http: None,
         embedder_uds: None,
         embedding_profiles: Vec::new(),
         extractor_http: None,
         extractor_uds: None,
+        reranker_http: None,
+        reranker_uds: None,
+        expander_http: None,
+        expander_uds: None,
         replay_cassette: None,
         record_cassette: None,
         qmd_bin: PathBuf::from("qmd"),
@@ -245,6 +290,10 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
             }
             "--extractor-http" => a.extractor_http = Some(val("--extractor-http")?),
             "--extractor-uds" => a.extractor_uds = Some(val("--extractor-uds")?),
+            "--reranker-http" => a.reranker_http = Some(val("--reranker-http")?),
+            "--reranker-uds" => a.reranker_uds = Some(val("--reranker-uds")?),
+            "--expander-http" => a.expander_http = Some(val("--expander-http")?),
+            "--expander-uds" => a.expander_uds = Some(val("--expander-uds")?),
             "--replay-cassette" => a.replay_cassette = Some(val("--replay-cassette")?),
             "--record-cassette" => a.record_cassette = Some(val("--record-cassette")?),
             "--qmd-bin" => a.qmd_bin = PathBuf::from(val("--qmd-bin")?),
@@ -267,6 +316,12 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
     }
     if a.extractor_http.is_some() && a.extractor_uds.is_some() {
         return Err("--extractor-http and --extractor-uds are mutually exclusive".into());
+    }
+    if a.reranker_http.is_some() && a.reranker_uds.is_some() {
+        return Err("--reranker-http and --reranker-uds are mutually exclusive".into());
+    }
+    if a.expander_http.is_some() && a.expander_uds.is_some() {
+        return Err("--expander-http and --expander-uds are mutually exclusive".into());
     }
     if a.private {
         if a.out.is_none() {
@@ -561,5 +616,39 @@ mod tests {
             false
         ))
         .is_ok());
+    }
+
+    #[test]
+    fn stage_configs_are_accepted_but_not_default() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        match parse_args(&a(&[])).unwrap() {
+            RetrievalMode::Run(r) => {
+                assert_eq!(r.configs.len(), DEFAULT_CONFIGS.len());
+                assert!(r
+                    .configs
+                    .iter()
+                    .all(|c| !STAGE_CONFIGS.contains(&c.as_str())));
+            }
+            m => panic!("{m:?}"),
+        }
+        match parse_args(&a(&[
+            "--configs",
+            "lcg-passages,lcg-passages-rerank,lcg-passages-expand,lcg-passages-expand-rerank",
+            "--reranker-uds",
+            "/r",
+            "--expander-http",
+            "http://e",
+        ]))
+        .unwrap()
+        {
+            RetrievalMode::Run(r) => {
+                assert_eq!(r.configs.len(), 4);
+                assert_eq!(r.reranker_uds.as_deref(), Some("/r"));
+                assert_eq!(r.expander_http.as_deref(), Some("http://e"));
+            }
+            m => panic!("{m:?}"),
+        }
+        assert!(parse_args(&a(&["--reranker-uds", "/r", "--reranker-http", "http://r"])).is_err());
+        assert!(parse_args(&a(&["--expander-uds", "/r", "--expander-http", "http://r"])).is_err());
     }
 }

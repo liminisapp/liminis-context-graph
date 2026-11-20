@@ -158,7 +158,18 @@ actor CoreMLEmbeddingActor {
     /// - `mlmodelcCacheDir != nil` and source is `.mlpackage` → run first-launch flow:
     ///   check sentinel + hash → load cached copy on hit, or compile → install → sentinel.
     ///   Emits `[setup]` progress to stderr.
-    static func resolveLoadURL(modelURL: URL, mlmodelcCacheDir: URL?) async throws -> URL {
+    ///
+    /// `verifyComputeUnits` is the compute-unit setting of the first-launch verification load. The
+    /// embedding model keeps the default (`.all`); the rerank model passes its own, because
+    /// DeBERTa-v3 crashes natively (not a Swift throw) when loaded with `.all`.
+    ///
+    /// `emitSetupEvents` is false for the rerank model: the `[setup]` stages describe the embedder's
+    /// first-launch sequence for the onboarding host, and a second, late sequence from the background
+    /// rerank load would be indistinguishable from it.
+    static func resolveLoadURL(
+        modelURL: URL, mlmodelcCacheDir: URL?, verifyComputeUnits: MLComputeUnits = .all,
+        emitSetupEvents: Bool = true
+    ) async throws -> URL {
         let isPackage = modelURL.pathExtension == "mlpackage"
 
         guard let cacheDir = mlmodelcCacheDir, isPackage else {
@@ -175,7 +186,7 @@ actor CoreMLEmbeddingActor {
         let expectedHash = SetupCache.buildHash(for: modelURL)
         if SetupCache.cacheIsValid(cacheDir: cacheDir, expectedHash: expectedHash) {
             let cachedURL = SetupCache.compiledModelURL(in: cacheDir)
-            FileHandle.standardError.emitSetupEvent(stage: "model_ready", message: "cached")
+            if emitSetupEvents { FileHandle.standardError.emitSetupEvent(stage: "model_ready", message: "cached") }
             return cachedURL
         }
 
@@ -183,14 +194,16 @@ actor CoreMLEmbeddingActor {
         // a hash mismatch from a model upgrade. Sweep before recompiling.
         SetupCache.cleanStaleCache(cacheDir: cacheDir)
 
-        FileHandle.standardError.emitSetupEvent(stage: "compiling_model", message: "first-launch compile")
+        if emitSetupEvents { FileHandle.standardError.emitSetupEvent(stage: "compiling_model", message: "first-launch compile") }
         let compiledTempURL = try await MLModel.compileModel(at: modelURL)
 
-        FileHandle.standardError.emitSetupEvent(stage: "installing_model", message: "writing to cache")
+        if emitSetupEvents { FileHandle.standardError.emitSetupEvent(stage: "installing_model", message: "writing to cache") }
         let installedURL = try SetupCache.installCompiledModel(from: compiledTempURL, into: cacheDir)
 
-        FileHandle.standardError.emitSetupEvent(stage: "verifying_model")
-        _ = try await MLModel.load(contentsOf: installedURL, configuration: MLModelConfiguration())
+        if emitSetupEvents { FileHandle.standardError.emitSetupEvent(stage: "verifying_model") }
+        let verifyConfig = MLModelConfiguration()
+        verifyConfig.computeUnits = verifyComputeUnits
+        _ = try await MLModel.load(contentsOf: installedURL, configuration: verifyConfig)
 
         // A racing sidecar may have written the sentinel already (O_EXCL → EEXIST);
         // since the model on disk is verified, treat that as success rather than
@@ -200,7 +213,7 @@ actor CoreMLEmbeddingActor {
         } catch SetupCache.SetupCacheError.sentinelWriteRace {
             // Another process completed setup concurrently — proceed.
         }
-        FileHandle.standardError.emitSetupEvent(stage: "model_ready", message: "compiled")
+        if emitSetupEvents { FileHandle.standardError.emitSetupEvent(stage: "model_ready", message: "compiled") }
         return installedURL
     }
 

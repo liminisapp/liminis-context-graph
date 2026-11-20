@@ -62,6 +62,7 @@ fn make_degraded_state_with_capture(
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -323,6 +324,7 @@ async fn test_recovery_rebuild_from_workspace_wal() {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
 
@@ -398,6 +400,7 @@ async fn test_recovery_rebuild_from_workspace_wal_recomputes_embeddings() {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
 
@@ -646,6 +649,7 @@ async fn test_recovery_unknown_strategy() {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
 
@@ -794,6 +798,7 @@ async fn test_recovery_missing_strategy() {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
 

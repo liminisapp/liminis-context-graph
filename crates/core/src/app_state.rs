@@ -174,9 +174,18 @@ pub struct AppState {
     /// → serving transition, and threaded through here so `handle_rebuild_from_wal` reuses the
     /// same instance rather than starting cold on every rebuild.
     pub embedding_cache: Arc<EmbeddingCache>,
+    /// Optional passage-search stages — rerank and query expansion (issue #796). Starts empty and
+    /// is set once at startup via [`AppState::set_search_stages`]; empty means neither stage is
+    /// configured, and a call that opts in degrades (`not_configured`) instead of failing.
+    pub search_stages: ArcSwapOption<crate::search_stages::SearchStages>,
 }
 
 impl AppState {
+    /// Installs the passage-search stage configuration and service handles (issue #796).
+    pub fn set_search_stages(&self, stages: crate::search_stages::SearchStages) {
+        self.search_stages.store(Some(Arc::new(stages)));
+    }
+
     /// Builds `AppState` from environment variables.
     ///
     /// - `LCG_DEDUP_LLM`: when on and `extractor` is configured, the extractor judges each
@@ -316,6 +325,7 @@ impl AppState {
             ontology_drift,
             group_ontologies: Arc::new(Mutex::new(HashMap::new())),
             embedding_cache,
+            search_stages: ArcSwapOption::empty(),
         }
     }
 
@@ -1074,6 +1084,7 @@ mod tests {
             ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
             group_ontologies: Arc::new(Mutex::new(HashMap::new())),
             embedding_cache: Arc::new(EmbeddingCache::new()),
+            search_stages: ArcSwapOption::empty(),
         }
     }
 

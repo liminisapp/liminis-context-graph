@@ -147,6 +147,14 @@ pub struct ServiceOpts {
     pub record_cassette: Option<String>,
     /// `LCG_EMBEDDING_PROFILE` for the spawned service (#790); `None` leaves the service default.
     pub embedding_profile: Option<String>,
+    /// Reranker endpoint for the spawned service (#796); `None` lets the service default to the
+    /// embedder's sidecar.
+    pub reranker_http: Option<String>,
+    pub reranker_uds: Option<String>,
+    /// Query-expansion LLM endpoint for the spawned service (#796); `None` lets the service use
+    /// `LCG_EXPANSION_URL`, else the sidecar.
+    pub expander_http: Option<String>,
+    pub expander_uds: Option<String>,
 }
 
 /// Mock and hash embedders produce meaningless vectors, so a real embedder must be named
@@ -173,6 +181,10 @@ pub fn service_args(o: &ServiceOpts) -> Vec<String> {
         ("--embedder-uds", &o.embedder_uds),
         ("--extractor-http", &o.extractor_http),
         ("--extractor-uds", &o.extractor_uds),
+        ("--reranker-http", &o.reranker_http),
+        ("--reranker-uds", &o.reranker_uds),
+        ("--expander-http", &o.expander_http),
+        ("--expander-uds", &o.expander_uds),
     ] {
         if let Some(v) = v {
             a.push(flag.to_string());
@@ -604,6 +616,12 @@ impl PassageMode {
     pub fn request(self, q: &str, k: usize) -> Value {
         let mut p =
             json!({"query": q, "num_results": k, "min_score": 0.0, "group_ids": [EVAL_GROUP]});
+        // The baselines never run a #796 stage, whatever the service's workspace default (an
+        // inherited `LCG_RERANK=on` would otherwise rerank them and make every stage comparison
+        // meaningless). These are not `mode` / `belief_aware`, so `Default` still tracks the
+        // shipped ranking default.
+        p["rerank"] = json!(false);
+        p["expand"] = json!(false);
         let (mode, belief) = match self {
             PassageMode::Default => return p,
             PassageMode::Raw => ("vector", false),
@@ -728,6 +746,116 @@ impl Retriever for LcgVariants {
         Box::pin(async move {
             self.search(&q.text, self.variants.for_question(&q.id), k)
                 .await
+        })
+    }
+}
+
+/// The passage-search stage configurations (#796): `lcg-passages-rerank`, `lcg-passages-expand`
+/// and `lcg-passages-expand-rerank` — `knowledge_search_passages` with `rerank` and/or `expand`.
+///
+/// A stage that was requested but did not apply (sidecar down, model absent) must not be scored as
+/// if it had: the service degrades to first-stage results, which would silently report
+/// `lcg-passages` numbers under the stage's name. So an unapplied stage is a **query error** here,
+/// and the run's failed-query count says so.
+pub struct LcgPassagesStaged {
+    pub t: Arc<dyn RpcTransport>,
+    pub rerank: bool,
+    pub expand: bool,
+    /// Sends `belief_aware: true` for the first stage (`lcg-passages-belief-rerank`): the rerank
+    /// candidates then come from the belief-aware ordering rather than plain cosine.
+    pub belief_aware: bool,
+}
+
+impl LcgPassagesStaged {
+    pub fn config_id(rerank: bool, expand: bool) -> &'static str {
+        match (rerank, expand) {
+            (true, false) => "lcg-passages-rerank",
+            (false, true) => "lcg-passages-expand",
+            (true, true) => "lcg-passages-expand-rerank",
+            (false, false) => "lcg-passages",
+        }
+    }
+
+    /// This configuration's id, including the belief-aware first-stage variant.
+    fn id_str(&self) -> &'static str {
+        if self.belief_aware && self.rerank && !self.expand {
+            "lcg-passages-belief-rerank"
+        } else {
+            Self::config_id(self.rerank, self.expand)
+        }
+    }
+
+    /// `Err` when a requested stage reports that it did not apply.
+    pub fn check_applied(&self, resp: &Value) -> Result<(), String> {
+        for (wanted, key) in [(self.rerank, "rerank"), (self.expand, "expansion")] {
+            if !wanted {
+                continue;
+            }
+            let block = &resp[key];
+            // `no_candidates` means the first stage returned nothing, so there was nothing to
+            // rescore: the empty result is the genuine first-stage answer, not a failed stage.
+            if key == "rerank" && block["reason"].as_str() == Some("no_candidates") {
+                continue;
+            }
+            if block["applied"].as_bool() != Some(true) {
+                return Err(format!(
+                    "{key} did not apply ({}); refusing to score first-stage results as {}",
+                    block["reason"]
+                        .as_str()
+                        .unwrap_or("no `applied` report in the response"),
+                    self.id_str()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Retriever for LcgPassagesStaged {
+    fn id(&self) -> &str {
+        self.id_str()
+    }
+    fn description(&self) -> String {
+        let stages = match (self.rerank, self.expand) {
+            (true, false) if self.belief_aware => "rerank over a belief-aware first stage: top-N candidates rescored by the local cross-encoder, blended with belief and recency",
+            (true, false) => "rerank: top-N candidates rescored by the local cross-encoder, blended with belief and recency",
+            (false, true) => "expand: query rewritten by a local LLM into lexical/semantic/HyDE variants, fused with RRF",
+            _ => "expand then rerank: LLM query variants fused with RRF, then cross-encoder rescoring blended with belief and recency",
+        };
+        format!("knowledge_search_passages (vector first stage) + {stages}, min_score=0")
+    }
+    fn retrieve<'a>(&'a self, q: &'a str, k: usize) -> BoxFuture<'a, Result<RankedResult, String>> {
+        Box::pin(async move {
+            let t0 = Instant::now();
+            let r = self
+                .t
+                .call(
+                    "knowledge_search_passages",
+                    // `mode` and `belief_aware` are pinned: a raw cosine first stage (`belief_aware:
+                    // false`) for `-rerank` / `-expand` / `-expand-rerank`, and `true` only for
+                    // `lcg-passages-belief-rerank`. The report pairs each with the baseline that has
+                    // the same first stage (`lcg-passages-raw`, `lcg-passages-belief`), so the paired
+                    // delta isolates the stage. `lcg-passages` itself is the shipped (belief-aware)
+                    // default since #806 and is only the fallback pairing.
+                    json!({"query": q, "num_results": k, "min_score": 0.0,
+                           "group_ids": [EVAL_GROUP], "mode": "vector",
+                           "belief_aware": self.belief_aware,
+                           "rerank": self.rerank, "expand": self.expand}),
+                )
+                .await?;
+            let latency = t0.elapsed();
+            self.check_applied(&r)?;
+            let (notes, evidence) = map_passages(&items(&r, "passages"));
+            Ok(RankedResult {
+                notes,
+                evidence,
+                // Expansion's variant embeddings are not exposed per query, so a count would be a
+                // guess; report it as not exposed rather than invent one.
+                model_calls: (!self.expand).then_some(1 + u64::from(self.rerank)),
+                lookup_calls: 0,
+                evidence_gaps: 0,
+                latency,
+            })
         })
     }
 }
@@ -1081,6 +1209,134 @@ mod tests {
         );
         assert_eq!(PassageMode::from_variants_id("lcg-passages"), None);
         assert_eq!(PassageMode::Raw.variants_config_id(), None);
+    }
+
+    #[tokio::test]
+    async fn belief_rerank_sends_belief_aware_true_and_reports_its_id() {
+        let t = Arc::new(FakeTransport::new(|_, _| {
+            Ok(
+                json!({"passages":[{"content":"c","source_description":"n1:n1#0"}],"count":1,
+                      "rerank":{"applied":true,"candidates":1}}),
+            )
+        }));
+        let rt = LcgPassagesStaged {
+            t: t.clone(),
+            rerank: true,
+            expand: false,
+            belief_aware: true,
+        };
+        assert_eq!(rt.id(), "lcg-passages-belief-rerank");
+        rt.retrieve("q", 5).await.unwrap();
+        let log = t.log.lock().unwrap();
+        assert_eq!(log[0].1["belief_aware"], true);
+        assert_eq!(log[0].1["rerank"], true);
+        assert_eq!(log[0].1["mode"], "vector");
+    }
+
+    #[tokio::test]
+    async fn staged_passages_send_the_stage_flags_and_report_their_ids() {
+        for (rerank, expand, id) in [
+            (true, false, "lcg-passages-rerank"),
+            (false, true, "lcg-passages-expand"),
+            (true, true, "lcg-passages-expand-rerank"),
+        ] {
+            let t = Arc::new(FakeTransport::new(move |_, _| {
+                let mut r =
+                    json!({"passages":[{"content":"c","source_description":"n1:n1#0"}],"count":1});
+                if rerank {
+                    r["rerank"] = json!({"applied": true, "candidates": 1});
+                }
+                if expand {
+                    r["expansion"] = json!({"applied": true, "variants": 2});
+                }
+                Ok(r)
+            }));
+            let rt = LcgPassagesStaged {
+                t: t.clone(),
+                rerank,
+                expand,
+                belief_aware: false,
+            };
+            assert_eq!(rt.id(), id);
+            let r = rt.retrieve("q", 5).await.unwrap();
+            assert_eq!(r.notes, vec!["n1"]);
+            assert_eq!(r.model_calls.is_some(), !expand);
+            let log = t.log.lock().unwrap();
+            assert_eq!(log[0].1["rerank"], rerank);
+            assert_eq!(log[0].1["expand"], expand);
+            assert_eq!(log[0].1["min_score"], 0.0);
+        }
+    }
+
+    /// A stage that did not apply must be an error — never first-stage results scored under the
+    /// stage's name.
+    #[tokio::test]
+    async fn an_unapplied_stage_is_a_query_error_not_a_silent_first_stage_score() {
+        for resp in [
+            json!({"passages":[],"count":0,"rerank":{"applied":false,"candidates":0,"reason":"unavailable"}}),
+            json!({"passages":[],"count":0}),
+        ] {
+            let t = Arc::new(FakeTransport::new(move |_, _| Ok(resp.clone())));
+            let rt = LcgPassagesStaged {
+                t,
+                rerank: true,
+                expand: false,
+                belief_aware: false,
+            };
+            let e = rt.retrieve("q", 5).await.expect_err("must fail");
+            assert!(e.contains("rerank did not apply"), "{e}");
+        }
+        // Expansion unapplied while rerank applied still fails.
+        let t = Arc::new(FakeTransport::new(|_, _| {
+            Ok(json!({"passages":[],"count":0,
+                "rerank":{"applied":true,"candidates":1},
+                "expansion":{"applied":false,"variants":0,"reason":"not_configured"}}))
+        }));
+        let rt = LcgPassagesStaged {
+            t,
+            rerank: true,
+            expand: true,
+            belief_aware: false,
+        };
+        let e = rt.retrieve("q", 5).await.expect_err("must fail");
+        assert!(
+            e.contains("expansion did not apply") && e.contains("not_configured"),
+            "{e}"
+        );
+    }
+
+    /// A rerank over an empty first stage reports `no_candidates`; that is an empty result, not a
+    /// stage failure, so it must not count as a failed query.
+    #[tokio::test]
+    async fn rerank_with_no_candidates_is_an_empty_result_not_a_failed_query() {
+        let t = Arc::new(FakeTransport::new(|_, _| {
+            Ok(json!({"passages":[],"count":0,
+                "rerank":{"applied":false,"candidates":0,"reason":"no_candidates"}}))
+        }));
+        let rt = LcgPassagesStaged {
+            t,
+            rerank: true,
+            expand: false,
+            belief_aware: false,
+        };
+        let r = rt
+            .retrieve("q", 5)
+            .await
+            .expect("empty result, not an error");
+        assert!(r.notes.is_empty());
+    }
+
+    #[test]
+    fn service_args_pass_reranker_and_expander_endpoints() {
+        let o = ServiceOpts {
+            reranker_uds: Some("/r.sock".into()),
+            expander_http: Some("http://llm".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            service_args(&o),
+            vec!["--reranker-uds", "/r.sock", "--expander-http", "http://llm"]
+        );
     }
 
     fn map() -> Arc<IngestMap> {

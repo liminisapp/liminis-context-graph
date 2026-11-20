@@ -120,6 +120,7 @@ async fn sibling_family_has_no_repointed_endpoints_and_no_self_loops() {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
     });
 

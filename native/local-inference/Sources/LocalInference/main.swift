@@ -124,13 +124,80 @@ if mode.includesEmbeddings {
     embeddingActor = nil
 }
 
+// MARK: - CoreML rerank actor initialization (issue #796)
+// Optional: enabled iff LOCAL_INFERENCE_RERANK_MODEL is set, independent of LOCAL_INFERENCE_MODE.
+// A load failure must NOT take the sidecar down — embeddings (and completions) are the product;
+// the rerank stage is opt-in and degrades. So the failure is logged and `/v1/rerank` answers 503.
+
+let env = ProcessInfo.processInfo.environment
+// An empty or whitespace-only value counts as unset (a launcher template may leave it set to "").
+func nonEmptyEnv(_ name: String) -> String? {
+    guard let v = env[name]?.trimmingCharacters(in: .whitespacesAndNewlines), !v.isEmpty else { return nil }
+    return v
+}
+let rerankModelPath: String? = nonEmptyEnv("LOCAL_INFERENCE_RERANK_MODEL")
+    .map { URL(fileURLWithPath: $0).standardized.path }
+// Loaded in the background so the sidecar listens (and serves embeddings) at once: a large
+// cross-encoder takes minutes to load on a cold start. `/v1/rerank` answers a "loading" 503 until
+// the model is ready, or the failure reason if it never is.
+let rerankLoadState: RerankLoadState? = rerankModelPath == nil ? nil : RerankLoadState()
+if let rerankModelPath, let rerankLoadState {
+    let rerankTokenizerId = nonEmptyEnv("LOCAL_INFERENCE_RERANK_TOKENIZER_ID") ?? "mixedbread-ai/mxbai-rerank-large-v1"
+    let rerankFamily = nonEmptyEnv("LOCAL_INFERENCE_RERANK_FAMILY")
+    let rerankComputeUnits = nonEmptyEnv("LOCAL_INFERENCE_RERANK_COMPUTE_UNITS")
+    let rerankModelId = nonEmptyEnv("LOCAL_INFERENCE_RERANK_MODEL_ID")
+    let rerankCacheDir = mlmodelcCacheDir?.appendingPathComponent("rerank", isDirectory: true)
+    let rerankHubCache = hubCachePath
+    Task.detached {
+        let started = Date()
+        do {
+            // Unset: the pair layout comes from the tokenizer's own tokenizer.json. The variable
+            // remains an override for a tokenizer.json this reader cannot interpret.
+            var layoutOverride: RerankTokenLayout? = nil
+            if let familyName = rerankFamily {
+                guard let named = RerankTokenLayout.named(familyName) else {
+                    throw LocalInferenceError.rerankSchemaInvalid(
+                        "unknown LOCAL_INFERENCE_RERANK_FAMILY '\(familyName)' (expected xlm-roberta or bert)")
+                }
+                layoutOverride = named
+            }
+            guard FileManager.default.fileExists(atPath: rerankModelPath) else {
+                throw LocalInferenceError.rerankSchemaInvalid("rerank model not found at \(rerankModelPath)")
+            }
+            let units = try RerankComputeUnits.resolve(rerankComputeUnits, tokenizerModelId: rerankTokenizerId)
+            let actor = try await CoreMLRerankActor(
+                modelURL: URL(fileURLWithPath: rerankModelPath),
+                tokenizerModelId: rerankTokenizerId,
+                layoutOverride: layoutOverride,
+                hubCachePath: rerankHubCache,
+                // A subdirectory: the embedding model's compiled copy lives directly in the cache dir.
+                mlmodelcCacheDir: rerankCacheDir,
+                modelIdOverride: rerankModelId,
+                computeUnits: units
+            )
+            rerankLoadState.setReady(actor)
+            print("local-inference: rerank model ready after \(Int(Date().timeIntervalSince(started))) s")
+        } catch {
+            // A load failure must NOT take the sidecar down — embeddings (and completions) are the
+            // product; the rerank stage is opt-in and degrades.
+            fputs("Warning: rerank model failed to load: \(error); /v1/rerank will return 503\n", stderr)
+            rerankLoadState.setFailed("\(error)")
+        }
+    }
+    print("local-inference: loading the rerank model in the background; /v1/rerank returns 503 (loading) until it is ready")
+} else {
+    print("local-inference: rerank not configured (LOCAL_INFERENCE_RERANK_MODEL unset); /v1/rerank returns 404")
+}
+
 // Remove stale socket file so Hummingbird can bind cleanly on restart
 try? FileManager.default.removeItem(atPath: socketPath)
 
 // MARK: - Application
 
 let app = Application(
-    router: buildRouter(adapter: fmAdapter, embeddingActor: embeddingActor, mode: mode),
+    router: buildRouter(
+        adapter: fmAdapter, embeddingActor: embeddingActor,
+        rerankEnabled: rerankModelPath != nil, rerankLoadState: rerankLoadState, mode: mode),
     configuration: .init(address: .unixDomainSocket(path: socketPath))
 )
 

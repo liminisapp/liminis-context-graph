@@ -464,6 +464,34 @@ retrieval eval (`lcg-passages` is the shipped default; `lcg-passages-raw`,
 [retrieval-quality-evaluation.md](retrieval-quality-evaluation.md) and
 [ADR-0789](adr/0789-hybrid-passage-search-rrf-top-rank-bonus.md)).
 
+### Optional rerank and expansion stages on `knowledge_search_passages` (issue #796)
+
+`knowledge_search_passages` accepts three **optional** parameters. Omit them all and the call behaves
+exactly as before (same results, order, response shape and latency).
+
+| Param | Type | Meaning |
+|-------|------|---------|
+| `rerank` | boolean | Rescore the top candidates with a local cross-encoder, blended with belief and recency. Overrides the workspace default (`LCG_RERANK`, default off). Latency (default model, Core ML, one maintainer machine): about 1.1 s p50 at 25 candidates and 1.9 s at 50 (the default), well over the 150 ms target; p95 not measured. The earlier ~587 ms figure was a Python/MPS run. See ADR-0796. |
+| `rerank_candidates` | integer 1–50 | Candidates rescored (default 50, which is also the maximum; `LCG_RERANK_CANDIDATES`). Validated only when a stage runs (`rerank` / `expand` effective for the call), where a non-integer, negative or `null` value is an error; a call that runs no stage ignores it, so the default path is unchanged. An out-of-range integer is clamped to 1–50 and a warning is logged. Results beyond it follow in first-stage order, with no duplicates. |
+| `expand` | boolean | Rewrite the query with a local LLM into lexical, semantic and hypothetical-answer variants and RRF-fuse their results (before rerank). Never a default; expected to cost on the order of a second (not yet measured). |
+
+A non-boolean, non-null `rerank`/`expand` is an invalid-params error on every call, including one that would otherwise run no stage; omit the key or send `null` for "not specified". When a stage is requested the response
+gains a block for it — `rerank: {applied, candidates, reason?, elapsed_ms?}` and/or
+`expansion: {applied, variants, reason?, elapsed_ms?}` (`elapsed_ms` is the stage's wall-clock time, present
+when the stage did work) — and the search **never fails** because a stage could not
+run: it returns the un-staged results with `applied: false` and a `reason` (`not_configured`,
+`unavailable`, `no_candidates`, `no_variants`). Each reranked passage gains `rerank_score` (cross-encoder
+logit) and `belief` (`current` or `superseded`; omitted when unknown). `score` stays the first-stage
+score (cosine in `vector` mode, the fused rank score in `hybrid` mode); only the order changes. The
+first stage follows the call's `mode` and `belief_aware` (belief-aware is the default since #806; see above), except that a hypothetical-answer
+expansion variant is always searched by vector. With `expand: true`, a passage the original query found
+keeps the `score` computed against that query; a passage found only by an expansion variant carries that
+variant's `score`, and `min_score` is applied to each variant's own query, so such a passage can have a
+lower similarity to the user's query than `min_score`. `queries` (#802) compose with the stages: with `rerank` and/or `expand`, the user's own query runs the `queries` weighted-RRF pipeline as its first stage (LLM-expansion variants are single queries, searched as before), and the cross-encoder then reorders the fused result. The `belief_aware` ordering (a superseded passage
+below its successor) is applied to each first-stage list, not to the fused result, so with `expand: true`
+and **without** `rerank` it is not guaranteed; `expand: true` together with `rerank: true` ranks a
+replacement above the note it supersedes when both are among the reranked candidates (`rerank_candidates`). See [Passage rerank and query expansion](configuration.md#passage-rerank-and-query-expansion).
+
 ### group_ids semantics: omitted vs. empty
 
 Every read tool that accepts `group_ids` treats an **omitted or `null` `group_ids` uniformly as

@@ -4,6 +4,7 @@ mod migration;
 #[cfg(unix)]
 mod sigterm_diag;
 mod sink;
+mod stages;
 mod transport;
 
 use std::path::Path;
@@ -1621,6 +1622,7 @@ async fn async_main(
             anthropic,
             ..
         } => {
+            validate_search_stage_settings()?;
             // Bind socket FIRST — this allows health_check and recovery IPC to work even
             // when the DB is in a degraded state. See ADR-0009.
             if let Some(parent) = std::path::Path::new(&socket_path).parent() {
@@ -1632,6 +1634,7 @@ async fn async_main(
                 listener.endpoint()
             );
 
+            let stage_embedder = embedder.clone();
             // FR-001/SC-002: socket-service (hand-started) mode keeps today's fail-fast
             // behavior unchanged — an unreachable embedder is never retried or degraded here.
             let Some(state) = bootstrap_or_exit_on_signal(
@@ -1654,6 +1657,7 @@ async fn async_main(
                 return Ok(());
             };
 
+            install_search_stages(&state, stage_embedder.as_ref())?;
             run_socket_service(
                 telemetry_sink,
                 sink_drain_handle,
@@ -1674,6 +1678,8 @@ async fn async_main(
             connect_eager: _,
             writable_groups: _,
         } => {
+            validate_search_stage_settings()?;
+            let stage_embedder = embedder.clone();
             // FR-002/FR-003: standalone --mcp-stdio mode retries an unreachable embedder with
             // bounded backoff and, if the window is exhausted, starts in degraded mode instead
             // of exiting (issue #499) — nobody is watching this process's stderr.
@@ -1697,6 +1703,7 @@ async fn async_main(
                 return Ok(());
             };
 
+            install_search_stages(&state, stage_embedder.as_ref())?;
             run_mcp_standalone(
                 telemetry_sink,
                 sink_drain_handle,
@@ -1714,6 +1721,32 @@ async fn async_main(
             unreachable!("--help/--version handled in main() before the runtime is built")
         }
     }
+}
+
+/// Fails fast on a malformed stage flag or `LCG_RERANK*` / `LCG_EXPANSION_*` setting, before the DB
+/// is opened or the embedder probed (in standalone MCP mode that includes a bounded retry window).
+fn validate_search_stage_settings() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    cli::parse_stage_flags(&args)?;
+    stages::validate_settings()
+        .map_err(|e| format!("passage rerank/expansion configuration: {e}"))?;
+    Ok(())
+}
+
+/// Installs the optional passage-search stages — rerank and query expansion (issue #796) — on the
+/// freshly bootstrapped state. An unreachable endpoint never fails startup (a call that opts in
+/// degrades and says so), but a malformed setting (a bad `LCG_RERANK*` value, say) does: running
+/// on with the stages silently unconfigured would make every opted-in call report
+/// `not_configured` with only a stderr line to explain it.
+fn install_search_stages(
+    state: &AppState,
+    embedder: Option<&EmbedderFlag>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let flags = cli::parse_stage_flags(&args)?;
+    stages::install(state, &flags, embedder)
+        .map_err(|e| format!("passage rerank/expansion configuration: {e}"))?;
+    Ok(())
 }
 
 /// Not `#[tokio::main]`: that macro's generated wrapper drops the `Runtime` via its default
