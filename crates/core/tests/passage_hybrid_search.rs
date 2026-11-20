@@ -684,3 +684,120 @@ async fn lexical_list_is_exposed_as_a_plain_uuid_score_list() {
     assert_eq!(list[0].0, "a");
     assert!(list[0].1 > 0.0);
 }
+
+// ── Caller-supplied query variants through the request's pipeline (issue #802, ADR-0802) ──
+
+fn with_variants(mut p: Value, queries: Value) -> Value {
+    p["queries"] = queries;
+    p
+}
+
+fn matched_queries(p: &Value) -> Vec<u64> {
+    p["matched_queries"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no matched_queries on {p}"))
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_variants_keywords_reach_bm25_in_hybrid_mode_but_not_in_vector_mode() {
+    // `far` shares no vector direction with any query and no word with the primary query; only
+    // the variant's keyword reaches it, and only through the lexical retriever.
+    let eps = [
+        ep("near", "unrelated words", 0),
+        ep("far", "quokkaplex migration", 3),
+    ];
+    let (state, _db, _d) = make_state(
+        embedder(&[("primary question", one_hot(0)), ("quokkaplex", one_hot(2))]),
+        &eps,
+    );
+    let mut base = params("primary question", "hybrid");
+    base["min_score"] = json!(0.5);
+    assert_eq!(uuids(&search(&state, base.clone()).await), vec!["near"]);
+
+    let hybrid = search(&state, with_variants(base.clone(), json!(["quokkaplex"]))).await;
+    assert_eq!(uuids(&hybrid), vec!["near", "far"], "{hybrid:?}");
+    assert_eq!(matched_queries(&hybrid[0]), vec![0]);
+    assert_eq!(matched_queries(&hybrid[1]), vec![1]);
+    // A lexical-only hit carries no cosine, as in single-query hybrid.
+    assert!(hybrid[1].get("similarity").is_none(), "{hybrid:?}");
+    assert!(hybrid[0]["similarity"].as_f64().unwrap() > 0.99);
+
+    // The same request in vector mode never consults BM25.
+    let mut vp = base;
+    vp["mode"] = json!("vector");
+    let vector = search(&state, with_variants(vp, json!(["quokkaplex"]))).await;
+    assert_eq!(uuids(&vector), vec!["near"], "{vector:?}");
+}
+
+#[tokio::test]
+async fn belief_ranking_is_honoured_once_on_the_fused_list_in_both_modes() {
+    // `page` (derived) restates the query and is first for the primary; the variant retrieves its
+    // cited source `src` first. Fused without belief the page still leads; with it the page falls
+    // below its source, in vector mode and in hybrid mode (both default on since #806).
+    let (state, _db, _d) = make_state(
+        embedder(&[
+            ("quokkaplex", graded_query()),
+            ("migration plan", one_hot(1)),
+        ]),
+        &derived_and_source(),
+    );
+    for mode in ["vector", "hybrid"] {
+        let off = search(
+            &state,
+            with_variants(belief("quokkaplex", mode, false), json!(["migration plan"])),
+        )
+        .await;
+        assert_eq!(uuids(&off), vec!["page", "src"], "{mode}: precondition");
+        let on = search(
+            &state,
+            with_variants(belief("quokkaplex", mode, true), json!(["migration plan"])),
+        )
+        .await;
+        assert_eq!(uuids(&on), vec!["src", "page"], "{mode}");
+        // Scores stay in rank order after the demotion, and the evidence survives it.
+        let scores: Vec<f64> = on.iter().map(|p| p["score"].as_f64().unwrap()).collect();
+        assert!(scores[0] > scores[1], "{mode}: {scores:?}");
+        assert_eq!(matched_queries(&on[0]), vec![0, 1], "{mode}");
+    }
+    // Both modes default to the rule being on (#806), exactly as without variants.
+    let hybrid = search(
+        &state,
+        with_variants(params("quokkaplex", "hybrid"), json!(["migration plan"])),
+    )
+    .await;
+    assert_eq!(uuids(&hybrid), vec!["src", "page"]);
+    let vector = search(
+        &state,
+        with_variants(params("quokkaplex", "vector"), json!(["migration plan"])),
+    )
+    .await;
+    assert_eq!(uuids(&vector), vec!["src", "page"]);
+}
+
+#[tokio::test]
+async fn five_agreeing_variants_cannot_outrank_the_primarys_top_hit() {
+    // Five variants all put `v` first; the primary puts `p` first. The primary keeps at least
+    // two-thirds of the fusion weight, so `p` stays ahead however many variants agree.
+    let eps = [ep("p", "alpha", 0), ep("v", "beta", 1)];
+    let (state, _db, _d) = make_state(
+        embedder(&[
+            ("q", one_hot(0)),
+            ("v1", one_hot(1)),
+            ("v2", one_hot(1)),
+            ("v3", one_hot(1)),
+            ("v4", one_hot(1)),
+            ("v5", one_hot(1)),
+        ]),
+        &eps,
+    );
+    for n in 1..=5usize {
+        let queries: Vec<String> = (1..=n).map(|i| format!("v{i}")).collect();
+        let r = search(&state, with_variants(params("q", "vector"), json!(queries))).await;
+        assert_eq!(uuids(&r)[0], "p", "n = {n}: {r:?}");
+        // min_score is 0, so `v` is also a (low-ranked) candidate of the primary query.
+        assert_eq!(matched_queries(&r[1]), (0..=n as u64).collect::<Vec<_>>());
+    }
+}

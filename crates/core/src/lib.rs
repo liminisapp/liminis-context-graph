@@ -38,6 +38,7 @@ pub mod origin;
 pub mod origin_reads;
 pub mod pointer;
 pub mod prompts;
+pub mod query_variants;
 pub mod read_page;
 pub mod rebuild_job;
 pub mod recovery;

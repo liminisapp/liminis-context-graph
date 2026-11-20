@@ -1835,6 +1835,84 @@ and `"external"` for clipped material; leave notes unmarked. Search with
 `origins: ["primary", "external"]` while the agent refreshes a page. To adopt this on an existing
 notebook, run `knowledge_stamp_origin` as a dry run, check `changes`, then run it for real.
 
+### Query variants: `knowledge_search_passages` `queries` (issue #802)
+
+`knowledge_search_passages` takes one required `query`. A question that *describes* a thing instead of
+naming it shares few words with the note that answers it, so a direct search can come back thin. The
+caller, usually an LLM agent, can write rewrites of its own question and pass them as the optional
+**`queries`** array. LCG adds no model call of its own: the variants are the caller's.
+
+```json
+{"query": "Whose sign-off lets someone get around the rule covering new-hire induction?",
+ "queries": ["onboarding policy exception approver",
+             "onboarding policy",
+             "The policy exception approver for onboarding is a named person."]}
+```
+
+Good variants are keywords the note itself would use, a likely name for the thing described, and a
+one-sentence hypothetical answer. Use them when a direct search came back thin or the question
+describes something rather than naming it.
+
+**Guidance for callers.**
+
+- **Keep the named entities.** Every variant must keep the question's named entities (people, projects,
+  policies, suppliers) and rephrase only the rest. A variant that drops the entity ("supplier uptime
+  guarantee percentage" for a question about Lumen Core's supplier) matches every company's note for that
+  attribute equally and pulls the right note down.
+- **No placeholders.** Do not send template answers such as `[supplier name]`, `[Name]` or `X%`; they add
+  a noise token that matches no note.
+- **Use variants where they help.** They help most for described-not-named lookups and for exact passage
+  lookups. Do not send them for multi-part questions whose entities are already explicit: on the v2
+  eval these lose to the plain search (see below).
+
+**Known regression.** On the v2 retrieval eval, with the committed fixture, variants lower multi-hop
+nDCG@10 by 0.062 [-0.107, -0.026] (vector) and 0.059 [-0.097, -0.027] (hybrid) against the same config
+without variants, while raising passage-lookup nDCG@10 by about 0.11 and, in hybrid mode, paraphrase by
+0.082 [+0.017, +0.153]. Overall the difference is within noise. `queries` is opt-in, so callers that do not
+send it are unaffected. The cause and the planned mitigation are in
+[ADR-0802](adr/0802-caller-supplied-query-variants-weighted-rrf.md).
+
+**Validation** (an error naming the broken rule; nothing is silently truncated):
+
+| Rule | Value |
+|---|---|
+| Shape | an array of strings; absent, `null` and `[]` all mean "no variants" |
+| Count | at most **5** |
+| Each entry | non-empty after trimming whitespace |
+| Total length | at most **2000** Unicode scalar values (`chars()`) across the trimmed entries |
+
+Variants are trimmed; `query` is not. A trimmed variant equal (case-sensitive) to `query` as sent
+or to an earlier variant is dropped before searching, so repeating a phrase never boosts a result. `query` is
+compared verbatim: if it carries surrounding whitespace, a variant equal to its trimmed text is not dropped and
+is searched as a near-identical second query, so send `query` without stray whitespace.
+
+**Execution.** `[query, ...queries]` are embedded in one batched query-role call. Each query then runs the
+request's **whole retrieval pipeline**, concurrently and each on its own connection: the same `mode`
+(`vector`, or `hybrid` with BM25 + vector fused per query, so a variant's keywords reach BM25), `group_ids`,
+`origins`, probe size and `min_score`. `group_ids` and `origins` therefore bind every query: a variant can never
+surface a passage from a group or origin that would be excluded for `query`. The `min_score` cosine floor binds
+each query's **vector** list only; in `hybrid` mode a variant's BM25 hits are not subject to it (as in
+single-query hybrid), so a variant keyword can add a lexical-only passage whose cosine is below `min_score`. The per-query rankings are then fused with weighted Reciprocal Rank Fusion
+(`weight / (rank + 60)`, UUID tie-break): `query` weighs **2** (`PRIMARY_QUERY_WEIGHT`, the qmd choice) and the
+variants **share a total weight of 1** (`VARIANT_BUDGET_WEIGHT`, split equally: 1 each for one variant, 0.2
+each for five). However many variants there are, `query` keeps at least **2/3** of the weight, so variants
+widen the candidate set but together can never outvote the primary query. Belief-aware ranking (`belief_aware`;
+on by default in both modes since #806; `belief_aware: false` opts out) runs **once, on the fused candidates**, never per variant. The first
+`num_results` of the result are returned.
+
+**Response.** With `queries`, every passage also carries **`matched_queries`**: ascending indices into the
+*caller's* `[query, ...queries]` of the queries that retrieved it (0 is `query`; a dropped duplicate's index is
+simply absent). `score` is the **fused rank score** (rank-ordered, so it stays monotone through belief
+demotion), and `similarity` is the best cosine across the vector legs that matched the passage (absent for a
+lexical-only hit), exactly as in hybrid mode. `min_score` floors each query's vector list before fusion.
+Without `queries` (or with `[]` / `null`) the response is byte-for-byte what it was before: no
+`matched_queries` key.
+
+Why a fixed variant budget: with one weight per variant, five variants outweighed `query` 5 : 2, and on the v2
+retrieval eval that cost 0.046 overall nDCG@10 (ADR-0802). Rerank-on-fused-candidates and
+`knowledge_graph_search` `queries` are follow-ups
+([ADR-0802](adr/0802-caller-supplied-query-variants-weighted-rrf.md)).
+
 ### Notebook health: `knowledge_lint` (issue #755)
 
 Wiki-style notebooks need a health pass — contradictions, stale agent-written pages, thinly
@@ -4994,6 +5072,9 @@ It is a separate mode of the existing `lcg-eval` binary. The extraction eval
 |---|---|
 | `lcg-passages` | `knowledge_search_passages` sending neither `mode` nor `belief_aware`: **the service's shipped default** (#806), i.e. belief-aware vector, no FTS and no RRF. It tracks the default, so a change to the default shows up here. The harness removes `LCG_PASSAGE_SEARCH_MODE` and `LCG_PASSAGE_BELIEF_AWARE` from the spawned service's environment so an operator's overrides cannot change what it measures. It is the same request as `lcg-passages-belief` today. |
 | `lcg-passages-raw` | *Opt-in (#806), not in the default run.* `mode: "vector"`, `belief_aware: false`: cosine only, the pre-#806 `lcg-passages` baseline, so the belief-aware gain stays measurable. |
+| `lcg-passages-variants` | *Extra.* `lcg-passages` (the shipped default, belief-aware vector) plus the question's variants from `query-variants.jsonl` passed as `queries` (#802): one batched embed, one vector probe per query (concurrent), weighted RRF with the primary query weighing 2 and the variants sharing a total of 1. Skipped, not failed, when `query-variants.jsonl` is absent. |
+| `lcg-passages-belief-variants` | *Opt-in.* `lcg-passages-belief` plus the same variants: every query runs the vector pipeline, belief-aware ranking runs once on the fused list. Read against `lcg-passages-belief`. |
+| `lcg-passages-hybrid-belief-variants` | *Opt-in.* `lcg-passages-hybrid-belief` plus the same variants: every query runs BM25 + vector (so a variant's keywords reach BM25), belief-aware ranking runs once on the fused list. Read against `lcg-passages-hybrid-belief`. |
 | `lcg-entities-facts` | `knowledge_find_entities` + `knowledge_find_relationships` (hybrid FTS + vector, RRF), default reads. k is split across the two reads (`ceil(k/2)` entities + `ceil(k/2)` facts) and the ranks are interleaved. |
 | `qmd` | `qmd query --no-rerank` (query expansion on). |
 | `qmd-rerank` | `qmd query` with its LLM reranker. |
@@ -5120,6 +5201,55 @@ Each rate carries a bootstrap interval. v1 declares no origins, so it never prin
 - Fact → notes: the fact's *producing* episodes (`episodes`). ADR-0012's either-endpoint
   inference is never used.
 - qmd result → note: the result path's file stem.
+
+## Query variants (`lcg-passages-variants`)
+
+A paraphrase question describes a thing instead of naming it, so it shares few words with the answer
+note. An agent calling `knowledge_search_passages` can supply its own rewrites as `queries`
+([IPC reference](ipc-mcp-reference.md)). The eval simulates that agent from a fixture,
+`query-variants.jsonl`, with up to 5 variants per question id. An LLM writes them seeing **only the
+question text** (no corpus, notes or relevance labels) under the prompt committed beside the fixture,
+`query-variants.prompt.md`. It is a one-time maintainer step, never run in CI:
+
+```bash
+lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --export-prompts prompts.jsonl
+# write each reply (a JSON array of up to 5 strings) to <replies>/<key>.md
+lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --replies <replies>
+lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --check
+```
+
+The fixture is stamped with the questions hash; the eval refuses a stale one. **Leak check:** a variant that
+contains, verbatim, the title (first `# ` heading, whole or without `Notes on ` / `Q&A: `) or a key-fact
+string of any note relevant to its question fails, naming the question and variant. Matching is
+case-insensitive, needles under 8 characters are skipped, and text the question itself already contains is not
+a leak. It catches verbatim leaks only, not paraphrased ones. With no `query-variants.jsonl`, the
+`lcg-passages-variants` row is reported as skipped.
+
+The committed v2 fixture (244 questions, 1,194 variants) was written by Sonnet 4.6 from each question's text
+alone through this exchange; `--check` finds no leaks. About one variant in ten is a hypothetical answer with a
+placeholder (`[date]`, `[Name]`), which adds a noise token and will not match note text.
+
+That fixture **predates the current `query-variants.prompt.md`**, which since added the rules to keep every
+named entity and to send no placeholders. The fixture does not follow them (about 41% of multi-hop variants
+omit the anchor entity), and it is not reproducible from the committed prompt, because replies are keyed by a
+hash of the system prompt. It will be regenerated and re-measured with #797's composite search.
+
+Every variants config sends the *same request as its base config* plus `queries`, so each query runs that
+pipeline (vector, or BM25 + vector) and the per-query rankings are fused (primary weight 2, the variants
+sharing a total of 1). The report's "Query variants vs `<base>`" section, one per variants config
+(`lcg-passages-variants` against `lcg-passages`, `lcg-passages-hybrid-belief-variants` against
+`lcg-passages-hybrid-belief`), gives per-category paired nDCG@k differences with intervals, p50/p95, and the
+merge-bar reading: paraphrase interval above zero, no category wholly below zero. Latency is reported, not gated: variants are deliberate agent searches.
+
+First v2 result (vector-only, per-variant weight 1, head `a0c7e95f`): variants lowered overall nDCG@10 from
+0.568 to 0.522 (paraphrase 0.150 to 0.085, multi-hop 0.662 to 0.552, p50 24 ms to 141 ms). That is why variants
+now run the request's whole pipeline, share a fixed weight budget and fuse concurrently (ADR-0802).
+
+Second v2 result (head `87c85525`, that design): overall +0.011 (vector) and +0.017 (hybrid), within noise;
+passage +0.117 and +0.112, hybrid paraphrase +0.082 [+0.017, +0.153], and multi-hop -0.062 [-0.107, -0.026]
+(vector) and -0.059 [-0.097, -0.027] (hybrid). The multi-hop loss is a known regression with the committed
+fixture, caused mostly by correlated variants voting together for generic distractors; entity-preserving
+variants are the planned mitigation (ADR-0802).
 
 ## Caveats the report repeats
 
@@ -5429,7 +5559,7 @@ target/release/lcg-eval retrieval \
 |---|---|
 | `--corpus <DIR>` | Fixture directory (default `crates/eval/fixtures/retrieval`, v1; the full corpus is `crates/eval/fixtures/retrieval-v2`). |
 | `--k <N>` | Shared cut-off, 1–100 (default 10). |
-| `--configs <LIST>` | Subset of the five configuration ids. |
+| `--configs <LIST>` | Subset of the six configuration ids. |
 | `--service-bin`, `--embedder-http/--embedder-uds`, `--extractor-http/--extractor-uds` | How the spawned LCG service is configured. |
 | `--embedding-profile <LIST>` | Embedding [instruction profile(s)](configuration.md#embedding-instruction-profiles) to measure, e.g. `none,bge-v1.5`. See [Comparing embedding profiles](#comparing-embedding-profiles). |
 | `--replay-cassette <PATH>` / `--record-cassette <PATH>` | Replay or record ingest extraction ([cassettes](testing-and-evaluation.md#recordreplay-cassettes)) for a free, repeatable LCG ingest. |
@@ -5941,6 +6071,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0788](0788-retrieval-corpus-v2-and-bootstrap-reporting.md) | Retrieval Corpus v2 and Bootstrap Reporting — a Generated, Origin-Aware Fixture and Intervals That Label Noise | 2026-11-18 |
 | [0789](0789-hybrid-passage-search-rrf-top-rank-bonus.md) | Hybrid Passage Search — BM25 + Vector with Weighted RRF and Belief-Aware Ranking | 2026-11-18 |
 | [0790](0790-embedder-roles-and-instruction-profiles.md) | Embedder Roles and Instruction Profiles | 2026-11-18 |
+| [0802](0802-caller-supplied-query-variants-weighted-rrf.md) | Caller-Supplied Query Variants, Fused with Weighted RRF | 2026-11-18 |
 | [0806](0806-belief-aware-passage-ranking-default.md) | Belief-Aware Passage Ranking Is the Default | 2026-11-19 |
 
 ## Historical numbering

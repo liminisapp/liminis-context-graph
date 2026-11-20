@@ -6098,6 +6098,7 @@ fn passage_from_row(row: &[Value], score: f64, origin_col: &Value) -> PassageRes
             .as_str()
             .to_string(),
         similarity: None,
+        matched_queries: None,
     }
 }
 

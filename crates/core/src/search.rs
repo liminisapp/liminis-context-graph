@@ -57,6 +57,49 @@ fn rrf_rank_weighted(lists: &[&[(String, f64)]], weights: &[f64]) -> Vec<(String
     ranked
 }
 
+/// Weight of the primary query in weighted RRF (issue #802, ADR-0802). The value is taken from
+/// qmd, which weights the original query ×2; it is a constant so it can be tuned without an API
+/// change.
+pub const PRIMARY_QUERY_WEIGHT: f64 = 2.0;
+
+/// The *total* weight shared by all caller-supplied variants, split equally across however many
+/// there are ([`variant_weight`]). A fixed budget, not a per-variant weight: with a per-variant
+/// weight of 1.0 five variants outweighed the primary query 5 : 2, and on v2 that cost 0.046
+/// overall nDCG@10 (ADR-0802). The budget keeps the primary query's share of the total at least
+/// `PRIMARY / (PRIMARY + BUDGET)` = 2/3 for any number of variants.
+pub const VARIANT_BUDGET_WEIGHT: f64 = 1.0;
+// The variants together must never outweigh half of the primary query.
+const _: () = assert!(PRIMARY_QUERY_WEIGHT >= 2.0 * VARIANT_BUDGET_WEIGHT);
+
+/// Weight of each variant when `n_variants` variants are searched: the budget split equally.
+pub fn variant_weight(n_variants: usize) -> f64 {
+    VARIANT_BUDGET_WEIGHT / n_variants.max(1) as f64
+}
+
+/// Weighted Reciprocal Rank Fusion (issue #802): like [`rrf_rank`] but each input list carries a
+/// weight, so `score(uuid) = Σ weight_i / (rank_i + 60)`. Same constant and the same UUID
+/// tie-break as the unweighted path, so output is deterministic. A uuid repeated within one
+/// list counts once, at its first (best) rank.
+pub fn rrf_fuse_weighted(lists: &[(f64, &[(String, f64)])]) -> Vec<(String, f64)> {
+    let mut scores: HashMap<String, f64> = HashMap::new();
+    for (weight, list) in lists {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (rank, (uuid, _)) in list.iter().enumerate() {
+            if !seen.insert(uuid.as_str()) {
+                continue;
+            }
+            *scores.entry(uuid.clone()).or_default() += weight / (rank as f64 + 60.0);
+        }
+    }
+    let mut ranked: Vec<(String, f64)> = scores.into_iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    ranked
+}
+
 /// One fused result with its evidence (issue #629): the fused RRF score and, per input list, the
 /// raw value (BM25 score or cosine distance) if that list contained the item, else `None`.
 #[derive(Debug, Clone, PartialEq)]
@@ -699,6 +742,231 @@ pub async fn search_passages_vector_belief(
     .await?
 }
 
+/// One query's retrieval result inside [`search_passages_variants`].
+struct QueryLeg {
+    /// Index into the caller's `[query, ...queries]`.
+    index: usize,
+    /// This query's ranked uuids after the mode's own pipeline (vector, or BM25 + vector fused).
+    ranked: Vec<String>,
+    /// The vector retriever's rows for this query (`score` is the cosine *distance*).
+    vector_rows: Vec<PassageResult>,
+}
+
+/// Runs the request's retrieval mode for one query: the floored vector list and, in hybrid mode,
+/// the BM25 list, fused with [`LEXICAL_RRF_WEIGHT`] exactly as [`search_passages_hybrid`] does.
+#[allow(clippy::too_many_arguments)]
+fn retrieve_one_query(
+    db: &Db,
+    index: usize,
+    text: &str,
+    embedding: &[f32],
+    mode: PassageSearchMode,
+    group_ids: Option<&[&str]>,
+    origins: Option<&[crate::origin::Origin]>,
+    candidate_limit: usize,
+    min_score: f64,
+) -> Result<QueryLeg, Error> {
+    let conn = db.connect()?;
+    let vector_rows =
+        conn.vector_search_episodic_origins(embedding, group_ids, candidate_limit, origins)?;
+    let vector = apply_similarity_floor(
+        vector_rows
+            .iter()
+            .map(|p| (p.uuid.clone(), p.score))
+            .collect(),
+        Some(min_score),
+    );
+    let ranked: Vec<String> = match mode {
+        PassageSearchMode::Vector => vector.into_iter().map(|(u, _)| u).collect(),
+        PassageSearchMode::Hybrid => {
+            let bm25 = lexical_passage_list(&conn, text, group_ids, origins, candidate_limit)?;
+            rrf_fuse_scored_weighted(&[&bm25, &vector], &[LEXICAL_RRF_WEIGHT, 1.0])
+                .into_iter()
+                .map(|h| h.uuid)
+                .collect()
+        }
+    };
+    Ok(QueryLeg {
+        index,
+        ranked,
+        vector_rows,
+    })
+}
+
+/// Passage search with caller-supplied query variants (issue #802, ADR-0802).
+///
+/// Every query (the primary and each variant) runs the request's **full retrieval pipeline**:
+/// the same `mode` (vector, or BM25 + vector fused), `group_ids`, `origins`, probe size and
+/// `min_score` floor. The `group_ids` and `origins` filters therefore bind every query, so a
+/// variant can never surface a passage from a group or origin the primary would exclude. The
+/// `min_score` cosine floor binds each query's **vector** list only: in hybrid mode a variant's
+/// BM25 hits are not subject to it (exactly as in single-query hybrid), which is how a variant's
+/// keywords reach a passage the primary's vector floor would drop. The per-query rankings are
+/// then fused with weighted RRF:
+/// the primary weighs [`PRIMARY_QUERY_WEIGHT`] and the variants share [`VARIANT_BUDGET_WEIGHT`]
+/// equally ([`variant_weight`]). Belief-aware ranking (`belief_aware`) runs **once, on the fused
+/// candidates**, not per variant; the result is then truncated to `num_results`.
+///
+/// Queries are embedded in **one** batched `EmbedRole::Query` call, and the per-query retrievals
+/// run concurrently, each on its own connection, so latency stays near a single search's.
+///
+/// `score` is the fused (cross-query) RRF score, rank-ordered, and `similarity` is the best cosine
+/// across the queries whose vector retriever matched the passage (`None` for a lexical-only hit).
+/// `matched_queries` lists, ascending, the indices into the caller's `[query, ...queries]` that
+/// retrieved the passage. With no variants this is the unchanged single-query path of `mode`.
+#[allow(clippy::too_many_arguments)]
+pub async fn search_passages_variants(
+    db: Arc<Db>,
+    embedder: Arc<dyn Embedder>,
+    query: &str,
+    variants: &[crate::query_variants::Variant],
+    group_ids: Option<Vec<String>>,
+    num_results: usize,
+    min_score: f64,
+    origins: Option<Vec<crate::origin::Origin>>,
+    mode: PassageSearchMode,
+    belief_aware: bool,
+) -> Result<Vec<PassageResult>, Error> {
+    let mut texts: Vec<String> = Vec::with_capacity(variants.len() + 1);
+    texts.push(query.to_string());
+    texts.extend(variants.iter().map(|v| v.text.clone()));
+    let text_refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+    let embeddings = embedder.embed_batch(&text_refs, EmbedRole::Query).await?;
+    if embeddings.len() != texts.len() {
+        return Err(Error::Ipc(format!(
+            "embedder returned {} vectors for {} queries",
+            embeddings.len(),
+            texts.len()
+        )));
+    }
+    // Index into the caller's `[query, ...queries]` for each text.
+    let indices: Vec<usize> = std::iter::once(0)
+        .chain(variants.iter().map(|v| v.index))
+        .collect();
+    let n_variants = variants.len();
+    let candidate_limit = num_results * 3;
+
+    tokio::task::spawn_blocking(move || -> Result<Vec<PassageResult>, Error> {
+        let gid_refs: Option<Vec<&str>> = group_ids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+
+        // One retrieval per query, concurrently; each opens its own connection.
+        let legs: Vec<Result<QueryLeg, Error>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = texts
+                .iter()
+                .zip(&embeddings)
+                .zip(&indices)
+                .map(|((text, embedding), &index)| {
+                    let (db, gid_refs, origins) = (&*db, gid_refs.as_deref(), origins.as_deref());
+                    scope.spawn(move || {
+                        retrieve_one_query(
+                            db,
+                            index,
+                            text,
+                            embedding,
+                            mode,
+                            gid_refs,
+                            origins,
+                            candidate_limit,
+                            min_score,
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| {
+                    h.join()
+                        .unwrap_or_else(|_| Err(Error::Ipc("query retrieval panicked".to_string())))
+                })
+                .collect()
+        });
+        let legs: Vec<QueryLeg> = legs.into_iter().collect::<Result<_, _>>()?;
+
+        let weight_of = |index: usize| {
+            if index == 0 {
+                PRIMARY_QUERY_WEIGHT
+            } else {
+                variant_weight(n_variants)
+            }
+        };
+        let lists: Vec<Vec<(String, f64)>> = legs
+            .iter()
+            .map(|l| l.ranked.iter().map(|u| (u.clone(), 0.0)).collect())
+            .collect();
+        let weighted: Vec<(f64, &[(String, f64)])> = legs
+            .iter()
+            .zip(&lists)
+            .map(|(l, list)| (weight_of(l.index), list.as_slice()))
+            .collect();
+        let mut fused = rrf_fuse_weighted(&weighted);
+        // Belief-aware ranking needs the whole candidate set, not just the top `num_results`.
+        fused.truncate(if belief_aware {
+            candidate_limit
+        } else {
+            num_results
+        });
+
+        // Which queries matched each uuid, and the best cosine across the vector legs.
+        let mut matched: HashMap<&str, Vec<usize>> = HashMap::new();
+        for leg in &legs {
+            for uuid in &leg.ranked {
+                matched.entry(uuid.as_str()).or_default().push(leg.index);
+            }
+        }
+        let mut best_cosine: HashMap<&str, f64> = HashMap::new();
+        let mut rows: HashMap<String, PassageResult> = HashMap::new();
+        for leg in &legs {
+            for p in &leg.vector_rows {
+                rows.entry(p.uuid.clone()).or_insert_with(|| p.clone());
+                // Below the floor the vector retriever did not match it (a lexical-only hit).
+                let cos = 1.0 - p.score;
+                if cos < min_score {
+                    continue;
+                }
+                let slot = best_cosine.entry(p.uuid.as_str()).or_insert(cos);
+                if cos > *slot {
+                    *slot = cos;
+                }
+            }
+        }
+
+        let conn = db.connect()?;
+        let missing: Vec<String> = fused
+            .iter()
+            .filter(|(u, _)| !rows.contains_key(u))
+            .map(|(u, _)| u.clone())
+            .collect();
+        for p in conn.get_passages_by_uuids(&missing)? {
+            rows.insert(p.uuid.clone(), p);
+        }
+
+        let mut ranked: Vec<PassageResult> = fused
+            .iter()
+            .filter_map(|(uuid, score)| {
+                let mut p = rows.remove(uuid)?;
+                p.score = *score;
+                // Only a uuid in a leg's vector rows has a cosine; a lexical-only hit has none.
+                p.similarity = best_cosine
+                    .get(uuid.as_str())
+                    .copied()
+                    .filter(|s| s.is_finite());
+                let mut m = matched.get(uuid.as_str()).cloned().unwrap_or_default();
+                m.sort_unstable();
+                p.matched_queries = Some(m);
+                Some(p)
+            })
+            .collect();
+        if belief_aware {
+            ranked = apply_belief_ranking(&conn, ranked)?;
+        }
+        ranked.truncate(num_results);
+        Ok(ranked)
+    })
+    .await?
+}
+
 /// Hybrid BM25 + HNSW entity search with RRF fusion (HOT path).
 /// `group_ids: None` searches across every group; `Some(vec![])` is a real filter and matches no
 /// groups.
@@ -895,6 +1163,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn weighted_fusion_ranks_primary_only_ahead_of_variant_only_at_same_rank() {
+        // Both are rank 0 in their own list; "z" sorts after "a" by uuid, so a UUID tie-break
+        // alone would put the variant-only hit first. The weight must overrule it.
+        let primary = list(&["z"]);
+        let variant = list(&["a"]);
+        let fused = rrf_fuse_weighted(&[
+            (PRIMARY_QUERY_WEIGHT, &primary),
+            (variant_weight(1), &variant),
+        ]);
+        let order: Vec<&str> = fused.iter().map(|(u, _)| u.as_str()).collect();
+        assert_eq!(order, vec!["z", "a"]);
+    }
+
+    #[test]
+    fn weighted_fusion_lists_a_multi_query_hit_once() {
+        let primary = list(&["a", "b"]);
+        let variant = list(&["b", "c"]);
+        let fused = rrf_fuse_weighted(&[(2.0, &primary), (1.0, &variant)]);
+        let order: Vec<&str> = fused.iter().map(|(u, _)| u.as_str()).collect();
+        assert_eq!(order, vec!["b", "a", "c"]);
+    }
+
+    #[test]
+    fn weighted_fusion_is_deterministic_on_ties() {
+        let l1 = list(&["m"]);
+        let l2 = list(&["c"]);
+        let l3 = list(&["x"]);
+        let fused = rrf_fuse_weighted(&[(1.0, &l1), (1.0, &l2), (1.0, &l3)]);
+        let order: Vec<&str> = fused.iter().map(|(u, _)| u.as_str()).collect();
+        assert_eq!(order, vec!["c", "m", "x"]);
+    }
+
+    #[test]
+    fn weighted_fusion_single_unit_list_matches_unweighted_order() {
+        let l = list(&["q", "a", "m"]);
+        let weighted: Vec<String> = rrf_fuse_weighted(&[(1.0, &l)])
+            .into_iter()
+            .map(|(u, _)| u)
+            .collect();
+        assert_eq!(weighted, rrf_fuse(&[&l]));
+    }
+
+    #[test]
+    fn weighted_fusion_does_not_double_count_a_repeat_within_one_list() {
+        let dup = list(&["a", "a"]);
+        let once = list(&["a"]);
+        let a = rrf_fuse_weighted(&[(1.0, &dup)]);
+        let b = rrf_fuse_weighted(&[(1.0, &once)]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
     fn belief_aware_switch_spellings() {
         for off in ["off", "OFF", "Off", "0", "false", "FALSE", "  off  "] {
             assert_eq!(parse_belief_aware_switch(off), Some(false), "{off:?}");
@@ -942,6 +1262,36 @@ mod tests {
             sanitize_fts_query(&long).split(' ').count(),
             MAX_FTS_QUERY_TOKENS
         );
+    }
+
+    #[test]
+    fn the_primary_share_of_the_weight_is_at_least_two_thirds_for_any_variant_count() {
+        for n in 1..=crate::query_variants::MAX_QUERY_VARIANTS {
+            let total = PRIMARY_QUERY_WEIGHT + variant_weight(n) * n as f64;
+            assert!(
+                PRIMARY_QUERY_WEIGHT / total >= 2.0 / 3.0 - 1e-12,
+                "n = {n}: primary share {}",
+                PRIMARY_QUERY_WEIGHT / total
+            );
+            // The variants' total weight is the fixed budget, however many there are.
+            assert!((variant_weight(n) * n as f64 - VARIANT_BUDGET_WEIGHT).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn variants_that_all_agree_cannot_outrank_the_primary_top_hit() {
+        // Every variant puts "v" at rank 0; the primary puts "p" at rank 0. Even with the
+        // maximum five agreeing variants, the primary's own top hit stays first.
+        for n in 1..=crate::query_variants::MAX_QUERY_VARIANTS {
+            let primary = list(&["p"]);
+            let variant = list(&["v"]);
+            let mut lists: Vec<(f64, &[(String, f64)])> = vec![(PRIMARY_QUERY_WEIGHT, &primary)];
+            for _ in 0..n {
+                lists.push((variant_weight(n), &variant));
+            }
+            let fused = rrf_fuse_weighted(&lists);
+            assert_eq!(fused[0].0, "p", "n = {n}");
+        }
     }
 
     #[test]
@@ -1241,6 +1591,7 @@ mod tests {
             attributes: "{}".into(),
             origin: "primary".into(),
             similarity: None,
+            matched_queries: None,
         };
         let mk = |superseded_at_us| crate::belief::EpisodeSupersession {
             superseded_at_us,

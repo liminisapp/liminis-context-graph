@@ -912,6 +912,84 @@ and `"external"` for clipped material; leave notes unmarked. Search with
 `origins: ["primary", "external"]` while the agent refreshes a page. To adopt this on an existing
 notebook, run `knowledge_stamp_origin` as a dry run, check `changes`, then run it for real.
 
+### Query variants: `knowledge_search_passages` `queries` (issue #802)
+
+`knowledge_search_passages` takes one required `query`. A question that *describes* a thing instead of
+naming it shares few words with the note that answers it, so a direct search can come back thin. The
+caller, usually an LLM agent, can write rewrites of its own question and pass them as the optional
+**`queries`** array. LCG adds no model call of its own: the variants are the caller's.
+
+```json
+{"query": "Whose sign-off lets someone get around the rule covering new-hire induction?",
+ "queries": ["onboarding policy exception approver",
+             "onboarding policy",
+             "The policy exception approver for onboarding is a named person."]}
+```
+
+Good variants are keywords the note itself would use, a likely name for the thing described, and a
+one-sentence hypothetical answer. Use them when a direct search came back thin or the question
+describes something rather than naming it.
+
+**Guidance for callers.**
+
+- **Keep the named entities.** Every variant must keep the question's named entities (people, projects,
+  policies, suppliers) and rephrase only the rest. A variant that drops the entity ("supplier uptime
+  guarantee percentage" for a question about Lumen Core's supplier) matches every company's note for that
+  attribute equally and pulls the right note down.
+- **No placeholders.** Do not send template answers such as `[supplier name]`, `[Name]` or `X%`; they add
+  a noise token that matches no note.
+- **Use variants where they help.** They help most for described-not-named lookups and for exact passage
+  lookups. Do not send them for multi-part questions whose entities are already explicit: on the v2
+  eval these lose to the plain search (see below).
+
+**Known regression.** On the v2 retrieval eval, with the committed fixture, variants lower multi-hop
+nDCG@10 by 0.062 [-0.107, -0.026] (vector) and 0.059 [-0.097, -0.027] (hybrid) against the same config
+without variants, while raising passage-lookup nDCG@10 by about 0.11 and, in hybrid mode, paraphrase by
+0.082 [+0.017, +0.153]. Overall the difference is within noise. `queries` is opt-in, so callers that do not
+send it are unaffected. The cause and the planned mitigation are in
+[ADR-0802](adr/0802-caller-supplied-query-variants-weighted-rrf.md).
+
+**Validation** (an error naming the broken rule; nothing is silently truncated):
+
+| Rule | Value |
+|---|---|
+| Shape | an array of strings; absent, `null` and `[]` all mean "no variants" |
+| Count | at most **5** |
+| Each entry | non-empty after trimming whitespace |
+| Total length | at most **2000** Unicode scalar values (`chars()`) across the trimmed entries |
+
+Variants are trimmed; `query` is not. A trimmed variant equal (case-sensitive) to `query` as sent
+or to an earlier variant is dropped before searching, so repeating a phrase never boosts a result. `query` is
+compared verbatim: if it carries surrounding whitespace, a variant equal to its trimmed text is not dropped and
+is searched as a near-identical second query, so send `query` without stray whitespace.
+
+**Execution.** `[query, ...queries]` are embedded in one batched query-role call. Each query then runs the
+request's **whole retrieval pipeline**, concurrently and each on its own connection: the same `mode`
+(`vector`, or `hybrid` with BM25 + vector fused per query, so a variant's keywords reach BM25), `group_ids`,
+`origins`, probe size and `min_score`. `group_ids` and `origins` therefore bind every query: a variant can never
+surface a passage from a group or origin that would be excluded for `query`. The `min_score` cosine floor binds
+each query's **vector** list only; in `hybrid` mode a variant's BM25 hits are not subject to it (as in
+single-query hybrid), so a variant keyword can add a lexical-only passage whose cosine is below `min_score`. The per-query rankings are then fused with weighted Reciprocal Rank Fusion
+(`weight / (rank + 60)`, UUID tie-break): `query` weighs **2** (`PRIMARY_QUERY_WEIGHT`, the qmd choice) and the
+variants **share a total weight of 1** (`VARIANT_BUDGET_WEIGHT`, split equally: 1 each for one variant, 0.2
+each for five). However many variants there are, `query` keeps at least **2/3** of the weight, so variants
+widen the candidate set but together can never outvote the primary query. Belief-aware ranking (`belief_aware`;
+on by default in both modes since #806; `belief_aware: false` opts out) runs **once, on the fused candidates**, never per variant. The first
+`num_results` of the result are returned.
+
+**Response.** With `queries`, every passage also carries **`matched_queries`**: ascending indices into the
+*caller's* `[query, ...queries]` of the queries that retrieved it (0 is `query`; a dropped duplicate's index is
+simply absent). `score` is the **fused rank score** (rank-ordered, so it stays monotone through belief
+demotion), and `similarity` is the best cosine across the vector legs that matched the passage (absent for a
+lexical-only hit), exactly as in hybrid mode. `min_score` floors each query's vector list before fusion.
+Without `queries` (or with `[]` / `null`) the response is byte-for-byte what it was before: no
+`matched_queries` key.
+
+Why a fixed variant budget: with one weight per variant, five variants outweighed `query` 5 : 2, and on the v2
+retrieval eval that cost 0.046 overall nDCG@10 (ADR-0802). Rerank-on-fused-candidates and
+`knowledge_graph_search` `queries` are follow-ups
+([ADR-0802](adr/0802-caller-supplied-query-variants-weighted-rrf.md)).
+
 ### Notebook health: `knowledge_lint` (issue #755)
 
 Wiki-style notebooks need a health pass — contradictions, stale agent-written pages, thinly

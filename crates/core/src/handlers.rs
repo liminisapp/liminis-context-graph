@@ -2202,13 +2202,34 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
     let belief =
         search::resolve_belief_aware(belief_request, search::belief_aware_default_from_env());
 
+    // Caller-supplied variants (issue #802). Validated before any embedding; empty means the
+    // unchanged single-query path. Variants run the request's full pipeline (`mode`,
+    // `belief_aware`), with belief-aware ranking applied once after fusion.
+    let variants = crate::query_variants::parse_query_variants(&p["queries"], &query)?;
+
     let run = |state: Arc<AppState>| {
         let query = query.clone();
+        let variants = variants.clone();
         let group_ids = group_ids.clone();
         let origins = origins.clone();
         async move {
             let db = load_db(&state)?;
             let embedder = Arc::clone(&state.embedder);
+            if !variants.is_empty() {
+                return search::search_passages_variants(
+                    db,
+                    embedder,
+                    &query,
+                    &variants,
+                    group_ids,
+                    num_results,
+                    min_score,
+                    origins,
+                    mode,
+                    belief,
+                )
+                .await;
+            }
             match mode {
                 search::PassageSearchMode::Vector if !belief => {
                     search::search_passages(

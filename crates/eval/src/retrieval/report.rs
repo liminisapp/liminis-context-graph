@@ -118,6 +118,33 @@ pub struct Report {
     pub configs: Vec<ConfigOutcome>,
 }
 
+/// Suffix of a caller-supplied-variants passage config (#802): `lcg-passages-variants`,
+/// `lcg-passages-belief-variants`, `lcg-passages-hybrid-belief-variants`. A profiled row is
+/// `<id>@<profile>`. Each is read against the same config without the suffix.
+const VARIANTS_SUFFIX: &str = "-variants";
+
+/// Whether `id` is a variants config (see [`VARIANTS_SUFFIX`]), profiled or not.
+pub(crate) fn is_variants_config(id: &str) -> bool {
+    id.split('@')
+        .next()
+        .unwrap_or(id)
+        .ends_with(VARIANTS_SUFFIX)
+}
+
+/// The config a variants config is read against: the same id without the suffix, with any
+/// `@<profile>` kept. `None` for a config that is not a variants config.
+pub(crate) fn variants_base_id(id: &str) -> Option<String> {
+    let (head, profile) = match id.split_once('@') {
+        Some((h, p)) => (h, Some(p)),
+        None => (id, None),
+    };
+    let base = head.strip_suffix(VARIANTS_SUFFIX)?;
+    Some(match profile {
+        Some(p) => format!("{base}@{p}"),
+        None => base.to_string(),
+    })
+}
+
 /// Nearest-rank percentile over unsorted samples; `None` when empty.
 pub fn percentile(samples: &[f64], p: f64) -> Option<f64> {
     if samples.is_empty() {
@@ -471,6 +498,9 @@ impl Report {
         self.ran()
             .into_iter()
             .filter(|(c, _)| c.id.starts_with(prefix))
+            // The variants config is read in its own section against `lcg-passages` (#802); it
+            // is not a separate system for the LCG-vs-qmd hypotheses.
+            .filter(|(c, _)| !is_variants_config(&c.id))
             .filter_map(|(c, r)| {
                 let s = r.by_category.get(&cat)?;
                 Some((c.id.clone(), s.ndcg?, s.stale_above_current_rate))
@@ -562,6 +592,9 @@ impl Report {
                 " `lcg-passages-belief` is the vector ranking with the same belief-aware rules.",
             );
         }
+        if self.ran().iter().any(|(c, _)| is_variants_config(&c.id)) {
+            passages.push_str(" Each `*-variants` configuration adds the fixture's caller-supplied query variants to the same configuration: every variant runs the request's full pipeline (vector, or BM25 + vector), the per-query rankings are fused with weighted RRF (the primary query weighs 2, the variants share a total of 1), and belief-aware ranking, where on, runs once on the fused list.");
+        }
         format!("> **Read with care.** LCG and qmd use different embedding (and reranker) models, so this compares *systems*, not retrieval algorithms. {corpus}.{passages}\n")
     }
 
@@ -650,6 +683,7 @@ impl Report {
         }
 
         self.origin_section(&mut o);
+        self.variants_section(&mut o);
 
         let _ = writeln!(o, "## Hypotheses\n");
         let (h1, h2) = self.hypotheses();
@@ -808,6 +842,113 @@ impl Report {
                     );
                 }
             }
+        }
+    }
+
+    /// A variants config against the same config without variants (#802): per-category paired nDCG@k
+    /// difference with its interval, latency, and the merge-bar reading. A profiled variants row
+    /// is paired with the same profile's `lcg-passages` row.
+    fn variants_section(&self, o: &mut String) {
+        let ran = self.ran();
+        let pairs: Vec<_> = ran
+            .iter()
+            .filter_map(|(c, r)| {
+                let base_id = variants_base_id(&c.id)?;
+                let base = ran.iter().find(|(b, _)| b.id == base_id)?;
+                Some((c.id.as_str(), *r, base.0.id.as_str(), base.1))
+            })
+            .collect();
+        for (vid, vrun, bid, brun) in pairs {
+            let _ = writeln!(o, "## Query variants vs `{bid}`\n");
+            let _ = writeln!(
+                o,
+                "`{vid}` is `{bid}` plus the question's variants from `query-variants.jsonl`, sent as `queries` (primary query weighted 2, the variants sharing a total of 1). Paired nDCG@k difference, `{vid}` − `{bid}`, {:.0}% bootstrap interval:\n",
+                LEVEL * 100.0
+            );
+            let _ = writeln!(
+                o,
+                "| scope | n | `{bid}` | `{vid}` | Δ nDCG@k | interval | reading |"
+            );
+            let _ = writeln!(o, "|---|---|---|---|---|---|---|");
+            let mut scopes: Vec<Option<Category>> = vec![None];
+            scopes.extend(
+                self.listed_categories()
+                    .into_iter()
+                    .filter(|c| self.meta.category_counts.get(c).copied().unwrap_or(0) > 0)
+                    .map(Some),
+            );
+            let mean = |r: &ConfigRun, cat: Option<Category>| match cat {
+                Some(c) => r.by_category.get(&c).and_then(|s| s.ndcg),
+                None => r.overall.ndcg,
+            };
+            let mut paraphrase_up = None;
+            let mut regressions: Vec<&'static str> = Vec::new();
+            for cat in scopes {
+                let d = self.paired((vid, vrun), (bid, brun), cat, ("ndcg", NDCG));
+                let (n, delta, iv, reading) = match d {
+                    None => (
+                        "<2".to_string(),
+                        "n/a".to_string(),
+                        "n/a".to_string(),
+                        "not distinguishable from noise (too few shared questions)".to_string(),
+                    ),
+                    Some(d) => (
+                        d.n.to_string(),
+                        format!("{:+.3}", d.mean_diff),
+                        format!("[{:+.3}, {:+.3}]", d.lo, d.hi),
+                        match d.verdict {
+                            Verdict::AHigher => format!("`{vid}` higher"),
+                            Verdict::BHigher => format!("`{bid}` higher"),
+                            Verdict::Noise => Verdict::Noise.label().to_string(),
+                        },
+                    ),
+                };
+                if let Some(c) = cat {
+                    if c == Category::Paraphrase {
+                        paraphrase_up =
+                            Some(matches!(d.map(|d| d.verdict), Some(Verdict::AHigher)));
+                    }
+                    if matches!(d.map(|d| d.verdict), Some(Verdict::BHigher)) {
+                        regressions.push(c.label());
+                    }
+                }
+                let _ = writeln!(
+                    o,
+                    "| {} | {n} | {} | {} | {delta} | {iv} | {reading} |",
+                    Self::cat_label(cat),
+                    f3(mean(brun, cat)),
+                    f3(mean(vrun, cat)),
+                );
+            }
+            let _ = writeln!(
+                o,
+                "\nLatency (warm, over the socket): `{bid}` p50 {} ms / p95 {} ms; `{vid}` p50 {} ms / p95 {} ms.\n",
+                ms(brun.latency_p50_ms),
+                ms(brun.latency_p95_ms),
+                ms(vrun.latency_p50_ms),
+                ms(vrun.latency_p95_ms)
+            );
+            let _ = writeln!(o, "Merge bar (#802):");
+            let _ = writeln!(
+                o,
+                "- paraphrase nDCG@k improves with the interval above zero: {}",
+                match paraphrase_up {
+                    Some(true) => "**met**",
+                    Some(false) => "**not met**",
+                    None => "cannot be read (no paraphrase questions)",
+                }
+            );
+            let _ = writeln!(
+                o,
+                "- no category regresses beyond noise (no interval wholly below zero): {}\n",
+                if regressions.is_empty() {
+                    "**met**".to_string()
+                } else {
+                    format!("**not met** ({})", regressions.join(", "))
+                }
+            );
+            // Latency is reported above, not gated: variants are deliberate agent searches (#802,
+            // SC-004 dropped its p50 ceiling).
         }
     }
 
@@ -1257,6 +1398,128 @@ mod tests {
     fn report() -> Report {
         let (l, q) = two((0.9, 0.4), (0.5, 0.8));
         report_with(l, q)
+    }
+
+    /// `lcg-passages` and `lcg-passages-variants` (#802) over temporal + paraphrase questions.
+    fn variants_report(base: (f64, f64), variants: (f64, f64), variants_p50: f64) -> Report {
+        let (b, _) = two(base, base);
+        let (v, _) = two(variants, variants);
+        let mut r = report_with(b.clone(), b.clone());
+        r.configs.insert(
+            0,
+            ConfigOutcome {
+                id: "lcg-passages".into(),
+                description: "d".into(),
+                status: run(b),
+            },
+        );
+        let mut vs = run(v);
+        if let Status::Ran(run) = &mut vs {
+            run.latency_p50_ms = Some(variants_p50);
+        }
+        r.configs.insert(
+            1,
+            ConfigOutcome {
+                id: "lcg-passages-variants".into(),
+                description: "d".into(),
+                status: vs,
+            },
+        );
+        r
+    }
+
+    #[test]
+    fn variants_section_reports_a_paraphrase_gain_and_the_merge_bar() {
+        let md = variants_report((0.7, 0.2), (0.7, 0.6), 40.0).render_markdown();
+        assert!(md.contains("## Query variants vs `lcg-passages`"), "{md}");
+        let row = md
+            .lines()
+            .find(|l| l.starts_with("| paraphrase |") && l.contains("lcg-passages-variants"))
+            .unwrap_or_else(|| panic!("no paraphrase row in {md}"));
+        assert!(row.contains("`lcg-passages-variants` higher"), "{row}");
+        assert!(
+            md.contains("paraphrase nDCG@k improves with the interval above zero: **met**"),
+            "{md}"
+        );
+        assert!(
+            md.contains("no interval wholly below zero): **met**"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("p50 ≤"),
+            "latency is reported, not gated: {md}"
+        );
+        assert!(md.contains("p50 40 ms"), "{md}");
+    }
+
+    #[test]
+    fn variants_section_flags_a_regressing_category_and_does_not_gate_latency() {
+        // Temporal regresses clearly; paraphrase does not move.
+        let md = variants_report((0.8, 0.5), (0.5, 0.5), 150.0).render_markdown();
+        assert!(
+            md.contains("paraphrase nDCG@k improves with the interval above zero: **not met**"),
+            "{md}"
+        );
+        assert!(md.contains("**not met** (temporal)"), "{md}");
+        assert!(md.contains("p50 150 ms"), "{md}");
+        assert!(
+            !md.contains("p50 ≤"),
+            "latency is reported, not gated: {md}"
+        );
+    }
+
+    #[test]
+    fn variants_section_absent_without_both_configs_and_hypotheses_ignore_the_variants_row() {
+        assert!(!report().render_markdown().contains("Query variants vs"));
+        // Adding a much better variants row must not change what H1/H2 read: they compare the
+        // best `lcg-*` with `qmd*`, and the variants row is read on its own.
+        let plain = report();
+        let (h1, h2) = plain.hypotheses();
+        let mut with = report();
+        let (v, _) = two((0.99, 0.99), (0.99, 0.99));
+        with.configs.insert(
+            0,
+            ConfigOutcome {
+                id: "lcg-passages-variants".into(),
+                description: "d".into(),
+                status: run(v),
+            },
+        );
+        assert_eq!(with.hypotheses(), (h1, h2));
+        // No `lcg-passages` row to pair with: no section, no panic.
+        assert!(!with.render_markdown().contains("Query variants vs"));
+    }
+
+    #[test]
+    fn the_passages_note_is_not_vector_only_when_variants_ran() {
+        let md = variants_report((0.7, 0.2), (0.7, 0.6), 40.0).render_markdown();
+        assert!(
+            md.contains("adds the fixture's caller-supplied query variants"),
+            "{md}"
+        );
+        assert!(!report()
+            .render_markdown()
+            .contains("caller-supplied query variants"));
+    }
+
+    #[test]
+    fn a_variants_config_is_read_against_its_own_base() {
+        for (id, base) in [
+            ("lcg-passages-variants", "lcg-passages"),
+            ("lcg-passages-belief-variants", "lcg-passages-belief"),
+            (
+                "lcg-passages-hybrid-belief-variants",
+                "lcg-passages-hybrid-belief",
+            ),
+            ("lcg-passages-variants@bge", "lcg-passages@bge"),
+        ] {
+            assert!(is_variants_config(id), "{id}");
+            assert_eq!(variants_base_id(id).as_deref(), Some(base), "{id}");
+        }
+        for id in ["lcg-passages", "lcg-passages-hybrid-belief", "qmd"] {
+            assert!(!is_variants_config(id), "{id}");
+            assert_eq!(variants_base_id(id), None, "{id}");
+        }
     }
 
     #[test]

@@ -10,10 +10,12 @@ pub const DEFAULT_K: usize = 10;
 pub const DEFAULT_FIXTURE_DIR: &str = "crates/eval/fixtures/retrieval";
 pub const DEFAULT_EVIDENCE_CACHE: &str = "retrieval_evidence_cache.jsonl";
 
-/// The four headline configurations (FR-004), then the labelled extra belief-aware variant.
+/// The four headline configurations (FR-004), then the labelled extras: the belief-aware variant
+/// and `lcg-passages-variants` (#802, needs `query-variants.jsonl`; a skipped row without it).
 pub const HEADLINE_CONFIGS: [&str; 4] = ["lcg-passages", "lcg-entities-facts", "qmd", "qmd-rerank"];
-pub const ALL_CONFIGS: [&str; 5] = [
+pub const ALL_CONFIGS: [&str; 6] = [
     "lcg-passages",
+    "lcg-passages-variants",
     "lcg-entities-facts",
     "qmd",
     "qmd-rerank",
@@ -30,6 +32,13 @@ pub const HYBRID_PASSAGE_CONFIGS: [&str; 4] = [
     "lcg-passages-belief",
     "lcg-passages-hybrid",
     "lcg-passages-hybrid-belief",
+];
+
+/// Opt-in caller-supplied-variants configs on top of those (#802): every query runs the same
+/// pipeline as the base config, so each is read against it. Needs `query-variants.jsonl`.
+pub const VARIANTS_PASSAGE_CONFIGS: [&str; 2] = [
+    "lcg-passages-belief-variants",
+    "lcg-passages-hybrid-belief-variants",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,13 +90,19 @@ OPTIONS:
                                Default: crates/eval/fixtures/retrieval
     --k <N>                    Shared cut-off for every configuration (1..=100, default 10).
     --configs <LIST>           Comma-separated subset of: lcg-passages, lcg-entities-facts, qmd,
-                               qmd-rerank, lcg-entities-facts-belief. Default: all five.
-                               lcg-passages is the service's shipped default (belief-aware
-                               vector since #806).
+                               qmd-rerank, lcg-entities-facts-belief, lcg-passages-variants.
+                               Default: all six. lcg-passages is the service's shipped default
+                               (belief-aware vector since #806). lcg-passages-variants reads
+                               <DIR>/query-variants.jsonl (see `lcg-eval retrieval-variants`) and is
+                               reported as skipped when that file is absent.
                                Opt-in: lcg-passages-raw (belief_aware=false, the pre-#806
                                baseline), (#789) lcg-passages-hybrid (BM25 + vector, weighted RRF),
                                lcg-passages-hybrid-belief (the same plus belief-aware ranking),
                                lcg-passages-belief (vector plus belief-aware ranking).
+                               Opt-in (#802, need query-variants.jsonl): lcg-passages-belief-variants
+                               and lcg-passages-hybrid-belief-variants (the same, with the variants
+                               run through that pipeline and fused once; each is read against its
+                               variants-less base).
     --service-bin <PATH>       liminis-context-graph binary to spawn (default: alongside lcg-eval,
                                else `liminis-context-graph` on PATH).
     --embedder-http <URL>      Real embedder for the spawned service (required for LCG configs
@@ -189,11 +204,15 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
                 let v = val("--configs")?;
                 let mut list = Vec::new();
                 for c in v.split(',').map(str::trim).filter(|c| !c.is_empty()) {
-                    if !ALL_CONFIGS.contains(&c) && !HYBRID_PASSAGE_CONFIGS.contains(&c) {
+                    if !ALL_CONFIGS.contains(&c)
+                        && !HYBRID_PASSAGE_CONFIGS.contains(&c)
+                        && !VARIANTS_PASSAGE_CONFIGS.contains(&c)
+                    {
                         return Err(format!(
-                            "unknown configuration '{c}' (expected one of: {}, {})",
+                            "unknown configuration '{c}' (expected one of: {}, {}, {})",
                             ALL_CONFIGS.join(", "),
-                            HYBRID_PASSAGE_CONFIGS.join(", ")
+                            HYBRID_PASSAGE_CONFIGS.join(", "),
+                            VARIANTS_PASSAGE_CONFIGS.join(", ")
                         ));
                     }
                     if !list.iter().any(|x| x == c) {
@@ -320,7 +339,8 @@ mod tests {
         match p(&[]).unwrap() {
             RetrievalMode::Run(a) => {
                 assert_eq!(a.k, DEFAULT_K);
-                assert_eq!(a.configs.len(), 5);
+                assert_eq!(a.configs.len(), 6);
+                assert!(a.configs.iter().any(|c| c == "lcg-passages-variants"));
                 assert_eq!(a.corpus, PathBuf::from(DEFAULT_FIXTURE_DIR));
                 assert!(!a.dry_run);
             }
@@ -356,6 +376,34 @@ mod tests {
         match p(&["--configs", "lcg-passages,lcg-passages-raw"]).unwrap() {
             RetrievalMode::Run(a) => {
                 assert_eq!(a.configs, vec!["lcg-passages", "lcg-passages-raw"])
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn variants_config_is_selectable_and_listed_in_usage() {
+        match p(&["--configs", "lcg-passages,lcg-passages-variants"]).unwrap() {
+            RetrievalMode::Run(a) => {
+                assert_eq!(a.configs, vec!["lcg-passages", "lcg-passages-variants"])
+            }
+            _ => panic!(),
+        }
+        assert!(usage().contains("lcg-passages-variants"));
+        assert!(p(&["--configs", "lcg-passages-variant"]).is_err());
+        match p(&[
+            "--configs",
+            "lcg-passages-hybrid-belief,lcg-passages-hybrid-belief-variants,lcg-passages-belief-variants",
+        ])
+        .unwrap()
+        {
+            RetrievalMode::Run(a) => assert_eq!(a.configs.len(), 3),
+            _ => panic!(),
+        }
+        // Opt-in: not in the default run.
+        match p(&[]).unwrap() {
+            RetrievalMode::Run(a) => {
+                assert!(!a.configs.iter().any(|c| c.contains("belief-variants")))
             }
             _ => panic!(),
         }

@@ -571,6 +571,31 @@ impl PassageMode {
         }
     }
 
+    /// The config id of this mode plus the caller-supplied query variants (#802): every query
+    /// runs this mode's pipeline, so the row is read against [`Self::config_id`]. `None` for
+    /// `lcg-passages-raw`, which has no variants row.
+    pub fn variants_config_id(self) -> Option<&'static str> {
+        match self {
+            PassageMode::Default => Some("lcg-passages-variants"),
+            PassageMode::Raw => None,
+            PassageMode::VectorBelief => Some("lcg-passages-belief-variants"),
+            PassageMode::Hybrid => Some("lcg-passages-hybrid-variants"),
+            PassageMode::HybridBelief => Some("lcg-passages-hybrid-belief-variants"),
+        }
+    }
+
+    /// The mode whose [`Self::variants_config_id`] is `id`, `None` for any other id.
+    pub fn from_variants_id(id: &str) -> Option<Self> {
+        [
+            PassageMode::Default,
+            PassageMode::VectorBelief,
+            PassageMode::Hybrid,
+            PassageMode::HybridBelief,
+        ]
+        .into_iter()
+        .find(|m| m.variants_config_id() == Some(id))
+    }
+
     /// The `knowledge_search_passages` request. `Default` omits `mode` and `belief_aware` so it
     /// tracks the service's default; every other configuration sends both explicitly so it keeps
     /// its meaning if the default changes again. (`spawn_service` removes `LCG_PASSAGE_SEARCH_MODE`
@@ -641,6 +666,68 @@ impl Retriever for LcgPassages {
                 evidence_gaps: 0,
                 latency,
             })
+        })
+    }
+}
+
+/// The caller-supplied-variants passage configs (issue #802): `knowledge_search_passages` with the
+/// question's variants from `query-variants.jsonl` passed as `queries`, on top of the same request
+/// as the matching [`LcgPassages`] row (`mode`, `belief_aware`, `min_score` 0). Any difference
+/// between the two rows is therefore the variants and the weighted fusion. The variants are keyed
+/// by question id, so scoring goes through [`Retriever::retrieve_for`]; a question with no
+/// variants sends no `queries` at all.
+pub struct LcgVariants {
+    pub t: Arc<dyn RpcTransport>,
+    pub mode: PassageMode,
+    pub variants: super::variants::VariantsFixture,
+}
+
+impl LcgVariants {
+    async fn search(&self, q: &str, variants: &[String], k: usize) -> Result<RankedResult, String> {
+        let mut params = self.mode.request(q, k);
+        if !variants.is_empty() {
+            params["queries"] = json!(variants);
+        }
+        let t0 = Instant::now();
+        let r = self.t.call("knowledge_search_passages", params).await?;
+        let latency = t0.elapsed();
+        let (notes, evidence) = map_passages(&items(&r, "passages"));
+        Ok(RankedResult {
+            notes,
+            evidence,
+            // One batched embed call, however many variants.
+            model_calls: Some(1),
+            lookup_calls: 0,
+            evidence_gaps: 0,
+            latency,
+        })
+    }
+}
+
+impl Retriever for LcgVariants {
+    fn id(&self) -> &str {
+        self.mode
+            .variants_config_id()
+            .expect("a variants retriever is built only for a mode with a variants config")
+    }
+    fn description(&self) -> String {
+        format!(
+            "{} plus caller-supplied query variants from query-variants.jsonl (every query runs the same pipeline; weighted RRF, primary 2, variants share 1)",
+            self.mode.config_id()
+        )
+    }
+    /// Without a question id there are no variants to look up: the plain request of the mode.
+    fn retrieve<'a>(&'a self, q: &'a str, k: usize) -> BoxFuture<'a, Result<RankedResult, String>> {
+        Box::pin(async move { self.search(q, &[], k).await })
+    }
+    fn retrieve_for<'a>(
+        &'a self,
+        q: &'a super::fixture::Question,
+        k: usize,
+    ) -> BoxFuture<'a, Result<RankedResult, String>> {
+        Box::pin(async move {
+            self.search(&q.text, self.variants.for_question(&q.id), k)
+                .await
         })
     }
 }
@@ -943,6 +1030,57 @@ mod tests {
         assert_eq!(log[0].1["num_results"], 7);
         assert_eq!(log[0].1["min_score"], 0.0);
         assert_eq!(log[0].1["group_ids"], json!([EVAL_GROUP]));
+    }
+
+    #[tokio::test]
+    async fn variants_retriever_sends_the_question_s_variants_keyed_by_id() {
+        let t = Arc::new(FakeTransport::new(|m, _| {
+            assert_eq!(m, "knowledge_search_passages");
+            Ok(json!({"passages":[{"content":"c","source_description":"n1:n1#0"}],"count":1}))
+        }));
+        let mut vf = crate::retrieval::variants::VariantsFixture::default();
+        vf.by_id
+            .insert("q1".into(), vec!["alt one".into(), "alt two".into()]);
+        let rt = LcgVariants {
+            t: t.clone(),
+            mode: PassageMode::HybridBelief,
+            variants: vf,
+        };
+        let mk = |id: &str| crate::retrieval::fixture::Question {
+            id: id.into(),
+            category: crate::retrieval::fixture::Category::Paraphrase,
+            text: "same text".into(),
+            relevant: vec![],
+            evidence: vec![],
+            current: vec![],
+            stale: vec![],
+            negative: false,
+        };
+        let with = rt.retrieve_for(&mk("q1"), 7).await.unwrap();
+        assert_eq!(with.notes, vec!["n1"]);
+        assert_eq!(with.model_calls, Some(1));
+        // Two questions can share text; only the id decides which variants apply.
+        rt.retrieve_for(&mk("q2"), 7).await.unwrap();
+        let log = t.log.lock().unwrap();
+        assert_eq!(log[0].1["query"], "same text");
+        assert_eq!(log[0].1["queries"], json!(["alt one", "alt two"]));
+        assert_eq!(log[0].1["num_results"], 7);
+        assert_eq!(log[0].1["min_score"], 0.0);
+        assert_eq!(log[0].1["group_ids"], json!([EVAL_GROUP]));
+        // The variants ride on the mode's own request (#802): the pipeline is not vector-only.
+        assert_eq!(log[0].1["mode"], "hybrid");
+        assert_eq!(log[0].1["belief_aware"], true);
+        assert!(
+            log[1].1.get("queries").is_none(),
+            "no variants: no queries key"
+        );
+        assert_eq!(rt.id(), "lcg-passages-hybrid-belief-variants");
+        assert_eq!(
+            PassageMode::from_variants_id("lcg-passages-variants"),
+            Some(PassageMode::Default)
+        );
+        assert_eq!(PassageMode::from_variants_id("lcg-passages"), None);
+        assert_eq!(PassageMode::Raw.variants_config_id(), None);
     }
 
     fn map() -> Arc<IngestMap> {

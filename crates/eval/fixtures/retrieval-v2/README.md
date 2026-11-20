@@ -70,5 +70,32 @@ target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2
    Afterwards the script replays it automatically with zero extraction requests. Note the corpus
    hash from the report header beside the file.
 
+4. **Query variants (#802), after the render is final.** `query-variants.prompt.md` is the fixed
+   prompt; the LLM sees each question's text and nothing else. No API key:
+   ```bash
+   target/release/lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --export-prompts prompts.jsonl
+   # write each reply (a JSON array of up to 5 strings) to <replies>/<key>.md, e.g. with agents
+   target/release/lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --replies <replies>
+   target/release/lcg-eval retrieval-variants --dir crates/eval/fixtures/retrieval-v2 --check
+   ```
+   Commit `query-variants.jsonl`. It is stamped with the questions hash, so any edit to
+   `questions.jsonl` makes it stale (regenerate). `--replies` refuses to write if a reply is missing or
+   invalid or any variant contains a relevant note's title or key fact verbatim. Then run the eval with
+   `lcg-passages-variants`, and the opt-in `lcg-passages-belief-variants` and
+   `lcg-passages-hybrid-belief-variants`, to measure the merge bar.
+
+   **Committed fixture:** 244 questions, 1,194 variants, written by Sonnet 4.6 from the question text only
+   (`--export-prompts` / `--replies` exchange, no API key); `--check` reports no leaks against questions hash
+   `c110fc2cb5090cea`.
+
+   **The committed fixture predates the current prompt.** It was generated with the earlier
+   `query-variants.prompt.md`, before the entity-preserving and no-placeholder rules were added, so it does
+   not follow them: about 41% of multi-hop variants omit the question's named entity and about 10% of all
+   variants carry placeholders such as `[Name]` or `[date]` (ADR-0802). `call_key` hashes the system prompt,
+   so re-running `--replies` against the current prompt finds none of the existing replies, and the
+   fixture is not reproducible from the committed prompt. The maintainer will regenerate it with the current
+   prompt and re-measure together with #797's composite search; until then the multi-hop result is a
+   known regression.
+
 `cargo test -p lcg-eval --test retrieval_v2` checks the skeleton against the scenario, the pipeline
 against a template-prose test double, and (once rendered) the checked-in prose against the skeleton.
