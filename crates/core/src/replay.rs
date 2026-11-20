@@ -574,9 +574,23 @@ impl WalReplayer {
         let files: Vec<PathBuf> = keyed_files.into_iter().map(|(_, p)| p).collect();
         let files_total = files.len() as u64;
 
-        let mut batch = ReplayBatch::new(opts.group_id.clone());
         // Zero-vector recording / retry state shared by every embed window of this run (#808).
-        let record_zero_rows = opts.group_id.is_some() && !opts.dry_run;
+        // The record is derived, best-effort state: if its table is absent (a database that never
+        // ran the schema step), recording is switched off for this run rather than letting a
+        // failed record write roll back real graph rows (`purge_groups` probes the same way).
+        let mut record_zero_rows = opts.group_id.is_some() && !opts.dry_run;
+        if record_zero_rows && !conn.has_zero_vector_table() {
+            eprintln!(
+                "[WAL WARN] EmbeddingZeroRow table is missing; zero-vector fallbacks will not be \
+                 recorded for this replay"
+            );
+            record_zero_rows = false;
+        }
+        let mut batch = ReplayBatch::new(if record_zero_rows {
+            opts.group_id.clone()
+        } else {
+            None
+        });
         // Per-success `Clear` effects are only worth their DELETEs when there is something to
         // clear: a record that was already non-empty at the start of this run (an incremental
         // replay/recovery onto a degraded group), or an `Add` made earlier in this run. A lookup

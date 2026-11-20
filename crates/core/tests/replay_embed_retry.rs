@@ -378,6 +378,25 @@ fn deleting_a_recorded_row_clears_its_entry() {
     );
 }
 
+// The record is derived, best-effort state: with its table absent, an embedder failure must still
+// store the (zero-vector) graph rows rather than roll the batch back over a failed record write.
+#[test]
+fn missing_record_table_does_not_cost_graph_rows() {
+    let fx = Fixture::new();
+    let lines = n_rows(3, |i| format!("entity-{i}"));
+    write_wal(&fx.wal_dir, &lines);
+    let db = fx.open();
+    db.connect()
+        .unwrap()
+        .run_cypher("DROP TABLE EmbeddingZeroRow")
+        .unwrap();
+    let failing: RecomputeEmbedFn = Box::new(|_t: &[&str]| Err(status_err("400 Bad Request")));
+    let stats = replay(&fx, &db, failing, fast_policy(0), 64, 0);
+    assert_eq!(stats.embeddings_recompute_failed, 3);
+    assert_eq!(stats.transactions_rolled_back, 0);
+    assert_eq!(db.connect().unwrap().count_nodes("Entity").unwrap(), 3);
+}
+
 // A bulk delete carrying a `uuids` list (`WHERE n.uuid IN $uuids`) clears every listed entry.
 #[test]
 fn bulk_delete_with_uuids_list_clears_entries() {
