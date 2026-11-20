@@ -5887,6 +5887,57 @@ This is the record of every retrieval experiment and its result: what was tried,
 
 Newest first. **Δ** is against the stated baseline, paired on v2 unless marked.
 
+### E13: graph multi-hop probes and an ontology ([#815](https://github.com/liminisapp/liminis-context-graph/issues/815), local probe on main @ `19759906`, v2). Promising, not shipped
+
+The question: does the graph answer what chunk search can't (chains, joins, inverse lookups), and does an ontology make it usable?
+
+- **Free-form graph audit (v2, standard cassette):**
+  - 2,016 edges carry 1,223 distinct relation types.
+  - Hub entities have 80–115 edges.
+  - The facts for the 15 real chain questions are present: 15/15 entities resolve and hop 1 is there for 15/15, hop 2 for 12/15.
+  - Question-guided walks found the answer in the top fact for at most 7/15, against 1/15 for flat fact search.
+  - `knowledge_canonicalize_relations` typed only 26–28% of edges lexically.
+- **Ontology v3 → v3.1.** It was written from a purpose statement and 25+4 competency questions (CQs), not from the corpus. Fit was judged by blind classifier agents given only the purpose and the type menu.
+  - Bar: ≥ 85% of purpose-relevant ("core") facts typed on both corpora, and κ ≥ 0.8.
+  - v3: 93–98% core typed on v2, κ 0.87, but only **45% on v1**. Missing: roles and titles, plans and schedules, proposals, replacement.
+  - v3.1 (+`HAS_ROLE`, `SCHEDULED_FOR`, `PROPOSED`, wider `SUPERSEDES`; 27 types): **97% / 97%** on a fresh v2 sample and **98%** on v1, κ 0.82, with incidental typing at 17–24%. The v1 figure is optimistic, since those facts were read while revising.
+- **Live re-extraction of v2 under v3.1 (strict), Haiku 4.5 via subscription:**
+  - 3,675 calls with 0 errors. The new cassette is `v2-haiku45-onto31`.
+  - Result: 2,612 edges over **28 types**, of which 74 are `UNCLASSIFIED` (3%). Nodes went from 769 to 1,202, so entity splitting needs a look.
+  - `lcg-entities-facts` nDCG 0.283 → 0.294 (noise). Passages are unaffected.
+- **Graph-native question set:** 129 questions in 13 families, shapes from the CQs and gold from the skeleton.
+  - Metric "complete": every hop has a gold note among the returned evidence.
+  - Metric "answer": every gold answer appears in the returned facts.
+  - Passages are scored strictly: all gold notes in the top 10.
+  - The walk is LLM-free: exact-name seed, then at each hop the top 3 edges by cosine (10 for lists and joins). "Typed" filters each hop to its CQ relation types.
+
+| runner (graph) | chain-2 (48) | chain-3 (24) | list (31) | join (14) | history (12) | **all (129)** | answer found |
+|---|---|---|---|---|---|---|---|
+| `lcg-passages` top 10 | 9 | 0 | 20 | 0 | **12** | 41 | n/a |
+| flat facts top 10 (typed graph) | 5 | 0 | 28 | 0 | 10 | 43 | 50 |
+| walk, untyped (free-form) | 17 | 3 | 28 | 12 | 9 | 69 | 93 |
+| walk, typed + fallback (free-form) | 18 | 4 | 24 | 4 | 1 | 51 | 97 |
+| walk, untyped (typed graph) | 22 | 9 | 26 | 11 | 11 | 79 | 95 |
+| **walk, typed (typed graph)** | **35** | **19** | **29** | 12 | 9 | **104** | **119** |
+
+- **Learned:**
+  - Chunk search can't do chains or joins: `lcg-passages` gets 0/24 on 3-hop and 0/14 on joins, with complete evidence for 41 of 129 questions.
+  - A typed walk over the ontology graph gets complete evidence for 104/129 and finds the answer for 119/129, returning about 6 facts against 10 passages.
+  - The ontology is the lever. Typing the free-form graph after the fact doesn't help (51, which falls below the untyped walk's 69). Extracting under the ontology does (104).
+  - Passages still win change history (12/12 against 9/12), so route by question type.
+- **Caveats:**
+  - The walk's plan is oracle (the CQ path is given), so a question-to-path planner is untested.
+  - "Answer found" is substring presence, not reader accuracy.
+  - v2 is nearly one-to-one (each supplier serves one project), which understates aggregation.
+  - qmd and rerank were not run on this set, because the reranker model was removed with the disk cleanup.
+  - The walk and the `--ontology` hook are local patches, not in the repo.
+- **Next:**
+  - An LLM path planner (oracle against planned).
+  - A reader for answer accuracy.
+  - qmd and passages-rerank on the same set.
+  - `lcg-eval --ontology`.
+  - A second corpus with fan-out and the CQs v2 can't instantiate (P3, S2, meetings, provenance).
+
 ### E12: graph search plus rerank ([#797](https://github.com/liminisapp/liminis-context-graph/issues/797), PR [#801](https://github.com/liminisapp/liminis-context-graph/issues/801) @ `672c6de3`). Rejected, closed 2026-11-20
 
 | config | v2 | v1 | paraphrase (v2) | temporal (v2) |
