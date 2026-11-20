@@ -717,6 +717,7 @@ impl LcgVariants {
             evidence,
             // One batched embed call, however many variants.
             model_calls: Some(1),
+            service_calls: Some(1),
             lookup_calls: 0,
             evidence_gaps: 0,
             latency,
@@ -854,6 +855,7 @@ impl Retriever for LcgPassagesStaged {
                 // Expansion's variant embeddings are not exposed per query, so a count would be a
                 // guess; report it as not exposed rather than invent one.
                 model_calls: (!self.expand).then_some(1 + u64::from(self.rerank)),
+                service_calls: Some(1),
                 lookup_calls: 0,
                 evidence_gaps: 0,
                 latency,

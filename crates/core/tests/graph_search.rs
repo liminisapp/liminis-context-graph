@@ -692,6 +692,7 @@ fn fixture_built_with(populate: impl FnOnce(&Conn<'_>), inner: Arc<dyn Embedder>
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
+        search_stages: Default::default(),
     });
     Fx {
         state,

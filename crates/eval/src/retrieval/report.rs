@@ -1868,7 +1868,10 @@ mod tests {
     fn variants_section_reports_a_paraphrase_gain_and_the_merge_bar() {
         let md = variants_report((0.7, 0.2), (0.7, 0.6), 40.0).render_markdown();
         assert!(md.contains("## Query variants vs `lcg-passages`"), "{md}");
-        let row = md
+        // Look inside the variants section: the headroom section's best-per-category table also
+        // has `| paraphrase |` rows naming the variants config.
+        let section = &md[md.find("## Query variants vs").unwrap()..];
+        let row = section
             .lines()
             .find(|l| l.starts_with("| paraphrase |") && l.contains("lcg-passages-variants"))
             .unwrap_or_else(|| panic!("no paraphrase row in {md}"));

@@ -2305,6 +2305,9 @@ mod tests {
                 attributes: String::new(),
                 origin: "primary".into(),
                 similarity: None,
+                matched_queries: None,
+                rerank_score: None,
+                belief: None,
             },
             origin: Origin::Primary,
             supersession: belief::EpisodeSupersession {

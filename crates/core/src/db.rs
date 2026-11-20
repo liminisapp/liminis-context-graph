@@ -4991,6 +4991,9 @@ impl<'db> Conn<'db> {
                         score: 0.0,
                         origin: origin.as_str().to_string(),
                         similarity: None,
+                        matched_queries: None,
+                        rerank_score: None,
+                        belief: None,
                     },
                     origin,
                     supersession: crate::belief::EpisodeSupersession {
