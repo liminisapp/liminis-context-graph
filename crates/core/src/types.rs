@@ -447,6 +447,15 @@ pub struct PassageResult {
     /// `queries`, so a request without them serializes exactly as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_queries: Option<Vec<usize>>,
+    /// Cross-encoder relevance logit (issue #796). `Some` only on a passage the rerank stage
+    /// scored, and omitted from the wire otherwise, so a call that does not opt in serializes
+    /// byte-identically to before the stage existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f64>,
+    /// Belief state at query time, `current` or `superseded` (issue #796). `Some` only on a
+    /// reranked passage whose supersession state is known; omitted otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub belief: Option<&'static str>,
 }
 
 /// Why an entity was returned by `knowledge_find_entities` (issue #629): the fused RRF score

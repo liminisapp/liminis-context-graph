@@ -556,6 +556,66 @@ These are on-demand runs: they need a real embedder, an extraction backend (a ca
 ingest free and repeatable) and, for the grounded columns, a judge key. Differences on a small
 question set are within noise; read them with the confidence caveats above.
 
+## Comparing the passage stages (rerank and query expansion)
+
+Four opt-in configurations measure the optional stages of `knowledge_search_passages`
+([ADR-0796](adr/0796-passage-rerank-and-query-expansion.md)); each is switchable and measured on its own:
+
+| Config | Stages |
+|--------|--------|
+| `lcg-passages-rerank` | rerank only |
+| `lcg-passages-expand` | query expansion only |
+| `lcg-passages-belief-rerank` | rerank over a belief-aware first stage (`belief_aware: true` with `rerank: true`) |
+| `lcg-passages-expand-rerank` | expansion, RRF fusion, then rerank |
+
+Since #806 `lcg-passages` is the shipped belief-aware default, while `lcg-passages-rerank`, `-expand` and
+`-expand-rerank` pin a raw cosine first stage (`belief_aware: false`); `lcg-passages-raw` is the matching
+un-staged baseline and `lcg-passages-belief-rerank` is the stage over the belief-aware first stage. The
+report's *Passage stages* section pairs each stage with the baseline that has the same first stage
+(`lcg-passages-raw`, or `lcg-passages-belief` for `lcg-passages-belief-rerank`) when that baseline ran, and falls back to
+`lcg-passages` otherwise, so include `lcg-passages-raw` (and `lcg-passages-belief`) in `--configs` for an isolated
+stage delta. All baselines send `rerank: false, expand: false`.
+
+They are **not** in the default configuration list: they need a reranker (and for expansion an LLM)
+reachable from the spawned service, which is normally the CoreML sidecar started with a rerank model
+(see [`native/local-inference/README.md`](../native/local-inference/README.md#reranker-v1rerank)).
+
+```sh
+lcg-eval retrieval --corpus crates/eval/fixtures/retrieval-v2 \
+  --embedder-uds /tmp/liminis-inference.sock \
+  --configs lcg-passages,lcg-passages-rerank,lcg-passages-expand,lcg-passages-expand-rerank,qmd-rerank \
+  --out report-stages
+# a different expansion LLM (e.g. a local Qwen): add --expander-http <url>; a separate reranker:
+# --reranker-uds <socket>
+```
+
+A stage that was requested but did not apply (sidecar down, model absent) is reported as a **failed
+query**, never scored as if it had run — the service degrades to first-stage results, and scoring those
+under the stage's name would silently report `lcg-passages` numbers. The report's *Passage stages* section
+gives, for each stage, the paired nDCG@k difference against the matching un-staged baseline (`lcg-passages-raw` / `lcg-passages-belief`, else `lcg-passages`) per category with a 95%
+bootstrap interval (and expansion on top of `lcg-passages-rerank`), plus the four rerank acceptance checks:
+paraphrase gain with an interval above zero, overall not lower, temporal interval including or exceeding
+zero, and p50 ≤ 150 ms. Take acceptance numbers only after #790 (embedding roles) is in the build under
+test, and hybrid BM25 + vector (#789) has landed, but the eval has no configuration for rerank or expansion on top of hybrid yet, so that half of the comparison is still to be done.
+
+### When to use each stage
+
+Rerank is measured; expansion is not yet. The maintainer's v2 and v1 numbers (Apple silicon, mxbai Core ML
+model) are in [ADR-0796](adr/0796-passage-rerank-and-query-expansion.md#belief-aware-first-stage-maintainer-head-2471ad5d):
+`lcg-passages-belief-rerank` scores 0.759 nDCG@10 on v2 against 0.653 for `lcg-passages-belief` (+0.106
+[+0.073, +0.142]) and 0.935 against 0.894 on the v1 holdout, at about 1.9 s p50 (not the 150 ms budget).
+
+- **Rerank** is aimed at paraphrase questions (a role or description instead of a name). Its blend keeps
+  superseded notes below their replacements, so it is designed not to repeat qmd's temporal collapse
+  (`qmd-rerank` 0.293 vs `lcg-passages` 0.628). Measured on v2 with the belief-aware first stage, temporal
+  is 0.800 against 0.745 for `lcg-passages-belief` (the 0.85 target was not reached; accepted as a
+  follow-up), so it does not collapse. Use it for deliberate searches by role or description, not
+  search-as-you-type (about 1.9 s p50 at the default 50 candidates).
+- **Query expansion** is expected to cost on the order of a second (unmeasured). It is recommended **only if** the measurements show it improving
+  some category with a paired interval above zero beyond what rerank already gives; if no category
+  justifies it, the ADR says so and it should not be used. Either way it is for deliberate agent searches,
+  never search-as-you-type.
+
 ## Reading the report
 
 - **Overall** and **per-category** tables: every configuration's metrics as `point [lo, hi]`, with

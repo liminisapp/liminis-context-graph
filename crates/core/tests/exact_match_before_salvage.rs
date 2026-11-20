@@ -89,6 +89,7 @@ fn make_state(db: Arc<Db>, extractions: Vec<ExtractionResult>) -> Arc<AppState> 
         ontology: Some(Arc::new(ontology())),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }

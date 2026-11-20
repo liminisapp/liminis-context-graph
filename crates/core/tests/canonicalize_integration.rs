@@ -105,6 +105,7 @@ fn make_state(db: Arc<Db>, ontology: Option<Arc<Ontology>>) -> Arc<AppState> {
         ontology,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -144,6 +145,7 @@ fn make_state_with_wal(
         ontology,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -184,6 +186,7 @@ fn make_state_with_name_map_embedder(
         ontology,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -226,6 +229,7 @@ fn make_state_with_workspace_and_wal(
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }

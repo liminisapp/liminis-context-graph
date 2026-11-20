@@ -20,6 +20,68 @@ pub enum ExtractorFlag {
     Http(String),
 }
 
+/// Endpoint of an optional passage-search stage service (issue #796): the reranker
+/// (`--reranker-*`) or the query-expansion LLM (`--expander-*`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StageEndpointFlag {
+    Uds(String),
+    Http(String),
+}
+
+/// The `--reranker-*` / `--expander-*` flags. Kept out of [`CliMode`] on purpose: they are only
+/// consumed after the app state is bootstrapped, and every `CliMode` literal in the tests would
+/// otherwise need a new field.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StageFlags {
+    pub reranker: Option<StageEndpointFlag>,
+    pub expander: Option<StageEndpointFlag>,
+}
+
+/// Extracts the passage-stage flags from argv (excluding the program name). Each pair is
+/// mutually exclusive. Other arguments are ignored here — [`parse_args`] owns their validation.
+pub fn parse_stage_flags(args: &[String]) -> Result<StageFlags, String> {
+    let mut uds: [Option<String>; 2] = [None, None];
+    let mut http: [Option<String>; 2] = [None, None];
+    let mut i = 0;
+    while i < args.len() {
+        let (slot, kind, name) = match args[i].as_str() {
+            "--reranker-uds" => (0, 0, "--reranker-uds"),
+            "--reranker-http" => (0, 1, "--reranker-http"),
+            "--expander-uds" => (1, 0, "--expander-uds"),
+            "--expander-http" => (1, 1, "--expander-http"),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        i += 1;
+        let value = args.get(i).cloned().ok_or(format!(
+            "{name} requires a {} argument",
+            if kind == 0 { "socket path" } else { "URL" }
+        ))?;
+        if kind == 0 {
+            uds[slot] = Some(value);
+        } else {
+            http[slot] = Some(value);
+        }
+        i += 1;
+    }
+    let mut pick = |slot: usize, what: &str| -> Result<Option<StageEndpointFlag>, String> {
+        match (uds[slot].take(), http[slot].take()) {
+            (Some(_), Some(_)) => Err(format!(
+                "--{what}-uds and --{what}-http are mutually exclusive; specify only one"
+            )),
+            (Some(u), None) => Ok(Some(StageEndpointFlag::Uds(u))),
+            (None, Some(h)) => Ok(Some(StageEndpointFlag::Http(h))),
+            (None, None) => Ok(None),
+        }
+    };
+    Ok(StageFlags {
+        reranker: pick(0, "reranker")?,
+        expander: pick(1, "expander")?,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum CliMode {
     /// Default: run the Unix-socket JSON-RPC service (existing behavior).
@@ -115,6 +177,19 @@ OPTIONS:
                                LCG_ANTHROPIC_VERSION, LCG_ANTHROPIC_VERSION_IN,
                                LCG_ANTHROPIC_PROMPT_CACHING) — see docs/configuration.md.
                                Neither flag is valid with --connect: set them on the daemon.
+    --reranker-uds <SOCKET>    Reach the cross-encoder reranker (POST /v1/rerank) over this Unix
+                               socket. Default: the embedder's sidecar. Only used by
+                               knowledge_search_passages when a call (or LCG_RERANK=on) opts in.
+    --reranker-http <URL>      Reach the reranker over this HTTP base URL.
+                               (--reranker-uds and --reranker-http are mutually exclusive.)
+    --expander-uds <SOCKET>    Reach the query-expansion LLM (an OpenAI-compatible
+                               /v1/chat/completions route) over this Unix socket. Default: the
+                               embedder's sidecar, or LCG_EXPANSION_URL if set. Only used when a
+                               call passes expand: true.
+    --expander-http <URL>      Reach the query-expansion LLM over this HTTP base URL.
+                               (--expander-uds and --expander-http are mutually exclusive.)
+                               None of the four stage flags is valid with --connect: set them
+                               on the daemon.
     -h, --help                 Print this help and exit.
     -V, --version              Print version and exit.
 
@@ -186,6 +261,11 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
                         .ok_or("--extractor-http requires a URL argument")?,
                 );
             }
+            // Passage-stage endpoints (issue #796): consumed by `parse_stage_flags`; validated
+            // (value present, pairs exclusive) below.
+            "--reranker-uds" | "--reranker-http" | "--expander-uds" | "--expander-http" => {
+                i += 1;
+            }
             "--anthropic-base-url" => {
                 i += 1;
                 anthropic.base_url = Some(
@@ -239,6 +319,8 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
         return Ok(CliMode::Version);
     }
 
+    let stage_flags = parse_stage_flags(args)?;
+
     if cli_uds.is_some() && cli_http.is_some() {
         return Err(
             "--embedder-uds and --embedder-http are mutually exclusive; specify only one"
@@ -282,6 +364,15 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
             "--writable-groups cannot be combined with --connect: the allow-list is \
              enforced by the daemon, so set --writable-groups (or LCG_WRITABLE_GROUPS) on the \
              daemon, not on the attached MCP process"
+                .to_string(),
+        );
+    }
+
+    if connect.is_some() && (stage_flags.reranker.is_some() || stage_flags.expander.is_some()) {
+        return Err(
+            "--reranker-uds/--reranker-http/--expander-uds/--expander-http cannot be combined \
+             with --connect: the daemon runs the search, so set them on the daemon, not on the \
+             attached MCP process"
                 .to_string(),
         );
     }
@@ -735,6 +826,29 @@ mod tests {
     }
 
     #[test]
+    fn stage_flags_are_rejected_with_connect() {
+        for flag in [
+            "--reranker-uds",
+            "--reranker-http",
+            "--expander-uds",
+            "--expander-http",
+        ] {
+            let err = parse_args(&args(&[
+                "--mcp-stdio",
+                "--connect",
+                ".lcg/service.sock",
+                flag,
+                "/x",
+            ]))
+            .unwrap_err();
+            assert!(
+                err.contains("--connect") && err.contains("daemon"),
+                "{flag}: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn writable_groups_is_rejected_with_connect() {
         let err = parse_args(&args(&[
             "--mcp-stdio",
@@ -761,5 +875,97 @@ mod tests {
         ] {
             assert!(u.contains(flag), "usage missing {flag}");
         }
+    }
+
+    #[test]
+    fn stage_flags_default_to_none() {
+        assert_eq!(
+            parse_stage_flags(&args(&[])).unwrap(),
+            StageFlags::default()
+        );
+        assert_eq!(
+            parse_stage_flags(&args(&["--mcp-stdio", "--embedder-uds", "/x"])).unwrap(),
+            StageFlags::default()
+        );
+    }
+
+    #[test]
+    fn reranker_and_expander_flags_parse_independently() {
+        let f = parse_stage_flags(&args(&[
+            "--reranker-uds",
+            "/tmp/r.sock",
+            "--expander-http",
+            "http://llm:1",
+        ]))
+        .unwrap();
+        assert_eq!(
+            f.reranker,
+            Some(StageEndpointFlag::Uds("/tmp/r.sock".into()))
+        );
+        assert_eq!(
+            f.expander,
+            Some(StageEndpointFlag::Http("http://llm:1".into()))
+        );
+        let f = parse_stage_flags(&args(&["--reranker-http", "http://r:2"])).unwrap();
+        assert_eq!(
+            f.reranker,
+            Some(StageEndpointFlag::Http("http://r:2".into()))
+        );
+        assert_eq!(f.expander, None);
+    }
+
+    #[test]
+    fn stage_flag_pairs_are_mutually_exclusive() {
+        let e = parse_stage_flags(&args(&[
+            "--reranker-uds",
+            "/a",
+            "--reranker-http",
+            "http://b",
+        ]))
+        .unwrap_err();
+        assert!(e.contains("mutually exclusive"), "{e}");
+        let e = parse_stage_flags(&args(&[
+            "--expander-uds",
+            "/a",
+            "--expander-http",
+            "http://b",
+        ]))
+        .unwrap_err();
+        assert!(e.contains("mutually exclusive"), "{e}");
+        // parse_args surfaces the same error.
+        assert!(parse_args(&args(&[
+            "--reranker-uds",
+            "/a",
+            "--reranker-http",
+            "http://b"
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn stage_flags_require_a_value() {
+        for f in [
+            "--reranker-uds",
+            "--reranker-http",
+            "--expander-uds",
+            "--expander-http",
+        ] {
+            assert!(parse_stage_flags(&args(&[f])).is_err(), "{f}");
+            assert!(parse_args(&args(&[f])).is_err(), "{f}");
+        }
+    }
+
+    #[test]
+    fn parse_args_accepts_stage_flags_without_changing_the_mode() {
+        assert_eq!(
+            parse_args(&args(&[
+                "--reranker-uds",
+                "/r",
+                "--expander-http",
+                "http://e"
+            ]))
+            .unwrap(),
+            parse_args(&args(&[])).unwrap()
+        );
     }
 }

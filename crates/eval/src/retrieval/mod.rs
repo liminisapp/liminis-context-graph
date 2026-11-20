@@ -563,6 +563,10 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                 embedder_uds: a.embedder_uds.clone(),
                 extractor_http: a.extractor_http.clone(),
                 extractor_uds: a.extractor_uds.clone(),
+                reranker_http: a.reranker_http.clone(),
+                reranker_uds: a.reranker_uds.clone(),
+                expander_http: a.expander_http.clone(),
+                expander_uds: a.expander_uds.clone(),
                 replay_cassette: a.replay_cassette.clone(),
                 record_cassette: a.record_cassette.clone(),
                 embedding_profile: profile.clone(),
@@ -651,6 +655,30 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                             continue;
                         }
                     },
+                    "lcg-passages-rerank" => Box::new(lcg::LcgPassagesStaged {
+                        t: transport.clone(),
+                        rerank: true,
+                        expand: false,
+                        belief_aware: false,
+                    }),
+                    "lcg-passages-belief-rerank" => Box::new(lcg::LcgPassagesStaged {
+                        t: transport.clone(),
+                        rerank: true,
+                        expand: false,
+                        belief_aware: true,
+                    }),
+                    "lcg-passages-expand" => Box::new(lcg::LcgPassagesStaged {
+                        t: transport.clone(),
+                        rerank: false,
+                        expand: true,
+                        belief_aware: false,
+                    }),
+                    "lcg-passages-expand-rerank" => Box::new(lcg::LcgPassagesStaged {
+                        t: transport.clone(),
+                        rerank: true,
+                        expand: true,
+                        belief_aware: false,
+                    }),
                     "lcg-entities-facts" => Box::new(lcg::LcgEntitiesFacts {
                         t: transport.clone(),
                         map: map.clone(),

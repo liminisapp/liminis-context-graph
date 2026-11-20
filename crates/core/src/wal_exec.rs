@@ -302,6 +302,7 @@ mod tests {
             ontology: None,
             ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
             group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+            search_stages: Default::default(),
             embedding_cache: Arc::new(crate::embedding_cache::EmbeddingCache::new()),
         }
     }

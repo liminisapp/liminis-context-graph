@@ -13,6 +13,8 @@ title: Configuration
 | `--embedder-http <url>` | HTTP URL for an OpenAI-compatible embedding endpoint. Mutually exclusive with `--embedder-uds`. |
 | `--extractor-uds <path>` | Unix domain socket for a local OpenAI-compatible extraction endpoint. |
 | `--extractor-http <url>` | HTTP URL for a local OpenAI-compatible extraction endpoint. Mutually exclusive with `--extractor-uds`. |
+| `--reranker-uds <path>` / `--reranker-http <url>` | Where `knowledge_search_passages` reaches the cross-encoder reranker (`POST /v1/rerank`). Mutually exclusive. Default: the embedder's sidecar. Only used when a call (or `LCG_RERANK=on`) opts in. Not valid with `--connect`: the daemon runs the search, so set it on the daemon. See [Passage rerank and query expansion](#passage-rerank-and-query-expansion). |
+| `--expander-uds <path>` / `--expander-http <url>` | Where `knowledge_search_passages` reaches the query-expansion LLM (an OpenAI-compatible `/v1/chat/completions` route). Mutually exclusive. Default: `LCG_EXPANSION_URL`, else the embedder's sidecar. Only used when a call passes `expand: true`. Not valid with `--connect` (set it on the daemon). |
 | `--anthropic-base-url <url>` | Base URL of an Anthropic-compatible gateway (OpenRouter, LiteLLM, a corporate proxy); `/v1/messages` is appended. Same meaning as `ANTHROPIC_BASE_URL`; the flag wins. Not valid with `--connect`. See [Anthropic-compatible gateways](#anthropic-compatible-gateways-bedrock-openrouter-litellm). |
 | `--anthropic-endpoint <url>` | Full Anthropic endpoint URL, used verbatim as the POST target (e.g. a Bedrock gateway's `<base>/<deployment>/v1/invoke`). Same meaning as `LCG_ANTHROPIC_ENDPOINT`; wins over the base URL. Not valid with `--connect`. |
 | `--mcp-stdio` | Starts a native [Model Context Protocol](https://modelcontextprotocol.io) server over stdin/stdout instead of binding the Unix socket. See [MCP-over-stdio transport](ipc-mcp-reference.md#mcp-over-stdio-transport). |
@@ -39,6 +41,17 @@ title: Configuration
 | `LCG_EMBEDDING_DOCUMENT_PREFIX` | No | Explicit document prefix; overrides the profile's document prefix. An explicitly empty value disables it. **Part of the workspace's embedding identity** — changing it needs a re-embed. |
 | `LCG_PASSAGE_SEARCH_MODE` | No | Default retrieval mode for `knowledge_search_passages` when a request names no `mode`: `vector` (default; cosine similarity, then belief-aware re-ranking unless turned off with `belief_aware: false` or `LCG_PASSAGE_BELIEF_AWARE=off`, which can lower the `score` of a demoted passage) or `hybrid` (BM25 + vector, weighted RRF, with belief-aware re-ranking by default; see [IPC reference](ipc-mcp-reference.md#hybrid-passage-search-knowledge_search_passages-issue-789)). Read per request. An unrecognised value logs a warning to stderr and falls back to `vector`. A request's own `mode` always wins. |
 | `LCG_PASSAGE_BELIEF_AWARE` | No | Workspace default for belief-aware re-ranking in `knowledge_search_passages` (a derived page ranks below the primary note it cites, a superseded passage below its successor), applied when a request omits `belief_aware`. Belief-aware ranking is **on by default** in both modes (#806). `off`, `0` or `false` turn it off, restoring the pre-#806 ordering byte-for-byte in `vector` mode (in `hybrid` it gives weighted RRF without the rules, which is not the old hybrid default); `on`, `1` or `true` leave it on. Case-insensitive. Read per request. An unrecognised value logs a warning to stderr once and is ignored (default applies). A request's own `belief_aware` always wins. |
+| `LCG_RERANK` | No | `on` makes the passage **rerank** stage the workspace default for `knowledge_search_passages` (default `off`). A per-call `rerank: true`/`false` always wins. Query expansion has no workspace default by design. See [Passage rerank and query expansion](#passage-rerank-and-query-expansion). |
+| `LCG_RERANK_CANDIDATES` | No | How many first-stage candidates the reranker rescores (default `50`, which is also the maximum; values above 50, and `0`, are clamped to the range 1–50 and a warning is logged). Per-call override: `rerank_candidates`. |
+| `LCG_RERANK_MODEL` | No | Model name sent to `/v1/rerank` (default `mixedbread-ai/mxbai-rerank-large-v1`; `BAAI/bge-reranker-base` is a supported alternative). The name is informational: the sidecar scores with whichever model it loaded (`LOCAL_INFERENCE_RERANK_MODEL`) and ignores this field, so a mismatch is not detected or rejected. The sidecar reports its own model id in the response. |
+| `LCG_RERANK_TIMEOUT_MS` | No | Bound for one rerank request attempt (default `10000`). It is not an overall deadline: a call first waits for a free connection (up to the same bound when all four are busy), then sends, so the worst case is about twice this bound, plus a re-dial (2 s) and a second attempt if the connection was broken. The recorded Core ML p50 for the default model is about 1.9 s at 50 candidates (p95 not measured), and the sidecar scores serially and keeps computing after a client times out, so concurrent searches queue behind abandoned requests. A call waits for a busy connection (the client keeps four per endpoint) for up to this same bound; only dialling the socket uses the 2 s connect bound. A timeout degrades to first-stage results (`reason: "unavailable"`) and is never retried; lower the candidate count or raise this bound if you see it. |
+| `LCG_RERANK_SUPERSEDED_FACTOR` | No | Demotion multiplier applied to a superseded passage's whole blended score — first-stage rank prior and sigmoid logit together, before the recency term is added — in `0..=1` (default `0.5`); a value above `1` would boost superseded notes and stops the service at startup. |
+| `LCG_RERANK_RECENCY_WEIGHT` | No | Weight of the small recency prior used to prefer later notes among near-equal matches (default `0.05`; `0` disables it). |
+| `LCG_RERANK_RANK_WEIGHT_TOP` / `_MID` / `_TAIL` | No | Weight of the **first-stage rank** in the rerank blend (`a·reciprocal-rank + (1−a)·sigmoid(logit)`) at ranks 1–3, 4–10 and beyond (defaults `0.30`, `0.20`, `0.10`; each `0..=1`, a larger value stops the service at startup; `0` for all three orders by the cross-encoder alone). A cross-encoder alone can bury a first-stage top result, so the first stage keeps most weight at the top. Tuned on corpus v2 only; the v1 holdout was then measured by the maintainer (0.935 against 0.894 for `lcg-passages-belief`); see ADR-0796. |
+| `LCG_EXPANSION_URL` | No | HTTP endpoint of an OpenAI-compatible LLM for query expansion (a base URL; a trailing `/v1/...` is stripped). LCG appends `/v1/chat/completions` to it, so the provider must serve that OpenAI-style path under the base: a provider whose API version segment is not `/v1` is not supported directly. Used when `--expander-*` is not passed; with neither, the embedder's sidecar (Apple Foundation Models) is used. |
+| `LCG_EXPANSION_MODEL` | No | Model name sent to the expansion endpoint (default `apple-foundation`). |
+| `LCG_EXPANSION_API_KEY` | No | Bearer token for the expansion endpoint named by `LCG_EXPANSION_URL`. It is sent **only** to that endpoint: an endpoint chosen with `--expander-http`/`--expander-uds`, or defaulted to the sidecar, never receives it (a note is logged at startup if the key is set but ignored). |
+| `LCG_EXPANSION_TIMEOUT_MS` | No | Bound for one expansion request attempt (default `3000`; the same additive worst case as `LCG_RERANK_TIMEOUT_MS` applies when `expand: true` calls queue behind each other, so about twice this bound; raise it for a slow expansion LLM). On timeout the search uses the original query alone. The original query's results are held until the expansion call returns or this bound elapses, so a stalled (not refused) LLM costs the full timeout: an `expand: true` call can take up to this long. |
 | `LCG_EMBEDDING_API_KEY` | No | Bearer token sent as `Authorization: Bearer <key>` on the HTTP embedder transport (`--embedder-http`/`LCG_EMBEDDING_URL`). Falls back to `GRAPHITI_EMBEDDING_API_KEY`, then to `OPENAI_API_KEY`. Unset (or empty) sends no `Authorization` header, unchanged from prior versions. Never applies to the UDS transport (`--embedder-uds`) — a local socket never accepts a credential regardless of this variable. |
 | `OPENAI_API_KEY` | No | Convenience fallback for `LCG_EMBEDDING_API_KEY` (see above) — reuses an already-exported OpenAI key. Not a deprecated alias, so using it logs no *deprecation* warning — but since it sends whatever key is exported for OpenAI tooling generally to whatever `--embedder-http`/`LCG_EMBEDDING_URL` endpoint is configured (not necessarily OpenAI's own API), using this tier does log a one-line informational notice naming the endpoint the key will be sent to. |
 | `LCG_EMBEDDING_TIMEOUT_MS` | No | Whole-request timeout, in milliseconds, applied per attempt by **both** embedder transports — HTTP (`--embedder-http`/`LCG_EMBEDDING_URL`) and UDS (`--embedder-uds`, the default when the sidecar's socket exists) — covering single embed, batch embed, and the startup probe (default `30000`, generous enough for a default-sized 64-text batch under normal latency). An unparseable or zero value is rejected with a configuration error rather than silently ignored. See [ADR-0510](adr/0510-oaiembedder-http-timeouts.md) (HTTP) and [ADR-0541](adr/0541-uds-embedder-transport-timeouts.md) (UDS). |
@@ -444,6 +457,73 @@ measurement and how to repeat it is in
 `knowledge_status` shows what is in effect under `embedding_instructions` (`profile`, `source` —
 `none`, `lcg` or `embedder` — `query_prefix`, `document_prefix`), and the recorded document prefix
 as `wal.embedding_doc_prefix` (also per group in `wal_groups`).
+
+## Passage rerank and query expansion
+
+`knowledge_search_passages` has two **optional** stages for finding a note by what it *does* rather
+than what it is called ("the initiative covering shift rostering"). Both are **off by default**, are
+switched on per call, and are independent of each other. A client that sets neither sees no change in
+results, ordering, response shape or latency.
+
+> **Status: rerank measured, expansion not.** The maintainer measured rerank on corpus v2 (and the v1
+> holdout) with the default model: with a belief-aware first stage it scores 0.759 nDCG@10 against 0.653
+> for `lcg-passages-belief` (+0.106 [+0.073, +0.142]), but at about 1.9 s p50, far over the 150 ms budget (see
+> [ADR-0796](adr/0796-passage-rerank-and-query-expansion.md#belief-aware-first-stage-maintainer-head-2471ad5d)).
+> Both stages stay off by default. Query expansion's per-category verdict is not yet recorded, so treat
+> it as experimental.
+
+| Stage | Turn on | What it does | Cost | Use it for |
+|-------|---------|--------------|------|------------|
+| **Rerank** | `rerank: true` per call, or `LCG_RERANK=on` | Rescores the top N first-stage candidates (default 50, the maximum) with a local cross-encoder, then blends in belief and recency so a superseded note does not outrank its replacement when both are among the reranked candidates (a replacement outside the top N is not pulled in) | target ≤ 150 ms p50 at k = 10 on Apple silicon (a budget). The default model does not meet it: the recorded Core ML p50 is about 1.1 s at 25 candidates and 1.9 s at 50 (the default), on one maintainer machine, p95 not measured (see the ADR); the earlier ~587 ms figure was a Python/MPS run | Deliberate searches by role or description (an agent, or a user who asks and waits); **not** search-as-you-type: the recorded default-model latency is seconds, not the 150 ms budget, until a faster model or a smaller N is measured |
+| **Query expansion** | `expand: true` per call only | A local LLM rewrites the query into keyword, paraphrase and hypothetical-answer variants; their results are RRF-fused (before rerank, if both are on) | expected on the order of a second per query (not yet measured) | Deliberate agent searches. **Never** search-as-you-type |
+
+Neither stage can fail a search. If the reranker or the LLM is unreachable, slow, or not configured,
+the call returns the un-staged results and the response says so:
+
+```json
+{"passages": [...], "count": 10,
+ "rerank":    {"applied": false, "candidates": 0, "reason": "unavailable"},
+ "expansion": {"applied": true,  "variants": 2}}
+```
+
+`reason` is `not_configured`, `unavailable`, `no_candidates` or `no_variants`. A reranked passage
+carries `rerank_score` (the cross-encoder logit) and, when known, `belief` (`current` or
+`superseded`); `score` remains the first-stage cosine similarity. `min_score` gates first-stage
+candidates, so a high `min_score` also shrinks what rerank can see.
+
+**Where the services come from.** The reranker needs the sidecar started with
+`LOCAL_INFERENCE_RERANK_MODEL` (see [`native/local-inference/README.md`](../native/local-inference/README.md#reranker-v1rerank)).
+LCG reaches it on the embedder's sidecar by default; `--reranker-uds`/`--reranker-http` point it
+elsewhere. Query expansion defaults to the sidecar's `/v1/chat/completions` route (Apple Foundation
+Models); point it at another OpenAI-compatible model (for example a local Qwen) with
+`--expander-uds`/`--expander-http` or `LCG_EXPANSION_URL` + `LCG_EXPANSION_MODEL`. Apple Foundation
+Models' suitability for query rewriting is unmeasured.
+
+"The embedder's sidecar" means its Unix socket (`--embedder-uds`, or the default socket when it
+exists) or a **loopback** HTTP URL (`localhost`, `127.0.0.0/8`, `::1`). An embedding URL that points
+at any other host is never reused for rerank or expansion, because it may be a third-party provider
+chosen for embeddings alone and rerank would send it passage text. To use a remote host for either
+stage, name it explicitly with `--reranker-http`, `--expander-http` or `LCG_EXPANSION_URL`.
+
+**Endpoints are resolved once, at startup.** If the service starts before the sidecar (or the default socket does not exist yet), it has no reranker or expander for its lifetime and opted-in calls report `reason: "not_configured"` until it is restarted with the sidecar running, or given an explicit `--reranker-*` / `--expander-*` endpoint.
+
+**Authentication.** The reranker client sends no credential: there is no `LCG_RERANK_API_KEY`, so
+`--reranker-http` is for an unauthenticated endpoint on the local machine or a network you trust.
+Do not point it at a public or credentialed service: it receives up to `LCG_RERANK_CANDIDATES`
+(default 50, max 50) full passage bodies per reranked call, and an `http://` URL sends them in
+clear text. Only expansion takes a key (`LCG_EXPANSION_API_KEY`), and it goes to the expansion
+endpoint alone. Either remote endpoint is reached only by a call that opts in.
+
+A malformed stage setting (`LCG_RERANK`, `LCG_RERANK_CANDIDATES`, `LCG_RERANK_*_FACTOR/WEIGHT`, a
+non-numeric `LCG_*_TIMEOUT_MS`) stops the service at startup with an error naming the variable. An
+endpoint that is merely unreachable does not: the call degrades and reports `applied: false`.
+
+**What "belief-aware" means.** A passage whose episode has been superseded (a newer revision of the
+document, a correction — see [belief time](adr/0705-belief-time-separate-from-validity.md)) has its
+rerank score multiplied by `LCG_RERANK_SUPERSEDED_FACTOR`, and is always placed below its replacement
+when both are among the candidates. Notes with no supersession record get a small recency preference
+(`LCG_RERANK_RECENCY_WEIGHT`) so that of two equally good matches the later note ranks first. A
+document superseded with a *future* effective date is still current until then.
 
 ## Extractor: local or hosted
 

@@ -196,7 +196,34 @@ pub async fn search_passages(
     min_score: f64,
     origins: Option<Vec<crate::origin::Origin>>,
 ) -> Result<Vec<PassageResult>, Error> {
-    let embedding = embedder.embed(query, EmbedRole::Query).await?;
+    search_passages_with_role(
+        db,
+        embedder,
+        query,
+        EmbedRole::Query,
+        group_ids,
+        num_results,
+        min_score,
+        origins,
+    )
+    .await
+}
+
+/// [`search_passages`] with an explicit embedding role for the probe text (issue #796): the
+/// query-expansion stage embeds a hypothetical-answer variant as a `Document`, since it reads
+/// like stored text rather than like a question. `search_passages` is this with `Query`.
+#[allow(clippy::too_many_arguments)]
+pub async fn search_passages_with_role(
+    db: Arc<Db>,
+    embedder: Arc<dyn Embedder>,
+    query: &str,
+    role: EmbedRole,
+    group_ids: Option<Vec<String>>,
+    num_results: usize,
+    min_score: f64,
+    origins: Option<Vec<crate::origin::Origin>>,
+) -> Result<Vec<PassageResult>, Error> {
+    let embedding = embedder.embed(query, role).await?;
     let overdraw = num_results * 3;
 
     let results = tokio::task::spawn_blocking(move || -> Result<Vec<PassageResult>, Error> {
@@ -1592,6 +1619,8 @@ mod tests {
             origin: "primary".into(),
             similarity: None,
             matched_queries: None,
+            rerank_score: None,
+            belief: None,
         };
         let mk = |superseded_at_us| crate::belief::EpisodeSupersession {
             superseded_at_us,

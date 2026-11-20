@@ -547,7 +547,23 @@ pub fn registry() -> Vec<ToolSpec> {
                            `queries`, `score` is the fused rank score, `similarity` the best \
                            cosine, and each result carries `matched_queries`: indices into \
                            `[query, ...queries]` of the queries that retrieved it (0 is \
-                           `query`). Without `queries` the response is unchanged.",
+                           `query`). Without `queries` the response is unchanged. Two \
+                           optional stages (issue #796), both off by default: `rerank` \
+                           rescores the top candidates with a local cross-encoder and blends \
+                           in belief and recency so a superseded note does not outrank its \
+                           replacement when both are among the reranked candidates \
+                           (`rerank_candidates`, default 50, the maximum; latency target: 150 ms p50 at k = 10 on Apple \
+                           silicon, which the default model does not meet — recorded Core ML \
+                           p50 is about 1.1 s at 25 candidates and 1.9 s at 50, on one \
+                           maintainer machine, p95 not measured; the earlier ~587 ms was a \
+                           Python/MPS run; see ADR-0796); `expand` rewrites the query with a \
+                           local LLM into keyword, paraphrase and hypothetical-answer \
+                           variants fused by RRF (expected to cost on the order of a second; \
+                           not yet measured — for deliberate agent searches, not \
+                           search-as-you-type). When a stage is requested the \
+                           response gains a `rerank` / `expansion` block with `applied` and, \
+                           if it could not run, a `reason`; results then fall back to the \
+                           un-staged order rather than failing.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -589,7 +605,19 @@ pub fn registry() -> Vec<ToolSpec> {
                                 explicit value here always wins)."
                         },
                         "group_ids": group_ids_prop(),
-                        "origins": origins_prop()
+                        "origins": origins_prop(),
+                        "rerank": {
+                            "type": "boolean",
+                            "description": "Rescore the top candidates with a local cross-encoder, belief- and recency-aware. Overrides the workspace default (LCG_RERANK); omitted means the default, which is off."
+                        },
+                        "rerank_candidates": {
+                            "type": "integer", "minimum": 1, "maximum": 50,
+                            "description": "How many first-stage candidates the reranker rescores (default 50, which is also the maximum; LCG_RERANK_CANDIDATES). Results beyond it follow in first-stage order."
+                        },
+                        "expand": {
+                            "type": "boolean", "default": false,
+                            "description": "Rewrite the query with a local LLM into lexical, semantic and hypothetical-answer variants and fuse their results with RRF (runs before rerank). Expected to cost on the order of a second (not yet measured); never on by default."
+                        }
                     },
                     "required": ["query"]
                 })
@@ -2216,6 +2244,37 @@ mod tests {
         // knowledge_list_entities is entity-scoped and out of scope for issue #410:
         // "episode provenance" is accurate there and must remain untouched.
         assert!(desc_of("knowledge_list_entities").contains("episode provenance attached"));
+    }
+
+    /// Issue #796: `knowledge_search_passages` exposes the optional rerank / expansion stages,
+    /// as optional parameters only — a client that sends none of them sees no change.
+    #[test]
+    fn search_passages_advertises_optional_stage_parameters() {
+        let r = registry();
+        let tool = r
+            .iter()
+            .find(|t| t.name == "knowledge_search_passages")
+            .expect("registered");
+        let schema = (tool.input_schema)();
+        let props = &schema["properties"];
+        assert_eq!(props["rerank"]["type"], "boolean");
+        assert_eq!(props["expand"]["type"], "boolean");
+        assert_eq!(props["rerank_candidates"]["type"], "integer");
+        assert_eq!(
+            schema["required"],
+            json!(["query"]),
+            "stages must stay optional"
+        );
+        assert_eq!(
+            props["expand"]["default"],
+            json!(false),
+            "expansion is never a default"
+        );
+        assert!(
+            props["rerank"].get("default").is_none(),
+            "rerank defaults come from config"
+        );
+        assert!(tool.description.contains("rerank") && tool.description.contains("expand"));
     }
 
     /// SC-006 (issue #528): every episode-derived MCP tool's description must accurately state

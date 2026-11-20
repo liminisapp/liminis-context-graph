@@ -2207,6 +2207,67 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
     // `belief_aware`), with belief-aware ranking applied once after fusion.
     let variants = crate::query_variants::parse_query_variants(&p["queries"], &query)?;
 
+    // Optional stages (issue #796). A call that opts in to neither — and a workspace that has not
+    // made rerank its default — takes the original path below, untouched.
+    let stages = state.search_stages.load_full();
+    let rerank_requested = optional_bool_param(&p["rerank"], "rerank")?
+        .unwrap_or_else(|| stages.as_ref().is_some_and(|s| s.config.rerank_default));
+    let expand_requested = optional_bool_param(&p["expand"], "expand")?.unwrap_or(false);
+    if rerank_requested || expand_requested {
+        let default_n = stages
+            .as_ref()
+            .map_or(crate::search_stages::DEFAULT_RERANK_CANDIDATES, |s| {
+                s.config.rerank_candidates
+            });
+        // Present means a non-negative integer, and an explicit `null` is rejected too; only an
+        // absent key takes the configured default. (Unlike `rerank` / `expand`, where `null` means
+        // "not specified".)
+        let requested_n = match p.get("rerank_candidates") {
+            None => default_n,
+            Some(v) => v.as_u64().map(|n| n as usize).ok_or_else(|| {
+                Error::Ipc("rerank_candidates must be a non-negative integer".to_string())
+            })?,
+        };
+        let n = requested_n.clamp(1, crate::search_stages::MAX_RERANK_CANDIDATES);
+        if n != requested_n {
+            eprintln!(
+                "liminis-context-graph: rerank_candidates={requested_n} is outside 1..={}; using {n}",
+                crate::search_stages::MAX_RERANK_CANDIDATES
+            );
+        }
+        let first_stage = staged_first_stage(
+            Arc::clone(&state),
+            group_ids,
+            min_score,
+            origins,
+            mode,
+            belief,
+            query.clone(),
+            variants.clone(),
+        );
+        let outcome = crate::staged_search::search_passages_staged(
+            load_db(&state)?,
+            stages,
+            &query,
+            crate::staged_search::StagedRequest {
+                num_results,
+                rerank_candidates: rerank_requested.then_some(n),
+                expand: expand_requested,
+            },
+            first_stage,
+        )
+        .await?;
+        let count = outcome.passages.len();
+        let mut resp = json!({ "passages": outcome.passages, "count": count });
+        if let Some(r) = &outcome.rerank {
+            resp["rerank"] = r.to_json("candidates");
+        }
+        if let Some(e) = &outcome.expansion {
+            resp["expansion"] = e.to_json("variants");
+        }
+        return Ok(resp);
+    }
+
     let run = |state: Arc<AppState>| {
         let query = query.clone();
         let variants = variants.clone();
@@ -2293,6 +2354,118 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
 
     let count = passages.len();
     Ok(json!({ "passages": passages, "count": count }))
+}
+
+/// Optional boolean request parameter: absent/null ⇒ `None`; any non-boolean is an error.
+fn optional_bool_param(v: &Value, name: &str) -> Result<Option<bool>, Error> {
+    match v {
+        Value::Null => Ok(None),
+        Value::Bool(b) => Ok(Some(*b)),
+        _ => Err(Error::Ipc(format!("{name} must be a boolean"))),
+    }
+}
+
+/// One first-stage passage search for the staged path (issue #796), with the same
+/// missing-index self-heal as the default path in [`handle_search_passages`].
+#[allow(clippy::too_many_arguments)]
+fn staged_first_stage(
+    state: Arc<AppState>,
+    group_ids: Option<Vec<String>>,
+    min_score: f64,
+    origins: Option<Vec<crate::origin::Origin>>,
+    mode: search::PassageSearchMode,
+    belief: bool,
+    original_query: String,
+    caller_variants: Vec<crate::query_variants::Variant>,
+) -> crate::staged_search::FirstStageFn {
+    Arc::new(move |query, role, n| {
+        let state = Arc::clone(&state);
+        let group_ids = group_ids.clone();
+        let origins = origins.clone();
+        let original_query = original_query.clone();
+        let caller_variants = caller_variants.clone();
+        Box::pin(async move {
+            let run = |state: &Arc<AppState>| {
+                let db = load_db(state);
+                let embedder = Arc::clone(&state.embedder);
+                let (query, group_ids, origins) =
+                    (query.clone(), group_ids.clone(), origins.clone());
+                let (original_query, caller_variants) =
+                    (original_query.clone(), caller_variants.clone());
+                async move {
+                    let db = db?;
+                    // A hypothetical-answer variant is embedded as a `Document`, which only the
+                    // vector search supports; every `Query`-role search (the original query and
+                    // the lexical / semantic variants) follows the call's retrieval mode, so a
+                    // hybrid workspace keeps its BM25 leg under the staged path too.
+                    if role == EmbedRole::Document {
+                        return search::search_passages_with_role(
+                            db, embedder, &query, role, group_ids, n, min_score, origins,
+                        )
+                        .await;
+                    }
+                    // Caller-supplied `queries` (issue #802) belong to the user's own query: that one
+                    // search runs the weighted-RRF variants pipeline, and the LLM expansion
+                    // variants (issue #796) are single queries searched as before.
+                    if !caller_variants.is_empty() && query == original_query {
+                        return search::search_passages_variants(
+                            db,
+                            embedder,
+                            &query,
+                            &caller_variants,
+                            group_ids,
+                            n,
+                            min_score,
+                            origins,
+                            mode,
+                            belief,
+                        )
+                        .await;
+                    }
+                    match mode {
+                        search::PassageSearchMode::Vector if !belief => {
+                            search::search_passages(
+                                db, embedder, &query, group_ids, n, min_score, origins,
+                            )
+                            .await
+                        }
+                        search::PassageSearchMode::Vector => {
+                            search::search_passages_vector_belief(
+                                db, embedder, &query, group_ids, n, min_score, origins,
+                            )
+                            .await
+                        }
+                        search::PassageSearchMode::Hybrid => {
+                            search::search_passages_hybrid(
+                                db, embedder, &query, group_ids, n, min_score, origins, belief,
+                            )
+                            .await
+                        }
+                    }
+                }
+            };
+            match run(&state).await {
+                Ok(p) => Ok(p),
+                Err(e) if is_missing_index_error(&e) => {
+                    // Unlike the default path, several first-stage searches (the original query
+                    // and each expansion variant) run concurrently here, so another one may
+                    // have built the indices between our failure and this check. Always go
+                    // through `build_indices_once` (it double-checks under the write lock and
+                    // is a no-op once built), then retry once; the error is final only if the
+                    // retry still reports a missing index.
+                    build_indices_once(&state).await?;
+                    run(&state).await.map_err(|e2| {
+                        if is_missing_index_error(&e2) {
+                            Error::Ipc(MISSING_INDEX_USER_MSG.to_string())
+                        } else {
+                            e2
+                        }
+                    })
+                }
+                Err(e) => Err(e),
+            }
+        })
+    })
 }
 
 async fn handle_list_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {

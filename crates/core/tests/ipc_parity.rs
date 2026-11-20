@@ -117,6 +117,7 @@ fn make_state(db: Arc<Db>) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -154,6 +155,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> Arc<Ap
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -199,6 +201,7 @@ fn make_state_with_live_wal(db: Arc<Db>, wal_dir: PathBuf, db_path: String) -> A
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -237,6 +240,7 @@ fn make_state_with_ontology(db: Arc<Db>, ontology: Arc<Ontology>) -> Arc<AppStat
         ontology: Some(ontology),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -267,6 +271,7 @@ fn make_degraded_state(reason: &str) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -649,6 +654,7 @@ fn make_state_with_mock_embed(db: Arc<Db>) -> Arc<AppState> {
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -681,6 +687,7 @@ fn make_state_with_capture_sink(db: Arc<Db>) -> (Arc<AppState>, Arc<CaptureSink>
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
     (state, capture)
@@ -711,6 +718,7 @@ fn make_state_with_workspace(db: Arc<Db>, workspace_root: PathBuf) -> Arc<AppSta
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -787,6 +795,7 @@ fn make_state_with_ontology_and_extractor(
         ontology: Some(ontology),
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -1866,6 +1875,7 @@ fn make_state_with_extractor(db: Arc<Db>, extractor: Arc<dyn Extractor>) -> Arc<
         ontology: None,
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }

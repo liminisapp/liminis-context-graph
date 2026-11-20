@@ -79,6 +79,16 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   should keep every named entity in each variant, send no placeholders, and skip variants for multi-part
   questions whose entities are explicit; entity-preserving variants are the planned mitigation (ADR-0802).
 
+- **Optional rerank and query-expansion stages for `knowledge_search_passages` (#796).** New optional
+  parameters `rerank`, `rerank_candidates` and `expand` (and `LCG_RERANK`, `LCG_RERANK_CANDIDATES`,
+  `LCG_EXPANSION_*`, `--reranker-uds|http`, `--expander-uds|http`). Rerank rescores the top candidates with
+  a local cross-encoder served by the CoreML sidecar's new `/v1/rerank` route and blends in belief and
+  recency, so a superseded note does not outrank its replacement when both are among the reranked candidates; expansion rewrites the query with a local LLM
+  and RRF-fuses the variants. Both are **off by default** (see ADR-0796 for the maintainer's v2/v1 measurements); the first stage under
+  them is the belief-aware default of #806 unless a call says `belief_aware: false`. A call that opts in to neither is unchanged, and a stage that
+  cannot run degrades to first-stage results with `applied: false`. `lcg-eval retrieval` gains
+  `lcg-passages-rerank`, `lcg-passages-belief-rerank`, `lcg-passages-expand` and `lcg-passages-expand-rerank`.
+
 - **Document mode: `knowledge_process_document` (write) and `knowledge_preview_chunks` (read)
   (#785, ADR-0785, slice 1 of #733).** Send a whole document as a completeness claim; the server
   chunks it by section, skips unchanged sections by content hash (an identical resubmission makes

@@ -85,6 +85,124 @@ This downloads the BGE-base-en-v1.5 model from HuggingFace and converts it to th
 
 Subsequent runs reuse the cached model.
 
+## Reranker (`/v1/rerank`)
+
+An **optional** cross-encoder route (issue #796) lets `liminis-context-graph` rescore the top passage
+candidates of `knowledge_search_passages`. It is enabled iff `LOCAL_INFERENCE_RERANK_MODEL` is set; there
+is no `LOCAL_INFERENCE_MODE` value for it, so `both` and every other mode behave exactly as before. Not
+configured → the route returns `404`; configured but the model failed to load → `503` (the sidecar keeps
+serving embeddings and completions). At load the sidecar runs a **batch self-check**: it scores a few
+documents in one batch and again one at a time and refuses to load (so the route answers `503`) if any
+score differs, which catches a broken export or output read-back before it can mis-rank searches.
+`benchmark/bench_rerank.py` runs the same check before timing anything.
+
+```
+POST /v1/rerank
+{"model": "...", "query": "...", "documents": ["...", ...], "top_n": 5}      # top_n optional
+→ {"object": "list", "model": "coreml-...",
+   "results": [{"index": 2, "relevance_score": 3.1}, {"index": 0, "relevance_score": -0.4}, ...]}
+```
+
+`relevance_score` is the cross-encoder's **raw logit** (higher = more relevant), best-first, `index` into
+`documents`; LCG applies the sigmoid itself. At most 256 documents per request. The input pair is
+`query` (kept up to half the token budget) + `document` (cut at its tail) at the model's fixed length —
+deterministic and head-biased.
+
+**Loading.** The rerank model loads in the background, so the sidecar listens and serves embeddings at once.
+A large cross-encoder takes minutes to load on a cold start (the maintainer measured 214–274 s for
+mxbai-rerank-large-v1, whatever the compute unit); until it is ready `/v1/rerank` answers a `503` whose message
+says the model is "still loading", and a model that failed to load answers a `503` with the reason. The
+effect of `LOCAL_INFERENCE_MLMODELC_CACHE` (the compiled `.mlmodelc` cache) on a warm start has **not been
+measured**; do not assume it removes the load time.
+
+Setup (not committed; the model is hundreds of MB):
+
+```bash
+cd native/local-inference
+RERANK_BATCH=8 ./prepare-rerank-assets.sh   # default model: mixedbread-ai/mxbai-rerank-large-v1
+LOCAL_INFERENCE_RERANK_MODEL=./mxbai-rerank-large-v1-b8-l512.mlpackage \
+LOCAL_INFERENCE_RERANK_TOKENIZER_ID=mixedbread-ai/mxbai-rerank-large-v1 \
+LOCAL_INFERENCE_HF_CACHE=./resources/models/tokenizer \
+  .build/release/LocalInference
+```
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `LOCAL_INFERENCE_RERANK_MODEL` | unset (route disabled) | Path to the converted `.mlpackage`/`.mlmodelc` |
+| `LOCAL_INFERENCE_RERANK_TOKENIZER_ID` | `mixedbread-ai/mxbai-rerank-large-v1` | Tokenizer, loaded offline from `LOCAL_INFERENCE_HF_CACHE` when set |
+| `LOCAL_INFERENCE_RERANK_FAMILY` | unset | Unset: the pair layout (special tokens, pad id) is read from the tokenizer's own `tokenizer.json` post-processor, and segment ids are fed exactly when the exported model has a `token_type_ids` input. Set to `xlm-roberta` (`<s> q </s></s> d </s>`) or `bert` (`[CLS] q [SEP] d [SEP]`) to force a built-in layout |
+| `LOCAL_INFERENCE_RERANK_MODEL_ID` | `coreml-<file stem>` | Model id reported in responses |
+| `LOCAL_INFERENCE_RERANK_COMPUTE_UNITS` | unset | `cpuAndGPU`, `cpuAndNeuralEngine` or `cpuOnly`. Unset: the Neural Engine for `bge-reranker-*`, the GPU for every other model. Measured by the maintainer for mxbai-rerank-large-v1: about 3.8 s per batch of 8 on the Neural Engine, about 0.26 s on the GPU |
+
+`LOCAL_INFERENCE_MLMODELC_CACHE`, when set, also caches the compiled rerank model, in its `rerank/`
+subdirectory. The export has **fixed** `[batch, length]` shapes read from the model at startup;
+batch size is the main latency lever, so choose it with `benchmark/bench_rerank.py` (p50/p95 by candidate
+count and passage length) before settling on one. `mixedbread-ai/mxbai-rerank-large-v1` (Apache-2.0,
+DeBERTa-v3-large, revision pinned in `convert-rerank-model.py`) is the default; `BAAI/bge-reranker-base` (MIT,
+pinned) is the supported alternative and `bge-reranker-v2-m3` uses the same converter. **The mxbai Core ML export was verified by the maintainer** (fp16, batch 8, length 512, pinned `98f65584`): on
+the 8 real pairs of `paraphrase-03` the sidecar's scores matched transformers within 0.037, and the full v2
+sweep is in ADR-0796. The converter's own step 5 also fails the conversion if Core ML and PyTorch logits drift by
+more than 0.5. Qwen-family rerankers (including Qwen3-Reranker-0.6B and `mxbai-rerank-*-v2`) have no export path
+here and are not used.
+
+**DeBERTa-v3 (mxbai) export and tokenizer.** `convert-rerank-model.py` patches DeBERTa-v2/v3 before tracing
+(plain-Python replacements for the `torch.jit.script` helpers, a float `scaled_size_sqrt`, and a fp16-safe
+`-1e4` mask fill instead of `finfo(float32).min`, which turned padded rows into NaN) and verifies the
+export on an unpadded **and a padded** batch with `CPU_AND_GPU` (`ComputeUnit.ALL` crashes at load for this
+model). swift-transformers rejects `tokenizer_class: DebertaV2Tokenizer`; `prepare-rerank-assets.sh` stages
+the tokenizer first (so a failed conversion does not skip it) and relabels the staged copy
+`XLMRobertaTokenizer` (mxbai's `tokenizer.json` is Unigram + Metaspace like XLM-R's); the special-token layout
+and pad id still come from `tokenizer.json`. These steps were written from the maintainer's working local
+patch; the converter and the relabel have **not been run end to end in CI** (they need the model and a Mac).
+
+**Tokenizer fixtures.** `Tests/LocalInferenceTests/RerankTokenizerFixtures.swift` pins the sidecar's pair
+layout against `transformers`. Each entry holds the `post_processor`, `padding` and the pad entry of
+`added_tokens` from the model's real `tokenizer.json` (vocabulary omitted) plus `transformers`' output for one
+fixed query/document pair. Regenerate it after changing a model or its pinned revision (revisions are in
+`convert-rerank-model.py`):
+
+```bash
+uv run --with transformers --with sentencepiece --with huggingface_hub python - <<'PY'
+import json
+from huggingface_hub import hf_hub_download
+from transformers import AutoTokenizer
+
+MODEL, REV = "mixedbread-ai/mxbai-rerank-large-v1", "<pinned revision>"
+q = "who owns Marlin Core?"
+d = "Marlin Core is owned by Northwind Holdings. It was acquired in 2021."
+tok = AutoTokenizer.from_pretrained(MODEL, revision=REV)
+full = json.load(open(hf_hub_download(MODEL, "tokenizer.json", revision=REV)))
+pad = [t for t in full["added_tokens"] if t["content"] in ("[PAD]", "<pad>")]
+fragment = {"post_processor": full["post_processor"], "padding": full.get("padding"), "added_tokens": pad}
+enc = tok(q, d, truncation="only_second")
+print(json.dumps(fragment))
+print("queryIds", tok(q, add_special_tokens=False)["input_ids"])
+print("documentIds", tok(d, add_special_tokens=False)["input_ids"])
+print("transformersPairIds", enc["input_ids"])
+print("transformersTokenTypeIds", enc.get("token_type_ids"))  # nil in Swift when absent
+PY
+```
+
+Paste the printed values into the matching `RerankTokenizerFixture` entry.
+
+**Other cross-encoders.** Nothing outside `prepare-rerank-assets.sh` and `convert-rerank-model.py` is tied to
+the default model: set `RERANK_MODEL` to any Hugging Face `AutoModelForSequenceClassification` cross-encoder
+that emits **one logit per pair**, plus `LOCAL_INFERENCE_RERANK_TOKENIZER_ID` to its tokenizer (and
+`RERANK_REVISION` to pin it; only the default model and bge-reranker-base have a built-in pin). What the
+sidecar still assumes: the pair layout is read from the tokenizer's `tokenizer.json` (a `TemplateProcessing`
+pair template, or `RobertaProcessing` / `BertProcessing`), so a tokenizer without one of those needs
+`LOCAL_INFERENCE_RERANK_FAMILY`; the pad id comes from `padding.pad_id` or the added `[PAD]`/`<pad>` token;
+the CoreML output is named `logits` with shape `[B, 1]` or `[B]`; inputs are fixed `[batch, length]`
+`input_ids`, `attention_mask` (and `token_type_ids` only if the exported model declares it); and the tokenizer
+is loaded through swift-transformers' `AutoTokenizer`, so a model it cannot load offline is not supported
+(**swift-transformers' handling of the DeBERTa-v3 tokenizer is untested here**). Truncation caps the query at
+half the post-special-token budget, whereas transformers' `truncation="only_second"` does not; the two agree
+for any query shorter than that. Decoder-only
+scorers (yes/no logits) and multi-label heads are not. A second CoreML model is
+resident only when the variable is set. The budget (≤ 150 ms p50 for a whole k = 10 search) is **not met**
+by the default model: the maintainer recorded about 1.1 s p50 at 25 candidates and 1.9 s at 50 (see
+[ADR-0796](../../docs/adr/0796-passage-rerank-and-query-expansion.md#measurements)).
+
 ## Build and run
 
 ```bash
