@@ -195,11 +195,13 @@ fn recency_priors(cands: &[Candidate]) -> Vec<f64> {
 
 /// For each candidate, the input indices that replace it (are expected to rank above it).
 fn replacements(cands: &[Candidate], states: &[BeliefState]) -> Vec<Vec<usize>> {
-    let by_uuid: HashMap<&str, usize> = cands
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.uuid.as_str(), i))
-        .collect();
+    // Every candidate carrying a uuid, not just the last: graph search (#797) keys a fact by its
+    // producing episode, so a passage and a fact can share one. Passage search never repeats a
+    // uuid, so for it this is the same map as before.
+    let mut by_uuid: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, c) in cands.iter().enumerate() {
+        by_uuid.entry(c.uuid.as_str()).or_default().push(i);
+    }
     cands
         .iter()
         .enumerate()
@@ -219,9 +221,10 @@ fn replacements(cands: &[Candidate], states: &[BeliefState]) -> Vec<Vec<usize>> 
                 // Episode supersession: `superseded_by` is the replacing episode's uuid.
                 Some("episode") => by_uuid
                     .get(by)
+                    .into_iter()
+                    .flatten()
                     .copied()
                     .filter(|j| usable(*j))
-                    .into_iter()
                     .collect(),
                 // Document supersession: `superseded_by` is the replacing document's id; every
                 // candidate episode of that document is a replacement.

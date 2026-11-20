@@ -2384,8 +2384,10 @@ impl<'db> Conn<'db> {
             ""
         };
         // `embedding.len()` is an integer, so formatting it into the cast is injection-safe.
-        // A zero-vector embedding scores NaN (or NULL); `sim <> sim` holds only for NaN, so such a
-        // mention is ranked last *inside* the query rather than wherever lbug sorts NaN.
+        // A NULL embedding (or a zero query vector) scores NULL or NaN; `sim <> sim` holds only for
+        // NaN, so such a mention is ranked last *inside* the query rather than wherever lbug sorts
+        // NaN. A zero *stored* embedding against a non-zero query scores 0.0 in lbug, and so ties
+        // with an orthogonal mention (the hub-mention test pins this).
         let cypher = format!(
             "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
              WHERE n.uuid = $uuid AND coalesce(ep.origin, '') IN $origins {live} \
@@ -6340,10 +6342,10 @@ fn rust_cosine(a: &[f32], b: &[f32]) -> Option<f64> {
     if a.is_empty() || a.len() != b.len() {
         return None;
     }
-    // A zero vector has no direction: `cosine_similarity` reports 0.0, but the in-query
-    // `array_cosine_similarity` yields NaN/NULL (unscored), so match that.
-    let zero = |v: &[f32]| v.iter().all(|x| *x == 0.0);
-    if zero(a) || zero(b) {
+    // Match lbug's in-query `array_cosine_similarity`, which is asymmetric on zero vectors (both
+    // pinned by tests): a zero *query* (`a`) yields NaN/NULL, i.e. unscored, while a zero
+    // *stored* embedding (`b`) against a non-zero query scores 0.0 — as `cosine_similarity` does.
+    if a.iter().all(|x| *x == 0.0) {
         return None;
     }
     let s = cosine_similarity(a, b) as f64;
@@ -8167,6 +8169,12 @@ mod graph_search_primitive_tests {
             ids(got),
             vec!["m-best", "m-good", "a-zero-1", "a-zero-2", "m-far"]
         );
+        // The Rust fallback scores a zero stored embedding as lbug does in-query (0.0).
+        let in_lbug = c
+            .get_episode_passages_scored(&["a-zero-1".into()], &q)
+            .unwrap();
+        assert_eq!(in_lbug[0].similarity, Some(0.0));
+        assert_eq!(rust_cosine(&q, &[0.0; 4]), in_lbug[0].similarity);
     }
 
     #[test]
@@ -8290,6 +8298,23 @@ mod graph_search_primitive_tests {
         // An empty query vector falls back to the unscored lookup.
         let empty = c.get_episode_passages_scored(&["p1".into()], &[]).unwrap();
         assert!(empty[0].similarity.is_none());
+    }
+
+    #[test]
+    fn zero_vector_scores_the_same_in_lbug_and_in_the_rust_fallback() {
+        // The in-query cosine and the Rust fallback must agree on a zero vector, or a fallback
+        // run would score some rows differently from the in-query run.
+        let (_d, db) = graph();
+        let c = db.connect().unwrap();
+        let zero = vec![0.0f32; DIM];
+        let (rows, _) = c.expand_frontier(&["a".into()], None, 100).unwrap();
+        let uuids: Vec<String> = rows.iter().map(|r| r.edge.uuid.clone()).collect();
+        assert!(!uuids.is_empty());
+        let in_lbug = c.fact_similarities(&uuids, &zero).unwrap();
+        let rust = rust_cosine(&zero, &[0.5f32; DIM]);
+        for u in &uuids {
+            assert_eq!(in_lbug.get(u).copied(), rust, "{u}: lbug vs Rust");
+        }
     }
 
     #[test]

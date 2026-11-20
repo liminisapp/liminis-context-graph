@@ -2,6 +2,7 @@
 
 **Status**: Accepted
 **Date**: 2026-11-18
+**Updated**: 2026-11-20 (maintainer steers of 2026-11-19 and 2026-11-20: summary seeds, broad passage collection, the 500 ms budget, the rerank stage)
 **Issue**: #797 (composes ADR-0629's evidence-carrying RRF, ADR-0705/0706/0707's belief time, ADR-0752's origin rule and ADR-0790's query role; measured with ADR-0754/0788's retrieval eval)
 
 ## Context
