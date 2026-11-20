@@ -26,6 +26,7 @@ export const PAGES = [
   ['extraction-quality-evaluation', 'Extraction-Quality Evaluation'],
   ['retrieval-quality-evaluation', 'Retrieval-Quality Evaluation'],
   ['graph-integrity-evaluation', 'Graph-Integrity Evaluation'],
+  ['retrieval-experiments', 'Retrieval Experiments'],
   ['release-process', 'Release Process'],
 ]
 
