@@ -25,6 +25,7 @@ export const PAGES = [
   ['eval-full-corpus-runbook', 'Full-Corpus Benchmark Runbook'],
   ['extraction-quality-evaluation', 'Extraction-Quality Evaluation'],
   ['retrieval-quality-evaluation', 'Retrieval-Quality Evaluation'],
+  ['retrieval-experiments', 'Retrieval Experiments'],
   ['release-process', 'Release Process'],
 ]
 
