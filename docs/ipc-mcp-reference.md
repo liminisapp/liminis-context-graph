@@ -47,7 +47,10 @@ In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 The socket dispatch handles **58 methods**: 57 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
 surface (58) and the MCP tool registry (57, below) differ by exactly one — `health_check` is
-not exposed as an MCP tool.
+not exposed as an MCP tool. MCP clients have no health tool; the `ok` / `healthy` /
+`ready_for_reads` semantics they would otherwise look for are in the
+[Health check contract](#health-check-contract) below
+([ADR-0855](adr/0855-health-check-ready-for-reads.md)).
 
 | Category | Methods |
 |----------|---------|
@@ -108,34 +111,47 @@ until `connected` and `queryable` are both `true` and `initializing` is `false` 
 for the full rationale. A `degraded` response after startup has otherwise settled is a legitimate
 outcome (e.g. unrecovered corruption) — not something to retry indefinitely.
 
-A `busy` response (see [Health check contract](#health-check-contract)) is **not** a readiness
-signal: it means the service is alive but a write is holding or waiting for the write lock — most
-importantly a long `knowledge_rebuild_from_wal`. Pollers keep waiting on `busy` (gate on
-`result.healthy == true`) and must not treat it as failure.
+A `busy` response (see [Health check contract](#health-check-contract)) is **not** a *write*
+readiness signal: it means the service is alive but a write is holding or waiting for the write
+lock — most importantly a long `knowledge_rebuild_from_wal`. Pollers that need to send writes keep
+waiting on `busy` (gate on `result.healthy == true`) and must not treat it as failure. A client that
+only reads gates on `result.ready_for_reads == true` instead, which stays `true` while `busy`.
 
 ### Health check contract
 
 `health_check` never waits on the write lock, so it answers promptly even during a long WAL
 rebuild ([ADR-0628](adr/0628-health-check-busy-state.md), #628). The response's `state` is one of:
 
-| `state` | `ok` | `healthy` | Meaning | Supervisor action |
-|---|---|---|---|---|
-| `healthy` | `true` | `true` | Alive and ready: DB open, no write in progress or pending. | Ready — send work. |
-| `busy` | `true` | `false` | Alive, **not ready**: a write is pending or in progress. | Alive — keep waiting; do not restart. |
-| `degraded` | `false` | `false` | Alive but unusable: DB not loaded. `reason` says why. | Recover (`knowledge_recover`) or investigate. |
-| *(no answer)* | — | — | Dead or wedged. | Restart. |
+| `state` | `ok` | `healthy` | `ready_for_reads` | Meaning | Supervisor action |
+|---|---|---|---|---|---|
+| `healthy` | `true` | `true` | `true` | Alive and ready: DB open, no write in progress or pending. | Ready — send work. |
+| `busy` | `true` | `false` | `true` | Alive, reads served, **not ready for writes**: a write is pending or in progress. | Alive — keep waiting for writes; reads may proceed; do not restart. |
+| `degraded` | `false` | `false` | `false` | Alive but unusable: DB not loaded. `reason` says why. | Recover (`knowledge_recover`) or investigate. |
+| *(no answer)* | — | — | — | Dead or wedged. | Restart. |
+
+The three fields carry three different facts ([ADR-0855](adr/0855-health-check-ready-for-reads.md)):
+
+- **`ok`** — liveness: the process is alive and answered. Gate on it for restart decisions.
+- **`healthy`** — idle and ready for writes: DB loaded and no write pending or in progress. Gate on
+  it before sending writes, or to wait for a rebuild to finish. It is **not** a liveness signal.
+- **`ready_for_reads`** — reads are served now: the database is loaded. `true` while `busy`, `false`
+  only when `degraded`. Gate on it before sending reads. It means "loaded", not "every read will
+  succeed": indexes may still be rebuilding, and a read racing a mid-clear rebuild can fail.
+
+Since ADR-0628 (0.16 era) `healthy` stopped meaning liveness. Raw-socket clients written before then
+should use `ok` for liveness and `ready_for_reads` for read availability.
 
 `busy` carries an `activity` field. While a `knowledge_rebuild_from_wal` job is running:
 
 ```json
-{"ok": true, "healthy": false, "state": "busy", "activity": "rebuilding",
- "job_id": "…", "progress": {"mutations_replayed": 48210, "wal_files_processed": 3,
+{"ok": true, "healthy": false, "state": "busy", "ready_for_reads": true,
+ "activity": "rebuilding", "job_id": "…", "progress": {"mutations_replayed": 48210, "wal_files_processed": 3,
                              "wal_files_total": 12, "elapsed_seconds": 91.4}}
 ```
 
 `progress` uses the same values as `knowledge_rebuild_status`. For any other writer the response
-is `{"ok": true, "healthy": false, "state": "busy", "activity": "writing"}` with no `job_id` or
-`progress`. The busy path never connects to or queries the database.
+is `{"ok": true, "healthy": false, "state": "busy", "ready_for_reads": true, "activity": "writing"}`
+with no `job_id` or `progress`. The busy path never connects to or queries the database.
 
 Notes:
 
@@ -150,7 +166,8 @@ Notes:
 - `healthy` can be reported in the short window after a rebuild job is registered but before it
   takes the write lock.
 - `busy` has `healthy: false` on purpose: existing pollers that gate on `healthy` keep waiting.
-  A liveness probe that only needs "is the process alive" should accept `ok: true`.
+  A liveness probe that only needs "is the process alive" should accept `ok: true`, and a read-only
+  client should gate on `ready_for_reads: true`.
 
 ## MCP-over-stdio transport
 

@@ -313,9 +313,12 @@ with `{"ok": true, "healthy": false, "state": "busy", "activity": "rebuilding" |
 for a rebuild job also `job_id` and `progress` (mutations replayed, WAL files processed/total,
 elapsed seconds). Keep polling on `busy`; **do not restart the service** — a restart mid-rebuild
 discards the replay and starts it over, so on a large corpus the rebuild never completes (#612).
-Supervisor liveness probes should treat any response with `ok: true` as alive and gate readiness on
-`healthy: true`. The four outcomes are: `busy` = alive, not ready; `healthy` = alive, ready;
-`degraded` = alive but unusable; no answer = dead or wedged. Full contract:
+Supervisor liveness probes should treat any response with `ok: true` as alive, gate write readiness
+on `healthy: true`, and gate read availability on `ready_for_reads: true` (which stays `true` while
+`busy`, because reads do not take the write lock). The four outcomes are: `busy` = alive, reads
+served, not ready for writes; `healthy` = alive, ready; `degraded` = alive but unusable
+(`ready_for_reads: false`); no answer = dead or wedged. See
+[ADR-0855](adr/0855-health-check-ready-for-reads.md). Full contract:
 [IPC reference: Health check contract](ipc-mcp-reference.md#health-check-contract).
 
 ## Memory sizing in containers

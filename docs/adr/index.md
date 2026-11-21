@@ -177,6 +177,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0821](0821-graph-qa-eval-and-kept-workspaces.md) | `lcg-eval graph-qa`, Ontology Ingest and Kept Workspaces | 2026-11-21 |
 | [0824](0824-own-source-id-entity-filter.md) | Drop Extracted Entities Named After the Episode's Own Source ID or a Cited Note ID | 2026-11-21 |
 | [0853](0853-episode-source-identity-and-exact-source-matching.md) | Episode Source Identity and Exact Source Matching | 2026-11-21 |
+| [0855](0855-health-check-ready-for-reads.md) | `health_check` Gains `ready_for_reads`; Documents `ok` / `healthy` / `ready_for_reads` Semantics | 2026-11-21 |
 
 ## Historical numbering
 

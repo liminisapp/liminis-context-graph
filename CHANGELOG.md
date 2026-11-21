@@ -244,6 +244,18 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   Operators may now see a `-32003` refusal for a group with a missing stamp and stale identity-kind
   data, where it was previously accepted.
 
+### Documentation
+
+- **`health_check` field semantics, and a new `ready_for_reads` field (#855, ADR-0855).** Since
+  ADR-0628 (0.16.1, "0.16 era"), `healthy` means *idle and ready for writes*, not liveness: while any
+  write holds or waits for the write lock, `health_check` answers `{ok: true, healthy: false,
+  state: "busy"}`. Raw-socket clients written before then that read `healthy` as "LCG is up" will
+  see LCG as unavailable during every ingest, although reads keep working. Use `ok` for liveness
+  and the new additive `ready_for_reads` (`true` whenever the database is loaded, including while
+  `busy`; `false` only when `degraded`) for read availability. `busy` still reports
+  `healthy: false`. See the IPC reference's health check contract and
+  [`docs/releases/0.16.1.md`](docs/releases/0.16.1.md).
+
 ## [0.19.1] - 2026-11-16
 
 ### Upgrading
