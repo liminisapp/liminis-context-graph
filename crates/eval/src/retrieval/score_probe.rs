@@ -308,6 +308,9 @@ fn sep_json(pos: &[f64], neg: &[f64], floors: &[f64]) -> Value {
     })
 }
 
+/// A per-observation statistic; the flag says whether the mode is a vector mode.
+type Stat = fn(&Observation, bool) -> Option<f64>;
+
 /// The JSON summary: per mode, per statistic (`top1_score`, `max_cosine`), the distribution of each
 /// set and its separation from the answerable set; plus lexical-leak counts and, in each mode, the
 /// answerable top-1 correct-vs-wrong split.
@@ -315,15 +318,13 @@ pub fn summarize(obs: &[Observation], modes: &[String], floors: &[f64]) -> Value
     let mut by_mode = serde_json::Map::new();
     for mode in modes {
         let vector_mode = mode.starts_with("vector");
-        let stats: [(&str, Box<dyn Fn(&Observation) -> Option<f64>>); 2] = [
-            ("top1_score", Box::new(|o: &Observation| o.top1_score())),
-            (
-                "max_cosine",
-                Box::new(move |o: &Observation| o.max_cosine(vector_mode)),
-            ),
+        let stats: [(&str, Stat); 2] = [
+            ("top1_score", |o, _| o.top1_score()),
+            ("max_cosine", |o, vector| o.max_cosine(vector)),
         ];
         let mut per_stat = serde_json::Map::new();
-        for (name, f) in &stats {
+        for (name, stat) in stats {
+            let f = move |o: &Observation| stat(o, vector_mode);
             let pos = scores_of(obs, mode, SET_ANSWERABLE, f);
             let mut sets = serde_json::Map::new();
             for set in [SET_ANSWERABLE, SET_HARD_NEGATIVE, SET_OFFTOPIC] {
@@ -355,7 +356,7 @@ pub fn summarize(obs: &[Observation], modes: &[String], floors: &[f64]) -> Value
                 );
             }
             sets.insert("offtopic_by_kind".into(), Value::Object(kinds));
-            per_stat.insert((*name).to_string(), Value::Object(sets));
+            per_stat.insert(name.to_string(), Value::Object(sets));
         }
         // Answerable top-1 right vs wrong, on the top-1 score.
         let (mut right, mut wrong) = (Vec::new(), Vec::new());

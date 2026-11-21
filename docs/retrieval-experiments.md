@@ -44,6 +44,45 @@ This is the record of every retrieval experiment and its result: what was tried,
 
 Newest first. **Δ** is against the stated baseline, paired on v2 unless marked.
 
+### E15: score separation and lexical-leg semantics ([#863](https://github.com/liminisapp/liminis-context-graph/issues/863), probe on branch `fabrik/issue-863` @ `e9d5177f`, v2, 2026-11-21). Measured, no product change
+
+The question (from [#848](https://github.com/liminisapp/liminis-context-graph/issues/848)): is [#812](https://github.com/liminisapp/liminis-context-graph/issues/812)'s absolute `min_score` floor (default 0.5) safe in hybrid mode? Related: does the lexical leg match any term or all terms ([#843](https://github.com/liminisapp/liminis-context-graph/issues/843))?
+
+- **Method:**
+  - `lcg-eval retrieval-score-probe` (eval-only) sends `knowledge_search_passages` with `min_score = 0` in `vector`, `hybrid` and `hybrid-belief` modes, then again with `min_score = 0.5`. It records the top-10 `score` and `similarity` per query.
+  - Service `0.19.1`, BGE-base v1.5 Core ML, profile `bge-v1.5`, k = 10, all 408 notes ingested through a stub extractor that extracts nothing (the committed free-form cassette no longer replays on this branch; passage search reads only Episodic nodes).
+  - Three query sets: **answerable** (140: direct, paraphrase, answer, passage), **hard negatives** (the 34 `negative` questions) and **off-topic** (34 constructed queries in `offtopic-queries.jsonl`: 16 unrelated-domain, 8 gibberish, 10 common-words-only).
+  - The FTS question was checked by running `QUERY_FTS_INDEX` through raw Cypher on the ingested corpus, with and without `conjunctive := true`.
+- **Top-1 vector cosine** (hybrid's best vector cosine is within 0.003):
+
+| set | n | min | p10 | median | p90 | max |
+|---|---|---|---|---|---|---|
+| answerable | 140 | 0.475 | 0.554 | 0.668 | 0.790 | 0.867 |
+| hard-negative | 34 | 0.582 | 0.616 | 0.690 | 0.732 | 0.764 |
+| off-topic | 34 | 0.407 | 0.429 | 0.469 | 0.567 | 0.601 |
+
+- **Separation from the answerable set (AUC):** off-topic 0.961, hard negatives 0.441 (cosine); fused hybrid score 0.947 and 0.410. Fused hybrid `score` saturates at 1.4/60 = 0.0233 (answerable median 0.0230, off-topic median 0.0167), a rank-only value.
+- **Under the 0.5 floor:**
+
+| | vector | hybrid |
+|---|---|---|
+| answerable queries returning a top-1 | 139/140 | 140/140 |
+| hard-negative queries returning hits | 34/34 | 34/34 |
+| off-topic queries returning hits | 13/34 | 25/34 |
+| lexical-only hits on off-topic queries | n/a | 115 |
+
+  - Hybrid's extra hits are BM25 matches for unrelated-domain queries, tagged `similarity == null` with a fused score of about 0.0067. On answerable queries, the 140 lexical-only hits that survive the floor contain 6 relevant notes (4%); the 1,260 vector-backed hits contain 139 (11%).
+  - The best single cosine threshold is 0.548 (keeps 91.4% of answerable, admits 11.8% of off-topic). No threshold separates the hard negatives.
+- **FTS leg:** `cedar` 34 matches; `zzqxvk` 0; `cedar zzqxvk` **34** by default and **0** with `conjunctive := true`. The shipped leg is any-term (OR). No E3 variant changed this.
+- **Mergers (for [#849](https://github.com/liminisapp/liminis-context-graph/issues/849)):** a name-only pair scan of the E13 graphs found 0 of 48 skeleton entities merged (free-form and ontology v3.1), 0 names on more than one node, 8 and 28 distinct node pairs at name cosine ≥ 0.85, and 13 and 17 exact-duplicate edge groups (by design: ingest does not deduplicate edges).
+- **Learned:**
+  - The 0.5 floor is **safe** on v2 with this embedder (99.3% of answerable top-1s kept) but is **not an abstention mechanism**, and it is weaker in hybrid mode than in vector mode because the BM25 leg is never floored.
+  - Hybrid's fused `score` is not a relevance and no floor on it is meaningful; `similarity` is the relevance signal.
+  - The margin is thin: the lowest answerable top-1 is 0.475 and the 10th percentile 0.554. The 0.5 default came from a different embedder run ([#811](https://github.com/liminisapp/liminis-context-graph/issues/811)), so it needs remeasuring per embedder.
+  - Near-domain negatives score above the answerable median in every mode.
+  - Limits: synthetic corpus, 34 hand-written off-topic queries, one embedder, rerank leg not measured.
+- **Decision:** no default changes. Follow-ups are recommended in [`docs/research/webbrain-retrieval-suggestions.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/research/webbrain-retrieval-suggestions.md): a work issue for per-leg evidence on hybrid passages (#848), a probe (E16) of an all-terms and a "BM25 must agree" lexical leg (#843), declining #849, and a work issue for `lcg-eval retrieval` input digests and `--compare` (#847).
+
 ### E14: LLM note summaries as extra retrieval units (offline probe, main @ `86f135dc` service, v2, 2026-11-21). Promising for paraphrase, borderline overall
 
 The question: does an LLM-written summary per note, indexed beside the raw passages, close the paraphrase gap (0.328 against qmd-rerank's 0.475)? The idea comes from a review of WebBrain's retrieval design ([#843](https://github.com/liminisapp/liminis-context-graph/issues/843)–[#849](https://github.com/liminisapp/liminis-context-graph/issues/849) are the related suggestions). This is an offline probe with no LCG change.
@@ -404,3 +443,4 @@ The question: does the graph answer what chunk search can't (chains, joins, inve
 2. **Temporal with rerank:** 0.800 on v2 against the 0.85 target. The cross-encoder alone reaches 0.904–0.932 (E8). Consider a belief-aware first stage that is stronger on time, or ordering by belief after rerank.
 3. **Router idea:** graph search wins on direct questions and passage lookups (E12). A per-question router could take some of the oracle headroom (0.814).
 4. **Notes:** rerank is opt-in, and Notes needs a release, then to opt in. When it sends `queries`, its agent prompt needs the rule to keep named entities.
+5. **Lexical leg and abstention (E15 → E16):** the lexical leg is any-term and unfloored, so hybrid answers 25 of 34 off-topic queries under the 0.5 floor. Probe an all-terms leg and a "BM25 must agree with the vector leg" gate (design in [`docs/research/webbrain-retrieval-suggestions.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/research/webbrain-retrieval-suggestions.md)).
