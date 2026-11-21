@@ -1396,7 +1396,7 @@ fn apply_key_resolution(
 /// rejects a wrong dimension, then rejects a non-finite component. Applied per-item regardless of
 /// whether the vector came from a single-text call or a batched one (constraint noted in this
 /// issue's Research: per-item validation is orthogonal to batching).
-fn validate_recomputed_vector(
+pub(crate) fn validate_recomputed_vector(
     vector: Vec<f32>,
     embed_dim: usize,
 ) -> Result<serde_json::Value, Error> {
@@ -1410,6 +1410,19 @@ fn validate_recomputed_vector(
     vector_to_json(&vector).ok_or_else(|| {
         Error::Ipc("recomputed embedding vector contains a non-finite value".to_string())
     })
+}
+
+/// Rejects an all-zero vector (issue #809, FR-012). Replay deliberately does **not** call this — a
+/// zero vector from the embedder is stored as-is there, preserving pre-#809 behaviour — but a
+/// repair that exists to replace zero vectors must never write one back as a "fix". Run before
+/// [`validate_recomputed_vector`] so the error names the zero rather than a later symptom.
+pub(crate) fn reject_zero_vector(vector: &[f32]) -> Result<(), Error> {
+    if vector.iter().all(|c| *c == 0.0) {
+        return Err(Error::Ipc(
+            "embedder returned an all-zero vector".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Logs (subject to `EMBED_FAILURE_LOG_CAP`) one request's embedding recompute failure.

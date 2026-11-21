@@ -27,32 +27,29 @@
 //! concurrent `knowledge_assert_entity` re-assert could change `summary` after Phase A captured
 //! it but before Phase C writes the embedding, silently persisting an embedding of stale text.
 //!
-//! `state.indices_built` is set to `false` before the index is dropped and back to `true` once
-//! the rebuild succeeds — mirroring `handle_rebuild_from_wal`'s exact bookkeeping
-//! (`handlers.rs`'s `bg_indices_built.store(false, ...)` before its own drop/replay/rebuild
-//! cycle). This is *not* redundant with holding `write_lock`: the hot-path search handlers
-//! (`knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_search_passages`) never
-//! take `write_lock` for their read queries, so a concurrent search genuinely can race in while
-//! the index is dropped. What makes that race safe is `indices_built`: a search that hits
-//! `is_missing_index_error` while `indices_built` is `false` calls `build_indices_once`, which
-//! itself blocks on `write_lock.write()` until this pass releases it, then finds `indices_built`
-//! already `true` and returns immediately, letting the search retry succeed. Without setting the
-//! flag, `indices_built` would stay `true` throughout, and a search hitting the race would take
-//! the *other* branch (`return Err(missing index)`) instead of auto-healing — a hard, user-visible
-//! failure despite this pass ostensibly self-healing (see `ADR-0025`, `ADR-0036`). If the process
-//! crashes mid-backfill (index dropped, `indices_built` never reset to `true`), the next read's
-//! auto-heal path self-heals it via the same idempotent `CREATE_VECTOR_INDEX` call.
+//! The drop / write / rebuild sequence and the `state.indices_built` bookkeeping live in
+//! [`crate::index_lifecycle::with_dropped_indexes`], shared with `knowledge_reembed_missing`
+//! (issue #809). See that module's doc for why `indices_built` is cleared before the drop (a
+//! concurrent search that races in must auto-heal via `build_indices_once`, not hard-fail — see
+//! `ADR-0025`, `ADR-0036`), why the rebuild is always attempted, and why the flag is restored to
+//! its *prior* value rather than set `true`. If the process crashes mid-backfill (index dropped,
+//! `indices_built` never restored), the next read's auto-heal path self-heals it via the same
+//! idempotent `CREATE_VECTOR_INDEX` call.
 //!
 //! Callers must add `knowledge_backfill_summary_embeddings` to `service_protocol.py` in the
 //! liminis-app repo.
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    app_state::AppState, db::value_as_string, embedder::EmbedRole, error::Error, wal_exec,
+    app_state::AppState,
+    db::value_as_string,
+    embedder::EmbedRole,
+    error::Error,
+    index_lifecycle::{with_dropped_indexes, DbIndexDdl, IndexDdl, IndexKind},
+    wal_exec,
 };
 
 const PAGE_SIZE: usize = 500;
@@ -189,87 +186,92 @@ pub async fn backfill_summary_embeddings(
         }));
     }
 
-    // Mirrors `handle_rebuild_from_wal`'s bookkeeping: cleared before the index is actually
-    // dropped, so a concurrent search that races in and hits a missing-index error takes the
-    // auto-heal branch (`build_indices_once`, which blocks on `write_lock` until this pass
-    // releases it) instead of a hard failure — see module doc.
-    state.indices_built.store(false, Ordering::Release);
+    // The shared lifecycle clears `indices_built`, drops the summary index, runs the embed+SET
+    // loop below, always rebuilds, and restores the prior flag (see `index_lifecycle`). The write
+    // lock has been held since Phase A and stays held past this call.
+    let guard = write_guard
+        .as_ref()
+        .expect("write lock is held for a non-dry run");
+    let ddl: Arc<dyn IndexDdl> = Arc::new(DbIndexDdl::new(Arc::clone(&db)));
+    let write_db = Arc::clone(&db);
+    let write_state = Arc::clone(&state);
+    let write_gid = params.group_id.clone();
+    let write_tx = progress_tx.clone();
+    let outcome = with_dropped_indexes(
+        &state.indices_built,
+        guard,
+        ddl,
+        &[IndexKind::Summary],
+        || async move {
+            let mut processed = 0usize;
+            for batch in candidates.chunks(WRITE_BATCH_SIZE) {
+                // One batch embed call per write chunk (issue #445, FR-009) instead of one call
+                // per candidate — shortens the exclusive write-lock window held for this whole
+                // run proportionally to WRITE_BATCH_SIZE.
+                let summary_refs: Vec<&str> = batch.iter().map(|c| c.summary.as_str()).collect();
+                let embeddings = write_state
+                    .embedder
+                    .embed_batch(&summary_refs, EmbedRole::Document)
+                    .await?;
+                let batch_data: Vec<(String, String, Vec<f32>)> = batch
+                    .iter()
+                    .zip(embeddings)
+                    .map(|(candidate, emb)| {
+                        (candidate.uuid.clone(), candidate.summary.clone(), emb)
+                    })
+                    .collect();
 
-    let db_drop = Arc::clone(&db);
-    tokio::task::spawn_blocking(move || -> Result<(), Error> {
-        let conn = db_drop
-            .connect()
-            .map_err(|e| Error::Ipc(format!("db: {e}")))?;
-        conn.drop_entity_summary_embedding_index();
-        Ok(())
-    })
-    .await??;
+                let db_c = Arc::clone(&write_db);
+                let state_c = Arc::clone(&write_state);
+                let gid_c = write_gid.clone();
 
-    let mut processed = 0usize;
-    for batch in candidates.chunks(WRITE_BATCH_SIZE) {
-        // One batch embed call per write chunk (issue #445, FR-009) instead of one call per
-        // candidate — shortens the exclusive write-lock window held for this whole run
-        // proportionally to WRITE_BATCH_SIZE.
-        let summary_refs: Vec<&str> = batch.iter().map(|c| c.summary.as_str()).collect();
-        let embeddings = state
-            .embedder
-            .embed_batch(&summary_refs, EmbedRole::Document)
-            .await?;
-        let batch_data: Vec<(String, String, Vec<f32>)> = batch
-            .iter()
-            .zip(embeddings)
-            .map(|(candidate, emb)| (candidate.uuid.clone(), candidate.summary.clone(), emb))
-            .collect();
+                tokio::task::spawn_blocking(move || -> Result<(), Error> {
+                    let conn = db_c.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+                    for (uuid, summary, emb) in &batch_data {
+                        // No WHERE guard (unlike backfill_relation_types): every candidate is
+                        // unconditionally re-embedded on each run, by design (see module doc).
+                        //
+                        // `summary` is re-SET to its own already-current value alongside
+                        // `summary_embedding` (issue #526, FR-005) — not because the text
+                        // changes here, but so this WAL record carries its embedding's source
+                        // text co-located in the same record. Without it, replay has no text to
+                        // recompute this vector from and must skip the SET outright once replay
+                        // stops binding a stored vector value.
+                        conn.exec_params(
+                            "MATCH (n:Entity {uuid: $uuid}) \
+                             SET n.summary_embedding = $summary_embedding, n.summary = $summary",
+                            json!({ "uuid": uuid, "summary_embedding": emb, "summary": summary }),
+                        )?;
+                    }
+                    let seq =
+                        wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
+                    wal_exec::advance_wal_position(&conn, &gid_c, seq, &state_c);
+                    Ok(())
+                })
+                .await??;
 
-        let db_c = Arc::clone(&db);
-        let state_c = Arc::clone(&state);
-        let gid_c = params.group_id.clone();
-
-        tokio::task::spawn_blocking(move || -> Result<(), Error> {
-            let conn = db_c.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-            for (uuid, summary, emb) in &batch_data {
-                // No WHERE guard (unlike backfill_relation_types): every candidate is
-                // unconditionally re-embedded on each run, by design (see module doc).
-                //
-                // `summary` is re-SET to its own already-current value alongside
-                // `summary_embedding` (issue #526, FR-005) — not because the text changes here,
-                // but so this WAL record carries its embedding's source text co-located in the
-                // same record. Without it, replay has no text to recompute this vector from and
-                // must skip the SET outright once replay stops binding a stored vector value.
-                conn.exec_params(
-                    "MATCH (n:Entity {uuid: $uuid}) \
-                     SET n.summary_embedding = $summary_embedding, n.summary = $summary",
-                    json!({ "uuid": uuid, "summary_embedding": emb, "summary": summary }),
-                )?;
+                processed += batch.len();
+                if let Some(ref tx) = write_tx {
+                    if processed.is_multiple_of(PROGRESS_EVERY) || processed == backfill_count {
+                        let _ = tx.send(json!({
+                            "type": "progress",
+                            "processed": processed,
+                            "total": backfill_count,
+                            "phase": "writing",
+                        }));
+                    }
+                }
             }
-            let seq = wal_exec::wal_flush_ungrouped(&state_c, &gid_c, conn.drain_mutations());
-            wal_exec::advance_wal_position(&conn, &gid_c, seq, &state_c);
             Ok(())
-        })
-        .await??;
-
-        processed += batch.len();
-        if let Some(ref tx) = progress_tx {
-            if processed.is_multiple_of(PROGRESS_EVERY) || processed == backfill_count {
-                let _ = tx.send(json!({
-                    "type": "progress",
-                    "processed": processed,
-                    "total": backfill_count,
-                    "phase": "writing",
-                }));
-            }
-        }
+        },
+    )
+    .await;
+    // A failed write wins; otherwise a failed rebuild is still an error (the flag stays `false`,
+    // so the next search heals the index).
+    outcome.write_result?;
+    if let Some((_, e)) = outcome.rebuild_errors.into_iter().next() {
+        return Err(e);
     }
-
-    let db_rebuild = Arc::clone(&db);
-    tokio::task::spawn_blocking(move || -> Result<(), Error> {
-        let conn = db_rebuild
-            .connect()
-            .map_err(|e| Error::Ipc(format!("db: {e}")))?;
-        conn.create_entity_summary_embedding_index()
-    })
-    .await??;
-    state.indices_built.store(true, Ordering::Release);
 
     drop(write_guard);
 

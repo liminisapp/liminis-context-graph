@@ -20,6 +20,7 @@ use crate::{
     ontology_sidecar,
     pointer::{self, EndpointSide, PointerStateCounts},
     rebuild_job::{JobStatus, RebuildJob},
+    reembed_missing,
     replay::{ProgressFn, ReplayOptions, ReplayProgress, WalReplayer},
     reprocess_relations, search,
     telemetry::{now_ms, TelemetryEvent},
@@ -251,6 +252,7 @@ async fn handle(
         "knowledge_backfill_relation_types" => {
             handle_backfill_relation_types(req, state, progress_tx).await
         }
+        "knowledge_reembed_missing" => handle_reembed_missing(req, state, progress_tx).await,
         "knowledge_backfill_summary_embeddings" => {
             handle_backfill_summary_embeddings(req, state, progress_tx).await
         }
@@ -6910,6 +6912,33 @@ async fn handle_backfill_summary_embeddings(
     let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
     let params = backfill_summary_embeddings::BackfillParams { group_id, dry_run };
     backfill_summary_embeddings::backfill_summary_embeddings(state, params, progress_tx).await
+}
+
+/// `knowledge_reembed_missing` (issue #809): re-embeds exactly the rows recorded as stored with a
+/// zero-vector embedding for `group_id` (the #808 record), for any of the four embedding kinds. See
+/// `reembed_missing`'s module doc for the phase order and why the index is down only for the writes.
+///
+/// Parameters (from req.params):
+/// - `group_id: String` (required).
+/// - `kinds: [String]` (optional, default all) — any non-empty subset of `name`, `fact`,
+///   `summary`, `content`.
+/// - `dry_run: bool` (default false) — report per-kind candidate counts without embedding,
+///   writing, or touching an index.
+async fn handle_reembed_missing(
+    req: &IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+) -> Result<Value, Error> {
+    let group_id = extract_required_group_id(&req.params["group_id"])?;
+    let kinds = reembed_missing::parse_kinds(&req.params["kinds"])?;
+    let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
+    let params = reembed_missing::ReembedParams {
+        group_id,
+        kinds,
+        dry_run,
+        retry_policy: None,
+    };
+    reembed_missing::reembed_missing(state, params, progress_tx).await
 }
 
 // ── Relation reprocessing handler (issue #210) ───────────────────────────────

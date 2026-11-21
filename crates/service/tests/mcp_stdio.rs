@@ -43,8 +43,8 @@ fn standalone_lists_and_calls_read_and_write_tools() {
     let tools = client.list_tools();
     assert_eq!(
         tools.len(),
-        56,
-        "default --scope=all should advertise all 56 tools"
+        57,
+        "default --scope=all should advertise all 57 tools"
     );
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"knowledge_status"));
@@ -214,6 +214,7 @@ fn scope_admin_advertises_wal_lifecycle_tools() {
         "knowledge_rebind_pointers",
         "knowledge_delete_by_group",
         "knowledge_backfill_summary_embeddings",
+        "knowledge_reembed_missing",
         "knowledge_reload_ontology",
     ] {
         assert!(
