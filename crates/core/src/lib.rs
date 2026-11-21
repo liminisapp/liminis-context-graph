@@ -65,6 +65,7 @@ pub(crate) mod wal_exec;
 pub mod wal_generation;
 pub mod wal_group;
 pub mod wal_strip;
+pub mod walk;
 pub mod write_policy;
 pub mod zero_vector_record;
 

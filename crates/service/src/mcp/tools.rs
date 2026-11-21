@@ -710,6 +710,95 @@ pub fn registry() -> Vec<ToolSpec> {
             },
         },
         ToolSpec {
+            name: "knowledge_get_ontology",
+            description: "Return the effective ontology of a group (group file, then workspace, \
+                           then none) as a planning menu for `knowledge_walk` (issue #820): \
+                           `mode`, `entity_types` (name, description, parent, identity, \
+                           extract) and `relation_types` (name, description, `source_type` and \
+                           `target_type` lists, `inverse_aliases`, `symmetric`, aliases, \
+                           keywords, extract). Assert-only types (`extract: false`) are omitted \
+                           unless `include_asserted` is true. A group with no ontology returns \
+                           `has_ontology: false`, `mode: \"free-form\"` and empty lists — not an \
+                           error. Read-only.",
+            scope: Scope::Read,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "default": "liminis"},
+                        "include_asserted": {
+                            "type": "boolean", "default": false,
+                            "description": "Include assert-only (`extract: false`) entity and relation types."
+                        }
+                    }
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_walk",
+            description: "Answer a question by FOLLOWING TYPED RELATIONS from an entity, along a \
+                           walk YOU plan (issue #820). LCG makes no LLM call: you are the \
+                           planner, this tool runs the walk and returns the facts. How to plan: \
+                           (1) Call `knowledge_get_ontology` once to get the relation and entity \
+                           types. (2) Pick the `start` entity (name or UUID; an ambiguous name \
+                           walks from every match), then for each hop the `relation_types` to \
+                           follow, a short `phrase` describing the hop (e.g. \"supplier of the \
+                           project\", used for ranking), and the `direction` AS THE TYPE NAME \
+                           READS — \"X REPORTS_TO Y: from X to Y is `out`\", from Y to X is `in`, \
+                           `any` for no preference — plus the `answer_type` (an entity type name, \
+                           or \"value\") and the question as `query`. (3) Fall back to \
+                           `knowledge_search_passages` for questions about how something changed \
+                           over time, or questions with no clear start entity. \
+                           Each hop keeps the top edges (3 in `single` mode, 10 in `list` and \
+                           `history`) ranked by similarity of the hop phrase to the edge fact; a \
+                           relation-type, direction or answer-type filter that matches nothing \
+                           falls back to all candidates and is reported in `fallbacks`. If the \
+                           hops end short of `answer_type`, one completion hop runs (needs \
+                           `query`). Returns, per hop, the chosen edges (`uuid`, `relation_type`, \
+                           `fact`, `source`/`target` {uuid, name, type}, `valid_at`, \
+                           `invalid_at`, `score`, `direction_matched`, `signature_mismatch`), \
+                           the resolved `start_entities`, `completion_hop_ran`, and `facts_text` \
+                           — typed, deduplicated facts ready to hand to a reader. If `start` \
+                           resolves to nothing, `found` is false. Read-only.",
+            scope: Scope::Read,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "start": {"type": "string", "description": "Start entity: a name or an entity UUID (required). An ambiguous name walks from every match."},
+                        "group_ids": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "Groups to walk in (names are resolved in each). Omitted: the default group `liminis`."
+                        },
+                        "hops": {
+                            "type": "array",
+                            "description": "The planned hops, in order. Required unless `answer_type` is an entity type and `query` is set, in which case it may be omitted or `[]` to run only the completion hop from the start entities.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "relation_types": {
+                                        "type": "array", "items": {"type": "string"},
+                                        "description": "Relation types to follow at this hop. Empty: no relation filter. If none match, all candidates are used (reported)."
+                                    },
+                                    "phrase": {"type": "string", "description": "Short description of the hop, used for ranking, e.g. \"supplier of the project\" (required)."},
+                                    "direction": {
+                                        "type": "string", "enum": ["out", "in", "any"], "default": "any",
+                                        "description": "As the relation type reads: `out` = the frontier entity is the edge's source, `in` = its target."
+                                    }
+                                },
+                                "required": ["phrase"]
+                            }
+                        },
+                        "answer_type": {"type": "string", "description": "An entity type name, or \"value\". On the last hop (not in history mode) far ends of this type are preferred; if the hops end short of it a completion hop runs."},
+                        "query": {"type": "string", "description": "The question text; ranks the completion hop (which does not run without it)."},
+                        "mode": {"type": "string", "enum": ["single", "list", "history"], "default": "single", "description": "single: top 3 per hop; list: top 10; history: top 10 and includes invalidated edges."},
+                        "direction_mode": {"type": "string", "enum": ["soft", "hard"], "default": "soft", "description": "soft: matching edges get a +0.05 ranking bonus; hard: only matching edges are kept (falls back if none)."}
+                    },
+                    "required": ["start"]
+                })
+            },
+        },
+        ToolSpec {
             name: "knowledge_get_entities_by_source",
             description: "List entities that were extracted from a given source document. \
                            Does not include episode `attributes` (issue #528) — this path \
@@ -1948,18 +2037,18 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_54_unique_tools() {
+    fn registry_has_56_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 54);
+        assert_eq!(r.len(), 56);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 54, "tool names must be unique");
+        assert_eq!(names.len(), 56, "tool names must be unique");
     }
 
     #[test]
     fn scope_bucket_sizes_match_fr_004_table() {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
-        assert_eq!(count(Scope::Read), 19);
+        assert_eq!(count(Scope::Read), 21);
         assert_eq!(count(Scope::Write), 18);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 16);
@@ -2366,6 +2455,46 @@ mod tests {
         assert!(
             desc.contains("knowledge_reprocess_relation_types") && desc.contains("untyped"),
             "description must point callers to knowledge_reprocess_relation_types {{scope: \"untyped\"}}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod walk_tool_tests {
+    use super::*;
+
+    fn tool(name: &str) -> ToolSpec {
+        registry()
+            .into_iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| panic!("{name} must be registered"))
+    }
+
+    #[test]
+    fn walk_and_ontology_are_read_scope() {
+        assert_eq!(tool("knowledge_walk").scope, Scope::Read);
+        assert_eq!(tool("knowledge_get_ontology").scope, Scope::Read);
+    }
+
+    #[test]
+    fn walk_description_carries_the_planning_guidance() {
+        let d = tool("knowledge_walk").description;
+        assert!(d.contains("knowledge_get_ontology"), "step 1");
+        assert!(
+            d.contains("X REPORTS_TO Y: from X to Y is `out`"),
+            "step 2 example"
+        );
+        assert!(d.contains("answer_type"), "step 2 answer type");
+        assert!(d.contains("knowledge_search_passages"), "step 3 fallback");
+    }
+
+    #[test]
+    fn walk_schema_requires_only_start() {
+        let schema = (tool("knowledge_walk").input_schema)();
+        assert_eq!(schema["required"], json!(["start"]));
+        assert_eq!(
+            schema["properties"]["hops"]["items"]["properties"]["direction"]["enum"],
+            json!(["out", "in", "any"])
         );
     }
 }

@@ -42,11 +42,11 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (55)
+## IPC methods (57)
 
-The socket dispatch handles **55 methods**: 54 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **57 methods**: 56 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (55) and the MCP tool registry (54, below) differ by exactly one — `health_check` is
+surface (57) and the MCP tool registry (56, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -57,6 +57,7 @@ not exposed as an MCP tool.
 | Document chunking (read-only) | `knowledge_preview_chunks` |
 | Direct assertion | `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | Search | `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_search_passages`, `knowledge_query_cypher` |
+| Typed walk (read-only) | `knowledge_get_ontology`, `knowledge_walk` |
 | Graph reads | `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source` |
 | Correction reads | `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
 | Notebook health | `knowledge_lint` |
@@ -225,7 +226,7 @@ union of all active scopes.
 
 | Scope | Methods |
 |-------|---------|
-| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
+| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_ontology`, `knowledge_walk`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
 | `write` | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |
@@ -1302,6 +1303,122 @@ group from source.
 `kind_disagreements` array (`entity_id`, `entity_name`, `kind`, `classified_type`) — report-only —
 to both its dry-run plan and its result.
 Ontology types flagged `extract: false` are never offered as reclassification targets by `knowledge_reprocess_entity_types` / `knowledge_reprocess_relation_types` (nor by `knowledge_canonicalize_relations`); see [Assert-only types](ontology.md#assert-only-types-extract-false).
+
+### Typed relation walks (`knowledge_get_ontology`, `knowledge_walk`, issue #820)
+
+`knowledge_walk` answers questions that are chains ("who supplies the project X's team owns?"),
+lists or joins by **following typed relations** from an entity. **The caller plans the walk and
+LCG executes it — LCG makes no LLM call** (it only embeds the hop phrases and `query`). See
+[ADR-0820](adr/0820-caller-plans-walk-no-lcg-llm.md). Both methods are `read` scope, read-only
+(no WAL writes, no graph mutation), and return the usual degraded-mode error when the database is
+unavailable.
+
+**How to plan** (this is also the MCP tool description):
+
+1. Call `knowledge_get_ontology` once for the menu.
+2. Pick the `start` entity, the `relation_types` per hop, the `direction` *as the type name reads*
+   ("X REPORTS_TO Y: from X to Y is `out`") and the `answer_type`.
+3. Use `knowledge_search_passages` instead for questions about how something changed over time, or
+   with no clear start entity.
+
+#### `knowledge_get_ontology`
+
+`{group_id?, include_asserted?}` returns the group's effective ontology (group file → workspace →
+none, as for extraction):
+
+```json
+{"group_id": "liminis", "has_ontology": true, "mode": "strict", "include_asserted": false,
+ "entity_type_count": 2, "entity_types": [
+   {"name": "Employee", "description": "...", "parent": "Person", "identity": false, "extract": true}],
+ "relation_type_count": 1, "relation_types": [
+   {"name": "REPORTS_TO", "description": "...", "source_type": ["Employee"], "target_type": ["Person"],
+    "inverse_aliases": [], "symmetric": false, "aliases": [], "keywords": [], "extract": true}]}
+```
+
+Types with `extract: false` (assert-only) are omitted unless `include_asserted: true`. A group with
+no ontology returns `has_ontology: false`, `mode: "free-form"` and empty lists — not an error.
+`source_type`/`target_type`, `inverse_aliases` and `symmetric` are always present and carry the
+declared values (#816).
+
+#### `knowledge_walk`
+
+Request:
+
+| Param | Meaning |
+|-------|---------|
+| `start` (required) | Entity name or UUID. A UUID-shaped value is tried as a UUID first, then as a name. A name is resolved in every listed group across all kinds, following `Merged` tombstones; an ambiguous name **walks from every match** (it is not an error, unlike `knowledge_resolve_entity`). |
+| `group_ids` | Groups to walk in. Omitted: the default group `liminis` (not "all groups"). |
+| `hops` (required unless completion-only, see below) | `[{relation_types: [..], phrase, direction}]`. `phrase` (required) is a short description of the hop used for ranking, e.g. "supplier of the project". `direction` is `out`, `in` or `any` (default `any`). Empty `relation_types` means no relation filter. |
+| `answer_type` | An entity type name, or `"value"` (no entity-type semantics). An unknown type is not an error: it matches nothing, so the type filter falls back and is reported. |
+| `query` | The question text; ranks the completion hop. |
+| `mode` | `single` (default, top 3 per hop), `list` (top 10) or `history` (top 10; includes invalidated edges). |
+| `direction_mode` | `soft` (default) or `hard`. |
+
+`hops` may be empty or omitted only when `answer_type` is an entity type and `query` is given — then only the
+completion hop runs, from the start entities. Anything else with empty `hops`, an unknown
+`mode` / `direction_mode` / `direction`, a missing `start` or `phrase`, or malformed `hops` is a
+`-32000` validation error.
+
+Algorithm (E13's v5, generic — no relation names are hard-coded). Per hop:
+
+1. **Candidates** are edges incident to the frontier (either direction) whose far end has not been
+   visited (cycles and self-loops never revisit). Live edges only, except in `history` mode.
+2. **Relation filter**: keep edges whose `relation_type` is in `relation_types`; if none match,
+   keep all and record a fallback.
+3. **Answer-type filter** (last hop only, `answer_type` an entity type, mode not `history`): keep
+   edges whose far end has that type (a supertype counts); if none do, keep all and record it.
+4. **Direction**: `out` means the frontier entity is the edge's source as its type reads, `in` that
+   it is the target. `soft` adds a fixed **0.05** cosine bonus to matching edges; `hard` keeps only
+   matching edges, falling back to all (recorded) if none match. `any` applies neither.
+5. **Rank** by cosine(embedding of `phrase` with the query-side instruction, the edge's fact
+   embedding) plus the bonus; ties break by edge uuid. Edges with no usable fact embedding rank
+   after every embedded edge (score 0.0). The top B are kept; their far ends are the next frontier.
+
+If the hops end on no entity of an entity-type `answer_type` and `query` is given (and mode is not
+`history`), one **completion hop** runs: edges from the final frontier to entities of that type,
+ranked by cosine(`query`, fact embedding), no direction logic. It is an *edge* hop (not a node
+ranking), appears as an extra entry with `completion: true`, and sets `completion_hop_ran`. A hop
+with no candidates ends the walk early (`dead_end_at`).
+
+Response:
+
+```json
+{"found": true, "start": "Bob", "group_ids": ["liminis"], "mode": "single", "direction_mode": "soft",
+ "start_entity_count": 1, "start_entities": [{"uuid": "...", "name": "Bob", "type": "Person", "group_id": "liminis"}],
+ "hops": [{"hop": 1, "completion": false, "candidate_count": 4, "count": 1, "edges": [
+   {"uuid": "...", "relation_type": "OWNS", "fact": "...",
+    "source": {"uuid": "...", "name": "Bob", "type": "Person"},
+    "target": {"uuid": "...", "name": "Apollo", "type": "Project"},
+    "valid_at": null, "invalid_at": null, "score": 0.93,
+    "direction_matched": true, "signature_mismatch": false}]}],
+ "fallbacks": {"relation_type": [], "direction": [], "answer_type": []},
+ "completion_hop_ran": false, "dead_end_at": null,
+ "facts_text": "- <fact> (Bob [Person] -> Apollo [Project]) [from 2024-01-01 until 2024-06-01]"}
+```
+
+- `found: false` (with `message`, empty `hops`) when `start` resolves to nothing — never a silent
+  empty walk. Hop numbers in `fallbacks` and `dead_end_at` are 1-based.
+- `direction_matched` is `null` for `any` hops. `type` is the entity's primary type, empty when it
+  has none.
+- `signature_mismatch` uses the flag persisted on the edge when present (`attributes`), otherwise
+  recomputes whether the endpoint types violate the relation's declared `source_type` /
+  `target_type`; `false` with no ontology, no declared signature or an untyped endpoint. With
+  several `group_ids`, each edge is checked against the ontology of its own `group_id`.
+- An edge whose fact embedding is unusable — a zero vector, or a different dimension from the
+  query embedding (the embedder changed since the edge was written) — cannot be scored: it gets
+  `score: 0.0`, no direction bonus, and ranks after every scorable candidate.
+- `facts_text` is the typed reader format, **deduplicated by edge uuid**, in hop then rank order:
+  `- <fact> (<source> [<Type>] -> <target> [<Type>]) [from <date> until <date>]`. An untyped
+  endpoint drops its `[Type]`; the validity suffix is omitted when both dates are absent and shows
+  only the side that is present otherwise. Showing the reader each endpoint's type was E13's
+  largest single gain.
+- An embedder failure is an explicit error, never a walk over zero vectors.
+
+**Known limit:** each hop loads every incident edge (with its fact embedding) of the frontier, so a
+hub entity with thousands of edges costs proportionally; the beam keeps later frontiers small. There
+is deliberately no cap, since a cap would silently drop candidates; each hop reports its
+`candidate_count` (the unfiltered candidates after visited-node exclusion) so a caller can see how
+wide a hop was.
 
 ### Ontology reload (`knowledge_reload_ontology`)
 

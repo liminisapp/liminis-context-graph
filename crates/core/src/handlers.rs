@@ -232,6 +232,8 @@ async fn handle(
         "knowledge_list_entities" => handle_list_entities(req, state).await,
         "knowledge_list_relationships" => handle_list_relationships(req, state).await,
         "knowledge_get_entity_neighbors" => handle_get_entity_neighbors(req, state).await,
+        "knowledge_get_ontology" => handle_get_ontology(req, state).await,
+        "knowledge_walk" => handle_walk(req, state).await,
         "knowledge_get_entities_by_source" => handle_get_entities_by_source(req, state).await,
         "knowledge_validate_corrections" => handle_validate_corrections(state).await,
         "knowledge_apply_corrections" => handle_apply_corrections(req, state).await,
@@ -2663,6 +2665,365 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
 
     let count = facts.len();
     Ok(json!({ "edges": facts, "count": count }))
+}
+
+// ── knowledge_get_ontology / knowledge_walk (issue #820, ADR-0820) ────────────
+
+/// Builds the `knowledge_get_ontology` view of an effective ontology. This is the one place that
+/// maps the in-memory `Ontology` to the wire shape. Signatures are the declared
+/// `source_types`/`target_types` lists, alongside `inverse_aliases` and `symmetric` (#816).
+///
+/// `extract: false` (assert-only) types are omitted unless `include_asserted`.
+fn ontology_view(onto: Option<&crate::ontology::Ontology>, include_asserted: bool) -> Value {
+    let Some(o) = onto else {
+        return json!({
+            "has_ontology": false,
+            "mode": "free-form",
+            "entity_types": [],
+            "entity_type_count": 0,
+            "relation_types": [],
+            "relation_type_count": 0,
+        });
+    };
+    let entity_types: Vec<Value> = o
+        .entity_types
+        .iter()
+        .filter(|t| include_asserted || t.extract)
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "parent": t.parent,
+                "identity": t.identity,
+                "extract": t.extract,
+            })
+        })
+        .collect();
+    let relation_types: Vec<Value> = o
+        .relation_types
+        .iter()
+        .filter(|r| include_asserted || r.extract)
+        .map(|r| {
+            json!({
+                "name": r.name,
+                "description": r.description,
+                "source_type": r.source_types,
+                "target_type": r.target_types,
+                "inverse_aliases": r.inverse_aliases,
+                "symmetric": r.symmetric,
+                "aliases": r.aliases,
+                "keywords": r.keywords,
+                "extract": r.extract,
+            })
+        })
+        .collect();
+    json!({
+        "has_ontology": true,
+        "mode": o.mode.to_string(),
+        "entity_type_count": entity_types.len(),
+        "entity_types": entity_types,
+        "relation_type_count": relation_types.len(),
+        "relation_types": relation_types,
+    })
+}
+
+/// `knowledge_get_ontology`: the effective ontology of a group (group file → workspace → none),
+/// as a planning menu for `knowledge_walk`. Read-only.
+async fn handle_get_ontology(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let group_id = p["group_id"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(DEFAULT_GROUP_ID)
+        .to_string();
+    let include_asserted = match &p["include_asserted"] {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        _ => return Err(Error::Ipc("include_asserted must be a boolean".to_string())),
+    };
+    let onto = state.peek_or_load_ontology(&group_id);
+    let mut v = ontology_view(onto.as_deref(), include_asserted);
+    v["group_id"] = json!(group_id);
+    v["include_asserted"] = json!(include_asserted);
+    Ok(v)
+}
+
+/// `Db`-backed [`crate::walk::WalkGraph`]: batched incident-edge reads (no `LIMIT`, group
+/// filtered) and entity lookups.
+struct DbWalkGraph<'a, 'db> {
+    conn: &'a db::Conn<'db>,
+    group_ids: Vec<String>,
+}
+
+impl crate::walk::WalkGraph for DbWalkGraph<'_, '_> {
+    fn incident_edges(
+        &self,
+        frontier: &[String],
+        include_invalidated: bool,
+    ) -> Result<Vec<RelatesToEdge>, Error> {
+        let gids: Vec<&str> = self.group_ids.iter().map(String::as_str).collect();
+        let mut out: Vec<RelatesToEdge> = Vec::new();
+        for chunk in frontier.chunks(200) {
+            out.extend(
+                self.conn
+                    .get_walk_edges(chunk, Some(&gids), include_invalidated)?,
+            );
+        }
+        // An edge whose endpoints fall in different chunks is returned by both calls; keep one.
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|e| seen.insert(e.uuid.clone()));
+        Ok(out)
+    }
+
+    fn entities(&self, uuids: &[String]) -> Result<Vec<EntityRow>, Error> {
+        let mut out = Vec::new();
+        for chunk in uuids.chunks(200) {
+            out.extend(self.conn.get_entities_by_uuids(chunk)?);
+        }
+        Ok(out)
+    }
+}
+
+/// Resolves `start` to every matching entity: a UUID-shaped string is tried as an entity uuid
+/// first (within `group_ids`), then — or if it is not UUID-shaped — as a name in every listed
+/// group across all kinds (unlike `knowledge_resolve_entity`, an ambiguous name is not an error:
+/// the walk starts from every match). `Merged` tombstones are followed to their canonical.
+fn resolve_walk_start(
+    conn: &db::Conn<'_>,
+    group_ids: &[String],
+    start: &str,
+) -> Result<Vec<EntityRow>, Error> {
+    let mut found: Vec<EntityRow> = Vec::new();
+    if Uuid::parse_str(start).is_ok() {
+        found = conn
+            .get_entities_by_uuids(&[start.to_string()])?
+            .into_iter()
+            .filter(|e| group_ids.contains(&e.group_id))
+            .collect();
+    }
+    if found.is_empty() {
+        for gid in group_ids {
+            found.extend(conn.resolve_entities_by_name_any_kind(start, gid)?);
+        }
+    }
+    let mut out: Vec<EntityRow> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for e in found {
+        let e = if e.labels.iter().any(|l| l == "Merged") {
+            match cross_group::follow_merged_into_chain(conn, &e.group_id.clone(), e)? {
+                Some(c) => c,
+                None => continue,
+            }
+        } else {
+            e
+        };
+        if seen.insert(e.uuid.clone()) {
+            out.push(e);
+        }
+    }
+    Ok(out)
+}
+
+/// Parses `hops` (absent ⇒ empty). Each hop: `{relation_types?, phrase, direction?}`;
+/// `direction` defaults to `any`.
+fn parse_walk_hops(v: &Value) -> Result<Vec<crate::walk::Hop>, Error> {
+    let arr = match v {
+        Value::Null => return Ok(vec![]),
+        Value::Array(a) => a,
+        _ => return Err(Error::Ipc("hops must be an array".to_string())),
+    };
+    arr.iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let n = i + 1;
+            let obj = h
+                .as_object()
+                .ok_or_else(|| Error::Ipc(format!("hops[{n}] must be an object")))?;
+            let relation_types = match obj.get("relation_types") {
+                None | Some(Value::Null) => vec![],
+                Some(Value::Array(a)) => a
+                    .iter()
+                    .map(|r| {
+                        r.as_str().map(str::to_string).ok_or_else(|| {
+                            Error::Ipc(format!(
+                                "hops[{n}].relation_types must be an array of strings"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                Some(_) => {
+                    return Err(Error::Ipc(format!(
+                        "hops[{n}].relation_types must be an array of strings"
+                    )))
+                }
+            };
+            let phrase = obj
+                .get("phrase")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| Error::Ipc(format!("hops[{n}].phrase is required")))?
+                .to_string();
+            let direction = match obj.get("direction") {
+                None | Some(Value::Null) => crate::walk::Direction::Any,
+                Some(Value::String(s)) => crate::walk::Direction::parse(s)?,
+                Some(_) => return Err(Error::Ipc(format!("hops[{n}].direction must be a string"))),
+            };
+            Ok(crate::walk::Hop {
+                relation_types,
+                phrase,
+                direction,
+            })
+        })
+        .collect()
+}
+
+fn walk_str_param<'a>(v: &'a Value, name: &str) -> Result<Option<&'a str>, Error> {
+    match v {
+        Value::Null => Ok(None),
+        Value::String(s) => Ok(Some(s.as_str())),
+        _ => Err(Error::Ipc(format!("{name} must be a string"))),
+    }
+}
+
+/// `knowledge_walk`: executes a caller-planned typed walk (see [`crate::walk`]). Read-only; makes
+/// no LLM call (it only embeds the hop phrases and `query`).
+async fn handle_walk(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    use crate::walk;
+    let p = &req.params;
+    let start = p["start"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("start is required".to_string()))?
+        .to_string();
+    let group_ids = extract_optional_group_ids(&p["group_ids"])
+        .unwrap_or_else(|| vec![DEFAULT_GROUP_ID.to_string()]);
+    let mode = walk::WalkMode::parse(walk_str_param(&p["mode"], "mode")?.unwrap_or("single"))?;
+    let direction_mode = walk::DirectionMode::parse(
+        walk_str_param(&p["direction_mode"], "direction_mode")?.unwrap_or("soft"),
+    )?;
+    let hops = parse_walk_hops(&p["hops"])?;
+    let answer_type = walk::parse_answer_type(walk_str_param(&p["answer_type"], "answer_type")?);
+    let query = walk_str_param(&p["query"], "query")?
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    // Validate the plan shape up front (start entities are filled in after resolution).
+    let mut plan = walk::WalkPlan {
+        start: vec![String::new()],
+        hops,
+        answer_type,
+        query,
+        mode,
+        direction_mode,
+    };
+    plan.validate()?;
+
+    // Embed the hop phrases and the query (query-side instruction). An embedder failure is an
+    // explicit error, never a walk over zero vectors.
+    let mut hop_embs = Vec::with_capacity(plan.hops.len());
+    for h in &plan.hops {
+        hop_embs.push(state.embedder.embed(&h.phrase, EmbedRole::Query).await?);
+    }
+    let query_emb = match plan.query.as_deref() {
+        Some(q) if plan.answer_type.is_some() => {
+            Some(state.embedder.embed(q, EmbedRole::Query).await?)
+        }
+        _ => None,
+    };
+    let embeddings = walk::WalkEmbeddings {
+        hops: hop_embs,
+        query: query_emb,
+    };
+
+    // One effective ontology per walked group: `signature_mismatch` is checked against the
+    // ontology of each edge's own group.
+    let ontologies: std::collections::HashMap<String, Option<Arc<crate::ontology::Ontology>>> =
+        group_ids
+            .iter()
+            .map(|g| (g.clone(), state.peek_or_load_ontology(g)))
+            .collect();
+    let db = load_db(&state)?;
+    let _guard = state.write_lock.read().await;
+    let gids = group_ids.clone();
+    let start_name = start.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        let starts = resolve_walk_start(&conn, &gids, &start_name)?;
+        if starts.is_empty() {
+            return Ok::<_, Error>(None);
+        }
+        plan.start = starts.iter().map(|e| e.uuid.clone()).collect();
+        let graph = DbWalkGraph {
+            conn: &conn,
+            group_ids: gids,
+        };
+        let resolve = |gid: &str| ontologies.get(gid).and_then(|o| o.as_deref());
+        let outcome = walk::run_with_ontologies(&graph, &resolve, &plan, &embeddings)?;
+        Ok(Some((starts, outcome)))
+    })
+    .await??;
+    drop(_guard);
+
+    let (starts, outcome) = match result {
+        Some(r) => r,
+        None => {
+            return Ok(json!({
+                "found": false,
+                "start": start,
+                "message": format!(
+                    "start {start:?} did not resolve to any entity in group(s) {group_ids:?}"
+                ),
+                "start_entities": [],
+                "start_entity_count": 0,
+                "hops": [],
+                "fallbacks": walk::WalkFallbacks::default(),
+                "completion_hop_ran": false,
+                "dead_end_at": null,
+                "facts_text": "",
+            }));
+        }
+    };
+    let start_entities: Vec<Value> = starts
+        .iter()
+        .map(|e| {
+            json!({
+                "uuid": e.uuid,
+                "name": e.name,
+                "type": walk::primary_type(&e.labels),
+                "group_id": e.group_id,
+            })
+        })
+        .collect();
+    let hops: Vec<Value> = outcome
+        .hops
+        .iter()
+        .map(|h| {
+            json!({
+                "hop": h.hop,
+                "completion": h.completion,
+                "candidate_count": h.candidate_count,
+                "count": h.edges.len(),
+                "edges": h.edges,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "found": true,
+        "start": start,
+        "group_ids": group_ids,
+        "mode": mode,
+        "direction_mode": direction_mode,
+        "start_entity_count": start_entities.len(),
+        "start_entities": start_entities,
+        "hops": hops,
+        "fallbacks": outcome.fallbacks,
+        "completion_hop_ran": outcome.completion_hop_ran,
+        "dead_end_at": outcome.dead_end_at,
+        "facts_text": outcome.facts_text,
+    }))
 }
 
 async fn handle_get_entity_neighbors(

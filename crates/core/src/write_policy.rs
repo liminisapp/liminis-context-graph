@@ -175,6 +175,9 @@ pub const CLASSIFICATION: &[(&str, WriteClass)] = &[
     ("knowledge_list_entities", WriteClass::ReadOnly),
     ("knowledge_list_relationships", WriteClass::ReadOnly),
     ("knowledge_get_entity_neighbors", WriteClass::ReadOnly),
+    // Read-only, caller-planned typed walk + its ontology menu (issue #820); no LLM, no WAL.
+    ("knowledge_get_ontology", WriteClass::ReadOnly),
+    ("knowledge_walk", WriteClass::ReadOnly),
     ("knowledge_get_entities_by_source", WriteClass::ReadOnly),
     ("knowledge_validate_corrections", WriteClass::ReadOnly),
     // Pure chunking: never touches the graph or the WAL (issue #785).

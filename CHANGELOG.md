@@ -37,6 +37,16 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `--out` writes `report.md` and `report.json`; `--compare <report.json>` prints per-metric deltas.
   Measurement only; see `docs/graph-integrity-evaluation.md`.
 
+- **`knowledge_walk` and `knowledge_get_ontology`: caller-planned typed relation walks (#820,
+  ADR-0820).** `knowledge_walk` follows typed relations from a start entity along hops the caller
+  plans (relation types, a ranking phrase and a direction per hop, plus an optional answer type),
+  ranks each hop's edges by hop-phrase similarity to the edge fact (a soft or hard direction
+  preference, a fixed 0.05 bonus), keeps the top 3 (or 10 in `list`/`history`) and returns the
+  chosen edges with typed endpoints plus a deduplicated `facts_text` in the typed reader format.
+  `knowledge_get_ontology` returns the effective ontology as the planning menu. Both are
+  read-scope, read-only (no WAL writes) and exposed as MCP tools (56 tools; the read scope
+  has 21). LCG makes no LLM call: the agent using LCG is the planner. E13 measured this walk at
+  0.91 against 0.37 for the best passage search on the v2 graph questions.
 - **`LCG_SEARCH_MIN_SCORE`: configurable default `min_score` for `knowledge_search_passages`
   (#812, ADR-0812).** The default floor used when a request omits `min_score` was a hard-coded 0.5,
   which can let unrelated passages through for some embedders (#811). Operators can now set it per
