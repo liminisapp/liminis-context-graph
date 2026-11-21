@@ -40,7 +40,7 @@ pub fn enable_summary_units() {
 /// is how a passage and its (upper-cased) summary get different vectors.
 pub fn vector_for(text: &str) -> Vec<f32> {
     const KEYWORDS: [&str; 5] = ["KILN", "ROCKET", "GARDEN", "TIDE", "OWL"];
-    let mut v = vec![0.0f32; DIM];
+    let mut v = [0.0f32; DIM];
     for (i, k) in KEYWORDS.iter().enumerate() {
         if text.contains(k) {
             v[i] = 1.0;
