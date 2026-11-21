@@ -83,9 +83,10 @@ self-loop, invalidate one a rewrite *creates*.
 
 - Entity merge (`corrections.rs`: `apply_same_as`, `merge_entities_inner`) moves both ends of an
   alias's pre-existing self-loop to the canonical and skips the `(src, dst, name)` dedup for it, since
-  a budget and a headcount legitimately share `(A, A, HAS_MEASURE)`. In `merge_entities_inner`, an
-  edge that only becomes a self-loop through the merge is still invalidated, as before;
-  `apply_same_as` is otherwise unchanged.
+  a budget and a headcount legitimately share `(A, A, HAS_MEASURE)`. An edge that only becomes a
+  self-loop through the merge is invalidated on both paths: `merge_entities_inner` already did this
+  (FR-010), and `apply_same_as`, which previously left such an edge in place as an unmarked
+  self-loop, now does too.
 - Cross-group rebind (`cross_group.rs`, phase 2) does not invalidate when the actual hop pair was
   already a self-loop, and skips the duplicate check for it.
 - The canonicalize direction repair (`canonicalize::plan_direction`) skips self-loops.

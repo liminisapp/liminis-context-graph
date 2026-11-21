@@ -1391,3 +1391,50 @@ fn test_same_as_correction_moves_pre_existing_self_loops() {
         .iter()
         .all(|e| e.source_node_uuid == canonical && e.target_node_uuid == canonical));
 }
+
+/// FR-010 on the corrections path (ADR-0823): an alias ↔ canonical edge that only *becomes* a
+/// self-loop through a `same_as` correction is invalidated, as `merge_entities` does — never left
+/// as an unmarked self-loop.
+#[test]
+fn test_same_as_correction_invalidates_merge_created_self_loop() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical = "sa2-canon";
+    let alias = "sa2-alias";
+    conn.insert_entity(&make_entity(canonical, "Robert", "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity(alias, "Bob", "2026-01-01 00:01:00"))
+        .unwrap();
+    let e = make_edge(alias, canonical, "KNOWS", TS);
+    let edge_uuid = e.uuid.clone();
+    conn.insert_relates_to_edge(&e).unwrap();
+
+    let liminis_dir = dir.path().join(".liminis");
+    std::fs::create_dir_all(&liminis_dir).unwrap();
+    std::fs::write(
+        liminis_dir.join("knowledge-corrections.yaml"),
+        format!(
+            "corrections:\n  - id: \"c1\"\n    type: \"same_as\"\n    canonical_uuid: \"{canonical}\"\n    aliases: [\"Bob\"]\n"
+        ),
+    )
+    .unwrap();
+    let result = apply_corrections_file(&conn, dir.path(), false);
+    assert!(result.success, "{:?}", result.errors);
+
+    let edges = conn.get_full_edges_for_entity(canonical).unwrap();
+    assert!(
+        edges
+            .iter()
+            .filter(|e| e.invalid_at.is_none())
+            .all(|e| e.source_node_uuid != e.target_node_uuid),
+        "no active self-loop on the canonical: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.uuid == edge_uuid && e.invalid_at.is_some()),
+        "the original alias → canonical edge is invalidated: {edges:?}"
+    );
+}

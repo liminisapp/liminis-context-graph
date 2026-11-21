@@ -577,6 +577,13 @@ fn apply_same_as(
                 // entity (a budget, a headcount) legitimately share `(A, A, name)`, so they all
                 // move to the canonical rather than collapsing into one (ADR-0823).
                 let was_self_loop = old_edge.source_node_uuid == old_edge.target_node_uuid;
+                // An edge that only *becomes* a self-loop through the merge (alias ↔ canonical)
+                // is invalidated, as `merge_entities_inner` does (FR-010): it carries no
+                // `literal_object` mark and is not a fact about one entity (ADR-0823).
+                if new_src == new_dst && !was_self_loop {
+                    conn.invalidate_edge(&old_edge.uuid, ts)?;
+                    continue;
+                }
                 if !was_self_loop
                     && conn.has_directed_edge(
                         &new_src,
