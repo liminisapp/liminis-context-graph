@@ -113,7 +113,7 @@ libssl-dev = "*"
 
 [workspace.dependencies]
 arc-swap = "1"
-lbug = "=0.21.2"
+lbug = "=0.22.3"
 thiserror = "2"
 tempfile = "3"
 regex = "1"
