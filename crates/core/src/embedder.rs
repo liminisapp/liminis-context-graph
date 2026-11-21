@@ -138,6 +138,16 @@ async fn dial_uds(path: &str) -> Result<UdsSender, Error> {
     Ok(sender)
 }
 
+/// Prefix of the `Error::Ipc` message a UDS embedder non-2xx response is flattened into. Shared
+/// between the producer (`send_and_read_uds`) and [`classify_embed_error`] so the two cannot drift
+/// apart (issue #808) — the status code follows the prefix, e.g. `"... status 503 Service
+/// Unavailable"`.
+const UDS_STATUS_ERROR_PREFIX: &str = "UDS embedder returned status ";
+/// Prefix of the error produced when reading the response body fails after the headers arrived
+/// (a reset or truncated body — a sidecar crash/restart mid-response). Shared with
+/// `classify_embed_error`, which treats it as transient (issue #808).
+const UDS_BODY_ERROR_PREFIX: &str = "UDS read response body: ";
+
 /// Distinguishes a `send_request` failure (the held connection is dead — the
 /// sidecar restarted, idle-closed the socket, etc. — worth one re-dial) from
 /// an error that occurred after a request was successfully sent over a
@@ -180,7 +190,7 @@ async fn send_and_read_uds(
         // pooled connection.
         let _ = resp.into_body().collect().await;
         return Err(UdsAttemptError::Other(Error::Ipc(format!(
-            "UDS embedder returned status {status}"
+            "{UDS_STATUS_ERROR_PREFIX}{status}"
         ))));
     }
 
@@ -188,7 +198,7 @@ async fn send_and_read_uds(
         .into_body()
         .collect()
         .await
-        .map_err(|e| UdsAttemptError::Other(Error::Ipc(format!("UDS read response body: {e}"))))?
+        .map_err(|e| UdsAttemptError::Other(Error::Ipc(format!("{UDS_BODY_ERROR_PREFIX}{e}"))))?
         .to_bytes();
 
     serde_json::from_slice(&bytes)
@@ -1079,6 +1089,83 @@ pub fn is_transport_error(e: &Error) -> bool {
     }
 }
 
+/// Whether an embedder error is worth retrying (issue #808).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedErrorClass {
+    /// Timeout, connection failure/reset/broken pipe, HTTP 5xx or HTTP 429 — the same request
+    /// may succeed if tried again.
+    Transient,
+    /// Anything else (HTTP 4xx other than 429, response-shape mismatch, JSON/parse failure,
+    /// non-finite or wrong-dimension values, ...) — retrying the identical request cannot help.
+    Permanent,
+}
+
+fn is_transient_status(code: u16) -> bool {
+    code >= 500 || code == 429
+}
+
+/// Whether a reqwest error is the response *body* failing to arrive — a connection reset or a
+/// body truncated after the headers (a sidecar or proxy restarting mid-response) — as opposed to a
+/// body that arrived whole but is not valid JSON. reqwest reports the former as `is_body()` or, via
+/// `.json()`/`.bytes()`, as a `Decode` error whose source chain holds the underlying hyper or I/O
+/// error; a genuine parse failure's chain holds a `serde_json::Error` instead and stays permanent.
+fn is_body_transport_failure(re: &reqwest::Error) -> bool {
+    if re.is_body() {
+        return true;
+    }
+    if !re.is_decode() {
+        return false;
+    }
+    let mut src = std::error::Error::source(re);
+    while let Some(e) = src {
+        if e.is::<hyper::Error>() || e.is::<std::io::Error>() {
+            return true;
+        }
+        src = e.source();
+    }
+    false
+}
+
+/// Classifies an embedder error as [`EmbedErrorClass::Transient`] or `Permanent` for the replay
+/// recompute retry policy (issue #808, ADR-0808).
+///
+/// - HTTP path (structured `Error::Http`): transient when the reqwest error is a timeout,
+///   connect or request-send failure ([`is_transport_error`]'s set), its status is 5xx/429, or the
+///   response body failed to arrive (reset/truncated, [`is_body_transport_failure`]); a complete
+///   but unparseable body is permanent.
+/// - UDS path (flattened `Error::Ipc(String)`): transient for the stable
+///   `UDS connect` / `UDS HTTP/1.1 handshake` / `UDS send request` prefixes
+///   ([`is_transport_error`]), for `UDS read response body` (a connection reset or truncated body
+///   after the headers arrived, [`UDS_BODY_ERROR_PREFIX`]) and for
+///   `UDS embedder returned status N` with N ≥ 500 or N == 429.
+///   The status message is built from [`UDS_STATUS_ERROR_PREFIX`], shared with the producer, and
+///   pinned by tests.
+/// - Everything else is permanent.
+pub fn classify_embed_error(e: &Error) -> EmbedErrorClass {
+    let transient = match e {
+        Error::Http(re) => {
+            is_transport_error(e)
+                || re.status().is_some_and(|s| is_transient_status(s.as_u16()))
+                || is_body_transport_failure(re)
+        }
+        Error::Ipc(msg) => {
+            is_transport_error(e)
+                || msg.starts_with(UDS_BODY_ERROR_PREFIX)
+                || msg
+                    .strip_prefix(UDS_STATUS_ERROR_PREFIX)
+                    .and_then(|rest| rest.split_whitespace().next())
+                    .and_then(|code| code.parse::<u16>().ok())
+                    .is_some_and(is_transient_status)
+        }
+        _ => false,
+    };
+    if transient {
+        EmbedErrorClass::Transient
+    } else {
+        EmbedErrorClass::Permanent
+    }
+}
+
 /// Returns `true` if the error is an HTTP 401/403 authentication failure.
 ///
 /// Used in `main.rs` to distinguish "credential rejected" (always fatal at startup, FR-008,
@@ -1603,6 +1690,204 @@ mod tests {
         assert!(reqwest_err.is_connect());
         assert!(reqwest_err.is_request());
         assert!(is_transport_error(&Error::Http(reqwest_err)));
+    }
+
+    // ── classify_embed_error (issue #808) ────────────────────────────────────
+
+    #[test]
+    fn classify_uds_status_messages_pin_producer_format() {
+        // The producer builds `"{UDS_STATUS_ERROR_PREFIX}{status}"` with a real
+        // `hyper::StatusCode` (`"503 Service Unavailable"`); the classifier must understand
+        // exactly that shape.
+        for (code, class) in [
+            (
+                hyper::StatusCode::SERVICE_UNAVAILABLE,
+                EmbedErrorClass::Transient,
+            ),
+            (
+                hyper::StatusCode::INTERNAL_SERVER_ERROR,
+                EmbedErrorClass::Transient,
+            ),
+            (
+                hyper::StatusCode::TOO_MANY_REQUESTS,
+                EmbedErrorClass::Transient,
+            ),
+            (hyper::StatusCode::BAD_REQUEST, EmbedErrorClass::Permanent),
+            (hyper::StatusCode::NOT_FOUND, EmbedErrorClass::Permanent),
+            (hyper::StatusCode::UNAUTHORIZED, EmbedErrorClass::Permanent),
+        ] {
+            let e = Error::Ipc(format!("{UDS_STATUS_ERROR_PREFIX}{code}"));
+            assert_eq!(classify_embed_error(&e), class, "{e}");
+        }
+    }
+
+    #[test]
+    fn classify_uds_transport_and_timeout_are_transient() {
+        for msg in [
+            "UDS connect to /tmp/x.sock: connection refused",
+            "UDS connect: pool slot acquisition timed out after 300ms",
+            "UDS HTTP/1.1 handshake: unexpected eof",
+            "UDS send request: connection closed",
+            "UDS send request: timed out after 30000ms",
+            // Connection reset / truncated body after the headers arrived (sidecar restart).
+            "UDS read response body: connection reset by peer",
+        ] {
+            assert_eq!(
+                classify_embed_error(&Error::Ipc(msg.to_string())),
+                EmbedErrorClass::Transient,
+                "{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_shape_mismatch_and_parse_errors_are_permanent() {
+        for msg in [
+            "embedding response shape mismatch: expected 2 vectors, got 1",
+            "parse UDS embed response: expected value at line 1 column 1",
+            "recomputed embedding has 3 components but the configured embedding dimension is 4",
+        ] {
+            assert_eq!(
+                classify_embed_error(&Error::Ipc(msg.to_string())),
+                EmbedErrorClass::Permanent,
+                "{msg}"
+            );
+        }
+        assert_eq!(
+            classify_embed_error(&Error::Config("x".into())),
+            EmbedErrorClass::Permanent
+        );
+    }
+
+    /// Serves one canned raw HTTP response per accepted connection, then returns the base URL.
+    async fn canned_http_server(status_line: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 {status_line}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn classify_http_status_errors() {
+        for (line, class) in [
+            ("503 Service Unavailable", EmbedErrorClass::Transient),
+            ("500 Internal Server Error", EmbedErrorClass::Transient),
+            ("429 Too Many Requests", EmbedErrorClass::Transient),
+            ("400 Bad Request", EmbedErrorClass::Permanent),
+            ("404 Not Found", EmbedErrorClass::Permanent),
+        ] {
+            let url = canned_http_server(line).await;
+            let err = reqwest::Client::new()
+                .post(&url)
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap_err();
+            assert_eq!(classify_embed_error(&Error::Http(err)), class, "{line}");
+        }
+    }
+
+    /// Serves a `200` whose body is `body` but whose `content-length` claims `claimed` bytes
+    /// (`claimed > body.len()` → the connection closes mid-body).
+    async fn canned_body_server(claimed: usize, body: &'static str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {claimed}\r\nconnection: close\r\n\r\n"
+            );
+            let _ = sock.write_all(head.as_bytes()).await;
+            let _ = sock.write_all(body.as_bytes()).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn classify_http_truncated_body_is_transient_but_bad_json_is_permanent() {
+        // Connection closes mid-body (sidecar/proxy restart): reqwest surfaces it as a `Decode`
+        // error whose source chain holds the hyper incomplete-body error — transient.
+        let url = canned_body_server(100, "{\"da").await;
+        let err = reqwest::Client::new()
+            .post(&url)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            classify_embed_error(&Error::Http(err)),
+            EmbedErrorClass::Transient
+        );
+
+        // A complete body that is not valid JSON is a real parse failure — retrying cannot help.
+        let url = canned_body_server(4, "nope").await;
+        let err = reqwest::Client::new()
+            .post(&url)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            classify_embed_error(&Error::Http(err)),
+            EmbedErrorClass::Permanent
+        );
+    }
+
+    #[tokio::test]
+    async fn classify_http_connect_and_timeout_are_transient() {
+        let err = reqwest::Client::new()
+            .post("http://127.0.0.1:1")
+            .send()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            classify_embed_error(&Error::Http(err)),
+            EmbedErrorClass::Transient
+        );
+
+        // A listener that accepts but never answers → client-side timeout.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _held = listener.accept().await;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let err = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(100))
+            .build()
+            .unwrap()
+            .post(format!("http://{addr}"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(err.is_timeout());
+        assert_eq!(
+            classify_embed_error(&Error::Http(err)),
+            EmbedErrorClass::Transient
+        );
     }
 
     #[test]

@@ -359,6 +359,7 @@ pub fn run_full_recovery_sequence(
                 &conn,
                 ReplayOptions {
                     from_seq: 0,
+                    group_id: Some(gid.clone()),
                     ..ReplayOptions::new(recompute_embed_fn, embedding_dim)
                 },
             )?;
@@ -382,6 +383,7 @@ pub fn run_full_recovery_sequence(
             &conn,
             ReplayOptions {
                 from_seq,
+                group_id: Some(group_id.to_string()),
                 ..ReplayOptions::new(recompute_embed_fn, embedding_dim)
             },
         )?;

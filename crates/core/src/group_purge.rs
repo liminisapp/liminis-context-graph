@@ -107,6 +107,7 @@ pub fn purge_groups(
     // database opened without the schema step has no such table, and then there is nothing to purge.
     let has_doc_supersessions = conn.has_doc_supersession_table();
     let has_doc_revisions = conn.has_doc_revision_table();
+    let has_zero_vector_rows = conn.has_zero_vector_table();
     conn.exec_transaction_control("BEGIN TRANSACTION")?;
     let mut grouped: GroupedMutations = GroupedMutations::new();
     let mutate_result = (|| -> Result<(), Error> {
@@ -133,6 +134,12 @@ pub fn purge_groups(
                 conn.delete_doc_revisions_by_group_ids(&single)?;
             }
             conn.delete_episodics_by_group_ids(&single)?;
+            // The zero-vector record describes rows that no longer exist (issue #808): a purge,
+            // and the full rebuild built on it, resets it so a rebuild records only its own
+            // failures. Unrecorded derived state — never reaches the WAL.
+            if has_zero_vector_rows {
+                conn.clear_zero_vector_rows(gid)?;
+            }
             conn.drain_mutations_into(&mut grouped, gid);
         }
         // Forced rebind per purged group, as a separate pass (not interleaved with the delete

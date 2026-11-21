@@ -10,7 +10,12 @@ use crate::error::Error;
 use crate::legacy_wal::{
     expand_bulk_property_set, promote_inline_vector_literals_to_params, strip_vecf32,
 };
+use crate::replay_embed_retry::{
+    embed_with_retry, real_jitter, real_sleep, EmbedRetryPolicy, RetryBreaker, RetryEnv,
+    RetryOutcome,
+};
 use crate::wal::{first_seq_in_file, strip_quoted_literals, WalLine};
+use crate::zero_vector_record::{apply_zero_effects, ZeroEffect, ZeroKind};
 
 /// lbug error-message substrings (lowercase) that classify a replay failure as a known legacy
 /// graphiti/FalkorDB-era construct — counted in `ReplayStats::legacy_skipped_lines` rather than
@@ -317,12 +322,12 @@ pub struct ReplayOptions {
     /// boundaries. Also the knob FR-008 relies on to bound cancellation latency: a pending window
     /// is dropped, unresolved, on cancellation (see `replay_opts`), so a larger window means more
     /// buffered-but-unreplayed rows on a cancelled run, not a longer wait. It also bounds
-    /// per-failure blast radius (accepted tradeoff, see ADR-0486's Consequences): since
-    /// `Embedder::embed_batch` is all-or-nothing, one transient failure (dropped connection, rate
-    /// limit, timeout) zero-fills/skips every row in the window that failure landed in, not just
-    /// one — set this lower (down to `1`, reproducing pre-#486 per-row isolation exactly) to trade
-    /// some round-trip reduction back for tighter failure isolation against a less reliable
-    /// embedder.
+    /// the blast radius of a *persistent* failure: `Embedder::embed_batch` is all-or-nothing, but
+    /// since #808 a transient failure is retried with backoff and, once retries are exhausted,
+    /// the window is split and the halves retried down to a single request (see
+    /// `replay_embed_retry`), so one bad text fails only its own row rather than the whole
+    /// window. Set this lower (down to `1`, reproducing pre-#486 per-row isolation exactly) to
+    /// trade some round-trip reduction back for a smaller worst-case retry tree.
     pub embed_window_size: Option<usize>,
     /// Throttle interval in seconds for `[WAL PROGRESS]` log lines. When `None`, reads
     /// `LCG_REPLAY_LOG_INTERVAL_SECS` env var, defaulting to 30s. Production passes `None`;
@@ -351,6 +356,17 @@ pub struct ReplayOptions {
     /// fixed-width (`FLOAT[dim]`), so binding a wrong-length vector fails at `execute_prepared`
     /// and rolls back the *entire* same-template batch (see `flush_batch`), not just one row.
     pub recompute_embed_dim: usize,
+    /// The workspace group this replay writes into (issue #808). When `Some`, a row stored with a
+    /// fallback zero vector because the embedder failed is recorded as `(kind, row uuid)` in that
+    /// group's durable zero-vector record (see `zero_vector_record`), in the same transaction as
+    /// the row itself, and a later successful embed of — or deletion of — a recorded row clears
+    /// its entry. `None` (the default; unit tests, group-less callers) records nothing.
+    pub group_id: Option<String>,
+    /// Retry/backoff policy for embedding recompute (issue #808, ADR-0808). `None` reads and
+    /// validates `LCG_REPLAY_EMBED_RETRIES` / `LCG_REPLAY_EMBED_BACKOFF_MS` /
+    /// `LCG_REPLAY_EMBED_BACKOFF_MAX_MS` via [`EmbedRetryPolicy::from_env`] when the replay
+    /// starts. Tests pass `Some(..)` to pin a policy.
+    pub embed_retry: Option<EmbedRetryPolicy>,
 }
 
 impl ReplayOptions {
@@ -372,6 +388,8 @@ impl ReplayOptions {
             progress_log_fn: None,
             recompute_embed_fn,
             recompute_embed_dim,
+            group_id: None,
+            embed_retry: None,
         }
     }
 }
@@ -458,6 +476,12 @@ impl WalReplayer {
         // #486, mirroring the batch-size validation above) — an independent knob from
         // `batch_size` (FR-009).
         let embed_window_size = resolve_embed_window_size(&opts)?;
+        // Validate the embedding retry policy too (issue #808) — an invalid env value fails the
+        // replay up front, before any WAL file is touched, naming the variable.
+        let embed_retry = match opts.embed_retry {
+            Some(p) => p,
+            None => EmbedRetryPolicy::from_env()?,
+        };
 
         let sample_cap = opts.failure_sample_cap.unwrap_or_else(|| {
             std::env::var("LCG_REPLAY_FAILURE_SAMPLES")
@@ -550,7 +574,36 @@ impl WalReplayer {
         let files: Vec<PathBuf> = keyed_files.into_iter().map(|(_, p)| p).collect();
         let files_total = files.len() as u64;
 
-        let mut batch = ReplayBatch::new();
+        // Zero-vector recording / retry state shared by every embed window of this run (#808).
+        // The record is derived, best-effort state: if its table is absent (a database that never
+        // ran the schema step), recording is switched off for this run rather than letting a
+        // failed record write roll back real graph rows (`purge_groups` probes the same way).
+        let mut record_zero_rows = opts.group_id.is_some() && !opts.dry_run;
+        if record_zero_rows && !conn.has_zero_vector_table() {
+            eprintln!(
+                "[WAL WARN] EmbeddingZeroRow table is missing; zero-vector fallbacks will not be \
+                 recorded for this replay"
+            );
+            record_zero_rows = false;
+        }
+        let mut batch = ReplayBatch::new(if record_zero_rows {
+            opts.group_id.clone()
+        } else {
+            None
+        });
+        // Per-success `Clear` effects are only worth their DELETEs when there is something to
+        // clear: a record that was already non-empty at the start of this run (an incremental
+        // replay/recovery onto a degraded group), or an `Add` made earlier in this run. A lookup
+        // failure errs on the side of tracking.
+        let initial_track = match (&opts.group_id, record_zero_rows) {
+            (Some(gid), true) => conn
+                .zero_vector_counts(gid)
+                .map(|c| c.total() > 0)
+                .unwrap_or(true),
+            _ => false,
+        };
+        let mut resolve_state =
+            EmbedResolveState::new(embed_retry, record_zero_rows, initial_track);
         // Single-entry prepared-statement cache carried across `flush_batch` calls for this
         // whole run — see `PreparedCache`'s doc comment for the LRU-1 scope decision (#238).
         let mut prepared_cache: Option<PreparedCache> = None;
@@ -771,12 +824,19 @@ impl WalReplayer {
                     });
 
                     if pending_window.len() >= embed_window_size {
-                        let resolved = resolve_embed_window(
+                        let Some(resolved) = resolve_embed_window_with(
                             std::mem::take(&mut pending_window),
                             opts.recompute_embed_fn.as_ref(),
                             opts.recompute_embed_dim,
                             &mut stats,
-                        );
+                            &mut resolve_state,
+                            opts.cancel_fn.as_ref(),
+                        ) else {
+                            // Cancelled mid-retry: the window is dropped unresolved, nothing
+                            // counted or recorded (#808).
+                            replay_aborted = true;
+                            break 'files;
+                        };
                         let cancelled = push_resolved_rows(
                             resolved,
                             &mut batch,
@@ -877,22 +937,25 @@ impl WalReplayer {
         // per-row `cancel_fn` check already gives by explicitly clearing it — an aborted replay
         // must never issue embedder calls or DB writes after the caller asked to stop.
         if !opts.dry_run && !replay_aborted && !pending_window.is_empty() {
-            let resolved = resolve_embed_window(
+            if let Some(resolved) = resolve_embed_window_with(
                 std::mem::take(&mut pending_window),
                 opts.recompute_embed_fn.as_ref(),
                 opts.recompute_embed_dim,
                 &mut stats,
-            );
-            push_resolved_rows(
-                resolved,
-                &mut batch,
-                conn,
-                &mut stats,
-                sample_cap,
-                &mut prepared_cache,
-                batch_size,
+                &mut resolve_state,
                 opts.cancel_fn.as_ref(),
-            )?;
+            ) {
+                push_resolved_rows(
+                    resolved,
+                    &mut batch,
+                    conn,
+                    &mut stats,
+                    sample_cap,
+                    &mut prepared_cache,
+                    batch_size,
+                    opts.cancel_fn.as_ref(),
+                )?;
+            }
         }
 
         // Flush any remaining batch after cancel/abort or EOF (FR-007, FR-011).
@@ -1008,6 +1071,9 @@ struct ResolvedRow {
     params_map: serde_json::Map<String, serde_json::Value>,
     match_prefixed: bool,
     seq: u64,
+    /// Zero-vector record changes this row implies, applied in `flush_batch`'s transaction only
+    /// if the row is actually stored (issue #808).
+    zero_effects: Vec<ZeroEffect>,
 }
 
 /// Per-row outcome tracked internally while [`resolve_embed_window`] resolves a whole window.
@@ -1047,19 +1113,46 @@ enum RowEmbeddingOutcome {
 ///   proceeds (bound to freshly recomputed and/or zero-filled values) or is dropped —
 ///   [`is_vector_only_set`] governs the same zero-fill-vs-skip choice as before. Skipped rows
 ///   bump `embeddings_skip_rows` and are absent from the returned `Vec`.
-fn resolve_embed_window(
+///
+/// **Retry, splitting and recording (issue #808, ADR-0808).** Phase 2b no longer calls `embed_fn`
+/// directly: it goes through [`embed_with_retry`], which retries transient errors with backoff,
+/// splits a multi-request window whose retries are exhausted, and bounds the total work per
+/// window (see `replay_embed_retry`). A request counts as failed — bumping
+/// `embeddings_recompute_failed` and, when it is zero-filled, adding a [`ZeroEffect::Add`] — only
+/// after that policy gives up on it. Returns `None` when `cancel_fn` fired mid-retry: the window
+/// is dropped with no counter touched (embed_calls and the no-text counter are applied only once
+/// the window is known to complete).
+fn resolve_embed_window_with(
     window: Vec<PendingRow>,
     embed_fn: &EmbedBatchDyn,
     embed_dim: usize,
     stats: &mut ReplayStats,
-) -> Vec<ResolvedRow> {
+    rs: &mut EmbedResolveState,
+    cancel_fn: Option<&CancelFn>,
+) -> Option<Vec<ResolvedRow>> {
     let mut rows = window;
     let mut row_outcome = vec![RowEmbeddingOutcome::Proceed; rows.len()];
+    let mut row_effects: Vec<Vec<ZeroEffect>> = (0..rows.len()).map(|_| Vec::new()).collect();
+    let row_uuids: Vec<Option<String>> = if rs.record {
+        rows.iter()
+            .map(|r| {
+                r.params_map
+                    .get("uuid")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let uuid_of =
+        |row_idx: usize| -> Option<&str> { row_uuids.get(row_idx).and_then(|u| u.as_deref()) };
 
     // Phase 1 (read-only over `rows`): resolve no-text keys immediately; queue the rest.
     let mut immediate: Vec<(usize, &'static str)> = Vec::new();
     let mut request_texts: Vec<String> = Vec::new();
     let mut request_targets: Vec<(usize, &'static str)> = Vec::new();
+    let mut no_text_count: u64 = 0;
 
     for (row_idx, row) in rows.iter().enumerate() {
         for (vec_key, text_key) in EMBEDDING_TEXT_PAIRS {
@@ -1068,19 +1161,40 @@ fn resolve_embed_window(
             }
             match row.params_map.get(*text_key).and_then(|v| v.as_str()) {
                 Some(text) if !text.is_empty() => {
-                    stats.embed_calls += 1;
                     request_texts.push(text.to_string());
                     request_targets.push((row_idx, vec_key));
                 }
                 _ => {
-                    stats.embeddings_recompute_skipped_no_text += 1;
+                    no_text_count += 1;
                     immediate.push((row_idx, vec_key));
                 }
             }
         }
     }
 
-    // Phase 2a: resolve the immediate (no-text) requests — no batch call needed for these.
+    // Phase 2b (run before any counter is touched so a cancel leaves none behind): one batched
+    // embed call — with retry/split — for the window's queued requests.
+    let results: Vec<crate::replay_embed_retry::RequestResult> = if request_texts.is_empty() {
+        Vec::new()
+    } else {
+        let texts_ref: Vec<&str> = request_texts.iter().map(String::as_str).collect();
+        let cancel = || cancel_fn.is_some_and(|c| c());
+        let env = RetryEnv {
+            cancel: &cancel,
+            sleep: &real_sleep,
+            jitter: &real_jitter,
+        };
+        match embed_with_retry(&texts_ref, &rs.policy, &mut rs.breaker, &env, &embed_fn) {
+            RetryOutcome::Resolved(r) => r,
+            RetryOutcome::Cancelled => return None,
+        }
+    };
+
+    stats.embed_calls += request_texts.len() as u64;
+    stats.embeddings_recompute_skipped_no_text += no_text_count;
+
+    // Phase 2a: resolve the immediate (no-text) requests — no batch call needed for these, and
+    // never a recorded failure (#526 / FR-009 of #808).
     for (row_idx, vec_key) in immediate {
         apply_key_resolution(
             &mut rows[row_idx],
@@ -1091,81 +1205,98 @@ fn resolve_embed_window(
         );
     }
 
-    // Phase 2b: one batched embed call for the window's queued requests.
-    if !request_texts.is_empty() {
-        let texts_ref: Vec<&str> = request_texts.iter().map(String::as_str).collect();
-        match embed_fn(&texts_ref) {
-            Ok(vectors) if vectors.len() == texts_ref.len() => {
-                for ((row_idx, vec_key), vector) in request_targets.into_iter().zip(vectors) {
-                    match validate_recomputed_vector(vector, embed_dim) {
-                        Ok(json_vector) => {
-                            stats.embeddings_recomputed += 1;
-                            apply_key_resolution(
-                                &mut rows[row_idx],
-                                &mut row_outcome[row_idx],
-                                vec_key,
-                                Some(json_vector),
-                                embed_dim,
-                            );
-                        }
-                        Err(e) => {
-                            log_embed_failure(
-                                stats.embeddings_recompute_failed,
-                                vec_key,
-                                &e.to_string(),
-                            );
-                            stats.embeddings_recompute_failed += 1;
-                            apply_key_resolution(
-                                &mut rows[row_idx],
-                                &mut row_outcome[row_idx],
-                                vec_key,
-                                None,
-                                embed_dim,
-                            );
-                        }
+    // Phase 2c: apply each request's final result.
+    for ((row_idx, vec_key), result) in request_targets.into_iter().zip(results) {
+        let failure = match result
+            .and_then(|v| validate_recomputed_vector(v, embed_dim).map_err(|e| e.to_string()))
+        {
+            Ok(json_vector) => {
+                stats.embeddings_recomputed += 1;
+                apply_key_resolution(
+                    &mut rows[row_idx],
+                    &mut row_outcome[row_idx],
+                    vec_key,
+                    Some(json_vector),
+                    embed_dim,
+                );
+                // A previously recorded zero vector for this key is now a real embedding.
+                if rs.record && rs.track_clears {
+                    if let (Some(kind), Some(uuid)) =
+                        (ZeroKind::from_vec_key(vec_key), uuid_of(row_idx))
+                    {
+                        row_effects[row_idx].push(ZeroEffect::Clear {
+                            kind,
+                            uuid: uuid.to_string(),
+                        });
+                    }
+                }
+                continue;
+            }
+            Err(msg) => msg,
+        };
+        log_embed_failure(stats.embeddings_recompute_failed, vec_key, &failure);
+        stats.embeddings_recompute_failed += 1;
+        let resolution = apply_key_resolution(
+            &mut rows[row_idx],
+            &mut row_outcome[row_idx],
+            vec_key,
+            None,
+            embed_dim,
+        );
+        // Only an actual zero-fill is a degraded row; a vector-only `SET` is skipped and never
+        // written (#526), so there is nothing to repair.
+        if rs.record && resolution == KeyResolution::ZeroFilled {
+            match (ZeroKind::from_vec_key(vec_key), uuid_of(row_idx)) {
+                (Some(kind), Some(uuid)) => {
+                    row_effects[row_idx].push(ZeroEffect::Add {
+                        kind,
+                        uuid: uuid.to_string(),
+                    });
+                    rs.track_clears = true;
+                }
+                _ => {
+                    if rs.missing_uuid_logged < EMBED_FAILURE_LOG_CAP {
+                        eprintln!(
+                            "[WAL WARN] zero-vector fallback for {vec_key} on a row with no \
+                             `uuid` param cannot be recorded for repair"
+                        );
+                        rs.missing_uuid_logged += 1;
                     }
                 }
             }
-            Ok(vectors) => {
-                // A whole-call length mismatch is treated exactly like a whole-call `Err` below —
-                // no request in this window got a usable vector.
-                let err_str = format!(
-                    "embed batch returned {} vectors for {} requested texts",
-                    vectors.len(),
-                    texts_ref.len()
-                );
-                for (row_idx, vec_key) in request_targets {
-                    log_embed_failure(stats.embeddings_recompute_failed, vec_key, &err_str);
-                    stats.embeddings_recompute_failed += 1;
-                    apply_key_resolution(
-                        &mut rows[row_idx],
-                        &mut row_outcome[row_idx],
-                        vec_key,
-                        None,
-                        embed_dim,
-                    );
+        }
+    }
+
+    // A deleted row leaves no stale entry behind. Done after the Adds above so a row that failed
+    // earlier in this very window and is deleted later in it is still cleared (effects are
+    // folded in row order).
+    if rs.record && rs.track_clears {
+        for (row_idx, row) in rows.iter().enumerate() {
+            if !row.match_prefixed || !is_delete_form(&row.cypher) {
+                continue;
+            }
+            for uuid in deleted_uuids(&row.params_map) {
+                for kind in ZeroKind::ALL {
+                    row_effects[row_idx].push(ZeroEffect::Clear {
+                        kind,
+                        uuid: uuid.clone(),
+                    });
                 }
             }
-            Err(e) => {
-                let err_str = e.to_string();
-                for (row_idx, vec_key) in request_targets {
-                    log_embed_failure(stats.embeddings_recompute_failed, vec_key, &err_str);
-                    stats.embeddings_recompute_failed += 1;
-                    apply_key_resolution(
-                        &mut rows[row_idx],
-                        &mut row_outcome[row_idx],
-                        vec_key,
-                        None,
-                        embed_dim,
-                    );
-                }
+            let gids = deleted_group_ids(&row.params_map);
+            let kinds = deleted_table_kinds(&row.cypher);
+            if !gids.is_empty() && !kinds.is_empty() {
+                row_effects[row_idx].push(ZeroEffect::ClearGroups {
+                    group_ids: gids,
+                    kinds,
+                });
             }
         }
     }
 
     // Phase 3: assemble output, dropping skipped rows (FR-003/FR-005).
     let mut resolved = Vec::with_capacity(rows.len());
-    for (row, outcome) in rows.into_iter().zip(row_outcome) {
+    for ((row, outcome), zero_effects) in rows.into_iter().zip(row_outcome).zip(row_effects) {
         match outcome {
             RowEmbeddingOutcome::Skip => stats.embeddings_skip_rows += 1,
             RowEmbeddingOutcome::Proceed => resolved.push(ResolvedRow {
@@ -1173,10 +1304,65 @@ fn resolve_embed_window(
                 params_map: row.params_map,
                 match_prefixed: row.match_prefixed,
                 seq: row.seq,
+                zero_effects,
             }),
         }
     }
-    resolved
+    Some(resolved)
+}
+
+/// Per-run state `resolve_embed_window_with` carries across windows (issue #808).
+struct EmbedResolveState {
+    policy: EmbedRetryPolicy,
+    breaker: RetryBreaker,
+    /// Whether zero-vector effects are produced at all (`group_id` set, not a dry run).
+    record: bool,
+    /// Whether successful recomputes / deletes need a `Clear` effect: the record was non-empty at
+    /// the start of the run, or an `Add` has happened since.
+    track_clears: bool,
+    /// Caps the "cannot record, no uuid" warning.
+    missing_uuid_logged: u64,
+}
+
+impl EmbedResolveState {
+    fn new(policy: EmbedRetryPolicy, record: bool, track_clears: bool) -> Self {
+        Self {
+            policy,
+            breaker: RetryBreaker::default(),
+            record,
+            track_clears,
+            missing_uuid_logged: 0,
+        }
+    }
+}
+
+/// Retry-free, recording-free wrapper over [`resolve_embed_window_with`] for the unit tests that
+/// predate #808 and exercise the pure resolution logic.
+#[cfg(test)]
+fn resolve_embed_window(
+    window: Vec<PendingRow>,
+    embed_fn: &EmbedBatchDyn,
+    embed_dim: usize,
+    stats: &mut ReplayStats,
+) -> Vec<ResolvedRow> {
+    let policy = EmbedRetryPolicy {
+        retries: 0,
+        ..EmbedRetryPolicy::default()
+    };
+    let mut rs = EmbedResolveState::new(policy, false, false);
+    resolve_embed_window_with(window, embed_fn, embed_dim, stats, &mut rs, None)
+        .expect("no cancel_fn, so never cancelled")
+}
+
+/// What [`apply_key_resolution`] did with a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyResolution {
+    /// Bound to a recomputed vector.
+    Bound,
+    /// The whole row is skipped (vector-only `SET` with no value).
+    Skipped,
+    /// Bound to a same-dimension zero vector.
+    ZeroFilled,
 }
 
 /// Applies one key's recompute resolution to `row`/`outcome` — the same per-key decision
@@ -1188,17 +1374,20 @@ fn apply_key_resolution(
     vec_key: &str,
     recomputed: Option<serde_json::Value>,
     embed_dim: usize,
-) {
+) -> KeyResolution {
     match recomputed {
         Some(json_vector) => {
             row.params_map.insert(vec_key.to_string(), json_vector);
+            KeyResolution::Bound
         }
         None if is_vector_only_set(&row.cypher, vec_key) => {
             *outcome = RowEmbeddingOutcome::Skip;
+            KeyResolution::Skipped
         }
         None => {
             row.params_map
                 .insert(vec_key.to_string(), zero_vector_json(embed_dim));
+            KeyResolution::ZeroFilled
         }
     }
 }
@@ -1272,6 +1461,7 @@ fn push_resolved_rows(
         batch.rows.push(row.params_map);
         batch.match_prefixed.push(row.match_prefixed);
         batch.seqs.push(row.seq);
+        batch.zero_effects.push(row.zero_effects);
 
         // Flush when the batch reaches the size limit (FR-002, FR-003). Same template as the
         // just-flushed batch reuses the cached prepared statement (issue #238) instead of
@@ -1444,15 +1634,22 @@ struct ReplayBatch {
     /// `ReplayStats::last_committed_seq` (FR-006, issue #240) when this batch's transaction
     /// commits.
     seqs: Vec<u64>,
+    /// Each row's zero-vector record changes, positionally aligned with `rows` (issue #808);
+    /// applied inside the batch's transaction so they commit or roll back with the rows.
+    zero_effects: Vec<Vec<ZeroEffect>>,
+    /// The group whose record `zero_effects` apply to; `None` records nothing. Survives `clear`.
+    group_id: Option<String>,
 }
 
 impl ReplayBatch {
-    fn new() -> Self {
+    fn new(group_id: Option<String>) -> Self {
         Self {
             template: String::new(),
             rows: Vec::new(),
             match_prefixed: Vec::new(),
             seqs: Vec::new(),
+            zero_effects: Vec::new(),
+            group_id,
         }
     }
 
@@ -1469,6 +1666,7 @@ impl ReplayBatch {
         self.rows.clear();
         self.match_prefixed.clear();
         self.seqs.clear();
+        self.zero_effects.clear();
     }
 }
 
@@ -1505,6 +1703,68 @@ struct PreparedCache {
 fn with_match_count_probe(template: &str) -> String {
     let trimmed = template.trim().trim_end_matches(';').trim_end();
     format!("{trimmed} RETURN count(*)")
+}
+
+/// Row uuids a DELETE-form mutation targets: a singular `uuid` param (`{uuid: $uuid}` forms) and/or
+/// a `uuids` list param (`WHERE n.uuid IN $uuids` bulk forms, e.g. `delete_by_source`).
+fn deleted_uuids(params: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(u) = params.get("uuid").and_then(|v| v.as_str()) {
+        out.push(u.to_string());
+    }
+    if let Some(list) = params.get("uuids").and_then(|v| v.as_array()) {
+        out.extend(list.iter().filter_map(|v| v.as_str()).map(str::to_string));
+    }
+    out
+}
+
+/// The zero-vector kinds that live on the node table(s) a DELETE-form template matches, by label:
+/// `Entity`/`Community` → `name`, `summary`; `Episodic` → `content`; `RelatesToNode_` → `fact`.
+/// An unrecognised label yields none, so a purge of a table this does not know leaves entries
+/// alone (a stale entry is repairable; wiping entries for rows that still exist is not).
+fn deleted_table_kinds(template: &str) -> Vec<ZeroKind> {
+    let mut kinds: Vec<ZeroKind> = Vec::new();
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b':' {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                end += 1;
+            }
+            let label_kinds: &[ZeroKind] = match &template[start..end] {
+                "Entity" | "Community" => &[ZeroKind::Name, ZeroKind::Summary],
+                "Episodic" => &[ZeroKind::Content],
+                "RelatesToNode_" => &[ZeroKind::Fact],
+                _ => &[],
+            };
+            for k in label_kinds {
+                if !kinds.contains(k) {
+                    kinds.push(*k);
+                }
+            }
+            i = end.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    kinds
+}
+
+/// Group ids a DELETE-form mutation purges wholesale: a `gids` list param
+/// (`WHERE n.group_id IN $gids DETACH DELETE n`, the `delete_*_by_group_ids` / group-purge forms).
+fn deleted_group_ids(params: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
+    params
+        .get("gids")
+        .and_then(|v| v.as_array())
+        .map(|l| {
+            l.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Returns true if a `MATCH`-prefixed `template` is DELETE-form (`MATCH ... DETACH DELETE` /
@@ -1634,6 +1894,8 @@ fn flush_batch(
     let rows = std::mem::take(&mut batch.rows);
     let match_prefixed = std::mem::take(&mut batch.match_prefixed);
     let seqs = std::mem::take(&mut batch.seqs);
+    let row_effects = std::mem::take(&mut batch.zero_effects);
+    let group_id = batch.group_id.clone();
     let batch_len = rows.len();
     let max_seq_in_batch = seqs.iter().max().copied();
 
@@ -1690,8 +1952,12 @@ fn flush_batch(
     let mut local_match_prefixed_replayed: u64 = 0;
     let mut local_match_prefixed_no_op: u64 = 0;
     let mut local_match_delete_no_op: u64 = 0;
+    // Zero-vector record changes of rows that were actually applied (#808).
+    let mut applied_effects: Vec<ZeroEffect> = Vec::new();
+    let mut row_effects = row_effects.into_iter();
 
     for (row, is_match_prefixed) in rows.into_iter().zip(match_prefixed) {
+        let this_row_effects = row_effects.next().unwrap_or_default();
         if let Some(cancel) = cancel_fn {
             if cancel() {
                 // Cancellation is a normal outcome, not an exception — unlike the genuine
@@ -1724,7 +1990,10 @@ fn flush_batch(
             Ok(Some(count)) if count > 0 => {
                 local_lines_replayed += 1;
                 local_match_prefixed_replayed += 1;
+                applied_effects.extend(this_row_effects);
             }
+            // A `MATCH`-prefixed row that matched nothing wrote nothing — no zero vector was
+            // stored, so no record change applies.
             Ok(Some(_)) => {
                 if is_delete_form_batch {
                     local_match_delete_no_op += 1;
@@ -1737,6 +2006,7 @@ fn flush_batch(
                 if is_match_prefixed {
                     local_match_prefixed_replayed += 1;
                 }
+                applied_effects.extend(this_row_effects);
             }
             Err(e) => {
                 // The engine has already rolled back the whole transaction — no explicit
@@ -1748,6 +2018,28 @@ fn flush_batch(
                 batch.clear();
                 return Ok(FlushOutcome { cancelled: false });
             }
+        }
+    }
+
+    // Fold the applied rows' zero-vector record changes into this same transaction (#808), so an
+    // entry commits or rolls back together with the zero-vector row it describes.
+    if let Some(gid) = group_id.as_deref() {
+        if let Err(e) = apply_zero_effects(conn, gid, &applied_effects) {
+            // Normally the engine has already rolled the transaction back (as for a row execute
+            // failure); a prepare-time failure leaves it open, so roll back explicitly and
+            // absorb a "nothing to roll back" error.
+            let _ = conn.exec_transaction_control("ROLLBACK");
+            classify_replay_failure(
+                &e.to_string(),
+                "<EmbeddingZeroRow record update>",
+                stats,
+                sample_cap,
+            );
+            stats.rolled_back_lines += batch_len as u64;
+            stats.transactions_rolled_back += 1;
+            *cache = None;
+            batch.clear();
+            return Ok(FlushOutcome { cancelled: false });
         }
     }
 
@@ -1848,6 +2140,25 @@ fn classify_replay_failure(
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+
+    #[test]
+    fn deleted_table_kinds_follow_the_matched_label() {
+        use ZeroKind::*;
+        let k = |t: &str| deleted_table_kinds(t);
+        assert_eq!(
+            k("MATCH (e:Entity) WHERE e.group_id IN $gids DETACH DELETE e"),
+            vec![Name, Summary]
+        );
+        assert_eq!(
+            k("MATCH (ep:Episodic) WHERE ep.group_id IN $gids DETACH DELETE ep"),
+            vec![Content]
+        );
+        assert_eq!(
+            k("MATCH (rn:RelatesToNode_) WHERE rn.group_id IN $gids DETACH DELETE rn"),
+            vec![Fact]
+        );
+        assert!(k("MATCH (d:DocRevision) WHERE d.group_id IN $gids DELETE d").is_empty());
+    }
 
     #[test]
     fn test_resolve_batch_size_defaults_to_64() {
