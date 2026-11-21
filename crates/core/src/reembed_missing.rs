@@ -53,7 +53,7 @@ use crate::db::{value_as_string, Conn};
 use crate::embedding_cache::EmbedderContext;
 use crate::error::Error;
 use crate::index_lifecycle::{with_dropped_indexes, DbIndexDdl, IndexDdl, IndexKind};
-use crate::replay::{reject_zero_vector, validate_recomputed_vector};
+use crate::replay::{reject_zero_vector, validate_recomputed_vector, vector_to_json};
 use crate::replay_embed_retry::{
     embed_with_retry, real_jitter, real_sleep, EmbedRetryPolicy, RetryBreaker, RetryEnv,
     RetryOutcome,
@@ -487,8 +487,11 @@ async fn remove_stale(
 
 enum EmbedPhase {
     Done {
-        /// `(uuid, text, vector)` rows that embedded and validated, per kind.
-        writable: BTreeMap<ZeroKind, Vec<(String, String, Value)>>,
+        /// `(uuid, text, vector)` rows that embedded and validated, per kind. Vectors stay as
+        /// `Vec<f32>` (4 bytes a component) until their write batch, where they are converted to
+        /// JSON: every vector is held until all embedding finishes (FR-014), and a JSON array
+        /// costs ~32 bytes a component, which at ~100k rows would be gigabytes.
+        writable: BTreeMap<ZeroKind, Vec<(String, String, Vec<f32>)>>,
         /// Per-kind count of rows whose embedding failed or was invalid.
         failed: BTreeMap<ZeroKind, usize>,
     },
@@ -521,7 +524,7 @@ fn embed_all(
     let mut breaker = RetryBreaker::default();
     let total: usize = candidates.values().map(Vec::len).sum();
     let mut processed = 0usize;
-    let mut writable: BTreeMap<ZeroKind, Vec<(String, String, Value)>> = BTreeMap::new();
+    let mut writable: BTreeMap<ZeroKind, Vec<(String, String, Vec<f32>)>> = BTreeMap::new();
     let mut failed: BTreeMap<ZeroKind, usize> = BTreeMap::new();
 
     for (kind, rows) in candidates {
@@ -537,17 +540,21 @@ fn embed_all(
                 RetryOutcome::Cancelled => return Ok(EmbedPhase::Cancelled),
             };
             for ((uuid, text), result) in window.iter().zip(results) {
+                // Validate (dimension, finiteness, not all-zero) but keep the compact `Vec<f32>`;
+                // the JSON form `validate_recomputed_vector` returns is built per write batch.
                 let valid = result.and_then(|v| {
                     reject_zero_vector(&v)
-                        .and_then(|()| validate_recomputed_vector(v, dim))
+                        .and_then(|()| validate_recomputed_vector(v.clone(), dim))
+                        .map(|_| v)
                         .map_err(|e| e.to_string())
                 });
                 match valid {
-                    Ok(json_vec) => writable.entry(*kind).or_default().push((
-                        uuid.clone(),
-                        text.clone(),
-                        json_vec,
-                    )),
+                    Ok(vec) => {
+                        writable
+                            .entry(*kind)
+                            .or_default()
+                            .push((uuid.clone(), text.clone(), vec))
+                    }
                     Err(msg) => {
                         eprintln!(
                             "liminis-context-graph: reembed_missing: {} {uuid}: {msg}",
@@ -571,7 +578,7 @@ fn embed_all(
 async fn write_all(
     db: Arc<crate::db::Db>,
     group_id: String,
-    writable: BTreeMap<ZeroKind, Vec<(String, String, Value)>>,
+    writable: BTreeMap<ZeroKind, Vec<(String, String, Vec<f32>)>>,
     written: Arc<Mutex<BTreeMap<ZeroKind, usize>>>,
     progress_tx: Option<UnboundedSender<Value>>,
     total: usize,
@@ -579,7 +586,7 @@ async fn write_all(
     let mut processed = 0usize;
     for (kind, rows) in writable {
         for batch in rows.chunks(BATCH_SIZE) {
-            let batch: Vec<(String, String, Value)> = batch.to_vec();
+            let batch: Vec<(String, String, Vec<f32>)> = batch.to_vec();
             let n = batch.len();
             let (db_b, gid_b, written_b) =
                 (Arc::clone(&db), group_id.clone(), Arc::clone(&written));
@@ -588,7 +595,15 @@ async fn write_all(
                 let mut stmt = conn.prepare(set_cypher(kind))?;
                 let mut ok: Vec<(ZeroKind, String)> = Vec::new();
                 for (uuid, text, vec) in &batch {
-                    let params = json!({ "uuid": uuid, "text": text, "emb": vec });
+                    // Validated finite at embed time, so the conversion cannot fail.
+                    let Some(emb) = vector_to_json(vec) else {
+                        eprintln!(
+                            "liminis-context-graph: reembed_missing: {} {uuid}: non-finite vector",
+                            kind.as_str()
+                        );
+                        continue;
+                    };
+                    let params = json!({ "uuid": uuid, "text": text, "emb": emb });
                     match conn.execute_prepared_returning_count(&mut stmt, &params) {
                         Ok(n) if n > 0 => ok.push((kind, uuid.clone())),
                         // Guard no longer matches: the row changed or vanished in the gap.

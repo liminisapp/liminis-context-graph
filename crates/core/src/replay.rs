@@ -1492,7 +1492,7 @@ fn push_resolved_rows(
 /// Converts a computed embedding vector to a JSON array of numbers, or `None` if any component
 /// is NaN or infinite (JSON has no representation for either — `serde_json::Number::from_f64`
 /// itself returns `None` in that case).
-fn vector_to_json(vector: &[f32]) -> Option<serde_json::Value> {
+pub(crate) fn vector_to_json(vector: &[f32]) -> Option<serde_json::Value> {
     vector
         .iter()
         .map(|f| serde_json::Number::from_f64(*f as f64).map(serde_json::Value::Number))
