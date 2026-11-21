@@ -52,6 +52,10 @@ async fn main() {
     if args.first().map(String::as_str) == Some("graph-integrity") {
         std::process::exit(lcg_eval::graph_integrity::run_cli(&args[1..]));
     }
+    // `lcg-eval graph-qa …` (#821): graph question answering over a kept workspace.
+    if args.first().map(String::as_str) == Some("graph-qa") {
+        std::process::exit(lcg_eval::graph_qa::run_cli(&args[1..]).await);
+    }
     let cli = match parse_args(&args) {
         Ok(cli) => cli,
         Err(e) => {

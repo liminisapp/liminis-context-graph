@@ -1,0 +1,342 @@
+//! `lcg-eval graph-qa` (#821): graph question answering over a kept workspace, the reproducible
+//! form of experiment E13 and the regression check for `knowledge_walk` (#820).
+//!
+//! Runners (FR-014): `passages` (the shipped default passage search), `passages-belief-rerank`,
+//! `qmd` (optional), `walk` (an LLM planner sees the question and the workspace's ontology menu;
+//! its plan runs through `knowledge_walk`) and `route` (the planner picks walk or passages). One
+//! reader prompt answers from every runner's context; [`scorer`] scores the answers.
+//!
+//! The workspace is never opened in place: it is copied to a temp dir and the service runs on the
+//! copy (ADR-0821, applying ADR-0819's copy principle to the service route of ADR-0754).
+
+pub mod cache;
+pub mod cli;
+pub mod mock;
+pub mod plans;
+pub mod prompts;
+pub mod report;
+pub mod runner;
+pub mod scorer;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use serde_json::{json, Value};
+
+use crate::graph_integrity::source::find_db;
+use crate::llm_client::{process_env, provider_configured, MessagesClient, ModelClient};
+use crate::retrieval::generator::graph_questions::{self, GraphQuestion};
+use crate::retrieval::lcg::{self, RpcTransport, EVAL_GROUP};
+use crate::retrieval::{fixture, qmd, workspace};
+use cache::LlmCache;
+use cli::{GraphQaArgs, Mode};
+use runner::{QmdSetup, QmdSource, RunError};
+
+/// Exit codes (see `cli::usage`).
+pub const EXIT_FAILED: i32 = 1;
+pub const EXIT_USAGE: i32 = 2;
+pub const EXIT_WORKSPACE: i32 = 3;
+pub const EXIT_UNCOVERED: i32 = 4;
+
+/// A run failure with its exit code.
+#[derive(Debug)]
+pub struct Failure {
+    pub code: i32,
+    pub message: String,
+}
+
+fn fail(code: i32, message: impl Into<String>) -> Failure {
+    Failure {
+        code,
+        message: message.into(),
+    }
+}
+
+/// What a workspace is, read without opening its DB.
+#[derive(Debug, Clone)]
+pub struct WorkspaceInfo {
+    /// `ontology` or `free-form`.
+    pub kind: String,
+    pub ontology_hash: String,
+    pub ontology_mode: Option<String>,
+    pub manifest: Option<workspace::WorkspaceManifest>,
+}
+
+/// Checks that `ws` is an ingested workspace and reads its ontology and manifest. The embedder the
+/// run will use must be the one the workspace was ingested with: a different one would compare
+/// query vectors against incompatible stored vectors and give silently meaningless numbers.
+pub fn inspect_workspace(ws: &Path, embedder: &str) -> Result<WorkspaceInfo, Failure> {
+    find_db(ws, None).map_err(|e| fail(EXIT_WORKSPACE, e.to_string()))?;
+    let manifest = workspace::read_manifest(ws).map_err(|e| fail(EXIT_WORKSPACE, e))?;
+    if let Some(m) = &manifest {
+        if !m.embedder.is_empty() && !embedder.is_empty() && m.embedder != embedder {
+            return Err(fail(
+                EXIT_WORKSPACE,
+                format!(
+                    "workspace {} was ingested with embedder {} but this run is configured with {}; \
+                     its stored vectors are not comparable. Pass the ingest embedder.",
+                    ws.display(),
+                    m.embedder,
+                    embedder
+                ),
+            ));
+        }
+    }
+    let onto = lcg_core::ontology::load_ontology(Some(ws));
+    Ok(WorkspaceInfo {
+        kind: if onto.is_some() {
+            "ontology"
+        } else {
+            "free-form"
+        }
+        .into(),
+        ontology_hash: lcg_core::ontology::content_hash(onto.as_ref()),
+        ontology_mode: onto.as_ref().map(|o| o.mode.to_string()),
+        manifest,
+    })
+}
+
+pub fn load_questions(path: &Path) -> Result<Vec<GraphQuestion>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("graph questions {}: {e}", path.display()))?;
+    let qs = graph_questions::parse_jsonl(&text)?;
+    if qs.is_empty() {
+        return Err(format!("graph questions {}: no questions", path.display()));
+    }
+    Ok(qs)
+}
+
+/// Everything a graph-qa run produced.
+pub struct Outcome {
+    pub json: Value,
+    pub markdown: String,
+}
+
+/// A whole graph-qa run over `a.workspace`, with the given planner and reader clients (`planner:
+/// None` means no planner may be called). Used by the CLI and by the end-to-end tests.
+pub async fn run_on_workspace(
+    a: &GraphQaArgs,
+    planner: Option<&dyn ModelClient>,
+    reader: &dyn ModelClient,
+    provider: &str,
+    qmd_runner: Option<Arc<dyn qmd::QmdRunner>>,
+) -> Result<Outcome, Failure> {
+    let embedder = a
+        .embedder_http
+        .clone()
+        .or(a.embedder_uds.clone())
+        .or_else(|| std::env::var("LCG_EMBEDDING_URL").ok())
+        .unwrap_or_default();
+    let info = inspect_workspace(&a.workspace, &embedder)?;
+    if info.manifest.is_none() {
+        eprintln!(
+            "lcg-eval graph-qa: WARNING {} has no {}; its provenance (corpus, embedder) is unknown",
+            a.workspace.display(),
+            workspace::MANIFEST_FILE
+        );
+    }
+    let qpath = a
+        .questions
+        .clone()
+        .unwrap_or_else(|| a.corpus.join(graph_questions::FILE));
+    let questions = load_questions(&qpath).map_err(|e| fail(EXIT_USAGE, e))?;
+    let plans_file = match &a.plans {
+        Some(p) => Some(plans::load_plans(p).map_err(|e| fail(EXIT_USAGE, e))?),
+        None => None,
+    };
+    let cache = LlmCache::load(&a.llm_cache).map_err(|e| fail(EXIT_FAILED, e))?;
+
+    // qmd before the service, so a skipped qmd costs nothing.
+    let qmd = if a.runners.iter().any(|r| r == "qmd") {
+        Some(qmd_setup(a, qmd_runner).await)
+    } else {
+        None
+    };
+
+    let opts = lcg::ServiceOpts {
+        bin: a
+            .service_bin
+            .clone()
+            .unwrap_or_else(crate::retrieval::default_service_bin),
+        embedder_http: a.embedder_http.clone(),
+        embedder_uds: a.embedder_uds.clone(),
+        reranker_http: a.reranker_http.clone(),
+        reranker_uds: a.reranker_uds.clone(),
+        embedding_profile: a.embedding_profile.clone(),
+        seed_workspace: Some(a.workspace.clone()),
+        ..Default::default()
+    };
+    eprintln!(
+        "lcg-eval graph-qa: starting LCG service on a copy of {}",
+        a.workspace.display()
+    );
+    let guard = lcg::spawn_service(&opts)
+        .await
+        .map_err(|e| fail(EXIT_FAILED, e))?;
+    let transport: Arc<dyn RpcTransport> = guard.client.clone();
+    let view = transport
+        .call("knowledge_get_ontology", json!({"group_id": EVAL_GROUP}))
+        .await
+        .map_err(|e| fail(EXIT_FAILED, e))?;
+    let out = runner::run(runner::Inputs {
+        questions: &questions,
+        runners: &a.runners,
+        transport,
+        ontology_view: &view,
+        plans_file: plans_file.as_ref(),
+        plans_only: a.plans_only,
+        planner,
+        reader,
+        planner_model: &a.planner_model,
+        reader_model: &a.reader_model,
+        cache: &cache,
+        qmd,
+        k: a.k,
+        concurrency: a.concurrency,
+    })
+    .await
+    .map_err(|e| match e {
+        RunError::Uncovered(_) => fail(EXIT_UNCOVERED, e.to_string()),
+        RunError::Failed(_) => fail(EXIT_FAILED, e.to_string()),
+    })?;
+    let meta = report::Meta {
+        workspace: a.workspace.display().to_string(),
+        workspace_kind: info.kind,
+        ontology_hash: info.ontology_hash,
+        ontology_mode: info.ontology_mode,
+        manifest: info.manifest,
+        lcg_build: guard.version.clone(),
+        embedder,
+        questions_file: qpath.display().to_string(),
+        planner_model: a.planner_model.clone(),
+        reader_model: a.reader_model.clone(),
+        provider: provider.to_string(),
+        plans_file: a.plans.as_ref().map(|p| p.display().to_string()),
+        plans_model: plans_file.as_ref().and_then(|f| f.model.clone()),
+        plans_ontology: plans_file.as_ref().and_then(|f| f.ontology.clone()),
+        k: a.k,
+        seed: a.bootstrap_seed,
+        resamples: a.bootstrap_resamples,
+        cache: cache.counts(),
+    };
+    let rep = report::Report {
+        meta,
+        run: &out,
+        questions: &questions,
+        reference: plans_file
+            .as_ref()
+            .and_then(|f| f.route_planned5_scores.as_ref()),
+    };
+    let outcome = Outcome {
+        json: rep.to_json(),
+        markdown: rep.render_markdown(),
+    };
+    drop(guard);
+    Ok(outcome)
+}
+
+async fn qmd_setup(a: &GraphQaArgs, runner: Option<Arc<dyn qmd::QmdRunner>>) -> QmdSetup {
+    let fx = match fixture::load(&a.corpus) {
+        Ok(f) => f,
+        Err(e) => return QmdSetup::Skipped(format!("cannot load --corpus for qmd: {e}")),
+    };
+    let runner: Arc<dyn qmd::QmdRunner> = runner.unwrap_or_else(|| {
+        Arc::new(qmd::ProcessRunner {
+            bin: a.qmd_bin.clone(),
+        })
+    });
+    let index = a
+        .qmd_index
+        .clone()
+        .unwrap_or_else(|| crate::retrieval::default_qmd_index(&fx));
+    match qmd::prepare(runner.as_ref(), &index, &fx.notes_dir()).await {
+        Ok(_) => QmdSetup::Ready(QmdSource {
+            runner,
+            index,
+            dates: fx
+                .manifest
+                .notes
+                .iter()
+                .filter_map(|n| n.reference_time.clone().map(|t| (n.id.clone(), t)))
+                .collect(),
+            notes: fx.notes.clone(),
+        }),
+        Err(qmd::Skipped(why)) => {
+            eprintln!("lcg-eval graph-qa: qmd skipped: {why}");
+            QmdSetup::Skipped(why)
+        }
+    }
+}
+
+/// Writes `graph-qa.md` and `graph-qa.json` to `dir`.
+pub fn write_outputs(dir: &Path, o: &Outcome) -> Result<(), String> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| format!("cannot create --out {}: {e}", dir.display()))?;
+    std::fs::write(dir.join("graph-qa.md"), &o.markdown)
+        .map_err(|e| format!("cannot write graph-qa.md: {e}"))?;
+    std::fs::write(
+        dir.join("graph-qa.json"),
+        serde_json::to_string_pretty(&o.json).expect("serializes") + "\n",
+    )
+    .map_err(|e| format!("cannot write graph-qa.json: {e}"))
+}
+
+pub async fn run_cli(args: &[String]) -> i32 {
+    let a = match cli::parse_args(args) {
+        Ok(Mode::Help) => {
+            println!("{}", cli::usage());
+            return 0;
+        }
+        Ok(Mode::Run(a)) => *a,
+        Err(e) => {
+            eprintln!("lcg-eval graph-qa: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let configured = provider_configured(&process_env, &a.anthropic);
+    let client = if configured {
+        match MessagesClient::from_env(&a.anthropic) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("lcg-eval graph-qa: {e}");
+                return EXIT_USAGE;
+            }
+        }
+    } else {
+        None
+    };
+    let provider = client
+        .as_ref()
+        .map_or("none configured (cache only)".to_string(), |c| c.describe());
+    let unconfigured = mock::Unconfigured;
+    let reader: &dyn ModelClient = match &client {
+        Some(c) => c,
+        None => &unconfigured,
+    };
+    let planner: Option<&dyn ModelClient> = client.as_ref().map(|c| c as &dyn ModelClient);
+    match run_on_workspace(&a, planner, reader, &provider, None).await {
+        Ok(o) => {
+            println!("{}", o.markdown);
+            if let Some(dir) = &a.out {
+                if let Err(e) = write_outputs(dir, &o) {
+                    eprintln!("lcg-eval graph-qa: {e}");
+                    return EXIT_FAILED;
+                }
+                eprintln!(
+                    "lcg-eval graph-qa: wrote graph-qa.md and graph-qa.json to {}",
+                    dir.display()
+                );
+            }
+            0
+        }
+        Err(f) => {
+            eprintln!("lcg-eval graph-qa: {}", f.message);
+            f.code
+        }
+    }
+}
+
+/// The default questions path for a corpus.
+pub fn default_questions(corpus: &Path) -> PathBuf {
+    corpus.join(graph_questions::FILE)
+}

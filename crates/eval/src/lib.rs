@@ -11,6 +11,7 @@ pub mod cli;
 pub mod corpus;
 pub mod failure_taxonomy;
 pub mod graph_integrity;
+pub mod graph_qa;
 pub mod judge;
 pub mod judge_cache;
 pub mod llm_client;

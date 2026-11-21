@@ -445,7 +445,7 @@ pub async fn evaluate(
     out
 }
 
-fn default_service_bin() -> PathBuf {
+pub fn default_service_bin() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let p = dir.join("liminis-context-graph");
