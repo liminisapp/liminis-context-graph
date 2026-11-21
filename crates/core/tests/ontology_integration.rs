@@ -948,7 +948,7 @@ async fn strict_mode_reclassify_count_includes_edges_with_no_original_relation_t
 // the sanctioned literal-object form, stored as a self-loop, so its reclassification *is*
 // persisted and counted. The dropped case is exercised here with an unresolvable endpoint.
 #[tokio::test]
-async fn strict_mode_reclassified_self_referential_edge_not_counted() {
+async fn strict_mode_reclassify_count_covers_stored_self_loop_not_dropped_edge() {
     let (db, _dir) = make_db();
     let ontology = Ontology {
         mode: OntologyMode::Strict,
