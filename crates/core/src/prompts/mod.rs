@@ -109,8 +109,9 @@ fn build_fact_types_section(ontology: Option<&Ontology>) -> String {
         if onto.mode == OntologyMode::Strict {
             for ia in &rt.inverse_aliases {
                 section.push_str(&format!(
-                    "  Inverse alias: {} = {} with source and target swapped\n",
-                    ia, rt.name
+                    "  Inverse alias: {} = {} with source and target swapped (emit {} as it reads, \
+                     so source_name is the subject of {}; the system swaps it into {} order)\n",
+                    ia, rt.name, ia, ia, rt.name
                 ));
             }
             if !rt.aliases.is_empty() {

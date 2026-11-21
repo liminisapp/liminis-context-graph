@@ -302,9 +302,16 @@ async fn real_run_swaps_marks_preserves_attributes_and_is_idempotent() {
         works.4["original_relation_type"], "works on",
         "attributes are merged, not replaced"
     );
-    // The swapped edge's ingest-form name follows its orientation (best-effort: lbug may
-    // refuse a SET on the FTS-indexed name column, in which case the old name stays).
-    assert!(edges.iter().filter(|e| e.2 == "APPROVES").count() == 2);
+    // The swapped edge's ingest-form name follows its new orientation, so both APPROVES edges
+    // now read `Lena → Lumen Policy`.
+    let approves: Vec<_> = edges.iter().filter(|e| e.2 == "APPROVES").collect();
+    assert_eq!(approves.len(), 2);
+    for e in &approves {
+        assert_eq!(
+            e.3, "Lena → Lumen Policy",
+            "name follows orientation: {e:?}"
+        );
+    }
 
     // Second run: nothing left to swap, nothing re-marked.
     let again = repair(&state, false).await;
