@@ -11,6 +11,20 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- **Ontology edge direction: define, validate and repair (#816, ADR-0816).** With an ontology, 34%
+  of typed edges on known-true links on the v2 corpus pointed the wrong way (the extractor made the
+  sentence's subject the source). Relation types now accept `source_type`/`target_type` as a name or
+  a list (matching through `parent` ancestry), `inverse_aliases` (names that read the relation the
+  other way, e.g. `APPROVED_BY`) and `symmetric: true`; all additive, existing ontologies load with
+  an unchanged hash. The edge prompt defines direction in every mode and renders `(Person → any)`,
+  `(Person | Team → Project | System)`, symmetric markers and inverse aliases. At ingest (strict and
+  open), an edge that fits its signature only when reversed is swapped (`edges_swapped`), and one that
+  fits neither way is stored unchanged with `signature_mismatch` in its `attributes`
+  (`edges_signature_mismatch`); no edge is dropped. `knowledge_canonicalize_relations` applies the
+  same rules to a stored graph without re-extraction, supports `dry_run`, is idempotent, and reports
+  `swapped_count`, `signature_mismatch_count` and per-type `by_type`. An undeclared type in a
+  signature logs a load warning and is ignored.
+
 - **`LCG_SEARCH_MIN_SCORE`: configurable default `min_score` for `knowledge_search_passages`
   (#812, ADR-0812).** The default floor used when a request omits `min_score` was a hard-coded 0.5,
   which can let unrelated passages through for some embedders (#811). Operators can now set it per
@@ -20,6 +34,12 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   an additive top-level `search_min_score_default` field.
 
 ### Changed
+
+- **The edge extraction prompt changes in every mode (#816, ADR-0816).** It now defines `source_name`
+  as the subject of the relation as its type name reads, and open-mode relation lists render declared
+  signatures. This relaxes ADR-0310's byte-identical open-mode constraint for the edge prompt.
+  **Recorded extraction cassettes hash the prompt, so any cassette with `extract` calls (including
+  `crates/eval/fixtures/retrieval-v2/cassette.jsonl`) must be re-recorded to re-extract.**
 
 - **Behaviour change: `knowledge_search_passages` is belief-aware by default (#806, ADR-0806).**
   A request that omits `belief_aware` now ranks a derived page below the primary note it cites and a
