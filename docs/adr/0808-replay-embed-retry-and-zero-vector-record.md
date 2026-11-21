@@ -94,8 +94,9 @@ rebuilds the database.
   none stored a zero vector because the embedder failed (#526).
 - **Stale entries**: a successful recompute of a recorded `(kind, uuid)`, or a delete-form row for
   that uuid (a `uuid` param or a `uuids` list), emits a `Clear`, and a delete-form row carrying a
-  `gids` list (a replayed group purge) emits a `ClearGroups` that drops every entry of those
-  groups. Other delete shapes are not recognised (a relationship-hop delete removes no row;
+  `gids` list (a replayed group purge) emits a `ClearGroups` that drops the entries of those groups of the kinds that live
+  on the deleted table (`Entity` → `name`/`summary`, `Episodic` → `content`, `RelatesToNode_` →
+  `fact`), so a purge of one table never wipes entries for rows still present in another. Other delete shapes are not recognised (a relationship-hop delete removes no row;
   free-form Cypher can leave a stale entry for the repair tool to remove). To avoid a per-row `DELETE` across an 80k-row clean replay, `Clear`s
   are only produced when the group's record was non-empty at the start of the run or an `Add` has
   happened since.

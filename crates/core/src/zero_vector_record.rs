@@ -118,10 +118,16 @@ pub enum ZeroEffect {
     Add { kind: ZeroKind, uuid: String },
     /// `(kind, uuid)` now holds a real embedding (or the row is gone): drop any stale entry.
     Clear { kind: ZeroKind, uuid: String },
-    /// Every row of these groups was deleted (a replayed group purge, `... WHERE n.group_id IN
-    /// $gids DETACH DELETE n`): drop all entries recorded for them. Ordered against later `Add`s
-    /// in the same batch, which are new rows and survive.
-    ClearGroups { group_ids: Vec<String> },
+    /// Every row of these groups in the table(s) the delete targets was removed (a replayed group
+    /// purge, `... WHERE n.group_id IN $gids DETACH DELETE n`): drop the entries of those `kinds`
+    /// recorded for them. Scoped to the kinds that live on the deleted table so a purge of one
+    /// table (`Episodic` → `content`) never wipes entries for rows that still exist in another
+    /// (`Entity` → `name`/`summary`). Ordered against later `Add`s in the same batch, which are
+    /// new rows and survive.
+    ClearGroups {
+        group_ids: Vec<String>,
+        kinds: Vec<ZeroKind>,
+    },
 }
 
 pub(crate) fn row_id(group_id: &str, kind: ZeroKind, uuid: &str) -> String {
@@ -140,7 +146,8 @@ fn value_as_count(v: &lbug::Value) -> u64 {
 const ADD_Q: &str = "MERGE (z:EmbeddingZeroRow {id: $id}) \
                      SET z.wal_group = $group_id, z.kind = $kind, z.uuid = $uuid";
 const DEL_Q: &str = "MATCH (z:EmbeddingZeroRow {id: $id}) DELETE z";
-const DEL_GROUPS_Q: &str = "MATCH (z:EmbeddingZeroRow) WHERE z.wal_group IN $gids DELETE z";
+const DEL_GROUPS_Q: &str = "MATCH (z:EmbeddingZeroRow) \
+                            WHERE z.wal_group IN $gids AND z.kind IN $kinds DELETE z";
 
 /// Folds `effects` (in order) into their net result per `(kind, uuid)` and applies it through
 /// `conn`, **unrecorded** (never reaches the WAL). Intended to run inside `flush_batch`'s open
@@ -157,17 +164,16 @@ pub(crate) fn apply_zero_effects(
     // Last write wins per id; BTreeMap keeps application order deterministic.
     let mut net: std::collections::BTreeMap<String, (bool, ZeroKind, &str)> =
         std::collections::BTreeMap::new();
-    // Groups purged by an effect in this batch: their stored entries are deleted first, and any
-    // earlier pending Add/Clear for this group is superseded (later ones are applied after).
-    let mut purged_groups: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    // Group purges in this batch (groups, kinds): their stored entries are deleted first, and any
+    // earlier pending Add/Clear of those kinds for this group is superseded (later ones apply
+    // after).
+    let mut purges: Vec<(&[String], &[ZeroKind])> = Vec::new();
     for e in effects {
         match e {
-            ZeroEffect::ClearGroups { group_ids } => {
-                for g in group_ids {
-                    purged_groups.insert(g.as_str());
-                }
+            ZeroEffect::ClearGroups { group_ids, kinds } => {
+                purges.push((group_ids, kinds));
                 if group_ids.iter().any(|g| g == group_id) {
-                    net.clear();
+                    net.retain(|_, (_, kind, _)| !kinds.contains(kind));
                 }
             }
             ZeroEffect::Add { kind, uuid } => {
@@ -178,10 +184,13 @@ pub(crate) fn apply_zero_effects(
             }
         }
     }
-    if !purged_groups.is_empty() {
+    if !purges.is_empty() {
         let mut stmt = conn.prepare(DEL_GROUPS_Q)?;
-        let params = serde_json::json!({ "gids": purged_groups.iter().collect::<Vec<_>>() });
-        conn.execute_prepared(&mut stmt, &params)?;
+        for (gids, kinds) in purges {
+            let kinds: Vec<&str> = kinds.iter().map(|k| k.as_str()).collect();
+            let params = serde_json::json!({ "gids": gids, "kinds": kinds });
+            conn.execute_prepared(&mut stmt, &params)?;
+        }
     }
     let mut add_stmt = None;
     let mut del_stmt = None;

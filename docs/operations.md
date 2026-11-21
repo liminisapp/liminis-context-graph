@@ -781,7 +781,9 @@ rebuild (`knowledge_rebuild_from_wal` with `force_clear`, or `knowledge_delete_b
 it to that rebuild's own failures. An incremental replay that later embeds a recorded row
 successfully, or deletes it, clears its entry. "Deletes it" covers a replayed delete that names
 the row by a `uuid` param or a `uuids` list, and a replayed group purge (a `gids` list), which
-clears every entry of those groups; a delete of a relationship hop only (`RelatesToNode_` hop
+clears the entries of those groups that live on the purged table (an `Episodic` purge clears
+`content`, an `Entity` purge `name` and `summary`, a `RelatesToNode_` purge `fact`) and leaves the
+other tables' entries alone; a delete of a relationship hop only (`RelatesToNode_` hop
 deletes) removes no row, so it leaves entries alone, and a delete by any other shape (for example a
 free-form `knowledge_query_cypher` mutation) is not recognised and can leave a stale entry, which
 the repair tool removes. Repair is a separate tool (which lists the rows

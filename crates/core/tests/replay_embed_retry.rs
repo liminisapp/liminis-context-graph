@@ -421,6 +421,35 @@ fn group_purge_clears_entries_but_not_later_rows() {
     );
 }
 
+// A replayed purge of one table (`Episodic` → `content` entries) clears that table's entries but
+// not the `name` entries of Entity rows that still exist.
+#[test]
+fn group_purge_is_scoped_to_the_deleted_table() {
+    let fx = Fixture::new();
+    let mut lines = n_rows(3, |i| format!("entity-{i}"));
+    lines.push(wal_line(
+        3,
+        "MERGE (ep:Episodic {uuid: $uuid}) SET ep.group_id = $group_id, ep.content = $content, \
+         ep.content_embedding = $content_embedding",
+        serde_json::json!({ "uuid": "ep0", "group_id": GROUP, "content": "an episode" }),
+    ));
+    lines.push(wal_line(
+        4,
+        "MATCH (ep:Episodic) WHERE ep.group_id IN $gids DETACH DELETE ep",
+        serde_json::json!({ "gids": [GROUP] }),
+    ));
+    write_wal(&fx.wal_dir, &lines);
+    let db = fx.open();
+    let failing: RecomputeEmbedFn = Box::new(|_t: &[&str]| Err(status_err("400 Bad Request")));
+    replay(&fx, &db, failing, fast_policy(0), 64, 0);
+    let conn = db.connect().unwrap();
+    assert_eq!(conn.count_nodes("Entity").unwrap(), 3);
+    assert_eq!(conn.count_nodes("Episodic").unwrap(), 0);
+    let rows = conn.list_zero_vector_rows(GROUP, None).unwrap();
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows.iter().all(|(k, _)| *k == ZeroKind::Name), "{rows:?}");
+}
+
 // A bulk delete carrying a `uuids` list (`WHERE n.uuid IN $uuids`) clears every listed entry.
 #[test]
 fn bulk_delete_with_uuids_list_clears_entries() {

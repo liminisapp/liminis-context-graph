@@ -1284,8 +1284,12 @@ fn resolve_embed_window_with(
                 }
             }
             let gids = deleted_group_ids(&row.params_map);
-            if !gids.is_empty() {
-                row_effects[row_idx].push(ZeroEffect::ClearGroups { group_ids: gids });
+            let kinds = deleted_table_kinds(&row.cypher);
+            if !gids.is_empty() && !kinds.is_empty() {
+                row_effects[row_idx].push(ZeroEffect::ClearGroups {
+                    group_ids: gids,
+                    kinds,
+                });
             }
         }
     }
@@ -1714,6 +1718,40 @@ fn deleted_uuids(params: &serde_json::Map<String, serde_json::Value>) -> Vec<Str
     out
 }
 
+/// The zero-vector kinds that live on the node table(s) a DELETE-form template matches, by label:
+/// `Entity`/`Community` → `name`, `summary`; `Episodic` → `content`; `RelatesToNode_` → `fact`.
+/// An unrecognised label yields none, so a purge of a table this does not know leaves entries
+/// alone (a stale entry is repairable; wiping entries for rows that still exist is not).
+fn deleted_table_kinds(template: &str) -> Vec<ZeroKind> {
+    let mut kinds: Vec<ZeroKind> = Vec::new();
+    let bytes = template.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b':' {
+            let start = i + 1;
+            let mut end = start;
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+                end += 1;
+            }
+            let label_kinds: &[ZeroKind] = match &template[start..end] {
+                "Entity" | "Community" => &[ZeroKind::Name, ZeroKind::Summary],
+                "Episodic" => &[ZeroKind::Content],
+                "RelatesToNode_" => &[ZeroKind::Fact],
+                _ => &[],
+            };
+            for k in label_kinds {
+                if !kinds.contains(k) {
+                    kinds.push(*k);
+                }
+            }
+            i = end.max(i + 1);
+        } else {
+            i += 1;
+        }
+    }
+    kinds
+}
+
 /// Group ids a DELETE-form mutation purges wholesale: a `gids` list param
 /// (`WHERE n.group_id IN $gids DETACH DELETE n`, the `delete_*_by_group_ids` / group-purge forms).
 fn deleted_group_ids(params: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
@@ -2102,6 +2140,25 @@ fn classify_replay_failure(
 #[cfg(test)]
 mod replay_tests {
     use super::*;
+
+    #[test]
+    fn deleted_table_kinds_follow_the_matched_label() {
+        use ZeroKind::*;
+        let k = |t: &str| deleted_table_kinds(t);
+        assert_eq!(
+            k("MATCH (e:Entity) WHERE e.group_id IN $gids DETACH DELETE e"),
+            vec![Name, Summary]
+        );
+        assert_eq!(
+            k("MATCH (ep:Episodic) WHERE ep.group_id IN $gids DETACH DELETE ep"),
+            vec![Content]
+        );
+        assert_eq!(
+            k("MATCH (rn:RelatesToNode_) WHERE rn.group_id IN $gids DETACH DELETE rn"),
+            vec![Fact]
+        );
+        assert!(k("MATCH (d:DocRevision) WHERE d.group_id IN $gids DELETE d").is_empty());
+    }
 
     #[test]
     fn test_resolve_batch_size_defaults_to_64() {
