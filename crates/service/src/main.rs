@@ -438,161 +438,205 @@ async fn bootstrap_app_state(
     anthropic_args: AnthropicCliArgs,
     allow_embedder_degrade: bool,
 ) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
+    // Test providers (#851) are selected ONLY by these explicit flags, never from the
+    // environment, a config file or a fallback.
+    let test_embedder = matches!(embedder_flag, Some(EmbedderFlag::Test));
+    let test_extractor = matches!(extractor_flag, Some(ExtractorFlag::Test));
+
     let (cli_uds, cli_http) = match embedder_flag {
         Some(EmbedderFlag::Uds(p)) => (Some(p), None),
         Some(EmbedderFlag::Http(u)) => (None, Some(u)),
-        None => (None, None),
+        Some(EmbedderFlag::Test) | None => (None, None),
     };
 
-    let embedder_model = lcg_env_var("LCG_EMBEDDING_MODEL", "GRAPHITI_EMBEDDING_MODEL")
-        .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
-
-    // Instruction profile + prefix overrides (#790). Parsed before any probe so an unknown profile
-    // name fails fast with the list of valid names (FR-006).
-    let instruction_config = InstructionConfig::from_env()?;
-
-    // Dim override — used as fallback if probe fails (FR-008)
+    // Dim override — used as fallback if probe fails (FR-008); the dimension itself in test mode.
     let embedding_dim_override: Option<usize> =
         lcg_env_var("LCG_EMBEDDING_DIM", "GRAPHITI_EMBEDDING_DIM")
             .ok()
             .and_then(|s| s.parse().ok());
 
-    // ── Transport resolution + probe, with bounded retry in standalone --mcp-stdio mode
-    // (issue #499 FR-002/FR-004) ────────────────────────────────────────────────────────
-    // Socket mode (`allow_embedder_degrade == false`) hits `Retryable`'s `return Err(..)` arm on
-    // the very first iteration, exactly as the pre-#499 single-shot code did (FR-001/SC-002) — the
-    // loop only actually iterates more than once when standalone `--mcp-stdio` is retrying.
-    let retry_deadline = std::time::Instant::now() + EMBEDDER_RETRY_CEILING;
-    let mut backoff = EMBEDDER_RETRY_INITIAL_BACKOFF;
-    let (resolved, embedding_dim, embedding_model_probed, embedding_api_key, embedder_advert) = loop {
-        // Bound each attempt to the time remaining in the window, not just the inter-attempt
-        // backoff: neither transport's client (reqwest::Client::new() nor the UDS hyper pool)
-        // has a request timeout configured, so a connection that stalls after being accepted —
-        // rather than refusing outright — could otherwise block a single attempt past the
-        // advertised ceiling (review finding on #499/PR #514). Applying this uniformly also
-        // bounds the same failure mode on the socket-service path, where it can only shorten an
-        // unbounded hang, never shorten today's fast-refusal fail-fast case FR-001 covers.
-        let attempt_budget = retry_deadline
-            .saturating_duration_since(std::time::Instant::now())
-            .max(Duration::from_millis(1));
-        let outcome = match tokio::time::timeout(
-            attempt_budget,
-            resolve_and_probe_embedder(
-                cli_uds.as_deref(),
-                cli_http.as_deref(),
-                &embedder_model,
-                embedding_dim_override,
-            ),
+    let (embedder, embedding_dim, embedding_model_probed): (
+        Arc<dyn lcg_core::Embedder>,
+        usize,
+        String,
+    ) = if test_embedder {
+        // Short-circuits resolution, the probe and the retry loop: there is no sidecar to
+        // wait on and nothing is dialled. The model name is distinct from any real model so
+        // a database shared with a real embedder reports `embedding_model_status: mismatch`.
+        let ignored: Vec<&str> = [
+            "LCG_EMBEDDING_PROFILE",
+            "LCG_EMBEDDING_MODEL",
+            "LCG_EMBEDDING_URL",
+        ]
+        .into_iter()
+        .filter(|k| std::env::var_os(k).is_some())
+        .collect();
+        if !ignored.is_empty() {
+            eprintln!(
+                "embedder: --embedder test ignores {} (no sidecar, no instruction profile)",
+                ignored.join(", ")
+            );
+        }
+        let dim = embedding_dim_override
+            .filter(|d| *d > 0)
+            .unwrap_or(lcg_core::TEST_EMBEDDING_DEFAULT_DIM);
+        let emb = lcg_core::TestEmbedder::new(dim);
+        let dim = lcg_core::Embedder::dim(&emb);
+        eprintln!(
+            "embedder: provider=test, model={}, dim={dim} (built-in deterministic embedder)",
+            lcg_core::TEST_EMBEDDER_MODEL
+        );
+        (
+            Arc::new(emb),
+            dim,
+            lcg_core::TEST_EMBEDDER_MODEL.to_string(),
         )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(_) => ProbeOutcome::Retryable(format!(
-                "embedder probe timed out after {:.1}s with no response",
-                attempt_budget.as_secs_f64()
-            )),
-        };
-        match outcome {
-            ProbeOutcome::Ready {
-                resolved,
-                embedding_dim,
-                embedding_model_probed,
-                embedding_api_key,
-                advert,
-            } => {
-                break (
+    } else {
+        let embedder_model = lcg_env_var("LCG_EMBEDDING_MODEL", "GRAPHITI_EMBEDDING_MODEL")
+            .unwrap_or_else(|_| "bge-base-en-v1.5".to_string());
+
+        // Instruction profile + prefix overrides (#790). Parsed before any probe so an unknown profile
+        // name fails fast with the list of valid names (FR-006).
+        let instruction_config = InstructionConfig::from_env()?;
+
+        // ── Transport resolution + probe, with bounded retry in standalone --mcp-stdio mode
+        // (issue #499 FR-002/FR-004) ────────────────────────────────────────────────────────
+        // Socket mode (`allow_embedder_degrade == false`) hits `Retryable`'s `return Err(..)` arm on
+        // the very first iteration, exactly as the pre-#499 single-shot code did (FR-001/SC-002) — the
+        // loop only actually iterates more than once when standalone `--mcp-stdio` is retrying.
+        let retry_deadline = std::time::Instant::now() + EMBEDDER_RETRY_CEILING;
+        let mut backoff = EMBEDDER_RETRY_INITIAL_BACKOFF;
+        let (resolved, embedding_dim, embedding_model_probed, embedding_api_key, embedder_advert) = loop {
+            // Bound each attempt to the time remaining in the window, not just the inter-attempt
+            // backoff: neither transport's client (reqwest::Client::new() nor the UDS hyper pool)
+            // has a request timeout configured, so a connection that stalls after being accepted —
+            // rather than refusing outright — could otherwise block a single attempt past the
+            // advertised ceiling (review finding on #499/PR #514). Applying this uniformly also
+            // bounds the same failure mode on the socket-service path, where it can only shorten an
+            // unbounded hang, never shorten today's fast-refusal fail-fast case FR-001 covers.
+            let attempt_budget = retry_deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .max(Duration::from_millis(1));
+            let outcome = match tokio::time::timeout(
+                attempt_budget,
+                resolve_and_probe_embedder(
+                    cli_uds.as_deref(),
+                    cli_http.as_deref(),
+                    &embedder_model,
+                    embedding_dim_override,
+                ),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => ProbeOutcome::Retryable(format!(
+                    "embedder probe timed out after {:.1}s with no response",
+                    attempt_budget.as_secs_f64()
+                )),
+            };
+            match outcome {
+                ProbeOutcome::Ready {
                     resolved,
                     embedding_dim,
                     embedding_model_probed,
                     embedding_api_key,
                     advert,
-                )
-            }
-            ProbeOutcome::Fatal(msg) => return Err(msg.into()),
-            ProbeOutcome::Retryable(msg) => {
-                if !allow_embedder_degrade {
-                    return Err(msg.into());
+                } => {
+                    break (
+                        resolved,
+                        embedding_dim,
+                        embedding_model_probed,
+                        embedding_api_key,
+                        advert,
+                    )
                 }
-                let now = std::time::Instant::now();
-                if now >= retry_deadline {
-                    // FR-003: retry window exhausted in standalone --mcp-stdio mode — start
-                    // degraded rather than exit. Never opens the DB (Costing finding 3: the
-                    // embedding dimension is never known here), so this returns directly rather
-                    // than falling through to the DB-open logic below.
-                    eprintln!(
+                ProbeOutcome::Fatal(msg) => return Err(msg.into()),
+                ProbeOutcome::Retryable(msg) => {
+                    if !allow_embedder_degrade {
+                        return Err(msg.into());
+                    }
+                    let now = std::time::Instant::now();
+                    if now >= retry_deadline {
+                        // FR-003: retry window exhausted in standalone --mcp-stdio mode — start
+                        // degraded rather than exit. Never opens the DB (Costing finding 3: the
+                        // embedding dimension is never known here), so this returns directly rather
+                        // than falling through to the DB-open logic below.
+                        eprintln!(
                         "liminis-context-graph: embedder still unreachable after {:.1}s of \
                          retries ({msg}) — starting in degraded mode (standalone --mcp-stdio); \
                          see knowledge_status for degraded_reason={EMBEDDER_UNREACHABLE_DEGRADED_REASON:?}",
                         EMBEDDER_RETRY_CEILING.as_secs_f64()
                     );
-                    telemetry_sink.emit(TelemetryEvent::ServiceState {
-                        ts_ms: now_ms(),
-                        state: "degraded".to_string(),
-                        reason: Some(EMBEDDER_UNREACHABLE_DEGRADED_REASON.to_string()),
-                        detail: Some(serde_json::Value::String(msg)),
-                    });
-                    // migration_failed (if any) takes precedence, matching the DB-open degraded
-                    // branch below's own precedence rule.
-                    let degraded_reason = pre_migration_degraded
-                        .or_else(|| Some(EMBEDDER_UNREACHABLE_DEGRADED_REASON.to_string()));
-                    // This state carries no extractor, so it runs veto-only whatever
-                    // `LCG_DEDUP_LLM` says; log that rather than leaving the mode unreported.
-                    log_dedup_config(false);
-                    let embedding_cache = Arc::new(lcg_core::EmbeddingCache::new());
-                    let state = Arc::new(AppState::from_env(
-                        telemetry_sink,
-                        None,
-                        degraded_reason,
-                        db_path,
-                        Arc::new(UnconfiguredEmbedder),
-                        String::new(),
-                        Arc::new(UnconfiguredExtractor),
-                        embedding_cache,
-                    ));
-                    state.indices_built.store(false, Ordering::Release);
-                    return Ok(state);
+                        telemetry_sink.emit(TelemetryEvent::ServiceState {
+                            ts_ms: now_ms(),
+                            state: "degraded".to_string(),
+                            reason: Some(EMBEDDER_UNREACHABLE_DEGRADED_REASON.to_string()),
+                            detail: Some(serde_json::Value::String(msg)),
+                        });
+                        // migration_failed (if any) takes precedence, matching the DB-open degraded
+                        // branch below's own precedence rule.
+                        let degraded_reason = pre_migration_degraded
+                            .or_else(|| Some(EMBEDDER_UNREACHABLE_DEGRADED_REASON.to_string()));
+                        // This state carries no extractor, so it runs veto-only whatever
+                        // `LCG_DEDUP_LLM` says; log that rather than leaving the mode unreported.
+                        log_dedup_config(false);
+                        let embedding_cache = Arc::new(lcg_core::EmbeddingCache::new());
+                        let state = Arc::new(AppState::from_env(
+                            telemetry_sink,
+                            None,
+                            degraded_reason,
+                            db_path,
+                            Arc::new(UnconfiguredEmbedder),
+                            String::new(),
+                            Arc::new(UnconfiguredExtractor),
+                            embedding_cache,
+                        ));
+                        state.indices_built.store(false, Ordering::Release);
+                        return Ok(state);
+                    }
+                    tokio::time::sleep(backoff.min(retry_deadline.saturating_duration_since(now)))
+                        .await;
+                    backoff = (backoff * 2).min(EMBEDDER_RETRY_MAX_BACKOFF);
                 }
-                tokio::time::sleep(backoff.min(retry_deadline.saturating_duration_since(now)))
-                    .await;
-                backoff = (backoff * 2).min(EMBEDDER_RETRY_MAX_BACKOFF);
             }
-        }
-    };
+        };
 
-    // Resolve who applies the instruction, once (#790): LCG (decorator installed, `input_type`
-    // never sent), the embedder (`input_type` sent, no decorator), or nobody. Exactly one
-    // applier is ever active, so a text can never receive two instructions.
-    let oai = match &resolved {
-        ResolvedTransport::Http(url) => {
-            OaiEmbedder::new_http(url.clone(), embedding_model_probed.clone(), embedding_dim)?
-                .with_api_key(embedding_api_key.clone())
-        }
-        #[cfg(unix)]
-        ResolvedTransport::Uds(path) => {
-            OaiEmbedder::new_uds(path.clone(), embedding_model_probed.clone(), embedding_dim)?
-        }
-    };
-    let (embedder, instructions) = lcg_core::embedder::build_embedder_stack(
-        oai,
-        &instruction_config,
-        embedder_advert.as_ref(),
-    )?;
-    if instruction_config.profile == lcg_core::InstructionProfile::Embedder
-        && instructions.source == lcg_core::InstructionSource::None
-    {
-        eprintln!(
-            "liminis-context-graph: LCG_EMBEDDING_PROFILE=embedder but the embedder did not \
+        // Resolve who applies the instruction, once (#790): LCG (decorator installed, `input_type`
+        // never sent), the embedder (`input_type` sent, no decorator), or nobody. Exactly one
+        // applier is ever active, so a text can never receive two instructions.
+        let oai = match &resolved {
+            ResolvedTransport::Http(url) => {
+                OaiEmbedder::new_http(url.clone(), embedding_model_probed.clone(), embedding_dim)?
+                    .with_api_key(embedding_api_key.clone())
+            }
+            #[cfg(unix)]
+            ResolvedTransport::Uds(path) => {
+                OaiEmbedder::new_uds(path.clone(), embedding_model_probed.clone(), embedding_dim)?
+            }
+        };
+        let (embedder, instructions) = lcg_core::embedder::build_embedder_stack(
+            oai,
+            &instruction_config,
+            embedder_advert.as_ref(),
+        )?;
+        if instruction_config.profile == lcg_core::InstructionProfile::Embedder
+            && instructions.source == lcg_core::InstructionSource::None
+        {
+            eprintln!(
+                "liminis-context-graph: LCG_EMBEDDING_PROFILE=embedder but the embedder did not \
              advertise role support (no `instruction_roles` in its response); falling back to \
              profile `none`."
-        );
-    }
-    eprintln!(
+            );
+        }
+        eprintln!(
         "embedder instructions: profile={}, applied_by={}, query_prefix={:?}, document_prefix={:?}",
         instructions.profile.as_str(),
         instructions.source.as_str(),
         instructions.query_prefix,
         instructions.document_prefix
     );
+        (embedder, embedding_dim, embedding_model_probed)
+    };
 
     // Content-addressed embedding cache (issue #440, FR-003) — constructed once, right after the
     // embedder is resolved/probed, and threaded into both the startup recovery call below and
@@ -617,7 +661,21 @@ async fn bootstrap_app_state(
         );
     }
 
-    let extractor: Arc<dyn Extractor> = if let Some(path) = replay_llm_path {
+    let extractor: Arc<dyn Extractor> = if test_extractor {
+        // #851: the cassette seam wraps or replaces a *real* provider, so combining it with the
+        // built-in test extractor is meaningless — and silently picking one would hide a
+        // misconfiguration.
+        if record_llm_path.is_some() || replay_llm_path.is_some() {
+            return Err(
+                "--extractor test cannot be combined with LCG_RECORD_LLM or LCG_REPLAY_LLM: the \
+                 cassette seam records or replaces a real extraction provider, and the test \
+                 extractor has none. Unset the cassette variable or drop --extractor test."
+                    .into(),
+            );
+        }
+        eprintln!("extractor: provider=test (built-in fact-line extractor; no LLM, no network)");
+        Arc::new(lcg_core::TestExtractor)
+    } else if let Some(path) = replay_llm_path {
         eprintln!("extractor: provider=cassette-replay, path={path}");
         Arc::new(ReplayingExtractor::load(&path)?)
     } else {
@@ -656,7 +714,7 @@ async fn bootstrap_app_state(
         let (extractor_cli_uds, extractor_cli_http) = match extractor_flag {
             Some(ExtractorFlag::Uds(p)) => (Some(p), None),
             Some(ExtractorFlag::Http(u)) => (None, Some(u)),
-            None => (None, None),
+            Some(ExtractorFlag::Test) | None => (None, None),
         };
 
         let resolved_extractor = if let Some(uds_path) = extractor_cli_uds {
@@ -861,6 +919,20 @@ async fn bootstrap_app_state(
             }
         }
     };
+
+    if test_embedder || test_extractor {
+        let which: Vec<&str> = [
+            (test_embedder, "embedder=test"),
+            (test_extractor, "extractor=test"),
+        ]
+        .into_iter()
+        .filter_map(|(on, label)| on.then_some(label))
+        .collect();
+        eprintln!(
+            "*** TEST PROVIDERS ACTIVE: {} — NOT FOR PRODUCTION ***",
+            which.join(" ")
+        );
+    }
 
     // Logged once here rather than from `AppState::from_env`, which also runs on the recovery and
     // attach paths (issue #650).
