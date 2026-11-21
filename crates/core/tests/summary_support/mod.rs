@@ -182,9 +182,7 @@ pub fn units(state: &Arc<AppState>) -> Vec<(String, String, String, String)> {
     let db = state.db.load_full().unwrap();
     let conn = db.connect().unwrap();
     let mut rows: Vec<(String, String, String, String)> = conn
-        .cypher_query(
-            "MATCH (s:SummaryUnit) RETURN s.uuid, s.episode_uuid, s.group_id, s.content",
-        )
+        .cypher_query("MATCH (s:SummaryUnit) RETURN s.uuid, s.episode_uuid, s.group_id, s.content")
         .unwrap()
         .into_iter()
         .map(|r| (r[0].clone(), r[1].clone(), r[2].clone(), r[3].clone()))
