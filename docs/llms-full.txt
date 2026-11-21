@@ -271,6 +271,7 @@ Source: https://docs.liminis.app/liminis-context-graph/configuration
 | `LCG_RERANK_SUPERSEDED_FACTOR` | No | Demotion multiplier applied to a superseded passage's whole blended score — first-stage rank prior and sigmoid logit together, before the recency term is added — in `0..=1` (default `0.5`); a value above `1` would boost superseded notes and stops the service at startup. |
 | `LCG_RERANK_RECENCY_WEIGHT` | No | Weight of the small recency prior used to prefer later notes among near-equal matches (default `0.05`; `0` disables it). |
 | `LCG_RERANK_RANK_WEIGHT_TOP` / `_MID` / `_TAIL` | No | Weight of the **first-stage rank** in the rerank blend (`a·reciprocal-rank + (1−a)·sigmoid(logit)`) at ranks 1–3, 4–10 and beyond (defaults `0.30`, `0.20`, `0.10`; each `0..=1`, a larger value stops the service at startup; `0` for all three orders by the cross-encoder alone). A cross-encoder alone can bury a first-stage top result, so the first stage keeps most weight at the top. Tuned on corpus v2 only; the v1 holdout was then measured by the maintainer (0.935 against 0.894 for `lcg-passages-belief`); see ADR-0796. |
+| `LCG_SUMMARY_UNITS` | No | `on` (or `1`/`true`) writes one LLM **summary unit** per ingested episode, for `knowledge_search_passages` calls that set `summaries: true` (#850, an opt-in probe). **Off by default**: with it unset, ingest makes no extra LLM call and stores nothing extra. Costs one extra extractor call per episode at ingest, never at query time. Affects episodes ingested after it is turned on (no backfill). Case-insensitive; read per ingest; an unrecognised value logs a warning once and counts as off. Workspace-wide only (a per-group switch is follow-up work). See [Summary units](#summary-units-opt-in-probe). |
 | `LCG_EXPANSION_URL` | No | HTTP endpoint of an OpenAI-compatible LLM for query expansion (a base URL; a trailing `/v1/...` is stripped). LCG appends `/v1/chat/completions` to it, so the provider must serve that OpenAI-style path under the base: a provider whose API version segment is not `/v1` is not supported directly. Used when `--expander-*` is not passed; with neither, the embedder's sidecar (Apple Foundation Models) is used. |
 | `LCG_EXPANSION_MODEL` | No | Model name sent to the expansion endpoint (default `apple-foundation`). |
 | `LCG_EXPANSION_API_KEY` | No | Bearer token for the expansion endpoint named by `LCG_EXPANSION_URL`. It is sent **only** to that endpoint: an endpoint chosen with `--expander-http`/`--expander-uds`, or defaulted to the sidecar, never receives it (a note is logged at startup if the key is set but ignored). |
@@ -750,6 +751,36 @@ rerank score multiplied by `LCG_RERANK_SUPERSEDED_FACTOR`, and is always placed 
 when both are among the candidates. Notes with no supersession record get a small recency preference
 (`LCG_RERANK_RECENCY_WEIGHT`) so that of two equally good matches the later note ranks first. A
 document superseded with a *future* effective date is still current until then.
+
+## Summary units (opt-in probe)
+
+Passage search is weakest on **paraphrased** questions, which describe a note in words the note
+never uses. A summary unit is a short description of one note (3–6 plain sentences and one
+key-concepts sentence, written by the extractor's LLM at ingest), searched *beside* the note's
+passages. In an offline probe (E14) adding summaries as rerank candidates lifted paraphrase nDCG@10
+from 0.397 to 0.526 against the same reranker without them. This implementation is a probe too: until
+the maintainer's v2 eval clears the bar in [ADR-0850](adr/0850-summary-units-as-rerank-candidates.md),
+it is not a recommended setting.
+
+Two switches, both off by default:
+
+1. **Generate** (operator, at ingest): `LCG_SUMMARY_UNITS=on`. Each episode of
+   `knowledge_process_chunk`, `knowledge_add_episode` and `knowledge_process_document` then gets one
+   summarize call (`call_type: "summarize"` in an LLM cassette) through the configured extractor, and
+   the summary is embedded with the passage embedder. A body under 20 non-whitespace characters is
+   skipped. A failed or empty summarize call never fails the ingest: the episode simply has no
+   summary unit, and the provider's failure is reported like any other extraction failure. The one
+   exception is a **cassette miss under replay** (`LCG_REPLAY_LLM`), which fails the ingest so a replay
+   can never silently run without summaries.
+2. **Use** (caller, per search): `summaries: true` on `knowledge_search_passages`. See
+   [IPC reference: summary units](ipc-mcp-reference.md#summary-units-as-candidates-summaries-issue-850).
+
+Granularity is **one summary per episode** (per chunk): for a single-chunk note that is one per note.
+A re-ingested chunk gets a new episode and a new summary; the old summary is demoted with the old
+episode, exactly like its passage. Summaries survive `knowledge_dump_wal` and
+`knowledge_rebuild_from_wal` (the vector is recomputed from the stored summary text; no LLM call), and
+deleting or purging an episode deletes its summary. Episodes ingested before the switch was turned on
+get no summary until they are re-ingested.
 
 ## Extractor: local or hosted
 
@@ -1567,6 +1598,58 @@ lower similarity to the user's query than `min_score`. `queries` (#802) compose 
 below its successor) is applied to each first-stage list, not to the fused result, so with `expand: true`
 and **without** `rerank` it is not guaranteed; `expand: true` together with `rerank: true` ranks a
 replacement above the note it supersedes when both are among the reranked candidates (`rerank_candidates`). See [Passage rerank and query expansion](configuration.md#passage-rerank-and-query-expansion).
+
+### Summary units as candidates: `summaries` (issue #850)
+
+An **opt-in probe** for paraphrased questions (a question that describes a note in words the note
+does not use). When the operator has turned on `LCG_SUMMARY_UNITS`, ingest writes one short
+LLM-written description per episode, a *summary unit* (see
+[Configuration: summary units](configuration.md#summary-units-opt-in-probe)). A call that sets
+`summaries: true` adds the summaries nearest the query to the candidates. With the key omitted,
+`null` or `false` the call is byte-identical to before, whatever else it sends.
+
+| Param | Type | Meaning |
+|-------|------|---------|
+| `summaries` | boolean | Add summary units to the candidates. Default off; `null` means "not specified"; any other non-boolean is an invalid-params error. |
+| `max_summary_slots` | integer ≥ 0 | At most this many returned results may come in via a summary (default `3`; `0` disables them). Validated only when `summaries` is true, with the `rerank_candidates` convention: absent takes the default; a non-integer, negative or `null` value is an error. Ignored otherwise. |
+
+How it works:
+
+- **Before belief-aware ranking and any rerank.** The 10 summary units nearest the user's own query
+  join that query's **vector** candidates, merged by cosine and subject to `min_score`, before the
+  `belief_aware` rules run and before RRF in `hybrid` mode. They are not fused in afterwards. LLM
+  expansion variants and caller `queries` variants get no summaries; the primary query's own leg does.
+  With `rerank`, the cross-encoder scores the summary's text.
+- **Belief is the episode's.** A summary carries its source episode's group, origin and supersession
+  state, so a superseded note's summary ranks below its successor exactly as its passage does, and a
+  `derived`/`answer` note's summary ranks below the primary note it cites. With `belief_aware: false`
+  summaries join without those rules, as passages do. A summary whose episode was removed
+  (`knowledge_mark_chunk_removed`) or deleted yields nothing. `group_ids` and `origins` filter a
+  summary through its episode, so a summary never brings in a passage the filters exclude.
+- **Results stay passages.** A summary that lands in the results is replaced by **its own episode's
+  passage**, the text the summary describes, so citations stay exact. That result has every ordinary
+  field plus `via: "summary"`, and its `score`, `similarity`, `rerank_score` and `belief` are the
+  summary candidate's (so `score` stays in rank order). Summary text never appears in a response. A
+  note appears at most once: if its passage was also retrieved directly, it keeps the better of the
+  two positions (`via` only when the summary placed it) and the next candidate fills the freed slot.
+  Results that did not come in through a summary have no `via` key.
+- **A response block**, present whenever `summaries: true` was sent:
+  `summaries: {applied, candidates, results?, reason?}` — `candidates` is how many summary units
+  entered the pool, `results` how many returned results came in via one. When summaries cannot
+  apply the call never fails: it returns the ordinary results with `applied: false` and a `reason`:
+  `no_units` (no summary units in the searched groups), `disabled` (`max_summary_slots: 0`) or
+  `no_candidates` (units exist but none entered the pool).
+- **No LLM call at query time** (ADR-0820): summaries are found by the query embedding alone.
+
+```json
+{"passages": [{"uuid": "…", "content": "…the passage text…", "score": 0.81, "via": "summary", "…": "…"}],
+ "count": 10,
+ "summaries": {"applied": true, "candidates": 10, "results": 2}}
+```
+
+Measured only as `lcg-passages-belief-rerank-summaries` (belief-aware first stage plus rerank); the
+other combinations (`expand`, `queries`, `hybrid`, rerank off) compose without errors but are
+unmeasured. See [ADR-0850](adr/0850-summary-units-as-rerank-candidates.md).
 
 ### group_ids semantics: omitted vs. empty
 
@@ -4863,7 +4946,8 @@ new cassette replays cleanly.
 
 A cassette is plain, uncompressed JSONL — one JSON object per line, no envelope. Each record
 carries a `key` (a SHA-256 hex digest used for matching), `call_type` (`extract`,
-`classify_entities`, or `classify_relations`), `provider`, `model`, an RFC 3339 `timestamp`,
+`classify_entities`, `classify_relations`, `consolidate_summary`, `judge_duplicates`, or
+`summarize`), `provider`, `model`, an RFC 3339 `timestamp`,
 the human-readable `request` content, and the call's `response`. Records are matched by `key`
 alone, independent of file order — a cassette assembled from multiple recording runs (or, for
 `LlmRouter`, from more than one primary/fallback leaf) replays correctly as a single flat file.
@@ -4873,7 +4957,11 @@ Two calls with identical semantic content are served FIFO, in the order they wer
 and edge system/user prompts plus `episode_body`/`group_id`/`reference_time`/
 `custom_instructions`/`source_type` — rendering the prompts (not just hashing the raw options)
 means editing a prompt template or the injected ontology correctly invalidates stale cassette
-entries. For `classify_entities`/`classify_relations`, the raw call arguments only. Timestamps,
+entries. For `classify_entities`/`classify_relations`, the raw call arguments only. For
+`summarize` (summary units, #850), the episode body and the rendered summarize prompts and
+nothing else: no group, ontology or chunk key, so a `summarize` record depends only on the text it
+describes and can be copied between cassettes (two episodes with the same body share one record).
+Timestamps,
 request nonces, and anything transport-specific (headers, API keys, URLs) are never part of the
 key, and never reach the cassette at all — the record/replay seam sits at the `Extractor` trait
 boundary, strictly above HTTP request construction, so there is nothing credential-shaped for it
@@ -4889,6 +4977,25 @@ committing or sharing a cassette**: source text drawn from a real workspace can 
 proprietary or personal data that has nothing to do with authentication. See
 [`crates/core/tests/fixtures/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md)
 for this repo's fixture-capture conventions.
+
+
+### Summary units (`summarize`) under replay
+
+With `LCG_SUMMARY_UNITS=on` every episode makes one `summarize` call. A summarize failure from a
+live provider never fails the ingest (the episode just has no summary unit), but under
+`LCG_REPLAY_LLM` a **missing `summarize` record fails the ingest** with the usual cassette-miss
+error: a replay without summaries must not quietly measure the no-summaries baseline under a
+summaries configuration. A cassette recorded before #850 has no `summarize` records, so
+re-record before replaying with summaries on. Because record and replay are mutually exclusive
+and the `summarize` key depends only on the body, the cheapest re-record is a live run with the
+summaries configuration selected (`lcg-eval retrieval --configs …,lcg-passages-belief-rerank-summaries
+--record-cassette <new.jsonl>`), then appending only its `summarize` lines to the committed cassette:
+
+```sh
+grep '"call_type":"summarize"' new.jsonl >> crates/eval/fixtures/retrieval-v2/cassette.jsonl
+```
+
+The run re-records every extraction too (one live call each); only the `summarize` lines are kept.
 
 ### Failure-record sidecar
 
@@ -4909,7 +5016,7 @@ Each record is a JSON object with:
 |-------|-------------|
 | `ts_ms` | Unix epoch milliseconds |
 | `model` | The model name in force for this call |
-| `call_type` | `"entities"` or `"edges"` |
+| `call_type` | `"entities"`, `"edges"`, or `"summarize"` (a summary-unit call, #850; it never fails the ingest) |
 | `chunk_key` | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
 | `classification` | `"http_error"`, `"truncation"`, or `"malformed"` |
 | `raw_body` | The **complete** raw response body — never truncated to a prefix. May echo back source-text content from the failing call; treat sidecar files with the same review-before-sharing care as cassettes above. |
@@ -6724,7 +6831,8 @@ question set are within noise; read them with the confidence caveats above.
 
 ## Comparing the passage stages (rerank and query expansion)
 
-Four opt-in configurations measure the optional stages of `knowledge_search_passages`
+Four opt-in configurations measure the optional stages of `knowledge_search_passages` (a fifth, for
+summary units, is [below](#summary-units-lcg-passages-belief-rerank-summaries-850))
 ([ADR-0796](adr/0796-passage-rerank-and-query-expansion.md)); each is switchable and measured on its own:
 
 | Config | Stages |
@@ -6763,6 +6871,35 @@ bootstrap interval (and expansion on top of `lcg-passages-rerank`), plus the fou
 paraphrase gain with an interval above zero, overall not lower, temporal interval including or exceeding
 zero, and p50 ≤ 150 ms. Take acceptance numbers only after #790 (embedding roles) is in the build under
 test, and hybrid BM25 + vector (#789) has landed, but the eval has no configuration for rerank or expansion on top of hybrid yet, so that half of the comparison is still to be done.
+
+### Summary units (`lcg-passages-belief-rerank-summaries`, #850)
+
+`lcg-passages-belief-rerank-summaries` is `lcg-passages-belief-rerank` with `summaries: true`
+([ADR-0850](adr/0850-summary-units-as-rerank-candidates.md)): each note's LLM-written summary unit
+joins the belief-aware first stage before the rerank, and a summary hit is scored as its note's
+passage. Selecting it sets `LCG_SUMMARY_UNITS=on` for the spawned service, so the run's single ingest
+writes summary units (every other configuration in the same run ignores them, since none sends
+`summaries`). It is paired **only** with `lcg-passages-belief-rerank`, so the delta isolates the
+summaries; include that config in `--configs`. A response whose summaries stage did not apply
+(`no_units`) is a failed query, never scored. Replaying a cassette needs `summarize` records; see
+[Testing: summary units under replay](testing-and-evaluation.md#summary-units-summarize-under-replay).
+
+```sh
+lcg-eval retrieval --corpus crates/eval/fixtures/retrieval-v2 \
+  --embedder-uds /tmp/liminis-inference.sock \
+  --configs lcg-passages-belief-rerank,lcg-passages-belief-rerank-summaries \
+  --out report-summaries
+```
+
+The *Passage stages* section adds a **summary-units bar** (SC-004–SC-006 of the #850 spec), the bar to
+make summaries a recommended setting:
+
+- paraphrase nDCG@k at least +0.05, with the paired interval above zero;
+- overall nDCG@k paired interval lower bound above −0.01;
+- temporal and multi-hop each no worse than −0.01 (point estimate).
+
+If the bar is not met the outcome is recorded as null result E15 and the feature stays opt-in or is
+reverted; the maintainer decides. v2 has no dev/test split, so a pass is optimistic.
 
 ### When to use each stage
 
@@ -8322,6 +8459,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0821](0821-graph-qa-eval-and-kept-workspaces.md) | `lcg-eval graph-qa`, Ontology Ingest and Kept Workspaces | 2026-11-21 |
 | [0823](0823-literal-object-edges-as-self-loops.md) | Literal-Object Edges as Self-Loops Under an Ontology | 2026-11-21 |
 | [0824](0824-own-source-id-entity-filter.md) | Drop Extracted Entities Named After the Episode's Own Source ID or a Cited Note ID | 2026-11-21 |
+| [0850](0850-summary-units-as-rerank-candidates.md) | Summary Units as Rerank Candidates, Inside Belief-Aware Order | 2026-11-21 |
 | [0851](0851-test-providers-mode.md) | Test-Providers Mode: Built-in Deterministic Embedder and Fact-Line Extractor | 2026-11-21 |
 | [0853](0853-episode-source-identity-and-exact-source-matching.md) | Episode Source Identity and Exact Source Matching | 2026-11-21 |
 | [0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md) | `knowledge_capabilities` — Protocol Version, Feature Registry and a Self-Describing Socket | 2026-11-21 |

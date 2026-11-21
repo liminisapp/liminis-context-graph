@@ -11,6 +11,17 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- **Summary units as passage-search candidates, opt-in (#850, ADR-0850).** Passage search is weakest
+  on paraphrased questions (0.328 nDCG@10 on v2 for `lcg-passages-belief-rerank`). With
+  `LCG_SUMMARY_UNITS=on`, ingest writes one short LLM summary per episode (one extra extractor call,
+  cassette `call_type: "summarize"`; a failure never fails the ingest, a replay cassette miss does).
+  `knowledge_search_passages` gains `summaries: true` and `max_summary_slots` (default 3): the nearest
+  summaries join the first stage before belief-aware ranking and rerank, carry their episode's belief
+  state, and come back as their own note's passage marked `via: "summary"`, once per note and at most
+  `max_summary_slots` times, with a `summaries` status block. Both switches are off by default and a
+  call without `summaries` is byte-identical; no LLM is called at query time. New eval config
+  `lcg-passages-belief-rerank-summaries`, paired with `lcg-passages-belief-rerank` and reporting the
+  recommendation bar. An implementation probe of E14: a null result is an acceptable outcome.
 - **Graph question answering eval: `lcg-eval graph-qa`, ontology ingest and kept workspaces
   (#821, ADR-0821).** E13's graph question-answering eval (#815) ran only as scratch Python, so
   none of its numbers could be reproduced and `knowledge_walk` (#820) had no regression check.
