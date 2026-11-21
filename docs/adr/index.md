@@ -170,6 +170,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0806](0806-belief-aware-passage-ranking-default.md) | Belief-Aware Passage Ranking Is the Default | 2026-11-19 |
 | [0808](0808-replay-embed-retry-and-zero-vector-record.md) | Replay Embedding Recompute — Bounded Retry, Window Splitting and a Durable Zero-Vector Record | 2026-11-19 |
 | [0812](0812-search-min-score-env-default.md) | Operator-Configurable Default `min_score` for Passage Search | 2026-11-19 |
+| [0816](0816-ontology-edge-direction-check-and-repair.md) | Ontology Edge Direction — Define, Validate and Repair | 2026-11-21 |
 
 ## Historical numbering
 

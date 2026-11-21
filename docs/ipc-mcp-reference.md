@@ -1344,6 +1344,29 @@ rely on it:
   canonicalize has nothing to map from and cannot rebuild it.** Snapshot with `knowledge_dump_wal`
   before such an operation.
 
+**Edge direction repair (#816).** When the ontology declares a relation signature
+(`source_type`/`target_type`) or `inverse_aliases`, `knowledge_canonicalize_relations` also applies
+the ingest-time direction rules to the stored graph, with no re-extraction
+([Ontology → Edge direction](ontology.md#edge-direction), [ADR-0816](adr/0816-ontology-edge-direction-check-and-repair.md)):
+
+- An edge whose endpoint entity types fit its relation's signature only when reversed is **swapped**
+  (source and target exchanged; the stored `name` is rewritten only if it has the ingest form
+  `"A → B"`). An edge retyped through an *inverse alias* (or an inverse keyword hit) is retyped and
+  swapped in the same pass. An edge that fits neither way is **never dropped**: it is marked
+  `"signature_mismatch": true` in its `attributes` (existing keys such as `original_relation_type`
+  are preserved). A stale mark is cleared once the edge fits. Symmetric relations, relations with no
+  signature, and edges with an untyped endpoint are skipped.
+- `dry_run: true` computes and reports everything and writes nothing.
+- The response gains `swapped_count`, `signature_mismatch_count` and
+  `by_type: {<RELATION>: {checked, swapped, mismatched}}` (`checked` = edges that could be
+  evaluated). `by_type` is `{}` and the counts are `0` for an ontology with no signature and no
+  inverse alias, which is processed exactly as before.
+- It is idempotent: a second run on a repaired graph reports `swapped_count: 0`. Edges missing
+  either endpoint hop (e.g. unbound cross-group pointers) are not checked.
+- A swap rewrites the edge's three stored structures (shadow node, direct relationship, two hops) as
+  several statements; a crash mid-swap can leave one edge half-wired. Take a snapshot
+  (`knowledge_dump_wal`) and preview with `dry_run` before running it on a large graph.
+
 **`knowledge_backfill_relation_types`** (DEPRECATED) does not classify at all — it mints
 uppercased fact-prefix pseudo-types (e.g. `THE_SPECIFICATION_DOCUMENT_DEFINES`) for edges with no
 `relation_type`, rather than matching against the ontology. Avoid it for building a typed
@@ -1527,6 +1550,14 @@ result fields exist for that, both introduced in 0.13.2.
   a similar entity of the current chunk; a name stored under more than one eligible kind is dropped
   as ambiguous rather than salvaged
   ([ADR-0666](adr/0666-exact-graph-match-and-uuid-self-loop-guard.md)).
+
+- **`edges_swapped` and `edges_signature_mismatch` report the endpoint direction check (#816).**
+  Two additive top-level counters, always present. `edges_swapped` counts edges stored with their
+  endpoints exchanged because they fit the relation's declared signature only when reversed;
+  `edges_signature_mismatch` counts edges stored unchanged but marked `"signature_mismatch": true`
+  in their `attributes` because they fit in neither direction. No edge is dropped by this check.
+  Both are `0` for an ontology that declares no signature. Swaps made by an inverse alias
+  (strict mode) are not counted here. See [Ontology → Edge direction](ontology.md#edge-direction).
 
 - **`warning` reports oversized input.** A `chunk_text` longer than the advisory threshold
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see

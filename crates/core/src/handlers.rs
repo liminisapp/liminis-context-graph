@@ -1290,6 +1290,8 @@ async fn handle_knowledge_process_chunk(
         "edges_dropped_self_loop": result.edges_dropped_self_loop,
         "dropped_edges": result.dropped_edges,
         "edges_reclassified_unclassified": result.edges_reclassified_unclassified,
+        "edges_swapped": result.edges_swapped,
+        "edges_signature_mismatch": result.edges_signature_mismatch,
         "entities_reclassified_unclassified": result.entities_reclassified_unclassified,
         "entities_dropped_malformed": result.entities_dropped_malformed,
         "edges_dropped_malformed": result.edges_dropped_malformed,
