@@ -706,8 +706,11 @@ call would miss. A cassette recorded before this change has no sidecar. Replayin
 
 **The manifest.** `lcg-eval-workspace.json` records how the workspace was built: group, corpus
 version and hash, ontology hash and mode, embedder, embedding profile, extractor, cassette and LCG
-build. `graph-qa` refuses a workspace whose embedder differs from the one it is given (exit 3). Its
-stored vectors would not be comparable, and the numbers would be silently meaningless.
+build. `graph-qa` refuses a workspace whose embedder differs from the one it is given (exit 3). The
+addresses are compared after normalising loopback aliases (`localhost`, `127.0.0.1`, `[::1]`), case
+and a trailing slash; `--allow-embedder-mismatch` downgrades a remaining mismatch to a warning, for
+the same embedding model reached at a new address (a relocated socket, say). A genuinely different
+embedder would make the stored vectors incomparable and the numbers silently meaningless.
 
 ## Model provider (judge, planner, reader)
 
@@ -777,7 +780,7 @@ workspace itself, including its WAL, is never modified.
 | `--plans-only` | off | Never call the planner. A question with no recorded plan fails the run before any reader call (exit 4). |
 | `--planner-model`, `--reader-model` | `claude-haiku-4-5-20251001` | Through the provider configuration above. |
 | `--llm-cache <FILE>` | `graph-qa-llm-cache.jsonl` | The response cache. |
-| `--embedder-*`, `--embedding-profile`, `--reranker-*`, `--service-bin` | | As for `retrieval`; the embedder must be the ingest embedder (exit 3 otherwise). `--embedding-profile` defaults to the one recorded in the workspace manifest, and a different one is refused (exit 3). |
+| `--embedder-*`, `--embedding-profile`, `--reranker-*`, `--service-bin` | | As for `retrieval`; the embedder must be the ingest embedder (exit 3 otherwise, unless `--allow-embedder-mismatch`). `--embedding-profile` defaults to the one recorded in the workspace manifest, and a different one is refused (exit 3). |
 | `--qmd-bin`, `--qmd-index` | `qmd`, `lcg-eval-<corpus>-<hash8>` | For the `qmd` runner. |
 | `--k`, `--concurrency` | 10, 6 | Passages per question; parallel model calls. |
 | `--bootstrap-seed`, `--bootstrap-resamples` | 788, 10000 | Paired bootstrap, as in `retrieval` (ADR-0788). |

@@ -28,6 +28,9 @@ pub struct GraphQaArgs {
     pub service_bin: Option<PathBuf>,
     pub embedder_http: Option<String>,
     pub embedder_uds: Option<String>,
+    /// `--allow-embedder-mismatch`: warn instead of refusing (exit 3) when the configured embedder
+    /// address differs from the one in the workspace manifest.
+    pub allow_embedder_mismatch: bool,
     pub embedding_profile: Option<String>,
     pub reranker_http: Option<String>,
     pub reranker_uds: Option<String>,
@@ -81,6 +84,9 @@ OPTIONS:
     --service-bin <PATH>       liminis-context-graph binary (default: alongside lcg-eval, else PATH).
     --embedder-http <URL>      The embedder the workspace was ingested with (required unless
     --embedder-uds <SOCKET>    LCG_EMBEDDING_URL is set; checked against the workspace manifest).
+    --allow-embedder-mismatch  Warn instead of refusing (exit 3) when the embedder address differs
+                               from the manifest's (loopback aliases and a trailing slash already
+                               compare equal). Only for the same embedding model at a new address.
     --embedding-profile <P>    LCG_EMBEDDING_PROFILE for the service (default: the ingest profile
                                recorded in the workspace manifest; a different one is refused).
     --reranker-http <URL>      Reranker for passages-belief-rerank.
@@ -119,6 +125,7 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
         service_bin: None,
         embedder_http: None,
         embedder_uds: None,
+        allow_embedder_mismatch: false,
         embedding_profile: None,
         reranker_http: None,
         reranker_uds: None,
@@ -147,6 +154,7 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
         match flag {
             "-h" | "--help" => return Ok(Mode::Help),
             "--plans-only" => a.plans_only = true,
+            "--allow-embedder-mismatch" => a.allow_embedder_mismatch = true,
             "--workspace" => workspace = Some(PathBuf::from(val(flag)?)),
             "--corpus" => a.corpus = PathBuf::from(val(flag)?),
             "--questions" => a.questions = Some(PathBuf::from(val(flag)?)),

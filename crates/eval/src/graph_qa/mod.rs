@@ -65,21 +65,46 @@ pub struct WorkspaceInfo {
 /// Checks that `ws` is an ingested workspace and reads its ontology and manifest. The embedder the
 /// run will use must be the one the workspace was ingested with: a different one would compare
 /// query vectors against incompatible stored vectors and give silently meaningless numbers.
-pub fn inspect_workspace(ws: &Path, embedder: &str) -> Result<WorkspaceInfo, Failure> {
+///
+/// The manifest records the embedder as an address, not a model identity, so the comparison goes
+/// through [`embedder_key`] (loopback aliases, case and a trailing slash do not count), and
+/// `allow_mismatch` (`--allow-embedder-mismatch`) downgrades a remaining mismatch to a warning, for
+/// the same embedder reached at a different address (a relocated socket, say).
+pub fn inspect_workspace(
+    ws: &Path,
+    embedder: &str,
+    allow_mismatch: bool,
+) -> Result<WorkspaceInfo, Failure> {
     find_db(ws, None).map_err(|e| fail(EXIT_WORKSPACE, e.to_string()))?;
     let manifest = workspace::read_manifest(ws).map_err(|e| fail(EXIT_WORKSPACE, e))?;
     if let Some(m) = &manifest {
-        if !m.embedder.is_empty() && !embedder.is_empty() && m.embedder != embedder {
-            return Err(fail(
-                EXIT_WORKSPACE,
-                format!(
-                    "workspace {} was ingested with embedder {} but this run is configured with {}; \
-                     its stored vectors are not comparable. Pass the ingest embedder.",
+        if !m.embedder.is_empty()
+            && !embedder.is_empty()
+            && embedder_key(&m.embedder) != embedder_key(embedder)
+        {
+            if allow_mismatch {
+                eprintln!(
+                    "lcg-eval graph-qa: WARNING workspace {} was ingested with embedder {} but \
+                     this run uses {}; proceeding because of --allow-embedder-mismatch. The scores \
+                     are only meaningful if both addresses serve the same embedding model.",
                     ws.display(),
                     m.embedder,
                     embedder
-                ),
-            ));
+                );
+            } else {
+                return Err(fail(
+                    EXIT_WORKSPACE,
+                    format!(
+                        "workspace {} was ingested with embedder {} but this run is configured \
+                         with {}; its stored vectors are not comparable. Pass the ingest \
+                         embedder, or --allow-embedder-mismatch if this address serves the same \
+                         embedding model.",
+                        ws.display(),
+                        m.embedder,
+                        embedder
+                    ),
+                ));
+            }
         }
     }
     let onto = lcg_core::ontology::load_ontology(Some(ws));
@@ -94,6 +119,41 @@ pub fn inspect_workspace(ws: &Path, embedder: &str) -> Result<WorkspaceInfo, Fai
         ontology_mode: onto.as_ref().map(|o| o.mode.to_string()),
         manifest,
     })
+}
+
+/// An embedder address in comparable form. For an `http(s)` URL the scheme and host are lowercased,
+/// `localhost` and `[::1]` become `127.0.0.1`, and a trailing `/` is dropped, so the same local
+/// embedder typed two ways compares equal. Anything else (a socket path) is only trimmed.
+pub fn embedder_key(addr: &str) -> String {
+    let s = addr.trim();
+    let Some((scheme, rest)) = s.split_once("://") else {
+        return s.to_string();
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return s.to_string();
+    }
+    let (authority, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    let authority = authority.to_ascii_lowercase();
+    let (host, port) = if let Some(after) = authority.strip_prefix('[') {
+        match after.split_once(']') {
+            Some((h, p)) => (format!("[{h}]"), p.to_string()),
+            None => (authority.clone(), String::new()),
+        }
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) => (h.to_string(), format!(":{p}")),
+            None => (authority.clone(), String::new()),
+        }
+    };
+    let host = match host.as_str() {
+        "localhost" | "[::1]" => "127.0.0.1".to_string(),
+        _ => host,
+    };
+    format!("{scheme}://{host}{port}{}", path.trim_end_matches('/'))
 }
 
 /// The embedding profile to run the service with. The query and hop-phrase vectors must be made with
@@ -152,7 +212,7 @@ pub async fn run_on_workspace(
         .or(a.embedder_uds.clone())
         .or_else(|| std::env::var("LCG_EMBEDDING_URL").ok())
         .unwrap_or_default();
-    let info = inspect_workspace(&a.workspace, &embedder)?;
+    let info = inspect_workspace(&a.workspace, &embedder, a.allow_embedder_mismatch)?;
     let embedding_profile = resolve_embedding_profile(
         &a.workspace,
         info.manifest.as_ref(),
@@ -374,6 +434,57 @@ pub fn default_questions(corpus: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedder_addresses_compare_through_loopback_case_and_trailing_slash() {
+        let same = [
+            ("http://localhost:8080", "http://127.0.0.1:8080"),
+            ("http://127.0.0.1:8080/", "http://127.0.0.1:8080"),
+            (
+                "HTTP://LocalHost:8080/embed/",
+                "http://127.0.0.1:8080/embed",
+            ),
+            ("http://[::1]:8080", "http://localhost:8080"),
+            (" /tmp/e.sock ", "/tmp/e.sock"),
+        ];
+        for (a, b) in same {
+            assert_eq!(embedder_key(a), embedder_key(b), "{a} vs {b}");
+        }
+        let different = [
+            ("http://127.0.0.1:8080", "http://127.0.0.1:8081"),
+            ("http://127.0.0.1:8080/a", "http://127.0.0.1:8080/b"),
+            ("http://10.0.0.2:8080", "http://127.0.0.1:8080"),
+            ("/tmp/a.sock", "/tmp/b.sock"),
+        ];
+        for (a, b) in different {
+            assert_ne!(embedder_key(a), embedder_key(b), "{a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn an_embedder_mismatch_is_refused_unless_allowed() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path();
+        std::fs::create_dir_all(ws.join(".lcg/db")).unwrap();
+        std::fs::write(ws.join(".lcg/db/liminis.db"), b"").unwrap();
+        let m = workspace::WorkspaceManifest {
+            embedder: "http://localhost:8080".into(),
+            ..Default::default()
+        };
+        workspace::write_manifest(ws, &m).unwrap();
+        // An alias of the ingest address is accepted.
+        inspect_workspace(ws, "http://127.0.0.1:8080/", false).unwrap();
+        // A different address is refused, and the error names the override.
+        let e = inspect_workspace(ws, "/tmp/other.sock", false).unwrap_err();
+        assert_eq!(e.code, EXIT_WORKSPACE);
+        assert!(
+            e.message.contains("--allow-embedder-mismatch"),
+            "{}",
+            e.message
+        );
+        // The override lets it through.
+        inspect_workspace(ws, "/tmp/other.sock", true).unwrap();
+    }
 
     #[test]
     fn the_ingest_embedding_profile_is_inherited_and_a_different_one_refused() {
