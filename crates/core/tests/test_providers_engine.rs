@@ -276,3 +276,20 @@ async fn status_and_health_report_test_providers() {
     let st = call(&state, "knowledge_status", json!({})).await;
     assert_eq!(st["embedding_model"], TEST_EMBEDDER_MODEL);
 }
+
+#[tokio::test]
+async fn self_edges_are_dropped_by_ingest_as_documented() {
+    let (state, _d) = make_state(None);
+    ingest(&state, "a", "A -> A: refers to itself\nA -> B: real edge").await;
+    let es = edges(&state).await;
+    assert_eq!(es.len(), 1, "{es:?}");
+    assert_eq!(es[0]["fact"], "real edge");
+}
+
+#[tokio::test]
+async fn entity_names_resolve_case_insensitively_as_documented() {
+    let (state, _d) = make_state(None);
+    ingest(&state, "a", "Alice -> Acme: Alice works at Acme").await;
+    ingest(&state, "b", "alice -> acme: alice works at acme").await;
+    assert_eq!(entity_names(&state).await, ["Acme", "Alice"]);
+}
