@@ -49,7 +49,8 @@ new cassette replays cleanly.
 
 A cassette is plain, uncompressed JSONL — one JSON object per line, no envelope. Each record
 carries a `key` (a SHA-256 hex digest used for matching), `call_type` (`extract`,
-`classify_entities`, or `classify_relations`), `provider`, `model`, an RFC 3339 `timestamp`,
+`classify_entities`, `classify_relations`, `consolidate_summary`, `judge_duplicates`, or
+`summarize`), `provider`, `model`, an RFC 3339 `timestamp`,
 the human-readable `request` content, and the call's `response`. Records are matched by `key`
 alone, independent of file order — a cassette assembled from multiple recording runs (or, for
 `LlmRouter`, from more than one primary/fallback leaf) replays correctly as a single flat file.
@@ -59,7 +60,11 @@ Two calls with identical semantic content are served FIFO, in the order they wer
 and edge system/user prompts plus `episode_body`/`group_id`/`reference_time`/
 `custom_instructions`/`source_type` — rendering the prompts (not just hashing the raw options)
 means editing a prompt template or the injected ontology correctly invalidates stale cassette
-entries. For `classify_entities`/`classify_relations`, the raw call arguments only. Timestamps,
+entries. For `classify_entities`/`classify_relations`, the raw call arguments only. For
+`summarize` (summary units, #850), the episode body and the rendered summarize prompts and
+nothing else: no group, ontology or chunk key, so a `summarize` record depends only on the text it
+describes and can be copied between cassettes (two episodes with the same body share one record).
+Timestamps,
 request nonces, and anything transport-specific (headers, API keys, URLs) are never part of the
 key, and never reach the cassette at all — the record/replay seam sits at the `Extractor` trait
 boundary, strictly above HTTP request construction, so there is nothing credential-shaped for it
@@ -75,6 +80,25 @@ committing or sharing a cassette**: source text drawn from a real workspace can 
 proprietary or personal data that has nothing to do with authentication. See
 [`crates/core/tests/fixtures/README.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/tests/fixtures/README.md)
 for this repo's fixture-capture conventions.
+
+
+### Summary units (`summarize`) under replay
+
+With `LCG_SUMMARY_UNITS=on` every episode makes one `summarize` call. A summarize failure from a
+live provider never fails the ingest (the episode just has no summary unit), but under
+`LCG_REPLAY_LLM` a **missing `summarize` record fails the ingest** with the usual cassette-miss
+error: a replay without summaries must not quietly measure the no-summaries baseline under a
+summaries configuration. A cassette recorded before #850 has no `summarize` records, so
+re-record before replaying with summaries on. Because record and replay are mutually exclusive
+and the `summarize` key depends only on the body, the cheapest re-record is a live run with the
+summaries configuration selected (`lcg-eval retrieval --configs …,lcg-passages-belief-rerank-summaries
+--record-cassette <new.jsonl>`), then appending only its `summarize` lines to the committed cassette:
+
+```sh
+grep '"call_type":"summarize"' new.jsonl >> crates/eval/fixtures/retrieval-v2/cassette.jsonl
+```
+
+The run re-records every extraction too (one live call each); only the `summarize` lines are kept.
 
 ### Failure-record sidecar
 
@@ -95,7 +119,7 @@ Each record is a JSON object with:
 |-------|-------------|
 | `ts_ms` | Unix epoch milliseconds |
 | `model` | The model name in force for this call |
-| `call_type` | `"entities"` or `"edges"` |
+| `call_type` | `"entities"`, `"edges"`, or `"summarize"` (a summary-unit call, #850; it never fails the ingest) |
 | `chunk_key` | The episode name (production) or corpus chunk title (`lcg-eval`), or `null` |
 | `classification` | `"http_error"`, `"truncation"`, or `"malformed"` |
 | `raw_body` | The **complete** raw response body — never truncated to a prefix. May echo back source-text content from the failing call; treat sidecar files with the same review-before-sharing care as cassettes above. |

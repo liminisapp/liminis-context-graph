@@ -562,7 +562,8 @@ question set are within noise; read them with the confidence caveats above.
 
 ## Comparing the passage stages (rerank and query expansion)
 
-Four opt-in configurations measure the optional stages of `knowledge_search_passages`
+Four opt-in configurations measure the optional stages of `knowledge_search_passages` (a fifth, for
+summary units, is [below](#summary-units-lcg-passages-belief-rerank-summaries-850))
 ([ADR-0796](adr/0796-passage-rerank-and-query-expansion.md)); each is switchable and measured on its own:
 
 | Config | Stages |
@@ -601,6 +602,35 @@ bootstrap interval (and expansion on top of `lcg-passages-rerank`), plus the fou
 paraphrase gain with an interval above zero, overall not lower, temporal interval including or exceeding
 zero, and p50 ≤ 150 ms. Take acceptance numbers only after #790 (embedding roles) is in the build under
 test, and hybrid BM25 + vector (#789) has landed, but the eval has no configuration for rerank or expansion on top of hybrid yet, so that half of the comparison is still to be done.
+
+### Summary units (`lcg-passages-belief-rerank-summaries`, #850)
+
+`lcg-passages-belief-rerank-summaries` is `lcg-passages-belief-rerank` with `summaries: true`
+([ADR-0850](adr/0850-summary-units-as-rerank-candidates.md)): each note's LLM-written summary unit
+joins the belief-aware first stage before the rerank, and a summary hit is scored as its note's
+passage. Selecting it sets `LCG_SUMMARY_UNITS=on` for the spawned service, so the run's single ingest
+writes summary units (every other configuration in the same run ignores them, since none sends
+`summaries`). It is paired **only** with `lcg-passages-belief-rerank`, so the delta isolates the
+summaries; include that config in `--configs`. A response whose summaries stage did not apply
+(`no_units`) is a failed query, never scored. Replaying a cassette needs `summarize` records; see
+[Testing: summary units under replay](testing-and-evaluation.md#summary-units-summarize-under-replay).
+
+```sh
+lcg-eval retrieval --corpus crates/eval/fixtures/retrieval-v2 \
+  --embedder-uds /tmp/liminis-inference.sock \
+  --configs lcg-passages-belief-rerank,lcg-passages-belief-rerank-summaries \
+  --out report-summaries
+```
+
+The *Passage stages* section adds a **summary-units bar** (SC-004–SC-006 of the #850 spec), the bar to
+make summaries a recommended setting:
+
+- paraphrase nDCG@k at least +0.05, with the paired interval above zero;
+- overall nDCG@k paired interval lower bound above −0.01;
+- temporal and multi-hop each no worse than −0.01 (point estimate).
+
+If the bar is not met the outcome is recorded as null result E15 and the feature stays opt-in or is
+reverted; the maintainer decides. v2 has no dev/test split, so a pass is optimistic.
 
 ### When to use each stage
 
