@@ -85,8 +85,11 @@ embedded with the passage embedder:
    never had summaries gets no new WAL line.
 7. **Generation is opt-in at ingest: `LCG_SUMMARY_UNITS`** (workspace-wide, read per ingest, no
    `AppState` field). `add_episode_with_opts` runs one `Extractor::summarize` call (its own
-   cassette `call_type: "summarize"`, keyed on the body and rendered prompts only) beside the embed +
-   extract pair but outside their `try_join!`, embeds the cleaned text as a `Document`, and writes the
+   cassette `call_type: "summarize"`, keyed on the body and rendered prompts only) concurrently with
+   the embed + extract pair, as a third `try_join!` branch that always yields `Ok` with the summary's
+   own result inside: a summarize failure cannot fail the ingest, and an embed or extract failure
+   drops the in-flight summarize call rather than waiting for it. It embeds the cleaned text as a
+   `Document`, and writes the
    unit in Phase C, in the same WAL flush as the episode. Labels and headings ("Topics:",
    "Summary:", `#`) are stripped defensively because they inflate similarity between unrelated items.
 8. **Failure.** A summarize failure (provider error, timeout, empty or malformed reply) never fails
