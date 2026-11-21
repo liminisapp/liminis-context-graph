@@ -6732,6 +6732,11 @@ This is the record of every retrieval experiment and its result: what was tried,
 - **Metric:** nDCG@10, with paired-bootstrap 95% intervals. Treat a difference as real only when its interval excludes 0.
 - **Artifacts:** each run's `report.md` / `report.json` is kept by the maintainer, outside the repo. The PR or issue comment linked in each entry has the full tables.
 - **Methodology:** see [Retrieval-Quality Evaluation](retrieval-quality-evaluation.md) for the harness, corpora and question format.
+- **Graph-QA results** (E13 and later) come from `lcg-eval graph-qa` and nothing else ([#821](https://github.com/liminisapp/liminis-context-graph/issues/821)). There are two steps:
+  1. Ingest v2 with `retrieval --ontology crates/eval/fixtures/retrieval-v2/ontology-v3.1.yaml --keep-workspace <ws>`.
+  2. Run `graph-qa --workspace <ws> --plans crates/eval/fixtures/retrieval-v2/e13-v5-plans.json` over the committed `graph-questions.jsonl`.
+
+  Report `route` on E13 (all 129 questions) and on E13/test. Graph-QA uses answer accuracy, not nDCG. See [Standard setup for graph-QA results](retrieval-quality-evaluation.md#standard-setup-for-graph-qa-results).
 
 ## Current standing (2026-11-20, main after [#806](https://github.com/liminisapp/liminis-context-graph/issues/806), [#796](https://github.com/liminisapp/liminis-context-graph/issues/796) and [#802](https://github.com/liminisapp/liminis-context-graph/issues/802))
 
