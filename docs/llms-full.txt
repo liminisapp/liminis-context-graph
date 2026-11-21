@@ -2667,18 +2667,18 @@ result fields exist for that, both introduced in 0.13.2.
   meaning is unchanged, and a caller reading only the count is unaffected (issue #411).
 
 - **`entities_dropped_source_id` counts extracted entities dropped for being named after the
-  episode's own source ID or a cited note ID (issue #824).** An entity whose normalised name (case, surrounding
-  punctuation / `[[ ]]`, path prefix, one `.md`/`.markdown`/`.mdx`/`.txt` extension) equals the
-  chunk's own slug-shaped note ID (no whitespace, containing a `-`, `_` or digit; a note named after
-  its subject, such as `Alice.md`, has none) — the `source_file`, `doc_id`, or the `chunk_id` before its `#<n>` suffix —
-  is the model extracting the note itself and is dropped, together with any edge touching it. So is
-  an entity whose normalised name equals the ID-shaped target of a `[[wikilink]]` in the chunk text
-  (a citation such as `Sources: [[project-quill-core-1]]`; `[[Quill Core]]` is not ID-shaped and is
-  kept). The host-asserted `Document`/`Source` entity is the supported way to represent the note.
-  An ID-shaped name that is neither the own ID nor linked in the chunk text is never matched.
-  "ID-shaped" is a letter plus a `-`, `_` or digit, so a link to a hyphenated or versioned concept
-  page (`[[GPT-4]]`, `[[machine-learning]]`) is also a citation target. The count is a top-level field, always present (`0` when nothing was
-  dropped); the discarded edges are *not* counted in `edges_dropped_unresolvable`.
+  episode's own source ID or a cited note ID (issue #824).** An entity whose normalised name (case,
+  surrounding punctuation / `[[ ]]`, path prefix, one `.md`/`.markdown`/`.mdx`/`.txt` extension)
+  equals the chunk's own slug-shaped note ID (no whitespace, containing a `-`, `_` or digit; a note
+  named after its subject, such as `Alice.md`, has none) — the `source_file`, `doc_id`, or the
+  `chunk_id` before its `#<n>` suffix — is the model extracting the note itself and is dropped,
+  together with any edge touching it. So is an entity whose name is, verbatim (before
+  normalisation), an all-lowercase, space-free, ID-shaped `[[wikilink]]` target in the chunk text
+  (a citation such as `Sources: [[project-quill-core-1]]`) *and* the source ID of a note already
+  ingested in the same group. `[[GPT-4]]`, `[[Quill Core]]` and `[[machine-learning]]` (no such
+  note) are kept. The host-asserted `Document`/`Source` entity is the supported way to represent
+  the note. The count is a top-level field, always present (`0` when nothing was dropped); the
+  discarded edges are *not* counted in `edges_dropped_unresolvable`.
 
 - **`edges_dropped_self_loop` counts edges dropped because both endpoints resolved to one entity.**
   Two differently named endpoints can resolve to the same entity UUID (through dedup merges or
@@ -3631,19 +3631,23 @@ See [`docs/examples/ontology.example.yaml`](https://github.com/liminisapp/limini
 **An extracted entity named after a note ID is dropped.** Declaring a `Document` type can invite
 the model to extract a note ID as an entity (e.g. `project-quill-core-1`), which then absorbs edges
 that belong to the real entities. In practice the ID is usually a *citation*: wiki and answer notes
-end with `Sources: [[project-quill-core-1]]`, and the model extracts the cited note. Extraction
-deterministically drops an entity whose name equals an ID-shaped `[[wikilink]]` target in the
-episode body (a link to a real entity such as `[[Quill Core]]` is kept), or the episode's *own*
-source ID (the chunk's
-`source_file`, `doc_id`, or `chunk_id` prefix, compared case-insensitively and ignoring path
-prefix, wikilink brackets and a `.md`-style extension, and only when that ID is slug-shaped — a note
-filed under its subject's name such as `Alice.md` has no ID to match, so the real entity is kept),
-plus any edge touching it
-([ADR-0824](adr/0824-own-source-id-entity-filter.md)). The asserted `Document`/`Source` entity your
-host supplies is the supported way to represent the note. An ID-shaped name that is neither the
-episode's own ID nor linked in its body is kept. Caveat: "ID-shaped" means a letter plus a `-`, `_`
-or digit, so a link to a hyphenated or versioned concept page (`[[GPT-4]]`, `[[machine-learning]]`)
-counts too, and an entity extracted under exactly that name is dropped from that episode. The drop is reported as `entities_dropped_source_id` on `knowledge_process_chunk`.
+end with `Sources: [[project-quill-core-1]]`, and the model extracts the cited note. The text
+extraction prompt tells the model that such citations are not entities, and a deterministic filter
+backs it up ([ADR-0824](adr/0824-own-source-id-entity-filter.md)). The filter drops an extracted
+entity, and any edge touching it, when its name is:
+
+- **a cited note ID** — verbatim (before normalisation) an all-lowercase, space-free, ID-shaped
+  `[[wikilink]]` target in the episode body, *and* the ID of a note already ingested in the same
+  group. `[[GPT-4]]` (capitalised), `[[Quill Core]]` (not ID-shaped) and `[[machine-learning]]`
+  (no such note) are kept; a note ingested after the one citing it is missed; or
+- **the episode's own source ID** — the chunk's `source_file`, `doc_id` or `chunk_id` prefix,
+  compared case-insensitively and ignoring path prefix, wikilink brackets and a `.md`-style
+  extension, and only when that ID is slug-shaped (a note filed under its subject's name such as
+  `Alice.md` has no ID to match, so the real entity is kept).
+
+The asserted `Document`/`Source` entity your host supplies is the supported way to represent the
+note. An ID-shaped name that is neither the episode's own ID nor a cited, ingested note's ID is
+kept. The drop is reported as `entities_dropped_source_id` on `knowledge_process_chunk`.
 
 ## Modes
 
@@ -5491,11 +5495,14 @@ Under an ontology with a `Document` type the model sometimes extracts a *junk* e
 note ID (`project-quill-core-1`); the graph-integrity report (#819) counts these as "Nodes named
 like note IDs". The v2 junk was traced to **citation links**: wiki and answer notes end with
 `Sources: [[project-quill-core-1]]` or `(from [[project-quill-core-1]])`, and the model extracts the
-*cited* note's ID as an entity — none of the 13 is named after the note it came from. Extraction
-now drops an entity named after the episode's **own** source ID *or* an ID-shaped `[[wikilink]]`
-target in the episode body (ADR-0824) and reports the count as `entities_dropped_source_id`. A link
-to a real entity (`[[Quill Core]]`) is not ID-shaped and survives, and an ID-shaped name not linked
-in the body is kept. The 13 → 0 figure on the v2 corpus needs a maintainer-run #819 evaluation.
+*cited* note's ID as an entity — none of the 13 is named after the note it came from. Two layers
+address it (ADR-0824). The text extraction prompt says citations are not entities (the primary
+fix; it changes the prompt, so the committed v2 cassette must be re-recorded). A deterministic
+filter drops an entity named after the episode's **own** source ID, or one that is verbatim an
+all-lowercase, ID-shaped `[[wikilink]]` target naming a note **already ingested in the same group**,
+and reports the count as `entities_dropped_source_id`. `[[GPT-4]]`, `[[Quill Core]]` and
+`[[machine-learning]]` (with no such note) survive; a note ingested after the one citing it is
+missed. The 13 → 0 figure on the v2 corpus needs a maintainer-run #819 evaluation.
 
 ## Guidance
 

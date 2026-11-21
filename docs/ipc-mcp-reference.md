@@ -1658,18 +1658,18 @@ result fields exist for that, both introduced in 0.13.2.
   meaning is unchanged, and a caller reading only the count is unaffected (issue #411).
 
 - **`entities_dropped_source_id` counts extracted entities dropped for being named after the
-  episode's own source ID or a cited note ID (issue #824).** An entity whose normalised name (case, surrounding
-  punctuation / `[[ ]]`, path prefix, one `.md`/`.markdown`/`.mdx`/`.txt` extension) equals the
-  chunk's own slug-shaped note ID (no whitespace, containing a `-`, `_` or digit; a note named after
-  its subject, such as `Alice.md`, has none) — the `source_file`, `doc_id`, or the `chunk_id` before its `#<n>` suffix —
-  is the model extracting the note itself and is dropped, together with any edge touching it. So is
-  an entity whose normalised name equals the ID-shaped target of a `[[wikilink]]` in the chunk text
-  (a citation such as `Sources: [[project-quill-core-1]]`; `[[Quill Core]]` is not ID-shaped and is
-  kept). The host-asserted `Document`/`Source` entity is the supported way to represent the note.
-  An ID-shaped name that is neither the own ID nor linked in the chunk text is never matched.
-  "ID-shaped" is a letter plus a `-`, `_` or digit, so a link to a hyphenated or versioned concept
-  page (`[[GPT-4]]`, `[[machine-learning]]`) is also a citation target. The count is a top-level field, always present (`0` when nothing was
-  dropped); the discarded edges are *not* counted in `edges_dropped_unresolvable`.
+  episode's own source ID or a cited note ID (issue #824).** An entity whose normalised name (case,
+  surrounding punctuation / `[[ ]]`, path prefix, one `.md`/`.markdown`/`.mdx`/`.txt` extension)
+  equals the chunk's own slug-shaped note ID (no whitespace, containing a `-`, `_` or digit; a note
+  named after its subject, such as `Alice.md`, has none) — the `source_file`, `doc_id`, or the
+  `chunk_id` before its `#<n>` suffix — is the model extracting the note itself and is dropped,
+  together with any edge touching it. So is an entity whose name is, verbatim (before
+  normalisation), an all-lowercase, space-free, ID-shaped `[[wikilink]]` target in the chunk text
+  (a citation such as `Sources: [[project-quill-core-1]]`) *and* the source ID of a note already
+  ingested in the same group. `[[GPT-4]]`, `[[Quill Core]]` and `[[machine-learning]]` (no such
+  note) are kept. The host-asserted `Document`/`Source` entity is the supported way to represent
+  the note. The count is a top-level field, always present (`0` when nothing was dropped); the
+  discarded edges are *not* counted in `edges_dropped_unresolvable`.
 
 - **`edges_dropped_self_loop` counts edges dropped because both endpoints resolved to one entity.**
   Two differently named endpoints can resolve to the same entity UUID (through dedup merges or

@@ -296,10 +296,11 @@ async fn other_notes_id_is_kept() {
 }
 
 // Maintainer follow-up on #824: on v2 the junk nodes are *other* notes' IDs cited as `[[wikilinks]]`
-// in wiki / answer notes, not the episode's own ID. An ID-shaped citation target is dropped (with its
-// edges) even though it is not the episode's own ID; the real entities survive.
+// in wiki / answer notes, not the episode's own ID. A verbatim-lowercase, ID-shaped link target that
+// names a note already ingested in the same group is dropped (with its edges); the real entities
+// survive. The three excerpts are the maintainer's v2 fixtures.
 #[tokio::test]
-async fn citation_targets_are_dropped_and_rest_survives() {
+async fn citation_targets_of_ingested_notes_are_dropped_and_rest_survives() {
     for (note_id, text, junk) in [
         (
             "wiki-quill-core",
@@ -324,12 +325,16 @@ async fn citation_targets_are_dropped_and_rest_survives() {
                 entities.push(ent(j, "Document"));
                 edges.push(edge("Quill Core", j, "CITES"));
             }
+            // One empty extraction per cited note (they are ingested first), then the citing note.
+            let mut queue: Vec<ExtractionResult> =
+                junk.iter().map(|_| ExtractionResult::default()).collect();
+            queue.push(ExtractionResult { entities, edges });
             let (db, _d) = make_db();
-            let state = make_state(
-                Arc::clone(&db),
-                Some(ontology(mode.clone())),
-                vec![ExtractionResult { entities, edges }],
-            );
+            let state = make_state(Arc::clone(&db), Some(ontology(mode.clone())), queue);
+            for j in &junk {
+                let r = process_chunk_text(&state, j, "The cited note.").await;
+                assert_eq!(r["success"], json!(true), "{j}: {r}");
+            }
             let r = process_chunk_text(&state, note_id, text).await;
             assert_eq!(r["success"], json!(true), "{note_id} {mode}: {r}");
             assert_eq!(
@@ -343,35 +348,164 @@ async fn citation_targets_are_dropped_and_rest_survives() {
     }
 }
 
-// The ID-shape guard: a link to a real entity (`[[Quill Core]]`) is not a citation target and the
-// entity must survive, as must an ID-shaped name that is *not* linked in this episode's body.
+// Rule (b): the same link is kept when the cited note is not (yet) in the group.
 #[tokio::test]
-async fn non_id_shaped_link_targets_and_unlinked_ids_are_kept() {
+async fn citation_target_is_kept_when_the_note_is_not_in_the_group() {
     let (db, _d) = make_db();
     let state = make_state(
         Arc::clone(&db),
         Some(ontology(OntologyMode::Open)),
         vec![ExtractionResult {
             entities: vec![
-                ent("Quill Core", "Document"),
                 ent("Ada", "Person"),
-                ent("project-quill-core-2", "Document"),
+                ent("project-quill-core-1", "Document"),
             ],
-            edges: vec![edge("Ada", "Quill Core", "KNOWS")],
+            edges: vec![edge("Ada", "project-quill-core-1", "CITES")],
         }],
     );
     let r = process_chunk_text(
         &state,
         "wiki-quill-core",
-        "Ada owns [[Quill Core]]. Sources: [[project-quill-core-1]]",
+        "Ada owns Quill Core. Sources: [[project-quill-core-1]]",
     )
     .await;
     assert_eq!(r["entities_dropped_source_id"], json!(0), "{r}");
-    assert_eq!(
-        entity_names(&db),
-        vec!["Ada", "Quill Core", "project-quill-core-2"]
+    assert_eq!(entity_names(&db), vec!["Ada", "project-quill-core-1"]);
+    assert_eq!(edge_facts(&db), vec!["Ada CITES project-quill-core-1"]);
+}
+
+// Rule (b) is group-scoped: a note ingested in *another* group does not make the link a citation.
+#[tokio::test]
+async fn citation_target_is_kept_when_the_note_is_only_in_another_group() {
+    let (db, _d) = make_db();
+    let state = make_state(
+        Arc::clone(&db),
+        Some(ontology(OntologyMode::Open)),
+        vec![
+            ExtractionResult::default(),
+            ExtractionResult {
+                entities: vec![
+                    ent("Ada", "Person"),
+                    ent("project-quill-core-1", "Document"),
+                ],
+                edges: vec![],
+            },
+        ],
     );
-    assert_eq!(edge_facts(&db), vec!["Ada KNOWS Quill Core"]);
+    let r = call(
+        &state,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "The cited note.",
+            "chunk_id": "project-quill-core-1#0",
+            "source_file": "project-quill-core-1",
+            "group_id": "some-other-group",
+        }),
+    )
+    .await["result"]
+        .clone();
+    assert_eq!(r["success"], json!(true), "{r}");
+    let r = process_chunk_text(
+        &state,
+        "wiki-quill-core",
+        "Sources: [[project-quill-core-1]]",
+    )
+    .await;
+    assert_eq!(r["entities_dropped_source_id"], json!(0), "{r}");
+    assert!(entity_names(&db).contains(&"project-quill-core-1".to_string()));
+}
+
+// The known note may be identified by an explicit `doc_id` rather than the chunk id / source file.
+#[tokio::test]
+async fn citation_target_known_by_doc_id_is_dropped() {
+    let (db, _d) = make_db();
+    let state = make_state(
+        Arc::clone(&db),
+        Some(ontology(OntologyMode::Open)),
+        vec![
+            ExtractionResult::default(),
+            ExtractionResult {
+                entities: vec![
+                    ent("Ada", "Person"),
+                    ent("project-quill-core-1", "Document"),
+                ],
+                edges: vec![edge("Ada", "project-quill-core-1", "CITES")],
+            },
+        ],
+    );
+    // Free-form episode carrying a doc_id: the chunk id / source file are unrelated names.
+    episode::add_episode_with_opts(
+        Arc::clone(&state),
+        "unrelated free-form name",
+        "The cited note.",
+        "text",
+        "free form",
+        "2026-01-01T00:00:00Z",
+        G,
+        SourceType::Text,
+        None,
+        "",
+        episode::EpisodeOpts {
+            doc_id: Some("Project-Quill-Core-1.md".to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let r = process_chunk_text(
+        &state,
+        "wiki-quill-core",
+        "Ada. Sources: [[project-quill-core-1]]",
+    )
+    .await;
+    assert_eq!(r["entities_dropped_source_id"], json!(1), "{r}");
+    assert_eq!(entity_names(&db), vec!["Ada"]);
+    assert!(edge_facts(&db).is_empty());
+}
+
+// Maintainer tests: `[[GPT-4]]` extracted as "GPT-4" is kept (not verbatim lowercase), and
+// `[[machine-learning]]` is kept when no such note is ingested; a link to a real entity
+// (`[[Quill Core]]`) is kept even when a note of that name could exist.
+#[tokio::test]
+async fn concept_links_are_kept() {
+    let (db, _d) = make_db();
+    let state = make_state(
+        Arc::clone(&db),
+        Some(ontology(OntologyMode::Open)),
+        vec![
+            // A note whose id is `gpt-4` exists, but the link is `[[GPT-4]]` (capitalised), so
+            // the entity "GPT-4" is not a verbatim lowercase citation of it.
+            ExtractionResult::default(),
+            ExtractionResult::default(),
+            ExtractionResult {
+                entities: vec![
+                    ent("GPT-4", "Technology"),
+                    ent("machine-learning", "Concept"),
+                    ent("Quill Core", "Document"),
+                    ent("Ada", "Person"),
+                ],
+                edges: vec![
+                    edge("Ada", "GPT-4", "KNOWS"),
+                    edge("Ada", "machine-learning", "KNOWS"),
+                    edge("Ada", "Quill Core", "KNOWS"),
+                ],
+            },
+        ],
+    );
+    process_chunk_text(&state, "gpt-4", "Notes.").await;
+    process_chunk_text(&state, "quill-core", "Notes.").await;
+    let r = process_chunk_text(
+        &state,
+        "wiki-ai",
+        "We migrated to [[GPT-4]] and [[machine-learning]]. See [[Quill Core]].",
+    )
+    .await;
+    assert_eq!(r["entities_dropped_source_id"], json!(0), "{r}");
+    let names = entity_names(&db);
+    for n in ["GPT-4", "machine-learning", "Quill Core", "Ada"] {
+        assert!(names.contains(&n.to_string()), "{n}: {names:?}");
+    }
+    assert_eq!(edge_facts(&db).len(), 3);
 }
 
 // A note filed under its subject's name (`people/Alice.md`) has no slug-shaped ID: the real `Alice`

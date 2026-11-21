@@ -97,13 +97,14 @@ pub struct AddEpisodeResult {
     /// missing/`null`/empty-string/whitespace-only `name` all still produce a single observable
     /// outcome (#342 FR-003, FR-007; #347 FR-004).
     pub entities_dropped_malformed: usize,
-    /// Extracted entities dropped because their name was the episode's own source ID, or an
-    /// ID-shaped `[[wikilink]]` target cited in the episode body (a note ID such as
-    /// `project-quill-core-1`), together with the edges touching them (issue #824, ADR-0824). One
-    /// counter covers both rules. Counts entities only; the discarded edges are not counted in
-    /// `edges_dropped_unresolvable`. The own-ID rule needs a `doc_id` (or, on the chunk path, a
-    /// chunk id / source file), but the citation-target rule reads the body on every path, so this
-    /// can be non-zero for a free-form episode with no `doc_id` whose body links an ID-shaped note.
+    /// Extracted entities dropped because their name was the episode's own source ID, or a cited
+    /// note ID (verbatim an all-lowercase, ID-shaped `[[wikilink]]` target in the episode body that
+    /// names a note already ingested in the same group, e.g. `project-quill-core-1`), together with
+    /// the edges touching them (issue #824, ADR-0824). One counter covers both rules. Counts
+    /// entities only; the discarded edges are not counted in `edges_dropped_unresolvable`. The
+    /// own-ID rule needs a `doc_id` (or, on the chunk path, a chunk id / source file), but the
+    /// citation rule reads the body on every path, so this can be non-zero for a free-form episode
+    /// with no `doc_id` whose body cites an ingested note.
     pub entities_dropped_source_id: usize,
     /// Edges dropped for failing required-field validation during extraction-response parsing —
     /// a missing `source_name`/`target_name`/`fact` (#342), or, since #347, a `source_name`,
@@ -600,6 +601,41 @@ pub async fn add_episode_with_opts(
         .await??;
     }
 
+    // Citation targets (issue #824, ADR-0824): `[[wikilink]]` targets in the body that could be a
+    // note ID — verbatim lowercase, space-free, ID-shaped — and that name a note already ingested
+    // in this group. Resolved here, with the other cheap pre-extraction reads, so the post-
+    // extraction filter below stays pure. A read failure is fail-open (nothing is dropped): the
+    // filter is a noise reduction, never a reason to fail an ingest.
+    let citation_cands = crate::source_id::citation_candidates(body);
+    let known_cited: std::collections::BTreeSet<String> = if citation_cands.is_empty() {
+        Default::default()
+    } else {
+        let norms: std::collections::BTreeSet<String> =
+            citation_cands.values().take(64).cloned().collect();
+        match load_db(&state) {
+            Ok(db_g) => {
+                let g = group_id.to_string();
+                tokio::task::spawn_blocking(move || {
+                    let conn = db_g.connect()?;
+                    let mut known = std::collections::BTreeSet::new();
+                    for t in &norms {
+                        let rows = conn.episode_id_rows_for_target(&g, t)?;
+                        if crate::source_id::known_source_ids_of_rows(&rows).contains(t) {
+                            known.insert(t.clone());
+                        }
+                    }
+                    Ok::<_, Error>(known)
+                })
+                .await?
+                .unwrap_or_else(|e| {
+                    eprintln!("liminis-context-graph: citation-target lookup failed ({e}); not filtering citations");
+                    Default::default()
+                })
+            }
+            Err(_) => Default::default(),
+        }
+    };
+
     // ── Phase A: concurrent HTTP (no lock) ────────────────────────────────────
     // Resolves this group's own ontology file if one exists, else falls back to the
     // workspace-wide ontology (FR-001, FR-002, FR-005) — governs extraction guidance, strict-mode
@@ -691,29 +727,37 @@ pub async fn add_episode_with_opts(
     // are an intentional discard, like the self-reference filter, and are not counted in
     // `edges_dropped_unresolvable` (ADR-0051: Phase C is the sole authority for that counter).
     //
-    // The same drop also covers *citation targets* (issue #824 maintainer follow-up): the ID-shaped
-    // target of a `[[wikilink]]` in the episode body (`Sources: [[project-quill-core-1]]`). On v2
-    // that — another note's ID cited as a source — is the observed origin of the junk nodes, not the
-    // episode's own ID. A non-ID-shaped link (`[[Quill Core]]`) names a real entity and survives.
-    let mut own_source_ids = crate::source_id::own_source_ids(
+    // The same drop also covers *citation targets* (issue #824 maintainer follow-up): an entity whose
+    // name is verbatim a `[[wikilink]]` target that is all-lowercase, space-free and ID-shaped, *and*
+    // that names a note already ingested in this group (`Sources: [[project-quill-core-1]]`). On v2
+    // that — another note's ID cited as a source — is the observed origin of the junk nodes. The
+    // two-part test is what spares `[[GPT-4]]` (not lowercase), `[[machine-learning]]` (no such note)
+    // and `[[Quill Core]]` (not ID-shaped); no name shape alone could.
+    let own_source_ids = crate::source_id::own_source_ids(
         name,
         source_description,
         opts.doc_id.as_deref(),
         opts.guard_chunk_collision,
     );
-    // Kept separate from the own IDs so a drop's log line can say which rule fired (a concept link
-    // such as `[[GPT-4]]` is indistinguishable from a note ID by shape — see ADR-0824 — so the log
-    // is the only trace of collateral loss).
-    let citation_ids = crate::source_id::citation_targets(body);
-    own_source_ids.extend(citation_ids.iter().cloned());
+    // The verbatim citation targets that name a known note (rules (a) and (b) of ADR-0824). Kept
+    // apart from the own IDs so a drop's log line can say which rule fired.
+    let citation_drop: std::collections::BTreeSet<&str> = citation_cands
+        .iter()
+        .filter(|(_, norm)| known_cited.contains(*norm))
+        .map(|(raw, _)| raw.as_str())
+        .collect();
     let mut entities_dropped_source_id = 0usize;
-    if !own_source_ids.is_empty() {
+    if !own_source_ids.is_empty() || !citation_drop.is_empty() {
+        let own_hit = |n: &str| crate::source_id::matches_source_id(n, &own_source_ids);
+        // Rule (a): the entity name is, before any normalisation, verbatim the link target.
+        let cited_hit = |n: &str| citation_drop.contains(n.trim());
         let before = extraction.entities.len();
         extraction.entities.retain(|e| {
-            let hit = crate::source_id::matches_source_id(&e.name, &own_source_ids);
+            let by_cite = cited_hit(&e.name);
+            let hit = by_cite || own_hit(&e.name);
             if hit {
-                let rule = if crate::source_id::matches_source_id(&e.name, &citation_ids) {
-                    "cited [[wikilink]] note ID"
+                let rule = if by_cite {
+                    "cited [[wikilink]] note ID of an ingested note"
                 } else {
                     "episode's own source ID"
                 };
@@ -727,8 +771,10 @@ pub async fn add_episode_with_opts(
         entities_dropped_source_id = before - extraction.entities.len();
         let edges_before = extraction.edges.len();
         extraction.edges.retain(|edge| {
-            !(crate::source_id::matches_source_id(&edge.source_name, &own_source_ids)
-                || crate::source_id::matches_source_id(&edge.target_name, &own_source_ids))
+            !(own_hit(&edge.source_name)
+                || own_hit(&edge.target_name)
+                || cited_hit(&edge.source_name)
+                || cited_hit(&edge.target_name))
         });
         let edges_discarded = edges_before - extraction.edges.len();
         if entities_dropped_source_id > 0 || edges_discarded > 0 {

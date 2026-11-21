@@ -23,6 +23,11 @@ NEVER extract:
   cat) unless qualified with a possessor (e.g., "Nisha's dad" is acceptable, "dad" alone is not)
 - Bare generic objects that cannot be meaningfully qualified with a possessor, brand, or
   distinguishing detail (e.g., NEVER extract "supplies" from "I picked up some supplies")
+- Citations and note identifiers. A wikilink citation such as "[[note-id]]", or a trailing line
+  such as "sources: [[project-quill-core-1]]" or "(from [[project-quill-core-1]])", names ANOTHER
+  note that the text was derived from. It is a pointer to that note, not an entity: NEVER extract
+  the note identifier (e.g. "project-quill-core-1", "decision-region-tern-core-4") or the citation
+  itself as an entity. Extract the real-world things the text says, not the notes it cites.
 
 Extract entities from the TEXT that are explicitly mentioned.
 Only extract entities specific enough to be uniquely identifiable — ask: "Could this have its own Wikipedia article or database entry?"
