@@ -54,6 +54,13 @@ pub struct RunMeta {
     /// Private-notebook run (`--private`): the report carries metrics, counts and hashes only and
     /// withholds the detail of failed queries (a service error can echo query text).
     pub private: bool,
+    /// [`lcg_core::ontology::content_hash`] of the `--ontology` the corpus was ingested under
+    /// (#821 FR-002); `None` for a free-form ingest.
+    pub ontology_hash: Option<String>,
+    pub ontology_mode: Option<String>,
+    pub ontology_file: Option<String>,
+    /// `--keep-workspace` destination, when the ingested workspace was kept.
+    pub kept_workspace: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1050,6 +1057,21 @@ impl Report {
         let _ = writeln!(o, "- LCG extraction: {}", m.extractor);
         let _ = writeln!(
             o,
+            "- Ontology: {}",
+            match (&m.ontology_hash, &m.ontology_mode) {
+                (Some(h), mode) => format!(
+                    "`{}` (hash `{h}`, mode {})",
+                    m.ontology_file.as_deref().unwrap_or("?"),
+                    mode.as_deref().unwrap_or("?")
+                ),
+                (None, _) => "none (free-form extraction)".to_string(),
+            }
+        );
+        if let Some(k) = &m.kept_workspace {
+            let _ = writeln!(o, "- Kept workspace: `{k}`");
+        }
+        let _ = writeln!(
+            o,
             "- qmd models (expansion / embedding / rerank): {}",
             m.qmd_models
         );
@@ -1521,6 +1543,8 @@ impl Report {
                 "k": m.k, "lcg_build": m.lcg_build, "qmd_version": m.qmd_version,
                 "qmd_index": m.qmd_index, "embedder": m.embedder, "extractor": m.extractor,
                 "qmd_models": m.qmd_models, "judge_model": m.judge_model,
+                "ontology_hash": m.ontology_hash, "ontology_mode": m.ontology_mode,
+                "ontology_file": m.ontology_file, "kept_workspace": m.kept_workspace,
                 "category_counts": cat_counts, "latency_convention": "warm",
             },
             "bootstrap": {
