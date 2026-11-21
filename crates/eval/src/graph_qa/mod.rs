@@ -196,6 +196,49 @@ pub fn load_questions(path: &Path) -> Result<Vec<GraphQuestion>, String> {
 pub struct Outcome {
     pub json: Value,
     pub markdown: String,
+    /// Set when a runner's reader parse-error rate is over [`READER_ERROR_LIMIT`] (and
+    /// `--allow-reader-errors` is off): the run then exits 1 after writing its report.
+    pub reader_failure: Option<Failure>,
+}
+
+/// The share of a runner's reader responses that may fail to parse before the run fails. A reader
+/// that answers in prose (a bridge that ignores `output_config.format`, say) scores every question
+/// 0, which must never pass as a measurement.
+pub const READER_ERROR_LIMIT: f64 = 0.10;
+
+/// Checks the reader parse-error rate of every runner. Any parse error is reported on stderr; a
+/// runner over [`READER_ERROR_LIMIT`] fails the run (exit 1) unless `allow` (`--allow-reader-errors`)
+/// downgrades it to a warning.
+pub fn check_reader_errors(run: &runner::RunOutput, allow: bool) -> Result<(), Failure> {
+    let errs = report::reader_parse_errors(run);
+    let mut over = Vec::new();
+    for (r, (e, n)) in &errs {
+        if *e == 0 {
+            continue;
+        }
+        let rate = *e as f64 / (*n).max(1) as f64;
+        eprintln!(
+            "lcg-eval graph-qa: WARNING runner {r}: {e} of {n} reader responses did not parse \
+             ({:.0}%) and were scored 0",
+            rate * 100.0
+        );
+        if rate > READER_ERROR_LIMIT {
+            over.push(format!("{r} ({e}/{n})"));
+        }
+    }
+    if over.is_empty() || allow {
+        return Ok(());
+    }
+    Err(fail(
+        EXIT_FAILED,
+        format!(
+            "reader parse-error rate over {:.0}% for runner(s) {}: the reader is not answering in \
+             the expected JSON (does the provider honour output_config.format?), so these scores \
+             are not a measurement. Pass --allow-reader-errors to report them anyway.",
+            READER_ERROR_LIMIT * 100.0,
+            over.join(", ")
+        ),
+    ))
 }
 
 /// A whole graph-qa run over `a.workspace`, with the given planner and reader clients (`planner:
@@ -322,6 +365,7 @@ pub async fn run_on_workspace(
     let outcome = Outcome {
         json: rep.to_json(),
         markdown: rep.render_markdown(),
+        reader_failure: check_reader_errors(&out, a.allow_reader_errors).err(),
     };
     drop(guard);
     Ok(outcome)
@@ -419,7 +463,13 @@ pub async fn run_cli(args: &[String]) -> i32 {
                     dir.display()
                 );
             }
-            0
+            match o.reader_failure {
+                Some(f) => {
+                    eprintln!("lcg-eval graph-qa: {}", f.message);
+                    f.code
+                }
+                None => 0,
+            }
         }
         Err(f) => {
             eprintln!("lcg-eval graph-qa: {}", f.message);

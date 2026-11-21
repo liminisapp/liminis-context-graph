@@ -21,6 +21,9 @@ pub struct GraphQaArgs {
     pub runners: Vec<String>,
     pub plans: Option<PathBuf>,
     pub plans_only: bool,
+    /// `--allow-reader-errors`: report a reader parse-error rate over the limit as a warning
+    /// instead of failing the run (exit 1).
+    pub allow_reader_errors: bool,
     pub planner_model: String,
     pub reader_model: String,
     pub llm_cache: PathBuf,
@@ -73,6 +76,8 @@ OPTIONS:
                                calls for the questions they cover.
     --plans-only               Never call the planner: a question with no recorded plan fails the
                                run (exit 4) before any reader call.
+    --allow-reader-errors      Report a runner whose reader replies fail to parse more than 10% of
+                               the time as a warning instead of failing the run (exit 1).
     --planner-model <MODEL>    Planner model (default {DEFAULT_MODEL}).
     --reader-model <MODEL>     Reader model (default {DEFAULT_MODEL}).
     --llm-cache <FILE>         Planner/reader response cache, keyed by model + full prompt
@@ -101,7 +106,8 @@ OPTIONS:
     -h, --help                 Print this help.
 
 EXIT CODES:
-    0 ok · 1 run failed (service, model provider, I/O) · 2 usage error · 3 unusable workspace
+    0 ok · 1 run failed (service, model provider, I/O, or a reader parse-error rate over 10%)
+    · 2 usage error · 3 unusable workspace
     (missing, not ingested, embedder mismatch) · 4 questions without a plan (recorded, or cached
     when no provider is set) and no planner
 ",
@@ -118,6 +124,7 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
         runners: DEFAULT_RUNNERS.iter().map(|s| s.to_string()).collect(),
         plans: None,
         plans_only: false,
+        allow_reader_errors: false,
         planner_model: DEFAULT_MODEL.into(),
         reader_model: DEFAULT_MODEL.into(),
         llm_cache: PathBuf::from(DEFAULT_LLM_CACHE),
@@ -154,6 +161,7 @@ pub fn parse_args(args: &[String]) -> Result<Mode, String> {
         match flag {
             "-h" | "--help" => return Ok(Mode::Help),
             "--plans-only" => a.plans_only = true,
+            "--allow-reader-errors" => a.allow_reader_errors = true,
             "--allow-embedder-mismatch" => a.allow_embedder_mismatch = true,
             "--workspace" => workspace = Some(PathBuf::from(val(flag)?)),
             "--corpus" => a.corpus = PathBuf::from(val(flag)?),

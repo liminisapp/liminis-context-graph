@@ -6302,6 +6302,7 @@ workspace itself, including its WAL, is never modified.
 | `--runners <LIST>` | `passages,walk,route` | Any of `passages`, `passages-belief-rerank`, `qmd`, `walk`, `route`. |
 | `--plans <FILE>` | none | Recorded plans, used instead of planner calls for the questions they cover. |
 | `--plans-only` | off | Never call the planner. A question with no recorded plan fails the run before any reader call (exit 4). |
+| `--allow-reader-errors` | off | Report a runner whose reader replies fail to parse more than 10% of the time as a warning instead of failing the run (exit 1). |
 | `--planner-model`, `--reader-model` | `claude-haiku-4-5-20251001` | Through the provider configuration above. |
 | `--llm-cache <FILE>` | `graph-qa-llm-cache.jsonl` | The response cache. |
 | `--embedder-*`, `--embedding-profile`, `--reranker-*`, `--service-bin` | | As for `retrieval`; the embedder must be the ingest embedder (exit 3 otherwise, unless `--allow-embedder-mismatch`). `--embedding-profile` defaults to the one recorded in the workspace manifest, and a different one is refused (exit 3). |
@@ -6313,7 +6314,11 @@ workspace itself, including its WAL, is never modified.
 Exit codes:
 
 - 0: the run succeeded.
-- 1: the run failed (service, model provider or I/O).
+- 1: the run failed (service, model provider or I/O), or a runner's reader replies failed to parse
+  more than 10% of the time. Unparseable replies score 0, so a reader that answers in prose (a
+  provider or bridge that ignores `output_config.format`) would otherwise yield an all-zero report
+  that looks like a measurement. The report is still written; its Overall section and stderr give
+  the parse-error count per runner. `--allow-reader-errors` turns this failure into a warning.
 - 2: usage error.
 - 3: unusable workspace (missing, not ingested, or an embedder mismatch).
 - 4: questions without a plan, and no planner may be called. With no model provider configured, a planner response already in `--llm-cache` still counts as a plan, so a fully cached rerun works offline; only questions with no recorded or cached plan are uncovered.

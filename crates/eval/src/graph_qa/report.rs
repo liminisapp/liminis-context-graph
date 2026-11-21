@@ -81,6 +81,22 @@ fn fmt(x: Option<f64>) -> String {
     x.map_or("—".into(), |v| format!("{v:.3}"))
 }
 
+/// Reader responses that did not parse, per runner that ran: `(errors, answered)`.
+pub fn reader_parse_errors(run: &RunOutput) -> BTreeMap<String, (usize, usize)> {
+    let mut m: BTreeMap<String, (usize, usize)> =
+        run.runners.iter().map(|r| (r.clone(), (0, 0))).collect();
+    for q in &run.questions {
+        for (r, a) in &q.per_runner {
+            let e = m.entry(r.clone()).or_default();
+            e.1 += 1;
+            if a.reader_parse_error {
+                e.0 += 1;
+            }
+        }
+    }
+    m
+}
+
 impl Report<'_> {
     fn by_id(&self) -> BTreeMap<&str, &GraphQuestion> {
         self.questions.iter().map(|q| (q.id.as_str(), q)).collect()
@@ -383,6 +399,17 @@ impl Report<'_> {
                 .collect();
             let _ = writeln!(o, "| `{r}` | {} |", cells.join(" | "));
         }
+        // A reader that cannot be parsed scores every question 0: say so beside the numbers, so
+        // an all-zero table is never mistaken for a measurement.
+        let errs = reader_parse_errors(self.run);
+        let _ = writeln!(
+            o,
+            "\nReader responses that did not parse (scored 0): {}",
+            errs.iter()
+                .map(|(r, (e, n))| format!("`{r}` {e}/{n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
 
         let _ = writeln!(o, "\n## By shape\n");
         let shapes = self.shapes_present();

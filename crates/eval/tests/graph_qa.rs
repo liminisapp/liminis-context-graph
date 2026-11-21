@@ -816,3 +816,56 @@ async fn two_questions_with_one_text_make_one_planner_call_and_share_its_plan() 
     assert!(plan_of("s006").is_some());
     assert_eq!(plan_of("s006"), plan_of("s006-twin"));
 }
+
+#[tokio::test]
+async fn a_reader_that_answers_in_prose_fails_the_run_and_names_the_runner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = LlmCache::load(&tmp.path().join("c.jsonl")).unwrap();
+    let qs = questions();
+    let f = plans::load_plans(&smoke().join("plans.json")).unwrap();
+    // A provider that ignores output_config.format answers in prose: nothing parses.
+    let prose = ScriptedModel::new(|_| Ok("The answer is Ana Silva.".to_string()));
+    let out = run_once(
+        &qs,
+        &f,
+        false,
+        &runners(&["passages", "walk"]),
+        &planner(),
+        &prose,
+        &cache,
+        Arc::new(FakeLcg::new()),
+    )
+    .await
+    .unwrap();
+    let e = lcg_eval::graph_qa::check_reader_errors(&out, false).unwrap_err();
+    assert_eq!(e.code, lcg_eval::graph_qa::EXIT_FAILED);
+    assert!(
+        e.message.contains("walk") && e.message.contains("passages"),
+        "{}",
+        e.message
+    );
+    assert!(e.message.contains("--allow-reader-errors"), "{}", e.message);
+    // The override reports it instead of failing.
+    lcg_eval::graph_qa::check_reader_errors(&out, true).unwrap();
+    // The report's Overall section names the count per runner.
+    let (_, md) = report_json(&out, &qs, &f, &cache);
+    let n = qs.len();
+    assert!(
+        md.contains(&format!("`walk` {n}/{n}")) && md.contains("did not parse"),
+        "{md}"
+    );
+    // A reader that answers in JSON passes the check.
+    let ok = run_once(
+        &qs,
+        &f,
+        false,
+        &runners(&["passages", "walk"]),
+        &planner(),
+        &reader(),
+        &LlmCache::load(&tmp.path().join("c2.jsonl")).unwrap(),
+        Arc::new(FakeLcg::new()),
+    )
+    .await
+    .unwrap();
+    lcg_eval::graph_qa::check_reader_errors(&ok, false).unwrap();
+}
