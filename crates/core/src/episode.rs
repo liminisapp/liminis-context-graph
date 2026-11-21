@@ -5,7 +5,7 @@ use chrono::DateTime;
 
 use crate::{
     app_state::{build_indices_once, load_db, AppState, OntologyDriftState},
-    canonicalize::build_alias_map,
+    canonicalize::build_alias_map_directed,
     db::Db,
     dedup_adapter::{pair_from, DedupMode},
     dedup_judge::{DedupVerdict, DuplicatePair},
@@ -77,6 +77,12 @@ pub struct AddEpisodeResult {
     /// above). The original relation type is preserved in the stored edge's `attributes` field,
     /// not lost.
     pub edges_reclassified_unclassified: usize,
+    /// Edges whose endpoints were swapped because they fit the relation's declared signature
+    /// only when reversed (#816, ADR-0816). Inverse-alias swaps are not counted here.
+    pub edges_swapped: usize,
+    /// Edges stored unchanged but marked `signature_mismatch` because their endpoints fit the
+    /// relation's declared signature in neither direction (#816). Never dropped.
+    pub edges_signature_mismatch: usize,
     /// Strict-mode entities whose type was outside the ontology's declared vocabulary after
     /// normalisation, reclassified to `Unclassified` rather than dropped (issue #312 FR-004).
     /// The original entity type is preserved in the stored entity's `attributes` field, not
@@ -228,7 +234,8 @@ pub struct EpisodeOpts {
 
 /// Phase C's result: `(edges_inserted, edges_dropped_unresolvable,
 /// edges_reclassified_unclassified, dropped_edges, edges_dropped_self_loop,
-/// superseded_episode_uuids, left_alone_episode_uuids)`.
+/// superseded_episode_uuids, left_alone_episode_uuids, edges_swapped,
+/// edges_signature_mismatch)`.
 type PhaseCOutcome = (
     usize,
     usize,
@@ -237,6 +244,8 @@ type PhaseCOutcome = (
     usize,
     Vec<String>,
     Vec<String>,
+    usize,
+    usize,
 );
 
 struct ActiveWriteGuard(Arc<std::sync::atomic::AtomicUsize>);
@@ -756,7 +765,7 @@ pub async fn add_episode_with_opts(
             }
         }
         if onto.mode == OntologyMode::Strict && onto.extractable_relation_types().next().is_some() {
-            let alias_map = build_alias_map(onto);
+            let alias_map = build_alias_map_directed(onto);
             for e in extraction.edges.iter_mut() {
                 let original = e.relation_type.clone();
                 let normalized = original
@@ -764,7 +773,14 @@ pub async fn add_episode_with_opts(
                     .map(normalize_relation_type)
                     .unwrap_or_default();
                 match alias_map.get(&normalized) {
-                    Some(canonical) => {
+                    Some((canonical, inverted)) => {
+                        // An inverse alias (#816, ADR-0816) reads the relation backwards: swap
+                        // the endpoints *before* Phase C's signature check, so "inverse first,
+                        // then check" holds and it works even when the canonical type declares
+                        // no signature — the inverse reading is itself the direction.
+                        if *inverted {
+                            std::mem::swap(&mut e.source_name, &mut e.target_name);
+                        }
                         e.relation_type = Some(canonical.clone());
                     }
                     None => {
@@ -1408,6 +1424,11 @@ pub async fn add_episode_with_opts(
         o.mode == OntologyMode::Strict && o.extractable_relation_types().next().is_some()
     });
 
+    // The endpoint direction check (#816) runs in Phase C, whose closure is 'static: hand it an
+    // owned ontology, and only when some relation declares a signature or inverse alias.
+    let direction_onto: Option<crate::ontology::Ontology> =
+        ontology_ref.filter(|o| o.has_direction_info()).cloned();
+
     // ── Phase C: commit under write lock ─────────────────────────────────────
     let episode_uuid = uuid::Uuid::new_v4().to_string();
     let ep_uuid = episode_uuid.clone();
@@ -1479,6 +1500,8 @@ pub async fn add_episode_with_opts(
         edges_dropped_self_loop,
         superseded_episode_uuids,
         left_alone_episode_uuids,
+        edges_swapped,
+        edges_signature_mismatch,
     ) = tokio::task::spawn_blocking(
             move || -> Result<PhaseCOutcome, Error> {
         let conn = db_c.connect()?;
@@ -1502,6 +1525,13 @@ pub async fn add_episode_with_opts(
         // taken here, not in the pre-lock strict-mode pass above, so an edge that was marked
         // reclassified but then dropped as self-referential or unresolvable is never counted.
         let mut edges_reclassified_unclassified = 0usize;
+        // Endpoint direction check tallies (#816) and the per-call endpoint-label cache: one
+        // read per unique endpoint, from the stored row (authoritative after dedup merges and
+        // for endpoints persisted by an earlier ingest).
+        let mut edges_swapped = 0usize;
+        let mut edges_signature_mismatch = 0usize;
+        let mut label_cache: std::collections::HashMap<String, Option<Vec<String>>> =
+            std::collections::HashMap::new();
 
         // Apply dedup decisions → collect entity UUIDs
         let mut entity_uuids: Vec<String> = Vec::with_capacity(decisions.len());
@@ -1642,6 +1672,53 @@ pub async fn add_episode_with_opts(
                 edges_dropped_self_loop += 1;
                 continue;
             }
+            // Endpoint direction check (#816, ADR-0816): after the relation type is resolved and
+            // both endpoints are known, before the edge is written. Never drops an edge.
+            let (mut src_uuid, mut dst_uuid) = (src_uuid, dst_uuid);
+            let (mut src_name, mut dst_name) = (&edge.source_name, &edge.target_name);
+            let mut signature_mismatch = false;
+            if let Some(onto) = direction_onto.as_ref() {
+                let rt_def = edge
+                    .relation_type
+                    .as_deref()
+                    .map(normalize_relation_type)
+                    .and_then(|n| onto.relation_types.iter().find(|r| r.name == n));
+                if let Some(rt_def) = rt_def {
+                    let mut types_of = |uuid: &str| -> Result<Option<Vec<String>>, Error> {
+                        if !label_cache.contains_key(uuid) {
+                            let labels = conn.get_entity_labels(uuid)?;
+                            label_cache.insert(
+                                uuid.to_string(),
+                                labels.and_then(|l| crate::direction::endpoint_types(onto, &l)),
+                            );
+                        }
+                        Ok(label_cache[uuid].clone())
+                    };
+                    let src_types = types_of(&src_uuid)?;
+                    let dst_types = types_of(&dst_uuid)?;
+                    match crate::direction::check_orientation(
+                        onto,
+                        rt_def,
+                        src_types.as_deref(),
+                        dst_types.as_deref(),
+                    ) {
+                        crate::direction::Orientation::Swap => {
+                            eprintln!(
+                                "liminis-context-graph: ontology: swapping edge '{}' → '{}' ({}): endpoints fit the declared signature only when reversed",
+                                edge.source_name, edge.target_name, rt_def.name
+                            );
+                            std::mem::swap(&mut src_uuid, &mut dst_uuid);
+                            std::mem::swap(&mut src_name, &mut dst_name);
+                            edges_swapped += 1;
+                        }
+                        crate::direction::Orientation::Mismatch => {
+                            signature_mismatch = true;
+                            edges_signature_mismatch += 1;
+                        }
+                        crate::direction::Orientation::Keep | crate::direction::Orientation::Skip => {}
+                    }
+                }
+            }
             // FR-011: record whether `valid_at` came from the text or defaulted to the episode's
             // reference time — the fallback was silent before.
             let llm_valid_at = validate_llm_timestamp(edge.valid_at.clone());
@@ -1653,7 +1730,7 @@ pub async fn add_episode_with_opts(
             conn.insert_relates_to_edge(&RelatesToEdge {
                 ingested_at: commit_instant.clone(),
                 uuid: uuid::Uuid::new_v4().to_string(),
-                name: format!("{} → {}", edge.source_name, edge.target_name),
+                name: format!("{} → {}", src_name, dst_name),
                 source_node_uuid: src_uuid,
                 target_node_uuid: dst_uuid,
                 group_id: gid_owned.clone(),
@@ -1662,11 +1739,15 @@ pub async fn add_episode_with_opts(
                 created_at: ref_time_owned.clone(),
                 valid_at: llm_valid_at.or_else(|| Some(ref_time_owned.clone())),
                 invalid_at: validate_llm_timestamp(edge.invalid_at.clone()),
-                attributes: match &edge.original_relation_type {
-                    Some(orig) => {
-                        serde_json::json!({ "original_relation_type": orig }).to_string()
+                attributes: {
+                    let mut attrs = serde_json::Map::new();
+                    if let Some(orig) = &edge.original_relation_type {
+                        attrs.insert("original_relation_type".to_string(), orig.clone().into());
                     }
-                    None => "{}".to_string(),
+                    if signature_mismatch {
+                        attrs.insert("signature_mismatch".to_string(), true.into());
+                    }
+                    serde_json::Value::Object(attrs).to_string()
                 },
                 relation_type: edge.relation_type.clone(),
                 episode_uuids: vec![],
@@ -1805,6 +1886,8 @@ pub async fn add_episode_with_opts(
             edges_dropped_self_loop,
             superseded_episode_uuids,
             left_alone_episode_uuids,
+            edges_swapped,
+            edges_signature_mismatch,
         ))
             },
         )
@@ -1892,6 +1975,8 @@ pub async fn add_episode_with_opts(
         edges_dropped_self_loop,
         dropped_edges,
         edges_reclassified_unclassified,
+        edges_swapped,
+        edges_signature_mismatch,
         entities_reclassified_unclassified,
         entities_dropped_malformed,
         edges_dropped_malformed,

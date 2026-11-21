@@ -4378,6 +4378,19 @@ impl<'db> Conn<'db> {
         }
     }
 
+    /// Stored `labels` of one entity, or `None` when it does not exist (#816 endpoint check).
+    /// A thin read — unlike [`Self::get_entity_by_uuid`] it skips the embedding columns.
+    pub fn get_entity_labels(&self, uuid: &str) -> Result<Option<Vec<String>>, Error> {
+        let rows = self.query_params(
+            "MATCH (e:Entity {uuid: $uuid}) RETURN e.labels",
+            serde_json::json!({ "uuid": uuid }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .next()
+            .map(|row| value_as_str_list(&row[0])))
+    }
+
     /// Fetches full EntityRows for a slice of UUIDs (for search result expansion).
     pub fn get_entities_by_uuids(&self, uuids: &[String]) -> Result<Vec<EntityRow>, Error> {
         if uuids.is_empty() {

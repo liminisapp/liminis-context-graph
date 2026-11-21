@@ -5,7 +5,7 @@
 //! types against the relation's declared signature and says whether to keep, swap or flag it.
 //! It never drops anything.
 
-use crate::ontology::{Ontology, RelationTypeDef};
+use crate::ontology::{normalize_entity_type, Ontology, RelationTypeDef};
 
 /// What to do with an edge after comparing its endpoints with the relation signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,13 +24,25 @@ pub enum Orientation {
 ///
 /// Drops the implicit `Entity` root and the strict-mode `Unclassified` catch-all. Returns
 /// `None` when nothing remains, i.e. the endpoint is untyped and cannot be evaluated. Labels
-/// already carry ancestors, so a signature type matches by label-set intersection.
-pub fn endpoint_types(labels: &[String]) -> Option<Vec<String>> {
-    let types: Vec<String> = labels
-        .iter()
-        .filter(|l| !matches!(l.as_str(), "Entity" | "Unclassified" | ""))
-        .cloned()
-        .collect();
+/// normally already carry ancestors, but open-mode labels are raw and carry none, so each label
+/// is normalized and expanded through the ontology's ancestor map; a signature type then matches
+/// by set intersection.
+pub fn endpoint_types(onto: &Ontology, labels: &[String]) -> Option<Vec<String>> {
+    let mut types: Vec<String> = Vec::new();
+    let mut push = |t: String| {
+        if !matches!(t.as_str(), "Entity" | "Unclassified" | "") && !types.contains(&t) {
+            types.push(t);
+        }
+    };
+    for l in labels {
+        let n = normalize_entity_type(l);
+        if let Some(ancestors) = onto.ancestor_map.get(&n) {
+            for a in ancestors {
+                push(a.clone());
+            }
+        }
+        push(n);
+    }
     if types.is_empty() {
         None
     } else {
@@ -123,13 +135,13 @@ mod tests {
         }
     }
 
-    fn labels(l: &[&str]) -> Option<Vec<String>> {
-        endpoint_types(&l.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    fn labels(o: &Ontology, l: &[&str]) -> Option<Vec<String>> {
+        endpoint_types(o, &l.iter().map(|s| s.to_string()).collect::<Vec<_>>())
     }
 
     fn check(o: &Ontology, src: &[&str], dst: &[&str]) -> Orientation {
-        let s = labels(src);
-        let d = labels(dst);
+        let s = labels(o, src);
+        let d = labels(o, dst);
         check_orientation(o, &o.relation_types[0], s.as_deref(), d.as_deref())
     }
 
@@ -172,7 +184,8 @@ mod tests {
     #[test]
     fn ancestry_matches_through_labels() {
         let o = onto(vec![rt("APPROVES", &["Person"], &["Policy"], false)]);
-        // Employee's stored labels include its ancestor Person.
+        // Employee's stored labels include its ancestor Person (and the ancestor map would
+        // supply it even for raw open-mode labels).
         assert_eq!(
             check(&o, &["Entity", "Person", "Employee"], &["Entity", "Policy"]),
             Orientation::Keep
@@ -180,6 +193,11 @@ mod tests {
         assert_eq!(
             check(&o, &["Entity", "Policy"], &["Entity", "Person", "Employee"]),
             Orientation::Swap
+        );
+        // Raw open-mode labels carry no ancestors: they are expanded via the ontology.
+        assert_eq!(
+            check(&o, &["Entity", "employee"], &["Entity", "policy"]),
+            Orientation::Keep
         );
     }
 

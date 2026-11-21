@@ -72,6 +72,10 @@ impl CanonicalizeReport {
 pub enum EdgeClass {
     /// Edge maps to this canonical relation type.
     Mapped(String),
+    /// Edge maps to this canonical relation type via an *inverse* alias (or an inverse keyword
+    /// hit, #816): the name reads the relation backwards, so source and target are swapped
+    /// when the retype is applied.
+    MappedInverse(String),
     /// Co-occurrence noise edge — reclassified to UNCLASSIFIED (never deleted; see ADR-0033).
     Noise,
     /// No lexical or embedding rule matched — mark UNCLASSIFIED.
@@ -89,10 +93,13 @@ pub struct EdgeRecord {
 // ── Lexical index ─────────────────────────────────────────────────────────────
 
 pub struct LexicalIndex {
-    /// SCREAMING_SNAKE_CASE token → canonical type name (exact match).
-    exact: HashMap<String, String>,
+    /// SCREAMING_SNAKE_CASE token → (canonical type name, inverted) (exact match, #816).
+    exact: HashMap<String, (String, bool)>,
     /// (lowercase keyword, canonical type name) for substring matching.
     keywords: Vec<(String, String)>,
+    /// canonical type name → lowercase inverse aliases. A keyword hit counts as an inverse
+    /// reading only when the text also contains one of the matched type's inverse aliases.
+    inverse_texts: HashMap<String, Vec<String>>,
     /// All canonical type names (for checking if current_rt is already canonical).
     canonical_names: std::collections::HashSet<String>,
     /// Declared `extract: false` relation names (#637). An edge already typed as one of these
@@ -107,20 +114,53 @@ pub struct LexicalIndex {
 /// types (#637) are mapped, so neither consumer can retype an edge *into* an `extract: false`
 /// type from extracted evidence.
 pub fn build_alias_map(ontology: &Ontology) -> HashMap<String, String> {
-    let mut exact: HashMap<String, String> = HashMap::new();
+    build_alias_map_directed(ontology)
+        .into_iter()
+        .map(|(alias, (canonical, _))| (alias, canonical))
+        .collect()
+}
+
+/// Like [`build_alias_map`] but carries direction (#816): each entry is
+/// `(canonical, inverted)`, where `inverted` is true for an `inverse_aliases` entry — a name
+/// that reads the relation backwards and so needs source and target swapped.
+///
+/// Canonical names and forward aliases are inserted first (forward aliases keep their existing
+/// last-wins behaviour); inverse aliases are added only where the name is still free, so a
+/// collision always resolves toward the forward reading, deterministically.
+pub fn build_alias_map_directed(ontology: &Ontology) -> HashMap<String, (String, bool)> {
+    let mut exact: HashMap<String, (String, bool)> = HashMap::new();
     for rt in ontology.extractable_relation_types() {
         // Canonical name maps to itself
-        exact.insert(rt.name.clone(), rt.name.clone());
+        exact.insert(rt.name.clone(), (rt.name.clone(), false));
         // Aliases map to the canonical name
         for alias in &rt.aliases {
-            exact.insert(alias.clone(), rt.name.clone());
+            exact.insert(alias.clone(), (rt.name.clone(), false));
+        }
+    }
+    for rt in ontology.extractable_relation_types() {
+        for ia in &rt.inverse_aliases {
+            exact
+                .entry(ia.clone())
+                .or_insert_with(|| (rt.name.clone(), true));
         }
     }
     exact
 }
 
 pub fn build_lexical_index(ontology: &Ontology) -> LexicalIndex {
-    let exact = build_alias_map(ontology);
+    let exact = build_alias_map_directed(ontology);
+    let mut inverse_texts: HashMap<String, Vec<String>> = HashMap::new();
+    for rt in ontology.extractable_relation_types() {
+        if !rt.inverse_aliases.is_empty() {
+            inverse_texts.insert(
+                rt.name.clone(),
+                rt.inverse_aliases
+                    .iter()
+                    .map(|a| a.to_lowercase())
+                    .collect(),
+            );
+        }
+    }
     let mut keywords: Vec<(String, String)> = Vec::new();
     let mut canonical_names = std::collections::HashSet::new();
     let mut assert_only_names = std::collections::HashSet::new();
@@ -142,6 +182,7 @@ pub fn build_lexical_index(ontology: &Ontology) -> LexicalIndex {
     LexicalIndex {
         exact,
         keywords,
+        inverse_texts,
         canonical_names,
         assert_only_names,
     }
@@ -160,6 +201,24 @@ pub fn is_noise_edge(s: &str) -> bool {
 }
 
 // ── Lexical classification ────────────────────────────────────────────────────
+
+fn mapped(canonical: &str, inverted: bool) -> EdgeClass {
+    if inverted {
+        EdgeClass::MappedInverse(canonical.to_string())
+    } else {
+        EdgeClass::Mapped(canonical.to_string())
+    }
+}
+
+impl LexicalIndex {
+    /// True when `lower_text` (lowercased, normalized) contains one of `canonical`'s inverse
+    /// aliases — the only evidence a keyword hit reads the relation backwards (#816).
+    fn reads_inverse(&self, canonical: &str, lower_text: &str) -> bool {
+        self.inverse_texts
+            .get(canonical)
+            .is_some_and(|v| v.iter().any(|ia| lower_text.contains(ia.as_str())))
+    }
+}
 
 /// Classifies a single edge lexically using the ontology index.
 ///
@@ -199,15 +258,15 @@ pub fn classify_edge_lexically(
 
     // Exact match on normalized name
     let normalized = normalize_relation_type(name);
-    if let Some(canonical) = idx.exact.get(&normalized) {
-        return EdgeClass::Mapped(canonical.clone());
+    if let Some((canonical, inverted)) = idx.exact.get(&normalized) {
+        return mapped(canonical, *inverted);
     }
 
     // Keyword substring match on lowercase normalized name
     let lower = normalized.to_lowercase();
     for (kw, canonical) in &idx.keywords {
         if lower.contains(kw.as_str()) {
-            return EdgeClass::Mapped(canonical.clone());
+            return mapped(canonical, idx.reads_inverse(canonical, &lower));
         }
     }
 
@@ -220,13 +279,13 @@ pub fn classify_edge_lexically(
             return EdgeClass::Mapped(rt.to_string());
         }
         let rt_normalized = normalize_relation_type(rt);
-        if let Some(canonical) = idx.exact.get(&rt_normalized) {
-            return EdgeClass::Mapped(canonical.clone());
+        if let Some((canonical, inverted)) = idx.exact.get(&rt_normalized) {
+            return mapped(canonical, *inverted);
         }
         let rt_lower = rt_normalized.to_lowercase();
         for (kw, canonical) in &idx.keywords {
             if rt_lower.contains(kw.as_str()) {
-                return EdgeClass::Mapped(canonical.clone());
+                return mapped(canonical, idx.reads_inverse(canonical, &rt_lower));
             }
         }
     }
@@ -404,7 +463,7 @@ pub async fn canonicalize_relations(
     let mut residual_count = 0usize;
     for (_, class) in &classifications {
         match class {
-            EdgeClass::Mapped(_) => mapped_count += 1,
+            EdgeClass::Mapped(_) | EdgeClass::MappedInverse(_) => mapped_count += 1,
             EdgeClass::Noise => noise_count += 1,
             EdgeClass::Residual => residual_count += 1,
         }
@@ -449,7 +508,7 @@ pub async fn canonicalize_relations(
             let mut exec_result: Result<(), Error> = Ok(());
             for (uuid, current_rt, class) in &batch_data {
                 let res = match class {
-                    EdgeClass::Mapped(canonical) => {
+                    EdgeClass::Mapped(canonical) | EdgeClass::MappedInverse(canonical) => {
                         // Idempotency: skip if already set to the target value
                         if current_rt.as_deref() == Some(canonical.as_str()) {
                             Ok(())
