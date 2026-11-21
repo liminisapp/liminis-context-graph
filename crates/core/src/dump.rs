@@ -64,6 +64,13 @@ const DOC_SUPERSESSION_CYPHER: &str = "\
     n.superseding_doc_id = $superseding_doc_id, \
     n.effective_at = timestamp($effective_at), n.recorded_at = timestamp($recorded_at)";
 
+/// Summary units (issue #850). `$content_embedding` is in the template, so replay recomputes the
+/// vector from `$content` (ADR-0526) and no LLM call is needed to rebuild a summary.
+const SUMMARY_UNIT_CYPHER: &str = "\
+    MERGE (n:SummaryUnit {uuid: $uuid}) \
+    SET n.group_id = $group_id, n.episode_uuid = $episode_uuid, n.content = $content, \
+    n.content_embedding = $content_embedding, n.created_at = timestamp($created_at)";
+
 const RELATO_CYPHER: &str = "\
     MERGE (n:RelatesToNode_ {uuid: $uuid}) \
     SET n.name = $name, n.group_id = $group_id, \
@@ -164,6 +171,7 @@ fn dump_nodes_phase(
     total += dump_saga_nodes(conn, writer, group_id)?;
     total += dump_doc_supersession_nodes(conn, writer, group_id)?;
     total += dump_doc_revision_nodes(conn, writer, group_id)?;
+    total += dump_summary_unit_nodes(conn, writer, group_id)?;
     Ok(total)
 }
 
@@ -569,6 +577,44 @@ fn dump_doc_revision_nodes(
                         "previous_revision_id": rec.previous_revision_id,
                     });
                     w.log_mutation(DOC_REVISION_CYPHER, params, "")?;
+                }
+                Ok(())
+            })?;
+            total += count;
+        }
+        if count < PAGE_SIZE {
+            break;
+        }
+        offset += count;
+    }
+    Ok(total)
+}
+
+/// Summary units (issue #850). Without them a compaction would silently drop every summary, and
+/// a rebuild would have no summary candidates until each note was re-ingested. The vector is not
+/// dumped: the WAL never carries one, and replay recomputes it from the summary text.
+fn dump_summary_unit_nodes(
+    conn: &Conn<'_>,
+    writer: &mut WalWriter,
+    group_id: Option<&str>,
+) -> Result<usize, Error> {
+    let mut total = 0;
+    let mut offset = 0;
+    loop {
+        let rows = conn.dump_summary_unit_page(group_id, offset, PAGE_SIZE)?;
+        let count = rows.len();
+        if count > 0 {
+            writer.with_chunk(|w| {
+                for row in &rows {
+                    // cols: [uuid, group_id, episode_uuid, content, created_at]
+                    let params = serde_json::json!({
+                        "uuid": value_as_string(&row[0]),
+                        "group_id": value_as_string(&row[1]),
+                        "episode_uuid": value_as_string(&row[2]),
+                        "content": value_as_string(&row[3]),
+                        "created_at": dump_ts_str(&row[4]),
+                    });
+                    w.log_mutation(SUMMARY_UNIT_CYPHER, params, "")?;
                 }
                 Ok(())
             })?;

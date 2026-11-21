@@ -108,6 +108,9 @@ pub fn purge_groups(
     let has_doc_supersessions = conn.has_doc_supersession_table();
     let has_doc_revisions = conn.has_doc_revision_table();
     let has_zero_vector_rows = conn.has_zero_vector_table();
+    // Summary units (issue #850): probed up front for the same reason, and so a workspace that
+    // never had summaries gets no new WAL line from a purge.
+    let has_summary_units = conn.has_summary_units(Some(group_ids)).unwrap_or(false);
     conn.exec_transaction_control("BEGIN TRANSACTION")?;
     let mut grouped: GroupedMutations = GroupedMutations::new();
     let mutate_result = (|| -> Result<(), Error> {
@@ -132,6 +135,9 @@ pub fn purge_groups(
             // baseline, and a fresh ingest would diff against revisions whose episodes are gone.
             if has_doc_revisions {
                 conn.delete_doc_revisions_by_group_ids(&single)?;
+            }
+            if has_summary_units {
+                conn.delete_summary_units_by_group_ids(&single)?;
             }
             conn.delete_episodics_by_group_ids(&single)?;
             // The zero-vector record describes rows that no longer exist (issue #808): a purge,

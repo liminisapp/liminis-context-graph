@@ -2008,6 +2008,8 @@ async fn handle_delete_episode(req: &IpcRequest, state: Arc<AppState>) -> Result
             .get_episode_group_id(&episode_uuid)?
             .unwrap_or_else(|| DEFAULT_GROUP_ID.to_string());
         conn.remove_episode(&episode_uuid)?;
+        // Its summary unit (issue #850), if any, goes with it; no unit means no extra line.
+        conn.delete_summary_units_for_episodes(std::slice::from_ref(&episode_uuid))?;
         let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, conn.drain_mutations());
         wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
         Ok(())
@@ -3153,7 +3155,9 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
     let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
         let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
-        let (uuids, grouped) = conn.remove_episodes_by_source(&source_file, &gid_refs)?;
+        let (uuids, mut grouped) = conn.remove_episodes_by_source(&source_file, &gid_refs)?;
+        // The deleted episodes' summary units (issue #850), bucketed by their own group.
+        conn.delete_summary_units_grouped(&uuids, &mut grouped)?;
         // Each affected group's own deletions are already bucketed by the group whose data they
         // actually modified (issue #402, following ADR-0385's precedent for
         // handle_delete_by_group) — flush each bucket to its own group's writer, never the
@@ -3202,7 +3206,9 @@ async fn handle_delete_chunk_episode(
     let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
         let conn = db.connect()?;
         let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
-        let (uuids, grouped) = conn.remove_episodes_by_chunk_id(&chunk_id, &gid_refs)?;
+        let (uuids, mut grouped) = conn.remove_episodes_by_chunk_id(&chunk_id, &gid_refs)?;
+        // The deleted episodes' summary units (issue #850), bucketed by their own group.
+        conn.delete_summary_units_grouped(&uuids, &mut grouped)?;
         // Same rationale as handle_delete_by_source above (issue #402): each affected group's
         // own deletions are already bucketed by the group they actually modified — flush each
         // bucket to its own group's writer, never the default group's.

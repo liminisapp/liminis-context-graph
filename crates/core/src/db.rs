@@ -3552,7 +3552,8 @@ impl<'db> Conn<'db> {
         }
     }
 
-    /// The summary units of the given episodes, as `(uuid, episode_uuid, content)`.
+    /// The summary units of the given episodes, as `(uuid, episode_uuid, group_id)`, by uuid. A
+    /// database without the table reads as none.
     pub fn summary_units_for_episodes(
         &self,
         episode_uuids: &[String],
@@ -3562,7 +3563,7 @@ impl<'db> Conn<'db> {
         }
         match self.query_params(
             "MATCH (s:SummaryUnit) WHERE s.episode_uuid IN $uuids \
-             RETURN s.uuid, s.episode_uuid, s.content ORDER BY s.uuid",
+             RETURN s.uuid, s.episode_uuid, s.group_id ORDER BY s.uuid",
             serde_json::json!({ "uuids": episode_uuids }),
         ) {
             Ok(rows) => Ok(rows
@@ -3578,6 +3579,25 @@ impl<'db> Conn<'db> {
             Err(e) if e.to_string().contains("does not exist") => Ok(vec![]),
             Err(e) => Err(e),
         }
+    }
+
+    /// Deletes the summary units of `episode_uuids`, draining each group's `DELETE` into that
+    /// group's bucket of `grouped` (issue #850), so every line lands on the WAL stream of the group
+    /// it modified. Nothing is logged when none of the episodes has a unit.
+    pub fn delete_summary_units_grouped(
+        &self,
+        episode_uuids: &[String],
+        grouped: &mut GroupedMutations,
+    ) -> Result<(), Error> {
+        let mut by_group: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+        for (_, ep, gid) in self.summary_units_for_episodes(episode_uuids)? {
+            by_group.entry(gid).or_default().push(ep);
+        }
+        for (gid, eps) in by_group {
+            self.delete_summary_units_for_episodes(&eps)?;
+            self.drain_mutations_into(grouped, &gid);
+        }
+        Ok(())
     }
 
     /// Deletes the summary units of the given episodes, so a deleted episode leaves no orphan
