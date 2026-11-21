@@ -116,7 +116,10 @@ comparison (hosted Anthropic vs. local qwen3.6-27b) built on top of it, with the
 
 This harness measures **extraction** only. For **retrieval** quality — whether the read side
 returns the right notes and evidence, compared with qmd — see
-[retrieval-quality-evaluation.md](retrieval-quality-evaluation.md) (`lcg-eval retrieval`).
+[retrieval-quality-evaluation.md](retrieval-quality-evaluation.md) (`lcg-eval retrieval`). For the
+quality of the **graph** itself — entity typing, link types and direction, value-fact attachment —
+scored deterministically against a fixture skeleton, see
+[graph-integrity-evaluation.md](graph-integrity-evaluation.md) (`lcg-eval graph-integrity`).
 
 ### Running the harness
 

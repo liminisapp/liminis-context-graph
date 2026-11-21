@@ -33,6 +33,8 @@ that embedder.
 ```text
 scenario.json         generator input: seed and quotas (hand-edited)
 skeleton.json         generated: facts, origins, citations, sizes, supersessions, question ground truth
+graph-mapping.json    hand-edited: skeleton kind/attribute -> expected node type / relation type + direction,
+                      read by `lcg-eval graph-integrity` (not touched by `retrieval-gen`)
 review.json           human-review template (pending, empty verdicts)
 --- written by `retrieval-render` ---
 manifest.json  notes/*.md  questions.jsonl  questions.meta.json  render.json

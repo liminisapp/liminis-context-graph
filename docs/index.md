@@ -71,6 +71,7 @@ every group in the database — treat the process boundary as the trust boundary
 - **[Testing & Evaluation](testing-and-evaluation.md)** — LLM cassettes and the extraction-quality eval harness.
 - **[Extraction-Quality Evaluation](extraction-quality-evaluation.md)** — evaluation methodology, model rankings, and local-LLM guidance.
 - **[Retrieval-Quality Evaluation](retrieval-quality-evaluation.md)** — `lcg-eval retrieval`: LCG vs qmd on two notebook corpora (smoke and realistic), bootstrap confidence intervals, the question/judgement format, and how to run it, including on a private notebook.
+- **[Graph-Integrity Evaluation](graph-integrity-evaluation.md)** — `lcg-eval graph-integrity`: a deterministic report on an extracted graph (typing, links, direction, value-fact attachment, junk, signature marks) scored against a fixture skeleton, with `--compare` for before/after.
 - **[Full-Corpus Extraction Benchmark Runbook](eval-full-corpus-runbook.md)** — maintainer procedure for full-corpus model comparison.
 - **[Release Process](release-process.md)** — maintainer procedure for verifying CI status before cutting a release.
 - **[ADR Index](adr/index.md)** — architecture decision records (historical, not current-state, documentation — see the index for framing).

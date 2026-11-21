@@ -10,6 +10,7 @@ pub mod backend;
 pub mod cli;
 pub mod corpus;
 pub mod failure_taxonomy;
+pub mod graph_integrity;
 pub mod judge;
 pub mod judge_cache;
 pub mod metrics;

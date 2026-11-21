@@ -19,6 +19,10 @@ It is a separate mode of the existing `lcg-eval` binary. The extraction eval
 > and the 408-note v2 skeleton, whose prose a maintainer still has to render) are in the repository; results appear here only after a maintainer
 > has run the comparison on a real embedder. Until then this page deliberately contains no scores.
 
+> Passage ranking never reads an edge's type, direction or endpoints. To score the extracted graph
+> against a fixture's `skeleton.json`, use `lcg-eval graph-integrity`
+> ([graph-integrity-evaluation.md](graph-integrity-evaluation.md)).
+
 ## What it measures
 
 | Configuration | What runs |
