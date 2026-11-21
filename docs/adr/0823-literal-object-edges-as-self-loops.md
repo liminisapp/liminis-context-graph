@@ -144,7 +144,7 @@ thing to add.
   already allows equal names.
 - **A per-relation ontology flag** (`literal_object: true` on `RelationTypeDef`). ~46 struct-literal
   sites, a conditional hash segment (ADR-0032), and an edit to the v3.1 fixture, which lives on an
-  unmerged branch. The prompt rule covers every relation and works on v3.1 as it stands.
+  unmerged branch when this was decided (it has since landed with #821). The prompt rule covers every relation and works on v3.1 as it stands.
 - **Admitting a self-loop only when its fact contains a value.** It would drop role/title facts
   (`HAS_ROLE`: "the fact text names the role"), which carry no digits.
 

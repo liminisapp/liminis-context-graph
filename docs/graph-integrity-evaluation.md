@@ -319,8 +319,8 @@ fewer than two entities, which the free-form prompt gives no way to carry an edg
 > the prompt golden file, and the graph-integrity unit tests).
 
 Produce each arm from a fresh extraction with the same model and settings. **Before** is `main` at
-the merge base without this change, **after** is this branch. Ontology-mode ingest needs
-`lcg-eval retrieval --ontology` and kept workspaces (PR #842), or an equivalent local patch:
+the merge base without this change, **after** is this branch. Ontology-mode ingest uses
+`lcg-eval retrieval --ontology` and kept workspaces (#821, ADR-0821), now on `main`:
 
 ```sh
 # per arm and mode: extract v2 into a kept workspace, then
