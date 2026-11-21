@@ -64,6 +64,16 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   line. The fact-line grammar and embedder guarantees are published in `docs/test-providers.md`, and
   every example there is executed by lcg's tests.
 
+- **`knowledge_capabilities`: the socket describes itself (#854, ADR-0854).** A new read-scope
+  method (IPC and MCP, no DB access, no lock, answers in degraded mode) returns `server_version`
+  (the crate version), `protocol_version` (integer, `1`; bumped only on a breaking socket-protocol
+  change), `features` (sorted stable feature strings, seeded with `process_document`,
+  `chunk_supersede`, `walk`, `origin`, `lint`, `writable_groups`, `hybrid_passage_search`) and
+  `methods` (sorted names of every method the dispatcher accepts, checked against the dispatcher by
+  a test). `health_check` additionally reports `server_version` and `protocol_version` in all three
+  states (additive; existing fields unchanged). The MCP registry grows from 57 to 58 tools and the
+  IPC surface from 58 to 59 methods.
+
 - **Ontology edge direction: define, validate and repair (#816, ADR-0816).** With an ontology, 34%
   of typed edges on known-true links on the v2 corpus pointed the wrong way (the extractor made the
   sentence's subject the source). Relation types now accept `source_type`/`target_type` as a name or

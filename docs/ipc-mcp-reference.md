@@ -55,6 +55,7 @@ not exposed as an MCP tool. MCP clients have no health tool; the `ok` / `healthy
 | Category | Methods |
 |----------|---------|
 | Health | `health_check` |
+| Capabilities | `knowledge_capabilities` |
 | Status | `knowledge_status`, `knowledge_rebuild_status` |
 | Ingestion | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode` |
 | Document chunking (read-only) | `knowledge_preview_chunks` |
@@ -123,6 +124,31 @@ lock — most importantly a long `knowledge_rebuild_from_wal`. Pollers that need
 waiting on `busy` (gate on `result.healthy == true`) and must not treat it as failure. A client that
 only reads gates on `result.ready_for_reads == true` instead, which stays `true` while `busy`.
 
+### Capabilities
+
+`knowledge_capabilities` (read scope; IPC and MCP; [ADR-0854](adr/0854-knowledge-capabilities-protocol-version-and-feature-registry.md), #854)
+lets a client ask the running service what it is and what it supports. It takes no parameters
+(unknown ones are ignored), reads no database and takes no lock, so it answers in degraded mode,
+during a rebuild and under any `--writable-groups` policy.
+
+```json
+{"server_version": "0.19.1", "protocol_version": 1,
+ "features": ["chunk_supersede", "hybrid_passage_search", "lint", "origin", "process_document",
+              "walk", "writable_groups"],
+ "methods": ["health_check", "knowledge_add_episode", "…"]}
+```
+
+| Field | Meaning |
+|---|---|
+| `server_version` | The crate version, exactly as `--version` and MCP `initialize` report it (no `v` prefix; pre-release suffixes kept). |
+| `protocol_version` | Integer, `1` today. Bumped **only** on a breaking change to the socket protocol (a removed or renamed method, a changed default scope or response semantics). A new method, field or feature does not bump it. Compare it for compatibility; do not infer features from it. |
+| `features` | Sorted, duplicate-free `lower_snake_case` strings, one per capability. Append-only: a string is never renamed or removed once shipped. Test for the one you need; **ignore strings you do not recognise**. |
+| `methods` | Sorted, duplicate-free names of every IPC method the dispatcher accepts, including `health_check` and `knowledge_capabilities`. It lists a method even if a particular call would currently be refused (degraded mode, write policy). |
+
+**Old servers.** A server that predates this method answers `knowledge_capabilities` with its
+ordinary unknown-method error: JSON-RPC code `-32000` and a message beginning `Method not found:`.
+Treat that as "older than the capabilities method" and fall back to your own probing.
+
 ### Health check contract
 
 `health_check` never waits on the write lock, so it answers promptly even during a long WAL
@@ -159,6 +185,10 @@ should use `ok` for liveness and `ready_for_reads` for read availability.
 `progress` uses the same values as `knowledge_rebuild_status`. For any other writer the response
 is `{"ok": true, "healthy": false, "state": "busy", "ready_for_reads": true, "activity": "writing"}`
 with no `job_id` or `progress`. The busy path never connects to or queries the database.
+
+Every `health_check` response, in every state, also carries `server_version` and
+`protocol_version` (issue #854), with the same values as
+[`knowledge_capabilities`](#capabilities). They are additive; no existing field changed.
 
 Notes:
 
@@ -250,7 +280,7 @@ union of all active scopes.
 
 | Scope | Methods |
 |-------|---------|
-| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_ontology`, `knowledge_walk`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
+| `read` | `knowledge_status`, `knowledge_capabilities`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_ontology`, `knowledge_walk`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
 | `write` | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |

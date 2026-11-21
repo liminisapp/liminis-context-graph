@@ -129,6 +129,20 @@ Two rules that follow:
 - **A storage migration ships alone.** Make it the only notable change in its release, so a user
   who hits trouble has one variable to consider and rollback is "go back one version".
 
+### CHANGELOG rules for raw-socket clients
+
+The socket protocol is a public interface: the Electron app and third-party integrators talk to it
+directly, not through a generated client ([ADR-0854](docs/adr/0854-knowledge-capabilities-protocol-version-and-feature-registry.md)).
+
+- A change to a **default scope** or to **response semantics** (a field's meaning, type, default or
+  ordering; an error code; what an empty result means) is flagged **BREAKING for raw-socket
+  clients** in the CHANGELOG entry, even when it is a patch-sized change in the code.
+- A breaking change to the socket protocol bumps `PROTOCOL_VERSION` in
+  `crates/core/src/capabilities.rs`. Purely additive changes (a new method, a new response field)
+  do not.
+- An issue that ships a new capability adds its own feature string to `FEATURES` in the same file
+  (sorted, `lower_snake_case`, append-only). Removing a feature string is itself a breaking change.
+
 The release version lives in `[workspace.package]` in `Cargo.toml`; cargo-dist derives the
 release from it and **requires the pushed tag to match that version**, so the bump and the tag
 must agree. Per this repo's worktree rule, prepare the release on a branch and land it via a PR —
