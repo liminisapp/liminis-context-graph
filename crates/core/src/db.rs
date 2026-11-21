@@ -5104,6 +5104,33 @@ impl<'db> Conn<'db> {
         Ok(rows.into_iter().next().map(|row| value_as_string(&row[0])))
     }
 
+    /// Whether `entity_uuid` already has an active self-loop in `group_id` that duplicates the
+    /// edge `like_edge_uuid`: same fact text and same relation type, excluding that edge itself.
+    ///
+    /// The dedup key for #823's literal-object self-loops (ADR-0823), used by entity merge and
+    /// cross-group rebind in place of [`Self::has_directed_edge`]. `(src, dst, name)` is the
+    /// wrong key for value facts: several distinct ones (a budget, a headcount) legitimately
+    /// share `(A, A, relation)`, and ingest names an edge after its endpoints, so an alias's
+    /// self-loop never matches the canonical's by name. Two copies of the same value fact are a
+    /// duplicate. Two different facts are not.
+    pub fn has_duplicate_self_loop(
+        &self,
+        entity_uuid: &str,
+        group_id: &str,
+        like_edge_uuid: &str,
+    ) -> Result<bool, Error> {
+        let rows = self.query_params(
+            "MATCH (like:RelatesToNode_ {uuid: $like}) \
+             MATCH (a:Entity {uuid: $ent})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(b:Entity {uuid: $ent}) \
+             WHERE rn.invalid_at IS NULL AND rn.group_id = $group_id AND rn.uuid <> like.uuid \
+               AND rn.fact = like.fact \
+               AND coalesce(rn.relation_type, '') = coalesce(like.relation_type, '') \
+             RETURN rn.uuid LIMIT 1",
+            serde_json::json!({ "like": like_edge_uuid, "ent": entity_uuid, "group_id": group_id }),
+        )?;
+        Ok(!rows.is_empty())
+    }
+
     /// Returns a full RelatesToEdge by UUID, joining via the RelatesToNode_ shadow node.
     pub fn get_edge_by_uuid(&self, uuid: &str) -> Result<Option<RelatesToEdge>, Error> {
         let mut rows = self.collect_relates_to_edges(

@@ -3534,7 +3534,8 @@ counted in `edges_literal_object`. So "Marlin Core has a monthly budget of $4,20
 - is not checked against the relation's signature (there is no direction to check), so it never
   picks up `signature_mismatch`, at ingest or in `knowledge_canonicalize_relations`;
 - survives an entity merge and a cross-group rebind (both ends move to the surviving entity), and
-  several value facts about one entity are all kept;
+  several value facts about one entity are all kept. Only a second copy of the same fact, with
+  the same text and relation type, is collapsed;
 - is returned by `knowledge_walk` on the **last** hop of a value walk (`answer_type` `"value"`
   or absent). A walk that reaches Marlin Core returns its budget, but the self-loop is never a
   step: it never extends the frontier, and it is not a candidate on earlier hops. See
