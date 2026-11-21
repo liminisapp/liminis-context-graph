@@ -542,14 +542,13 @@ async fn resolve_phase_b(
     .await?
 }
 
+/// A summary unit's text and embedding, if one was made (issue #850).
+type SummaryOutcome = Result<Option<(String, Vec<f32>)>, Error>;
+
 /// One summary unit for `body` (issue #850): the summarize call, then the summary embedded with
 /// the passage embedder as a `Document`. `Ok(None)` is never returned for a successful call; the
 /// caller decides what a failure means (see `add_episode_with_opts`).
-async fn summarize_episode(
-    state: &AppState,
-    body: &str,
-    chunk_key: &str,
-) -> Result<Option<(String, Vec<f32>)>, Error> {
+async fn summarize_episode(state: &AppState, body: &str, chunk_key: &str) -> SummaryOutcome {
     let raw = state.extractor.summarize(body, Some(chunk_key)).await?;
     let summary = crate::summary_units::clean_summary(&raw)
         .ok_or_else(|| Error::Ipc("summarize reply held no summary text".to_string()))?;
@@ -708,7 +707,7 @@ pub async fn add_episode_with_opts(
     let (content_embedding, extraction_outcome, summary_outcome): (
         Vec<f32>,
         ExtractionOutcome,
-        Result<Option<(String, Vec<f32>)>, Error>,
+        SummaryOutcome,
     ) = tokio::select! {
         result = async {
             tokio::join!(
