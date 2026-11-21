@@ -88,7 +88,9 @@ deterministic name predicate in `episode.rs`.
   `[[Node-RED]]`, `[[S3]]` and `[[e-commerce]]` are citation targets too. In a vault that links to
   such pages, a real entity the model extracts under exactly that name (a `GPT-4` Technology) is
   dropped, with its edges, in that episode; the only trace is the stderr line and the
-  `entities_dropped_source_id` count. The rule applies to every body on every path. The gate is the
+  `entities_dropped_source_id` count (the stderr line names the dropped entity, its type, and whether the
+  own-ID or the citation-target rule fired, so the loss can be audited). The rule applies to every body
+  on every path. The gate is the
   one the maintainer specified for the v2 fix; a stricter shape (e.g. a trailing numeric segment)
   would not exclude `GPT-4`/`covid-19` and could miss v2 nodes, so it was not applied. Mitigations:
   the drop is per-episode and exact-name only, the entity is still extracted from episodes that do

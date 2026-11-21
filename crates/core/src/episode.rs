@@ -97,10 +97,13 @@ pub struct AddEpisodeResult {
     /// missing/`null`/empty-string/whitespace-only `name` all still produce a single observable
     /// outcome (#342 FR-003, FR-007; #347 FR-004).
     pub entities_dropped_malformed: usize,
-    /// Extracted entities dropped because their name was the episode's own source ID (the note
-    /// identifier, e.g. `project-quill-core-1`), together with the edges touching them (issue
-    /// #824, ADR-0824). Counts entities only; the discarded edges are not counted in
-    /// `edges_dropped_unresolvable`. Always `0` for a free-form episode with no `doc_id`.
+    /// Extracted entities dropped because their name was the episode's own source ID, or an
+    /// ID-shaped `[[wikilink]]` target cited in the episode body (a note ID such as
+    /// `project-quill-core-1`), together with the edges touching them (issue #824, ADR-0824). One
+    /// counter covers both rules. Counts entities only; the discarded edges are not counted in
+    /// `edges_dropped_unresolvable`. The own-ID rule needs a `doc_id` (or, on the chunk path, a
+    /// chunk id / source file), but the citation-target rule reads the body on every path, so this
+    /// can be non-zero for a free-form episode with no `doc_id` whose body links an ID-shaped note.
     pub entities_dropped_source_id: usize,
     /// Edges dropped for failing required-field validation during extraction-response parsing —
     /// a missing `source_name`/`target_name`/`fact` (#342), or, since #347, a `source_name`,
@@ -698,16 +701,25 @@ pub async fn add_episode_with_opts(
         opts.doc_id.as_deref(),
         opts.guard_chunk_collision,
     );
-    own_source_ids.extend(crate::source_id::citation_targets(body));
+    // Kept separate from the own IDs so a drop's log line can say which rule fired (a concept link
+    // such as `[[GPT-4]]` is indistinguishable from a note ID by shape — see ADR-0824 — so the log
+    // is the only trace of collateral loss).
+    let citation_ids = crate::source_id::citation_targets(body);
+    own_source_ids.extend(citation_ids.iter().cloned());
     let mut entities_dropped_source_id = 0usize;
     if !own_source_ids.is_empty() {
         let before = extraction.entities.len();
         extraction.entities.retain(|e| {
             let hit = crate::source_id::matches_source_id(&e.name, &own_source_ids);
             if hit {
+                let rule = if crate::source_id::matches_source_id(&e.name, &citation_ids) {
+                    "cited [[wikilink]] note ID"
+                } else {
+                    "episode's own source ID"
+                };
                 eprintln!(
-                    "liminis-context-graph: dropping extracted entity '{}' named after the episode's own source ID or a cited note ID",
-                    e.name
+                    "liminis-context-graph: dropping extracted entity '{}' (type '{}') named after the {rule}",
+                    e.name, e.entity_type
                 );
             }
             !hit
