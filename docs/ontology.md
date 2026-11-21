@@ -122,6 +122,16 @@ ingest for that group (`knowledge_add_episode`, e.g. following "Recreate + re-in
 `knowledge_rebuild_from_wal` replay for that group. Clearing one group's drift never clears (or
 affects) any other group's drift status.
 
+## Reading the effective ontology
+
+`knowledge_get_ontology {group_id?, include_asserted?}` (MCP tool of the same name, `read` scope)
+returns the ontology that applies to a group — the same group → workspace → none resolution used
+for extraction — as a planning menu for `knowledge_walk`: mode, entity types (description, parent)
+and relation types (description, `source_type` / `target_type` lists, `inverse_aliases`,
+`symmetric`). Assert-only types (`extract: false`) are omitted unless `include_asserted: true`; a
+group with no ontology gets `has_ontology: false` and `mode: "free-form"`. See
+[IPC/MCP reference → Typed relation walks](ipc-mcp-reference.md#typed-relation-walks-knowledge_get_ontology-knowledge_walk-issue-820).
+
 ## Reloading a group's ontology
 
 A group's ontology is resolved on its first use and then cached, so editing its file does not
