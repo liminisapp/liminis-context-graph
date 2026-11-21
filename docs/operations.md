@@ -474,8 +474,10 @@ the named one) with `CALL DROP_FTS_INDEX('Entity','node_name_and_summary')`,
 **`wal_groups`** (issue #378) — an additive map, keyed by `group_id`, of every group that
 currently has a WAL directory, each entry shaped like the flat `wal` object below
 (`{applied_seq, max_seq, generation, generation_status, hydration_status, embedding_model,
-embedding_dim, embedding_model_status}` — the last three added by issue #440, mirroring each
-group's own embedding identity the same way `generation` is already mirrored per group). This is
+embedding_dim, embedding_model_status, zero_vector_rows}` — the embedding fields added by issue
+#440, mirroring each group's own embedding identity the same way `generation` is already mirrored
+per group, and `zero_vector_rows` by issue #808, see
+[below](#embedding-failures-during-replay-retry-and-the-zero-vector-record)). This is
 the multi-group view; the flat
 `wal.applied_seq`/`wal.max_seq`/`wal.generation`/`wal.generation_status`/`wal.hydration_status`/`wal.embedding_model`/`wal.embedding_dim`/`wal.embedding_model_status`
 fields described next remain present and
@@ -725,6 +727,68 @@ conservative position on first open, derived from the last `Episodic` node's loc
 for why this issue persists a cursor for the fast path in addition to ADR-0026's own recovery-time
 use of the same mechanism). This backfill runs once at startup and is a no-op on every subsequent
 boot once a position is recorded.
+
+### Embedding failures during replay: retry and the zero-vector record
+
+*(Issue #808, [ADR-0808](adr/0808-replay-embed-retry-and-zero-vector-record.md).)* A row whose
+embedding could not be computed during replay is stored with a same-dimension **zero vector** and
+is invisible to vector search. Two mechanisms limit and expose that:
+
+**Retry with backoff (replay only).** Replay's embedding recompute retries a *transient* embedder
+failure — a timeout, a connection reset or broken pipe, HTTP 5xx (including 503) or HTTP 429 —
+with exponential backoff and jitter. It never retries a non-transient error (another 4xx, a
+wrong-dimension or non-finite vector). When a multi-row window exhausts its retries it is split in
+half and the halves retried recursively, so one text the embedder cannot process costs only its
+own row. Tune with `LCG_REPLAY_EMBED_RETRIES` (default 4), `LCG_REPLAY_EMBED_BACKOFF_MS` (default
+500) and `LCG_REPLAY_EMBED_BACKOFF_MAX_MS` (default 10000); see
+[configuration](configuration.md). Live ingest (`add_episode`) does not use this: it has no
+zero-vector fallback, an embedder failure fails the ingest.
+
+**Worst-case time.** Each attempt is bounded by `LCG_EMBEDDING_TIMEOUT_MS` (default 30 s). One
+request costs at most `(retries + 1) × timeout + Σ backoff`, with the defaults about 150 s + 10 s.
+Splitting does not multiply that: a window may spend at most
+`(retries + 1) × (depth + 2) + depth` *transiently failing* calls across its whole retry tree,
+where `depth = ⌈log₂ rows⌉` (46 for a 64-row window at the defaults; successful and
+permanently-failing calls are not counted). When the budget is spent the rest of the window fails
+without further calls. If an entire window fails transiently (the embedder is down) the next
+window gets one attempt with no retry or split (a permanent error such as a 4xx still splits, to
+isolate a poison text), until a window succeeds again, so from then on a dead embedder costs about
+one timeout per window — what it cost before #808. The **first** window of a dead-embedder run, and
+the first window after each recovery, is not covered by the breaker: it can spend its whole
+transient-call budget, up to `budget × LCG_EMBEDDING_TIMEOUT_MS` (46 × 30 s, about 23 minutes, for a
+64-row window at the defaults). An intermittent outage can pay that again after every recovery.
+Lower `LCG_REPLAY_EMBED_RETRIES` or `LCG_EMBEDDING_TIMEOUT_MS` to shrink it. A cancel or shutdown
+during a backoff aborts the window within about 100 ms.
+
+**`wal_groups.<gid>.zero_vector_rows`.** `knowledge_status` reports, per group, how many rows are
+currently stored with a fallback zero vector because the embedder failed, with a breakdown by the
+column that is zero:
+
+```json
+"zero_vector_rows": { "total": 25, "by_kind": { "name": 25, "fact": 0, "summary": 0, "content": 0 } }
+```
+
+The field is always present (all zeros when nothing failed), exact however many rows failed (the
+per-row log stops after 10), and survives a restart. A non-zero total means vector search is
+missing those rows; it does not change `embedding_model_status`, and a later clean run can stamp
+the embedding identity while old entries remain — treat `zero_vector_rows` as the authority on
+degraded rows. Rows with no source text, and vector-only updates that were skipped (issue #526),
+are not counted: they are not failures.
+
+The record is a database table (`EmbeddingZeroRow`), written in the same transaction as the rows
+it describes, so it cannot name a row that was rolled back or miss one that was stored. A full
+rebuild (`knowledge_rebuild_from_wal` with `force_clear`, or `knowledge_delete_by_group`) resets
+it to that rebuild's own failures. An incremental replay that later embeds a recorded row
+successfully, or deletes it, clears its entry. "Deletes it" covers a replayed delete that names
+the row by a `uuid` param or a `uuids` list, and a replayed group purge (a `gids` list), which
+clears the entries of those groups that live on the purged table (an `Episodic` purge clears
+`content`, an `Entity` purge `name` and `summary`, a `RelatesToNode_` purge `fact`) and leaves the
+other tables' entries alone; a delete of a relationship hop only (`RelatesToNode_` hop
+deletes) removes no row, so it leaves entries alone, and a delete by any other shape (for example a
+free-form `knowledge_query_cypher` mutation) is not recognised and can leave a stale entry, which
+the repair tool removes. Repair is a separate tool (which lists the rows
+with `Conn::list_zero_vector_rows` and removes entries with `Conn::remove_zero_vector_rows`);
+until it exists, a full rebuild against a healthy embedder re-embeds everything.
 
 ## Streaming progress
 
