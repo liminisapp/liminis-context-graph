@@ -189,7 +189,8 @@ OPTIONS:
                                Mode applied to --ontology (default strict). Requires --ontology.
     --keep-workspace <DIR>     Keep the ingested workspace (DB, WAL, ontology) at DIR after the run,
                                for `graph-integrity --workspace` and `graph-qa --workspace`. DIR must
-                               not exist or be empty. One --embedding-profile at most.
+                               not exist or be empty. One --embedding-profile at most, and at least
+                               one lcg-* config in --configs.
     --anthropic-base-url <URL> Anthropic-compatible base URL for the judge (also ANTHROPIC_BASE_URL;
     --anthropic-endpoint <URL> the endpoint form is used verbatim, also LCG_ANTHROPIC_ENDPOINT). With
                                either set, or ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN, the judge
@@ -372,6 +373,15 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
             return Err(
                 "--keep-workspace keeps one workspace; it cannot be combined with more than one \
                  --embedding-profile"
+                    .into(),
+            );
+        }
+        // The kept workspace is the LCG service's; a run with no `lcg-*` config never starts one,
+        // so it would otherwise exit 0 with nothing at the keep directory.
+        if !a.configs.iter().any(|c| c.starts_with("lcg-")) {
+            return Err(
+                "--keep-workspace needs at least one lcg-* config in --configs; a qmd-only run \
+                 ingests nothing into LCG, so there is no workspace to keep"
                     .into(),
             );
         }
@@ -772,6 +782,15 @@ mod tests {
         ])
         .unwrap_err();
         assert!(e.contains("--embedding-profile"), "{e}");
+        // A qmd-only run ingests nothing into LCG, so there is no workspace to keep.
+        let e = p(&[
+            "--keep-workspace",
+            fresh.to_str().unwrap(),
+            "--configs",
+            "qmd",
+        ])
+        .unwrap_err();
+        assert!(e.contains("lcg-"), "{e}");
     }
 
     #[test]

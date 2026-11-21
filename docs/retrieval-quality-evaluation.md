@@ -691,7 +691,7 @@ target/release/lcg-eval retrieval --corpus crates/eval/fixtures/retrieval-v2 \
 |---|---|
 | `--ontology <FILE>` | Every extraction call is constrained by this ontology. It is written into the workspace as `.lcg/ontology.yaml`, which is where the service reads it. |
 | `--ontology-mode open\|strict` | The mode applied to the ontology (default `strict`, as in the extraction eval). It needs `--ontology`. The mode is part of the ontology hash. |
-| `--keep-workspace <DIR>` | After the run, the service is shut down gracefully (`knowledge_close`) and the ingested workspace (DB, WAL, ontology) is moved to `DIR`, with an `lcg-eval-workspace.json` manifest. `DIR` must not exist or must be empty. It takes one `--embedding-profile` at most. Without the flag the temporary workspace is removed, as before. |
+| `--keep-workspace <DIR>` | After the run, the service is shut down gracefully (`knowledge_close`) and the ingested workspace (DB, WAL, ontology) is moved to `DIR`, with an `lcg-eval-workspace.json` manifest. `DIR` must not exist or must be empty. It takes one `--embedding-profile` at most, and needs at least one `lcg-*` config in `--configs` (a qmd-only run ingests nothing into LCG). Without the flag the temporary workspace is removed, as before. |
 
 **The ontology hash.** The report records the ontology's hash and mode in its Reproduction block
 and in `meta.ontology_hash` / `meta.ontology_mode`. It is `lcg_core::ontology::content_hash`, the
