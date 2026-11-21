@@ -108,6 +108,20 @@ fn install(f: &Fixture, reranker: Option<MockReranker>, expander: Option<MockQue
     ));
 }
 
+/// Drops the wall-clock `elapsed_ms` from every stage block (`rerank`, `expansion`, …).
+/// Two otherwise identical calls can straddle a millisecond tick, so the timing is the
+/// one field a byte-identity comparison must not include; everything else is compared.
+fn without_timings(mut v: Value) -> Value {
+    if let Some(obj) = v.as_object_mut() {
+        for block in obj.values_mut() {
+            if let Some(b) = block.as_object_mut() {
+                b.remove("elapsed_ms");
+            }
+        }
+    }
+    v
+}
+
 #[tokio::test]
 async fn without_the_flag_every_mode_is_unchanged() {
     let f = fixture();
@@ -126,7 +140,11 @@ async fn without_the_flag_every_mode_is_unchanged() {
             with["summaries"] = flag.clone();
             // A stray `max_summary_slots` is not even validated when summaries are off.
             with["max_summary_slots"] = json!("ignored");
-            assert_eq!(search(&f, with).await, plain, "{base} summaries={flag}");
+            assert_eq!(
+                without_timings(search(&f, with).await),
+                without_timings(plain.clone()),
+                "{base} summaries={flag}"
+            );
         }
         assert!(plain.get("summaries").is_none());
         assert_eq!(via_count(&plain), 0);
