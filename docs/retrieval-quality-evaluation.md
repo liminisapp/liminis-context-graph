@@ -660,8 +660,8 @@ notebook or the questions is checked in or written into the report.**
    or `lcg-eval retrieval --private --corpus ... --out ... --judge-cache ...` (use `--no-grounded`
    to skip the judge and its cache).
 3. **What `--private` does.** It requires an explicit `--out` (and `--judge-cache` unless
-   `--no-grounded`) and **refuses any such path, and any `--record-cassette` path, that is inside a
-   git working tree** (it looks for a `.git` above the path), so private text cannot land in a
+   `--no-grounded`) and **refuses any such path, and any `--record-cassette` or `--keep-workspace` path,
+   that is inside a git working tree** (it looks for a `.git` above the path), so private text cannot land in a
    commit. The report's disclaimer says the corpus is a private notebook, not a synthetic one. The report contains aggregate
    metrics, counts, versions and hashes only: it never prints note or question text, and the detail
    of a failed query is withheld (`id: error (detail withheld)`) because a service error can echo the

@@ -447,6 +447,10 @@ pub fn private_guard(a: &RetrievalArgs) -> Result<(), String> {
     if let Some(r) = record {
         paths.push(("--record-cassette", r));
     }
+    // A kept workspace holds the whole ingested private corpus (DB, WAL, episodes).
+    if let Some(k) = &a.keep_workspace {
+        paths.push(("--keep-workspace", k));
+    }
     for (flag, p) in paths {
         if inside_git_tree(p) {
             return Err(format!(
@@ -644,6 +648,33 @@ mod tests {
             "{e}"
         );
         assert!(private_guard(&args(&outside.path().join("cassette.jsonl"))).is_ok());
+    }
+
+    #[test]
+    fn private_guard_refuses_a_workspace_kept_inside_a_git_tree() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tree.path().join(".git")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let args = |kept: &Path| {
+            let RetrievalMode::Run(a) = p(&[
+                "--private",
+                "--out",
+                outside.path().join("out").to_str().unwrap(),
+                "--no-grounded",
+                "--keep-workspace",
+                kept.to_str().unwrap(),
+            ])
+            .unwrap() else {
+                panic!()
+            };
+            *a
+        };
+        let e = private_guard(&args(&tree.path().join("ws"))).unwrap_err();
+        assert!(
+            e.contains("--keep-workspace") && e.contains("git working tree"),
+            "{e}"
+        );
+        assert!(private_guard(&args(&outside.path().join("ws"))).is_ok());
     }
 
     #[test]
