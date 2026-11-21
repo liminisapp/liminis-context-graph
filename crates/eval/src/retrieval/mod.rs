@@ -588,6 +588,7 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                 ontology_mode: a.ontology_mode.clone(),
                 ontology_hash: a.ontology.as_ref().map(|_| onto.hash.clone()),
                 seed_workspace: None,
+                summary_units: a.configs.iter().any(|c| c == lcg::SUMMARIES_CONFIG),
             };
             eprintln!(
                 "lcg-eval retrieval: starting LCG service ({}){}",
@@ -683,24 +684,35 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                         rerank: true,
                         expand: false,
                         belief_aware: false,
+                        summaries: false,
                     }),
                     "lcg-passages-belief-rerank" => Box::new(lcg::LcgPassagesStaged {
                         t: transport.clone(),
                         rerank: true,
                         expand: false,
                         belief_aware: true,
+                        summaries: false,
+                    }),
+                    lcg::SUMMARIES_CONFIG => Box::new(lcg::LcgPassagesStaged {
+                        t: transport.clone(),
+                        rerank: true,
+                        expand: false,
+                        belief_aware: true,
+                        summaries: true,
                     }),
                     "lcg-passages-expand" => Box::new(lcg::LcgPassagesStaged {
                         t: transport.clone(),
                         rerank: false,
                         expand: true,
                         belief_aware: false,
+                        summaries: false,
                     }),
                     "lcg-passages-expand-rerank" => Box::new(lcg::LcgPassagesStaged {
                         t: transport.clone(),
                         rerank: true,
                         expand: true,
                         belief_aware: false,
+                        summaries: false,
                     }),
                     "lcg-entities-facts" => Box::new(lcg::LcgEntitiesFacts {
                         t: transport.clone(),

@@ -163,6 +163,10 @@ pub struct ServiceOpts {
     /// An existing workspace to run on (`graph-qa`): it is **copied** into the temp workspace and
     /// the service runs on the copy, so the original is never opened, migrated or checkpointed.
     pub seed_workspace: Option<PathBuf>,
+    /// Sets `LCG_SUMMARY_UNITS=on` in the child (issue #850), so ingest writes summary units. Set
+    /// only when `lcg-passages-belief-rerank-summaries` is selected; otherwise the variable is
+    /// removed so an operator's setting cannot leak into what other configs measure.
+    pub summary_units: bool,
 }
 
 /// Mock and hash embedders produce meaningless vectors, so a real embedder must be named
@@ -354,6 +358,11 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
         .env_remove("GRAPHITI_DB_PATH")
         .env_remove("GRAPHITI_WAL_DIR")
         .env_remove("GRAPHITI_SOCKET_PATH");
+    if o.summary_units {
+        cmd.env("LCG_SUMMARY_UNITS", "on");
+    } else {
+        cmd.env_remove("LCG_SUMMARY_UNITS");
+    }
     let mut child = cmd.spawn().map_err(|e| {
         format!(
             "cannot start service '{}': {e} (pass --service-bin, or build with `cargo build --release -p lcg-service`)",
@@ -835,7 +844,14 @@ pub struct LcgPassagesStaged {
     /// Sends `belief_aware: true` for the first stage (`lcg-passages-belief-rerank`): the rerank
     /// candidates then come from the belief-aware ordering rather than plain cosine.
     pub belief_aware: bool,
+    /// Sends `summaries: true` (`lcg-passages-belief-rerank-summaries`, issue #850): summary units
+    /// join the belief-aware first stage before the rerank. Otherwise the key is not sent at all.
+    pub summaries: bool,
 }
+
+/// The summary-units probe configuration (issue #850): `lcg-passages-belief-rerank` plus
+/// `summaries: true`, on a workspace ingested with summary units.
+pub const SUMMARIES_CONFIG: &str = "lcg-passages-belief-rerank-summaries";
 
 impl LcgPassagesStaged {
     pub fn config_id(rerank: bool, expand: bool) -> &'static str {
@@ -849,7 +865,9 @@ impl LcgPassagesStaged {
 
     /// This configuration's id, including the belief-aware first-stage variant.
     fn id_str(&self) -> &'static str {
-        if self.belief_aware && self.rerank && !self.expand {
+        if self.summaries && self.belief_aware && self.rerank && !self.expand {
+            SUMMARIES_CONFIG
+        } else if self.belief_aware && self.rerank && !self.expand {
             "lcg-passages-belief-rerank"
         } else {
             Self::config_id(self.rerank, self.expand)
@@ -878,6 +896,21 @@ impl LcgPassagesStaged {
                 ));
             }
         }
+        // Summaries (issue #850): with no units (a replay cassette without `summarize` records
+        // fails ingest instead, but a live run whose summarize calls all failed would get here)
+        // the service answers with the ordinary results, which must not be scored as the
+        // summaries configuration. `no_candidates` is a genuine answer: units exist, none matched.
+        if self.summaries {
+            let block = &resp["summaries"];
+            let reason = block["reason"].as_str();
+            if block["applied"].as_bool() != Some(true) && reason != Some("no_candidates") {
+                return Err(format!(
+                    "summaries did not apply ({}); refusing to score ordinary results as {}",
+                    reason.unwrap_or("no `summaries` report in the response"),
+                    self.id_str()
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -888,6 +921,7 @@ impl Retriever for LcgPassagesStaged {
     }
     fn description(&self) -> String {
         let stages = match (self.rerank, self.expand) {
+            (true, false) if self.belief_aware && self.summaries => "rerank over a belief-aware first stage with summary units as candidates (summary hits resolved to their note's passage, at most 3): top-N rescored by the local cross-encoder, blended with belief and recency",
             (true, false) if self.belief_aware => "rerank over a belief-aware first stage: top-N candidates rescored by the local cross-encoder, blended with belief and recency",
             (true, false) => "rerank: top-N candidates rescored by the local cross-encoder, blended with belief and recency",
             (false, true) => "expand: query rewritten by a local LLM into lexical/semantic/HyDE variants, fused with RRF",
@@ -898,6 +932,15 @@ impl Retriever for LcgPassagesStaged {
     fn retrieve<'a>(&'a self, q: &'a str, k: usize) -> BoxFuture<'a, Result<RankedResult, String>> {
         Box::pin(async move {
             let t0 = Instant::now();
+            let mut params = json!({"query": q, "num_results": k, "min_score": 0.0,
+                   "group_ids": [EVAL_GROUP], "mode": "vector",
+                   "belief_aware": self.belief_aware,
+                   "rerank": self.rerank, "expand": self.expand});
+            // Only the summaries config sends the key, so every other config's request is
+            // unchanged.
+            if self.summaries {
+                params["summaries"] = json!(true);
+            }
             let r = self
                 .t
                 .call(
@@ -908,10 +951,7 @@ impl Retriever for LcgPassagesStaged {
                     // the same first stage (`lcg-passages-raw`, `lcg-passages-belief`), so the paired
                     // delta isolates the stage. `lcg-passages` itself is the shipped (belief-aware)
                     // default since #806 and is only the fallback pairing.
-                    json!({"query": q, "num_results": k, "min_score": 0.0,
-                           "group_ids": [EVAL_GROUP], "mode": "vector",
-                           "belief_aware": self.belief_aware,
-                           "rerank": self.rerank, "expand": self.expand}),
+                    params,
                 )
                 .await?;
             let latency = t0.elapsed();
@@ -1295,6 +1335,7 @@ mod tests {
             rerank: true,
             expand: false,
             belief_aware: true,
+            summaries: false,
         };
         assert_eq!(rt.id(), "lcg-passages-belief-rerank");
         rt.retrieve("q", 5).await.unwrap();
@@ -1302,6 +1343,66 @@ mod tests {
         assert_eq!(log[0].1["belief_aware"], true);
         assert_eq!(log[0].1["rerank"], true);
         assert_eq!(log[0].1["mode"], "vector");
+    }
+
+    #[tokio::test]
+    async fn summaries_config_sends_the_flag_and_refuses_to_score_without_units() {
+        let applied = Arc::new(std::sync::Mutex::new(
+            json!({"applied": true, "candidates": 4, "results": 1}),
+        ));
+        let a = Arc::clone(&applied);
+        let t = Arc::new(FakeTransport::new(move |_, _| {
+            Ok(
+                json!({"passages":[{"content":"c","source_description":"n1:n1#0","via":"summary"}],
+                      "count":1, "rerank":{"applied":true,"candidates":1},
+                      "summaries": a.lock().unwrap().clone()}),
+            )
+        }));
+        let rt = LcgPassagesStaged {
+            t: t.clone(),
+            rerank: true,
+            expand: false,
+            belief_aware: true,
+            summaries: true,
+        };
+        assert_eq!(rt.id(), SUMMARIES_CONFIG);
+        let got = rt.retrieve("q", 5).await.unwrap();
+        assert_eq!(got.notes, vec!["n1"]);
+        {
+            let log = t.log.lock().unwrap();
+            assert_eq!(log[0].1["summaries"], true);
+            assert_eq!(log[0].1["belief_aware"], true);
+            assert_eq!(log[0].1["rerank"], true);
+            assert_eq!(log[0].1["mode"], "vector");
+        }
+
+        // Units exist but none matched: a genuine answer, scored.
+        *applied.lock().unwrap() =
+            json!({"applied": false, "candidates": 0, "reason": "no_candidates"});
+        assert!(rt.retrieve("q", 5).await.is_ok());
+        // No units (or no block at all): refused, never scored as the summaries config.
+        for block in [
+            json!({"applied": false, "candidates": 0, "reason": "no_units"}),
+            Value::Null,
+        ] {
+            *applied.lock().unwrap() = block.clone();
+            let e = rt.retrieve("q", 5).await.unwrap_err();
+            assert!(e.contains("summaries did not apply"), "{block}: {e}");
+        }
+
+        // The plain belief-rerank config never sends the key.
+        let t = Arc::new(FakeTransport::new(|_, _| {
+            Ok(json!({"passages":[],"count":0,"rerank":{"applied":true,"candidates":0}}))
+        }));
+        let rt = LcgPassagesStaged {
+            t: t.clone(),
+            rerank: true,
+            expand: false,
+            belief_aware: true,
+            summaries: false,
+        };
+        rt.retrieve("q", 5).await.unwrap();
+        assert!(t.log.lock().unwrap()[0].1.get("summaries").is_none());
     }
 
     #[tokio::test]
@@ -1327,6 +1428,7 @@ mod tests {
                 rerank,
                 expand,
                 belief_aware: false,
+                summaries: false,
             };
             assert_eq!(rt.id(), id);
             let r = rt.retrieve("q", 5).await.unwrap();
@@ -1353,6 +1455,7 @@ mod tests {
                 rerank: true,
                 expand: false,
                 belief_aware: false,
+                summaries: false,
             };
             let e = rt.retrieve("q", 5).await.expect_err("must fail");
             assert!(e.contains("rerank did not apply"), "{e}");
@@ -1368,6 +1471,7 @@ mod tests {
             rerank: true,
             expand: true,
             belief_aware: false,
+            summaries: false,
         };
         let e = rt.retrieve("q", 5).await.expect_err("must fail");
         assert!(
@@ -1389,6 +1493,7 @@ mod tests {
             rerank: true,
             expand: false,
             belief_aware: false,
+            summaries: false,
         };
         let r = rt
             .retrieve("q", 5)

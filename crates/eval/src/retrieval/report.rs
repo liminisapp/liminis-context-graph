@@ -336,6 +336,9 @@ fn redact_reason(why: &str, private: bool) -> String {
     }
 }
 
+/// The summary-units probe configuration (issue #850), paired with `lcg-passages-belief-rerank`.
+const SUMMARIES_STAGE: &str = "lcg-passages-belief-rerank-summaries";
+
 /// p50 latency budget for a rerank-enabled passage search at k = 10 on Apple silicon (#796).
 pub const RERANK_P50_BUDGET_MS: f64 = 150.0;
 
@@ -693,6 +696,7 @@ impl Report {
                 "-belief-rerank",
                 "-expand",
                 "-expand-rerank",
+                "-belief-rerank-summaries",
             ]
             .contains(&kind)
             {
@@ -712,6 +716,11 @@ impl Report {
     /// (belief-aware first stage) with `lcg-passages-belief`. Since #806 `lcg-passages` is the
     /// belief-aware default, so it is only the fallback when the matching baseline did not run.
     fn baseline_for(&self, stage_base: &str, suffix: &str) -> String {
+        // The summary-units probe (issue #850) is `lcg-passages-belief-rerank` plus summaries, so
+        // only that pairing isolates the summaries; there is no fallback.
+        if stage_base == SUMMARIES_STAGE {
+            return format!("lcg-passages-belief-rerank{suffix}");
+        }
         let preferred = if stage_base == "lcg-passages-belief-rerank" {
             "lcg-passages-belief"
         } else {
@@ -771,6 +780,7 @@ impl Report {
             "lcg-passages-belief-rerank",
             "lcg-passages-expand",
             "lcg-passages-expand-rerank",
+            SUMMARIES_STAGE,
         ]
         .iter()
         .map(|s| format!("{s}{suffix}"))
@@ -780,7 +790,14 @@ impl Report {
         let rerank_id = format!("lcg-passages-rerank{suffix}");
         let bases: Vec<String> = ["lcg-passages-rerank", "lcg-passages-belief-rerank"]
             .iter()
-            .chain(["lcg-passages-expand", "lcg-passages-expand-rerank"].iter())
+            .chain(
+                [
+                    "lcg-passages-expand",
+                    "lcg-passages-expand-rerank",
+                    SUMMARIES_STAGE,
+                ]
+                .iter(),
+            )
             .map(|s| self.baseline_for(s, suffix))
             .collect();
         // Emit the section when at least one stage ran together with its own matching baseline
@@ -881,6 +898,51 @@ impl Report {
                 mark(a.p50_within_budget)
             );
         }
+        self.summaries_bar_for(o, suffix);
+    }
+
+    /// The summary-units recommendation bar (issue #850, SC-004–SC-006) for
+    /// `lcg-passages-belief-rerank-summaries` against `lcg-passages-belief-rerank`. Written only when
+    /// both ran. Not met means a recorded null result (E15); the maintainer decides at Validate.
+    fn summaries_bar_for(&self, o: &mut String, suffix: &str) {
+        let stage = format!("{SUMMARIES_STAGE}{suffix}");
+        let base = self.baseline_for(SUMMARIES_STAGE, suffix);
+        if self.run_of(&stage).is_none() || self.run_of(&base).is_none() {
+            return;
+        }
+        let mark = |v: Option<bool>| match v {
+            Some(true) => "met",
+            Some(false) => "**not met**",
+            None => "unreadable",
+        };
+        let para = self.stage_pair(&stage, &base, Some(Category::Paraphrase));
+        let overall = self.stage_pair(&stage, &base, None);
+        let temporal = self.stage_pair(&stage, &base, Some(Category::Temporal));
+        let multi_hop = self.stage_pair(&stage, &base, Some(Category::MultiHop));
+        let _ = writeln!(
+            o,
+            "\nSummary-units bar (`{stage}` vs `{base}`; not met means a null result, E15):\n"
+        );
+        let _ = writeln!(
+            o,
+            "- Paraphrase nDCG@k at least +0.05, paired interval above zero: {}.",
+            mark(para.as_ref().map(|d| d.mean_diff >= 0.05 && d.lo > 0.0))
+        );
+        let _ = writeln!(
+            o,
+            "- Overall nDCG@k paired interval lower bound above −0.01: {}.",
+            mark(overall.as_ref().map(|d| d.lo > -0.01))
+        );
+        let _ = writeln!(
+            o,
+            "- Temporal nDCG@k no worse than −0.01: {}.",
+            mark(temporal.as_ref().map(|d| d.mean_diff >= -0.01))
+        );
+        let _ = writeln!(
+            o,
+            "- Multi-hop nDCG@k no worse than −0.01: {}.",
+            mark(multi_hop.as_ref().map(|d| d.mean_diff >= -0.01))
+        );
     }
 
     pub fn render_markdown(&self) -> String {
@@ -2307,6 +2369,55 @@ mod tests {
             md.contains("Rerank acceptance (`lcg-passages-rerank` vs `lcg-passages-raw`)"),
             "{md}"
         );
+    }
+
+    /// The summary-units probe (issue #850) pairs with `lcg-passages-belief-rerank` only and gets
+    /// its SC-004–SC-006 bar; without that baseline it is not paired at all.
+    #[test]
+    fn summaries_config_pairs_with_belief_rerank_and_reports_its_bar() {
+        let mut r = report();
+        r.configs.clear();
+        for (id, levels) in [
+            ("lcg-passages-belief", (0.7, 0.3)),
+            ("lcg-passages-belief-rerank", (0.8, 0.3)),
+            ("lcg-passages-belief-rerank-summaries", (0.8, 0.5)),
+        ] {
+            r.configs.push(ConfigOutcome {
+                id: id.into(),
+                description: "d".into(),
+                status: run(staged_scores(levels)),
+            });
+        }
+        let md = r.render_markdown();
+        assert!(
+            md.contains("`lcg-passages-belief-rerank-summaries` | `lcg-passages-belief-rerank` |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("Summary-units bar (`lcg-passages-belief-rerank-summaries` vs `lcg-passages-belief-rerank`"),
+            "{md}"
+        );
+        assert!(
+            md.contains("- Paraphrase nDCG@k at least +0.05, paired interval above zero: met."),
+            "{md}"
+        );
+        assert!(
+            md.contains("- Temporal nDCG@k no worse than −0.01: met."),
+            "{md}"
+        );
+
+        // Without its baseline the probe is not paired with anything else.
+        r.configs.retain(|c| c.id != "lcg-passages-belief-rerank");
+        let md = r.render_markdown();
+        for fallback in ["lcg-passages-belief", "lcg-passages", "lcg-passages-raw"] {
+            assert!(
+                !md.contains(&format!(
+                    "| `lcg-passages-belief-rerank-summaries` | `{fallback}` | overall"
+                )),
+                "{md}"
+            );
+        }
+        assert!(!md.contains("Summary-units bar"), "{md}");
     }
 
     /// A run with the stage configs and `lcg-passages-raw` but no `lcg-passages` still gets its

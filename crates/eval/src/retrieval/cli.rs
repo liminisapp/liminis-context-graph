@@ -27,14 +27,17 @@ pub const DEFAULT_CONFIGS: [&str; 6] = [
 /// Passage-search stage configurations (#796). Opt-in via `--configs`: they need a reranker /
 /// expansion LLM reachable from the spawned service (normally the CoreML sidecar), which a
 /// default run does not assume.
-pub const STAGE_CONFIGS: [&str; 4] = [
+pub const STAGE_CONFIGS: [&str; 5] = [
     "lcg-passages-rerank",
     "lcg-passages-belief-rerank",
     "lcg-passages-expand",
     "lcg-passages-expand-rerank",
+    // Issue #850: `lcg-passages-belief-rerank` plus summary units (generated at this run's
+    // ingest) as first-stage candidates. Needs `summarize` records when replaying a cassette.
+    "lcg-passages-belief-rerank-summaries",
 ];
 /// Every accepted configuration id.
-pub const ALL_CONFIGS: [&str; 10] = [
+pub const ALL_CONFIGS: [&str; 11] = [
     "lcg-passages",
     "lcg-passages-variants",
     "lcg-entities-facts",
@@ -45,6 +48,7 @@ pub const ALL_CONFIGS: [&str; 10] = [
     "lcg-passages-belief-rerank",
     "lcg-passages-expand",
     "lcg-passages-expand-rerank",
+    "lcg-passages-belief-rerank-summaries",
 ];
 
 /// Opt-in LCG passage-search variants (#789, #806), measured on one binary by sending `mode` and
@@ -148,6 +152,11 @@ OPTIONS:
                                expansion LLM reachable from the service, normally the CoreML
                                sidecar, and are reported as failed queries if a stage cannot
                                apply — never scored as first-stage results).
+                               Opt-in summary-units probe (#850):
+                               lcg-passages-belief-rerank-summaries (lcg-passages-belief-rerank
+                               plus summaries: true; selecting it turns LCG_SUMMARY_UNITS on for
+                               the run's ingest, so a replayed cassette needs summarize records).
+                               Paired against lcg-passages-belief-rerank.
     --reranker-http <URL>      Reranker endpoint for the spawned service (default: the embedder's
     --reranker-uds <SOCKET>    sidecar when that is a Unix socket or a loopback URL; a remote
                                --embedder-http is never reused, so name one). Used by the lcg-passages-*rerank configurations.
