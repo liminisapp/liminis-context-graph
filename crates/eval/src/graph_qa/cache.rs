@@ -50,15 +50,20 @@ pub fn key(req: &ModelRequest) -> String {
 
 impl LlmCache {
     /// Loads `path` if it exists (unparseable lines are skipped, as a truncated last line after a
-    /// crash must not lose the rest).
+    /// crash must not lose the rest). The file is read as bytes and each line decoded on its own:
+    /// a crash can cut a response mid-way through a multi-byte character, and that one invalid
+    /// line must not make the whole file unreadable.
     pub fn load(path: &Path) -> Result<Self, String> {
         let mut entries = HashMap::new();
         let mut needs_newline = false;
-        match std::fs::read_to_string(path) {
-            Ok(text) => {
-                needs_newline = !text.is_empty() && !text.ends_with('\n');
-                for line in text.lines() {
-                    if let Ok(e) = serde_json::from_str::<Entry>(line) {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                needs_newline = bytes.last().is_some_and(|b| *b != b'\n');
+                for line in bytes.split(|b| *b == b'\n') {
+                    let Ok(line) = std::str::from_utf8(line) else {
+                        continue;
+                    };
+                    if let Ok(e) = serde_json::from_str::<Entry>(line.trim_end_matches('\r')) {
                         entries.insert(e.k, e.v);
                     }
                 }
@@ -245,5 +250,41 @@ mod tests {
         assert_eq!(c2.len(), 2);
         assert_eq!(c2.get_or_call("reader", &m, &req()).await.unwrap(), "v");
         assert_eq!(m.calls(), 2, "a reload after the crash makes no model call");
+    }
+
+    #[tokio::test]
+    async fn a_line_cut_mid_way_through_a_multibyte_character_does_not_spoil_the_file() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("c.jsonl");
+        // A non-ASCII response is stored unescaped, so a crash can cut it inside a character.
+        let m = ScriptedModel::new(|_| Ok("Zoë — done".into()));
+        let mut other = req();
+        other.user = "other".into();
+        LlmCache::load(&p)
+            .unwrap()
+            .get_or_call("reader", &m, &other)
+            .await
+            .unwrap();
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        // `ë` is 0xC3 0xAB; keep only its first byte, as a crash mid-write would.
+        f.write_all(b"{\"k\":\"ab\",\"role\":\"reader\",\"model\":\"m\",\"v\":\"Zo\xC3")
+            .unwrap();
+        drop(f);
+        assert!(std::str::from_utf8(&std::fs::read(&p).unwrap()).is_err());
+        let c = LlmCache::load(&p).unwrap();
+        assert_eq!(
+            c.len(),
+            1,
+            "the invalid fragment is skipped, the good entry kept"
+        );
+        assert_eq!(
+            c.get_or_call("reader", &m, &other).await.unwrap(),
+            "Zoë — done"
+        );
+        assert_eq!(m.calls(), 1, "the good entry is still a hit");
+        // An append after it lands on its own line and survives a reload.
+        c.get_or_call("reader", &m, &req()).await.unwrap();
+        let c2 = LlmCache::load(&p).unwrap();
+        assert_eq!(c2.len(), 2);
     }
 }
