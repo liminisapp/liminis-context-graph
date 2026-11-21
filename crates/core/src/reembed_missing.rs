@@ -510,6 +510,11 @@ fn embed_all(
 
     for (kind, rows) in candidates {
         for window in rows.chunks(BATCH_SIZE) {
+            // `embed_with_retry` polls `cancel` only on its failure paths (replay polls per row
+            // itself), so a healthy run must check between windows here.
+            if cancel() {
+                return Ok(EmbedPhase::Cancelled);
+            }
             let texts: Vec<&str> = window.iter().map(|(_, t)| t.as_str()).collect();
             let results = match embed_with_retry(&texts, policy, &mut breaker, &env, &embed_fn) {
                 RetryOutcome::Resolved(r) => r,
