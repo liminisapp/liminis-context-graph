@@ -876,6 +876,11 @@ pub fn registry() -> Vec<ToolSpec> {
                            `edges_dropped_self_loop` counts edges dropped because both \
                            endpoints resolved to the same entity (they would have been \
                            self-loops); these are not in `dropped_edges`. \
+                           Under an ontology, `edges_literal_object` counts literal-valued facts \
+                           (a budget, date, price) stored as a self-loop on the one entity they \
+                           describe; `edges_suspected_misattachment` counts edges marked \
+                           `suspected_misattachment` because their fact states a value but does \
+                           not name both endpoints (never dropped). \
                            Recommended maximum `chunk_text` size is 8,000 characters (default, \
                            overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`) — extraction \
                            quality degrades well before any context-window limit is reached. \
