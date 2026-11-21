@@ -2328,28 +2328,60 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
     let rerank_requested = optional_bool_param(&p["rerank"], "rerank")?
         .unwrap_or_else(|| stages.as_ref().is_some_and(|s| s.config.rerank_default));
     let expand_requested = optional_bool_param(&p["expand"], "expand")?.unwrap_or(false);
-    if rerank_requested || expand_requested {
-        let default_n = stages
-            .as_ref()
-            .map_or(crate::search_stages::DEFAULT_RERANK_CANDIDATES, |s| {
-                s.config.rerank_candidates
-            });
-        // Present means a non-negative integer, and an explicit `null` is rejected too; only an
-        // absent key takes the configured default. (Unlike `rerank` / `expand`, where `null` means
-        // "not specified".)
-        let requested_n = match p.get("rerank_candidates") {
-            None => default_n,
+
+    // Summary candidates (issue #850, ADR-0850). Requested per call only; with the flag omitted,
+    // `null` or `false` nothing below this point changes. `max_summary_slots` is validated only
+    // when summaries are requested, with the `rerank_candidates` convention: absent takes the
+    // default, present must be a non-negative integer, and an explicit `null` is rejected.
+    let summaries_requested = optional_bool_param(&p["summaries"], "summaries")?.unwrap_or(false);
+    let mut summaries_skipped: Option<crate::staged_search::StageReport> = None;
+    let summary_stage = if summaries_requested {
+        let max_slots = match p.get("max_summary_slots") {
+            None => crate::summary_units::DEFAULT_MAX_SUMMARY_SLOTS,
             Some(v) => v.as_u64().map(|n| n as usize).ok_or_else(|| {
-                Error::Ipc("rerank_candidates must be a non-negative integer".to_string())
+                Error::Ipc("max_summary_slots must be a non-negative integer".to_string())
             })?,
         };
-        let n = requested_n.clamp(1, crate::search_stages::MAX_RERANK_CANDIDATES);
-        if n != requested_n {
-            eprintln!(
-                "liminis-context-graph: rerank_candidates={requested_n} is outside 1..={}; using {n}",
-                crate::search_stages::MAX_RERANK_CANDIDATES
-            );
+        if max_slots == 0 {
+            summaries_skipped = Some(crate::staged_search::StageReport::skipped("disabled"));
+            None
+        } else if !summary_units_exist(&state, group_ids.clone()).await? {
+            summaries_skipped = Some(crate::staged_search::StageReport::skipped("no_units"));
+            None
+        } else {
+            Some(crate::staged_search::SummaryStage { max_slots })
         }
+    } else {
+        None
+    };
+
+    if rerank_requested || expand_requested || summary_stage.is_some() {
+        let n = if rerank_requested || expand_requested {
+            let default_n = stages
+                .as_ref()
+                .map_or(crate::search_stages::DEFAULT_RERANK_CANDIDATES, |s| {
+                    s.config.rerank_candidates
+                });
+            // Present means a non-negative integer, and an explicit `null` is rejected too; only
+            // an absent key takes the configured default. (Unlike `rerank` / `expand`, where
+            // `null` means "not specified".)
+            let requested_n = match p.get("rerank_candidates") {
+                None => default_n,
+                Some(v) => v.as_u64().map(|n| n as usize).ok_or_else(|| {
+                    Error::Ipc("rerank_candidates must be a non-negative integer".to_string())
+                })?,
+            };
+            let n = requested_n.clamp(1, crate::search_stages::MAX_RERANK_CANDIDATES);
+            if n != requested_n {
+                eprintln!(
+                    "liminis-context-graph: rerank_candidates={requested_n} is outside 1..={}; using {n}",
+                    crate::search_stages::MAX_RERANK_CANDIDATES
+                );
+            }
+            n
+        } else {
+            0
+        };
         let first_stage = staged_first_stage(
             Arc::clone(&state),
             group_ids,
@@ -2359,6 +2391,7 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
             belief,
             query.clone(),
             variants.clone(),
+            summary_stage.is_some(),
         );
         let outcome = crate::staged_search::search_passages_staged(
             load_db(&state)?,
@@ -2368,6 +2401,7 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
                 num_results,
                 rerank_candidates: rerank_requested.then_some(n),
                 expand: expand_requested,
+                summaries: summary_stage,
             },
             first_stage,
         )
@@ -2379,6 +2413,12 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
         }
         if let Some(e) = &outcome.expansion {
             resp["expansion"] = e.to_json("variants");
+        }
+        if let Some(r) = &outcome.summaries {
+            resp["summaries"] = r.to_json("candidates");
+            resp["summaries"]["results"] = json!(outcome.via_summary);
+        } else if let Some(r) = &summaries_skipped {
+            resp["summaries"] = r.to_json("candidates");
         }
         return Ok(resp);
     }
@@ -2468,7 +2508,29 @@ async fn handle_search_passages(req: &IpcRequest, state: Arc<AppState>) -> Resul
     };
 
     let count = passages.len();
-    Ok(json!({ "passages": passages, "count": count }))
+    let mut resp = json!({ "passages": passages, "count": count });
+    // Requested but not applicable (issue #850): the ordinary results, plus why.
+    if let Some(r) = &summaries_skipped {
+        resp["summaries"] = r.to_json("candidates");
+    }
+    Ok(resp)
+}
+
+/// Whether any summary unit exists in the searched groups (issue #850): the cheap probe behind the
+/// `no_units` reason, so a summaries request on a workspace without units runs the ordinary search.
+async fn summary_units_exist(
+    state: &Arc<AppState>,
+    group_ids: Option<Vec<String>>,
+) -> Result<bool, Error> {
+    let db = load_db(state)?;
+    tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        let gid_refs: Option<Vec<&str>> = group_ids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+        conn.has_summary_units(gid_refs.as_deref())
+    })
+    .await?
 }
 
 /// Optional boolean request parameter: absent/null ⇒ `None`; any non-boolean is an error.
@@ -2492,6 +2554,7 @@ fn staged_first_stage(
     belief: bool,
     original_query: String,
     caller_variants: Vec<crate::query_variants::Variant>,
+    summaries: bool,
 ) -> crate::staged_search::FirstStageFn {
     Arc::new(move |query, role, n| {
         let state = Arc::clone(&state);
@@ -2518,6 +2581,51 @@ fn staged_first_stage(
                             db, embedder, &query, role, group_ids, n, min_score, origins,
                         )
                         .await;
+                    }
+                    // Summary candidates (issue #850) join the user's own query's first stage only
+                    // (not the LLM expansion variants or a caller's `queries`), before belief-aware
+                    // ranking, in the call's retrieval mode.
+                    if summaries && query == original_query {
+                        let k = crate::summary_units::SUMMARY_CANDIDATES;
+                        if !caller_variants.is_empty() {
+                            return search::search_passages_variants_with_summaries(
+                                db,
+                                embedder,
+                                &query,
+                                &caller_variants,
+                                group_ids,
+                                n,
+                                min_score,
+                                origins,
+                                mode,
+                                belief,
+                                Some(k),
+                            )
+                            .await;
+                        }
+                        return match mode {
+                            search::PassageSearchMode::Vector => {
+                                search::search_passages_vector_summaries(
+                                    db, embedder, &query, group_ids, n, min_score, origins, belief,
+                                    k,
+                                )
+                                .await
+                            }
+                            search::PassageSearchMode::Hybrid => {
+                                search::search_passages_hybrid_with_summaries(
+                                    db,
+                                    embedder,
+                                    &query,
+                                    group_ids,
+                                    n,
+                                    min_score,
+                                    origins,
+                                    belief,
+                                    Some(k),
+                                )
+                                .await
+                            }
+                        };
                     }
                     // Caller-supplied `queries` (issue #802) belong to the user's own query: that one
                     // search runs the weighted-RRF variants pipeline, and the LLM expansion

@@ -53,6 +53,16 @@ pub struct StagedRequest {
     /// `Some(n)`: rerank the top `n` first-stage candidates.
     pub rerank_candidates: Option<usize>,
     pub expand: bool,
+    /// `Some` when summary candidates are in the pool (issue #850): the first stage injects them,
+    /// and every exit resolves them to passages with [`crate::summary_units::resolve_results`].
+    pub summaries: Option<SummaryStage>,
+}
+
+/// The summaries stage of one call (issue #850).
+#[derive(Debug, Clone, Copy)]
+pub struct SummaryStage {
+    /// `max_summary_slots`: at most this many results may come in via a summary.
+    pub max_slots: usize,
 }
 
 /// Outcome of one stage, rendered into the response envelope. Present only for a stage that was
@@ -93,7 +103,8 @@ impl StageReport {
         }
     }
 
-    fn skipped(reason: &'static str) -> Self {
+    /// A stage that was requested but did not apply, with why.
+    pub fn skipped(reason: &'static str) -> Self {
         Self {
             applied: false,
             count: 0,
@@ -120,6 +131,30 @@ pub struct StagedOutcome {
     pub passages: Vec<PassageResult>,
     pub rerank: Option<StageReport>,
     pub expansion: Option<StageReport>,
+    /// Summaries stage outcome (issue #850): `count` is the summary candidates that entered the
+    /// pool; `via_summary` how many results came in through one. `None` unless requested.
+    pub summaries: Option<StageReport>,
+    pub via_summary: usize,
+}
+
+/// Turns the fully ordered candidates into the final results: plain truncation without
+/// summaries (byte-for-byte the pre-#850 behaviour), [`crate::summary_units::resolve_results`]
+/// with them. Returns the results and how many came in via a summary.
+fn finish(
+    candidates: Vec<PassageResult>,
+    num_results: usize,
+    summaries: Option<SummaryStage>,
+) -> (Vec<PassageResult>, usize) {
+    match summaries {
+        None => {
+            let mut c = candidates;
+            c.truncate(num_results);
+            (c, 0)
+        }
+        Some(stage) => {
+            crate::summary_units::resolve_results(candidates, num_results, stage.max_slots)
+        }
+    }
 }
 
 fn now_us() -> i64 {
@@ -198,6 +233,12 @@ pub async fn search_passages_staged(
     let fetch = req
         .rerank_candidates
         .map_or(req.num_results, |n| n.max(req.num_results));
+    // Room for slots that de-duplication or the summary cap frees (issue #850).
+    let fetch = if req.summaries.is_some() {
+        fetch + crate::summary_units::SUMMARY_CANDIDATES
+    } else {
+        fetch
+    };
 
     // ── Expansion (concurrent with the original query's first stage) ──────────────────────────
     let expander = stages.as_ref().and_then(|s| s.expander.clone());
@@ -279,19 +320,31 @@ pub async fn search_passages_staged(
         }
     }
 
+    // ── Summaries (issue #850): report how many summary candidates entered the pool ───────────
+    let summaries_report = req.summaries.map(|_| {
+        let n = candidates.iter().filter(|p| p.summary_of.is_some()).count();
+        if n == 0 {
+            StageReport::skipped("no_candidates")
+        } else {
+            StageReport::applied(n)
+        }
+    });
+
     // ── Rerank ────────────────────────────────────────────────────────────────────────────────
     let Some(n) = req.rerank_candidates else {
-        candidates.truncate(req.num_results);
+        let (passages, via_summary) = finish(candidates, req.num_results, req.summaries);
         return Ok(StagedOutcome {
-            passages: candidates,
+            passages,
             rerank: None,
             expansion: expansion_report,
+            summaries: summaries_report,
+            via_summary,
         });
     };
 
     let rerank_started = Instant::now();
-    let finish_degraded = |mut c: Vec<PassageResult>, reason: &'static str| {
-        c.truncate(req.num_results);
+    let finish_degraded = |c: Vec<PassageResult>, reason: &'static str| {
+        let (passages, via_summary) = finish(c, req.num_results, req.summaries);
         // Time was only spent when the cross-encoder was actually called.
         let r = StageReport::skipped(reason);
         let r = if reason == "unavailable" {
@@ -300,9 +353,11 @@ pub async fn search_passages_staged(
             r
         };
         StagedOutcome {
-            passages: c,
+            passages,
             rerank: Some(r),
             expansion: expansion_report.clone(),
+            summaries: summaries_report.clone(),
+            via_summary,
         }
     };
 
@@ -319,10 +374,13 @@ pub async fn search_passages_staged(
         .iter()
         .map(|p| p.content.clone())
         .collect();
-    let head_uuids: Vec<String> = candidates[..head_len]
+    // Keyed on the episode (issue #850): a summary candidate's belief is its source episode's.
+    let mut head_uuids: Vec<String> = candidates[..head_len]
         .iter()
-        .map(|p| p.uuid.clone())
+        .map(|p| p.belief_key().to_string())
         .collect();
+    head_uuids.sort_unstable();
+    head_uuids.dedup();
 
     let (logits, supersession) = futures::join!(
         reranker.rerank(query, &documents),
@@ -353,10 +411,12 @@ pub async fn search_passages_staged(
         .iter()
         .zip(&logits)
         .map(|(p, logit)| Candidate {
-            uuid: p.uuid.clone(),
+            // The episode (issue #850): a revision's replacement is matched on it, so a summary
+            // and its episode's passage carry the same belief and replacement relations.
+            uuid: p.belief_key().to_string(),
             logit: *logit,
             time_us: passage_time_us(p),
-            belief: supersession.get(&p.uuid).cloned(),
+            belief: supersession.get(p.belief_key()).cloned(),
         })
         .collect();
     let blended = passage_rerank::blend(&cands, now_us(), blend_cfg);
@@ -367,14 +427,23 @@ pub async fn search_passages_staged(
         p.rerank_score = Some(logits[b.index]);
         p.belief = b.state.as_wire();
     }
-    let order = passage_rerank::assemble(&head_order, head_len, candidates.len(), req.num_results);
+    // With summaries the whole order is kept: resolution, de-duplication and the cap need it.
+    let assemble_to = if req.summaries.is_some() {
+        candidates.len()
+    } else {
+        req.num_results
+    };
+    let order = passage_rerank::assemble(&head_order, head_len, candidates.len(), assemble_to);
     let mut slots: Vec<Option<PassageResult>> = candidates.into_iter().map(Some).collect();
-    let passages: Vec<PassageResult> = order.into_iter().filter_map(|i| slots[i].take()).collect();
+    let ordered: Vec<PassageResult> = order.into_iter().filter_map(|i| slots[i].take()).collect();
+    let (passages, via_summary) = finish(ordered, req.num_results, req.summaries);
 
     Ok(StagedOutcome {
         passages,
         rerank: Some(StageReport::applied(head_len).timed(rerank_started)),
         expansion: expansion_report,
+        summaries: summaries_report,
+        via_summary,
     })
 }
 

@@ -195,11 +195,6 @@ fn recency_priors(cands: &[Candidate]) -> Vec<f64> {
 
 /// For each candidate, the input indices that replace it (are expected to rank above it).
 fn replacements(cands: &[Candidate], states: &[BeliefState]) -> Vec<Vec<usize>> {
-    let by_uuid: HashMap<&str, usize> = cands
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.uuid.as_str(), i))
-        .collect();
     cands
         .iter()
         .enumerate()
@@ -216,12 +211,14 @@ fn replacements(cands: &[Candidate], states: &[BeliefState]) -> Vec<Vec<usize>> 
             let usable =
                 |j: usize| j != i && !cands[j].belief.as_ref().is_some_and(|b| b.is_pending());
             match ep.kind.as_deref() {
-                // Episode supersession: `superseded_by` is the replacing episode's uuid.
-                Some("episode") => by_uuid
-                    .get(by)
-                    .copied()
-                    .filter(|j| usable(*j))
-                    .into_iter()
+                // Episode supersession: `superseded_by` is the replacing episode's uuid. Every
+                // candidate standing for that episode replaces it — its passage and, with summary
+                // candidates in the pool (issue #850), its summary, which shares the uuid.
+                Some("episode") => cands
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, c2)| c2.uuid == by && usable(*j))
+                    .map(|(j, _)| j)
                     .collect(),
                 // Document supersession: `superseded_by` is the replacing document's id; every
                 // candidate episode of that document is a replacement.
