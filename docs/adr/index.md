@@ -173,6 +173,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0816](0816-ontology-edge-direction-check-and-repair.md) | Ontology Edge Direction — Define, Validate and Repair | 2026-11-21 |
 | [0819](0819-graph-integrity-eval.md) | `lcg-eval graph-integrity`: Deterministic Graph Scoring Over a Copied DB | 2026-11-21 |
 | [0820](0820-caller-plans-walk-no-lcg-llm.md) | Caller-Planned Typed Walk: LCG Makes No LLM Call | 2026-11-21 |
+| [0824](0824-own-source-id-entity-filter.md) | Drop Extracted Entities Named After the Episode's Own Source ID or a Cited Note ID | 2026-11-21 |
 
 ## Historical numbering
 

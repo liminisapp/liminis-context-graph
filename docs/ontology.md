@@ -461,6 +461,29 @@ declared.
 
 See [`docs/examples/ontology.example.yaml`](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
 
+### Extracted entities named after a source note ID
+
+**An extracted entity named after a note ID is dropped.** Declaring a `Document` type can invite
+the model to extract a note ID as an entity (e.g. `project-quill-core-1`), which then absorbs edges
+that belong to the real entities. In practice the ID is usually a *citation*: wiki and answer notes
+end with `Sources: [[project-quill-core-1]]`, and the model extracts the cited note. The text
+extraction prompt tells the model that such citations are not entities, and a deterministic filter
+backs it up ([ADR-0824](adr/0824-own-source-id-entity-filter.md)). The filter drops an extracted
+entity, and any edge touching it, when its name is:
+
+- **a cited note ID** — verbatim (before normalisation) an all-lowercase, space-free, ID-shaped
+  `[[wikilink]]` target in the episode body, *and* the ID of a note already ingested in the same
+  group. `[[GPT-4]]` (capitalised), `[[Quill Core]]` (not ID-shaped) and `[[machine-learning]]`
+  (no such note) are kept; a note ingested after the one citing it is missed; or
+- **the episode's own source ID** — the chunk's `source_file`, `doc_id` or `chunk_id` prefix,
+  compared case-insensitively and ignoring path prefix, wikilink brackets and a `.md`-style
+  extension, and only when that ID is slug-shaped (a note filed under its subject's name such as
+  `Alice.md` has no ID to match, so the real entity is kept).
+
+The asserted `Document`/`Source` entity your host supplies is the supported way to represent the
+note. An ID-shaped name that is neither the episode's own ID nor a cited, ingested note's ID is
+kept. The drop is reported as `entities_dropped_source_id` on `knowledge_process_chunk`.
+
 ## Modes
 
 | Mode | Entity types | Relation types |

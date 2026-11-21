@@ -2264,6 +2264,66 @@ impl<'db> Conn<'db> {
         Ok(out)
     }
 
+    /// Already-ingested episodes of `group_id` that could carry `target` (a lowercase, normalised
+    /// note ID) as their source ID: a `doc_id` or source description mentioning `target`, or a chunk
+    /// id starting `target#`. A pre-filter only — the caller derives the real source IDs
+    /// from the rows ([`crate::source_id::known_source_ids_of_rows`]) and compares them exactly.
+    /// Uncommitted revisions (never believed) are excluded; superseded episodes still count, since
+    /// the note was ingested. Case-insensitive via `lower()` (stored IDs may be mixed-case).
+    /// Capped, because one match is enough to know a note. The substring predicates over-match
+    /// (`note-1` also matches `note-10`, `xnote-1`), so rows that look like an exact source ID —
+    /// `doc_id = target`, a name starting `target#`, or a source description whose file stem starts
+    /// `target` — are ordered first; a crowd of near-misses therefore cannot push the real note out
+    /// of the cap.
+    pub fn episode_id_rows_for_target(
+        &self,
+        group_id: &str,
+        target: &str,
+    ) -> Result<Vec<crate::source_id::EpisodeIdRow>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid \
+             AND (ep.revision_id IS NULL OR ep.revision_committed_at IS NOT NULL) \
+             AND (lower(coalesce(ep.doc_id, '')) CONTAINS $t \
+                  OR lower(ep.name) STARTS WITH $tp \
+                  OR lower(ep.source_description) CONTAINS $t) \
+             RETURN ep.name, ep.source_description, coalesce(ep.doc_id, ''), ep.write_path \
+             ORDER BY CASE WHEN lower(coalesce(ep.doc_id, '')) = $t \
+                            OR lower(ep.name) STARTS WITH $tp \
+                            OR lower(ep.source_description) STARTS WITH $td \
+                            OR lower(ep.source_description) STARTS WITH $tc \
+                            OR lower(ep.source_description) CONTAINS $sd \
+                            OR lower(ep.source_description) CONTAINS $sc \
+                       THEN 0 ELSE 1 END \
+             LIMIT 50",
+            serde_json::json!({
+                "gid": group_id,
+                "t": target,
+                "tp": format!("{target}#"),
+                "td": format!("{target}."),
+                "tc": format!("{target}:"),
+                "sd": format!("/{target}."),
+                "sc": format!("/{target}:"),
+            }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let doc = value_as_string(&r[2]);
+                let wp = value_as_string(&r[3]);
+                crate::source_id::EpisodeIdRow {
+                    name: value_as_string(&r[0]),
+                    source_description: value_as_string(&r[1]),
+                    doc_id: if doc.is_empty() { None } else { Some(doc) },
+                    is_chunk_path: crate::types::write_path_is_chunk_eligible(if wp.is_empty() {
+                        None
+                    } else {
+                        Some(wp.as_str())
+                    }),
+                }
+            })
+            .collect())
+    }
+
     /// Origins of the episodes of `group_id` named `chunk_id` that are live at `as_of` (the same
     /// predicate as [`Self::live_episode_uuids_for_chunk`]).
     pub fn live_origins_for_chunk(

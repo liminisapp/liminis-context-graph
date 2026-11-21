@@ -151,7 +151,15 @@ async fn put(
     origin: Option<&str>,
     doc: Option<&str>,
 ) -> Value {
-    let v = put_raw(state, chunk_id, origin, doc, "notes/a.md", json!({})).await;
+    let v = put_raw(
+        state,
+        chunk_id,
+        origin,
+        doc,
+        "notes/source-note.md",
+        json!({}),
+    )
+    .await;
     assert!(v.get("error").is_none(), "ingest errored: {v}");
     v["result"].clone()
 }
@@ -924,7 +932,15 @@ async fn legacy_corpus() -> (Arc<AppState>, Arc<Db>, TempDir, TempDir) {
         ],
         Some(wal.path().to_path_buf()),
     );
-    put_raw(&state, "note", None, None, "notes/a.md", json!({})).await;
+    put_raw(
+        &state,
+        "note",
+        None,
+        None,
+        "notes/source-note.md",
+        json!({}),
+    )
+    .await;
     put_raw(
         &state,
         "page1",

@@ -1296,6 +1296,7 @@ async fn handle_knowledge_process_chunk(
         "edges_signature_mismatch": result.edges_signature_mismatch,
         "entities_reclassified_unclassified": result.entities_reclassified_unclassified,
         "entities_dropped_malformed": result.entities_dropped_malformed,
+        "entities_dropped_source_id": result.entities_dropped_source_id,
         "edges_dropped_malformed": result.edges_dropped_malformed,
         "dedup_paths": result.dedup_paths,
         "duration_seconds": start.elapsed().as_secs_f64(),
