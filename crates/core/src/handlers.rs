@@ -6931,7 +6931,17 @@ async fn handle_reembed_missing(
 ) -> Result<Value, Error> {
     let group_id = extract_required_group_id(&req.params["group_id"])?;
     let kinds = reembed_missing::parse_kinds(&req.params["kinds"])?;
-    let dry_run = req.params["dry_run"].as_bool().unwrap_or(false);
+    // Strict: a present-but-non-boolean `dry_run` (e.g. the string "true") must not silently
+    // turn a requested preview into the real, index-dropping repair.
+    let dry_run = match &req.params["dry_run"] {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        other => {
+            return Err(Error::Ipc(format!(
+                "dry_run must be a boolean, got {other}"
+            )))
+        }
+    };
     let params = reembed_missing::ReembedParams {
         group_id,
         kinds,

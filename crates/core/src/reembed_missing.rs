@@ -17,6 +17,8 @@
 //!    `skipped_no_source`); a row with empty/whitespace text, or one whose own `group_id` is not the
 //!    requested group, is `skipped_no_source` and stays recorded.
 //! 2. `dry_run` stops here: per-kind counts, no embedder call, no write, no lock beyond the read.
+//!    Stale record entries are removed only after the embed phase (its last cancellation point), so
+//!    a cancelled run changes nothing.
 //! 3. **Embed everything** with no lock held and no index touched: batched `embed_with_retry`
 //!    (the same bounded retry/backoff/splitting as replay, #808) through the document-role embedder
 //!    path (#790). Each vector is validated — wrong dimension, non-finite or all-zero is a `failed`
@@ -366,24 +368,16 @@ pub async fn reembed_missing_with_ddl(
         return Ok(report.to_json());
     }
 
-    // Stale record entries (row no longer exists) are cleaned up now, before any embedding.
+    // ── Phase 3: embed everything (no lock, no index touched) ────────────────────────────────
+    // Stale record entries (row no longer exists) are removed only once the run is past its last
+    // cancellation point, so a cancelled run changes nothing.
     let stale: Vec<(ZeroKind, String)> = selection
         .iter()
         .flat_map(|(k, s)| s.stale.iter().map(move |u| (*k, u.clone())))
         .collect();
-    if !stale.is_empty() {
-        let _w = state.write_lock.write().await;
-        let (db_s, gid_s) = (Arc::clone(&db), group_id.clone());
-        tokio::task::spawn_blocking(move || {
-            let conn = db_s.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
-            conn.remove_zero_vector_rows(&gid_s, &stale)
-        })
-        .await??;
-    }
-
-    // ── Phase 3: embed everything (no lock, no index touched) ────────────────────────────────
     let total: usize = selection.values().map(|s| s.candidates.len()).sum();
     if total == 0 {
+        remove_stale(&state, &db, &group_id, stale).await?;
         return Ok(report.to_json());
     }
     let embed_state = Arc::clone(&state);
@@ -404,6 +398,7 @@ pub async fn reembed_missing_with_ddl(
         report.cancelled = true;
         return Ok(report.to_json());
     };
+    remove_stale(&state, &db, &group_id, stale).await?;
     for (kind, n) in &embed_failed {
         report.kinds.entry(*kind).or_default().failed += n;
     }
@@ -465,6 +460,27 @@ pub async fn reembed_missing_with_ddl(
         .map(|(k, e)| (k, e.to_string()))
         .collect();
     Ok(report.to_json())
+}
+
+/// Removes record entries whose row no longer exists (FR-011). Takes the write lock briefly; no
+/// index is touched.
+async fn remove_stale(
+    state: &Arc<AppState>,
+    db: &Arc<crate::db::Db>,
+    group_id: &str,
+    stale: Vec<(ZeroKind, String)>,
+) -> Result<(), Error> {
+    if stale.is_empty() {
+        return Ok(());
+    }
+    let _w = state.write_lock.write().await;
+    let (db_s, gid_s) = (Arc::clone(db), group_id.to_string());
+    tokio::task::spawn_blocking(move || {
+        let conn = db_s.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+        conn.remove_zero_vector_rows(&gid_s, &stale)
+    })
+    .await??;
+    Ok(())
 }
 
 // ── Embed phase ───────────────────────────────────────────────────────────────

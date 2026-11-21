@@ -752,6 +752,53 @@ async fn cancel_during_embedding_changes_nothing() {
     assert!(fx.state.indices_built.load(Ordering::SeqCst));
 }
 
+/// A cancelled run changes nothing — including stale record entries, which are only removed once
+/// the embed phase (the last cancellation point) has completed.
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_leaves_stale_entries_recorded() {
+    let fx = fixture();
+    seed_all_kinds(&fx);
+    record(&fx.db, G, ZeroKind::Name, "gone");
+    assert_eq!(count(&fx.db, G), 5);
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(rx); // client disconnected
+    let v = reembed_missing(
+        Arc::clone(&fx.state),
+        params(G, &ZeroKind::ALL, false),
+        Some(tx),
+    )
+    .await
+    .unwrap();
+    assert_eq!(v["cancelled"], true, "{v}");
+    assert_eq!(
+        count(&fx.db, G),
+        5,
+        "a cancelled run must not remove stale entries"
+    );
+}
+
+/// A present-but-non-boolean `dry_run` is rejected rather than silently running the real repair.
+#[tokio::test(flavor = "multi_thread")]
+async fn non_boolean_dry_run_is_rejected() {
+    let fx = fixture();
+    seed_all_kinds(&fx);
+    for bad in [json!("true"), json!(1), json!("yes")] {
+        let resp = handlers::dispatch(
+            req(
+                "knowledge_reembed_missing",
+                json!({"group_id": G, "dry_run": bad}),
+            ),
+            Arc::clone(&fx.state),
+            None,
+        )
+        .await;
+        let v = serde_json::to_value(resp).unwrap();
+        assert!(v.get("error").is_some(), "expected rejection: {v}");
+    }
+    assert_eq!(count(&fx.db, G), 4);
+    assert!(events(&fx).is_empty(), "no embedder call or index change");
+}
+
 /// Progress events precede the terminal result and cover both phases.
 #[tokio::test(flavor = "multi_thread")]
 async fn streams_progress_events() {
