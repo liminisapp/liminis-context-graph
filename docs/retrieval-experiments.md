@@ -176,6 +176,10 @@ The question: does the graph answer what chunk search can't (chains, joins, inve
   - **No net gain over v5.** v5 against v5 swap-only: -0.006 [-0.023, +0.005]. The soft bonus had already absorbed most of the reversal damage, and this question set has almost no question whose answer turns on direction (inverse lookups such as "who reports to X").
   - **The v3.2 retyping and menu cost slightly:** full repair with the v3.1 menu is -0.022 [-0.053, +0.002] against v5; with the v3.2 menu, -0.040 [-0.078, -0.010]. The planner and walk were tuned on v3.1 types (dev half), so this is a re-tuning cost, not evidence against v3.2.
   - **Decision:** the typed walk keeps direction as a soft preference by default. It's robust to residual errors and equal to hard direction on a clean graph.
+- **Step 6: parity of the shipped `knowledge_walk` ([#820](https://github.com/liminisapp/liminis-context-graph/issues/820), PR [#825](https://github.com/liminisapp/liminis-context-graph/pull/825) @ `86f135dc`) with the v5 probe, 2026-11-21.** The recorded v5 plans were replayed through `knowledge_walk` (soft direction) on a copy of the v3.1 workspace.
+  - **Edges:** 112/118 planned questions return the identical edge-uuid set. The 6 others are exact ties between duplicate edges with the same fact text and endpoints. LCG breaks ties by uuid; the probe used Python set order, which varies with the hash seed (6, 12 and 6 differing edges across three seeds). By fact text and endpoints: **118/118**. Edge scores match the probe's cosine to 4 decimal places.
+  - **Reader score** (`route-planned5`, walk context from `facts_text`): **0.916** against the probe's 0.915; test half 0.943 against 0.940.
+  - **Read-only:** WAL byte-identical after 118 walks.
 - **Graph integrity baseline against the skeleton (no LLM).** Filed as [#819](https://github.com/liminisapp/liminis-context-graph/issues/819), `lcg-eval graph-integrity`.
 
 | | free-form | ontology v3.1 | v3.1 + repair |
@@ -193,8 +197,9 @@ The question: does the graph answer what chunk search can't (chains, joins, inve
     - **Misattached value facts.** "Marlin Core has a monthly budget of $4,200" is stored as `Marlin Core HAS_MEASURE Tomas Kowalski`.
     - **About a third of value facts are not on their entity's edges at all.** The check is an exact string match, so this is a lower bound.
 - **Next:**
-  - [#816](https://github.com/liminisapp/liminis-context-graph/issues/816) / PR [#817](https://github.com/liminisapp/liminis-context-graph/pull/817): done and validated (step 5); waiting to merge.
-  - [#819](https://github.com/liminisapp/liminis-context-graph/issues/819): `lcg-eval graph-integrity`, then the value-fact misattachment fix.
+  - [#816](https://github.com/liminisapp/liminis-context-graph/issues/816) / PR [#817](https://github.com/liminisapp/liminis-context-graph/pull/817): merged 2026-11-21 as `468f6ba4`.
+  - [#819](https://github.com/liminisapp/liminis-context-graph/issues/819): `lcg-eval graph-integrity` merged 2026-11-21 as `76c9c077` (PR [#822](https://github.com/liminisapp/liminis-context-graph/pull/822)). Value-fact misattachment fix next.
+  - [#820](https://github.com/liminisapp/liminis-context-graph/issues/820): `knowledge_walk` passes parity (step 6); PR [#825](https://github.com/liminisapp/liminis-context-graph/pull/825) waiting to merge.
   - Inverse-direction questions ("who reports to X", "what does Lena own") in the next question set, since v2 can't show a direction gain.
   - A wider held-out test, since n = 62 can't separate +0.05.
   - `lcg-eval --ontology`.
