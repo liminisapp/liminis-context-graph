@@ -36,7 +36,9 @@ retrieval-v2 fixture already carries the ground truth (`skeleton.json`: entities
    facts, where the E13 table uses 72 and 428 (same sum). The difference is the 12 `Location` links,
    which E13 scored as links because the value resolves to a graph node; here a fact is a link only
    when its value is a skeleton entity, so `Location` is a value fact. Excluding it, the link rows
-   reproduce E13 (56/71 → 44/59, 71/71 → 59/59). The mapping must name the ontology's relation types
+   match E13 (56/71 → 44/59, 71/71 → 59/59) according to the maintainer's run on the kept workspaces;
+   those workspaces and the E13 script are not in the repository, so this is reported, not checkable
+   from the repo. The mapping must name the ontology's relation types
    for every link attribute, and a test enforces it for v2.
 6. **Signature marks are read from `attributes.signature_mismatch`**, the key #816 writes (ADR-0816),
    held as a named constant. Graphs built before #816 carry none, so when no edge carries it the
