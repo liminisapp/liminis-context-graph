@@ -185,6 +185,7 @@ const SINGLE_ENTITY_RULES_LITERAL: &str = "\
    - \"Orbit Supply charges $43 per unit\" → source_name: Orbit Supply, target_name: Orbit Supply
    - NEVER attach such a fact to another listed entity just because that entity appears nearby in the message. If the fact does not name the other entity, the other entity is not part of it.
    - If another listed entity genuinely takes part in the fact, extract the edge between the two as usual: \"Tomas Kowalski set Marlin Core's monthly budget at $4,200\" → Tomas Kowalski and Marlin Core.
+   - A role or title held *in* another listed entity is a relation between the two, not a literal: \"Lena Moreau is the project lead of Marlin Core\" → Lena Moreau and Marlin Core. Only a role with no other listed entity (\"Lena Moreau is a senior engineer\") is a single-entity fact.
    - Do not extract a single entity's mood or feeling as a literal value; for a state or feeling, identify the second entity it relates to (\"Alice feels happy about Bob's promotion\") or skip it.";
 
 /// Returns the edge extraction system prompt with optional ontology injection.

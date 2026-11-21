@@ -3524,7 +3524,10 @@ extractable relation type), the edge prompt's endpoint rules say:
   stays in the fact text;
 - never attach such a fact to another listed entity just because it appears nearby;
 - if another listed entity genuinely takes part ("Tomas Kowalski set Marlin Core's monthly budget at
-  $4,200"), extract the edge between the two as usual.
+  $4,200"), extract the edge between the two as usual;
+- a role or title held *in* another listed entity is a relation, not a literal ("Lena Moreau is the
+  project lead of Marlin Core" links the two). Only a role with no other listed entity ("Lena Moreau
+  is a senior engineer") becomes a self-loop.
 
 With no ontology, or one whose relation types are all `extract: false`, the edge prompt is unchanged.
 
