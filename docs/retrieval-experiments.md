@@ -149,8 +149,17 @@ The question: does the graph answer what chunk search can't (chains, joins, inve
   - Core typing is 47/48 correct; Orbit Supply is labelled Project.
   - There are 13 note-ID junk nodes such as `project-quill-core-1`, against 2 free-form. They likely come from the Document type inviting the note itself.
 - **Harness:** the embedder sidecar twice left a request hanging with no reply. `traverse_lib.embed` now has a 60 s timeout, retries, batches of 32 and an on-disk cache.
+- **Edge direction ([#816](https://github.com/liminisapp/liminis-context-graph/issues/816)).** On known-true links, 48/142 typed edges (34%) are reversed: `APPROVES` 79%, `CONTACT_FOR` 75%, `OWNS` 21%, `SUPPLIED_BY` 12%, and `LOCATED_IN` and `REPORTS_TO` 0%. The extractor orients edges by the sentence's subject.
+  - **Causes:**
+    - The edge prompt never defines direction.
+    - Half signatures are not rendered.
+    - Endpoints are never checked against the signature.
+    - Aliases can't express an inverse.
+  - **Simulated fix:** checking endpoint types against full signatures (test ontology v3.2: type lists, `inverse_aliases`, symmetric `WORKS_WITH`) and swapping on a reversed fit, over the existing graph. Reversed links went from 48/142 to **1/142** without re-extraction.
+  - **38% of typed edges fit neither way.** They are mostly incidental facts with loose entity types, so the fix flags them and keeps them.
+  - The walk results above don't depend on direction, since direction is only a ranking bonus there.
 - **Next:**
-  - Edge direction at extraction (or a direction-normalising pass), so direction can be trusted.
+  - #816: the edge-direction fix and the repair pass, then re-measure direction.
   - A wider held-out test, since n = 62 can't separate +0.05.
   - `lcg-eval --ontology`.
   - A second corpus with fan-out and the CQs v2 can't instantiate (P3, S2, meetings, provenance).
