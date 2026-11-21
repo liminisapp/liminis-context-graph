@@ -1,5 +1,7 @@
 # ADR-0666: Exact Graph Match Before Salvage, UUID-Level Self-Loop Guard, Short-Code Veto
 
+> **Amended by [ADR-0823](0823-literal-object-edges-as-self-loops.md) (issue #823):** under an ontology, an edge whose two endpoint *names* are identical is admitted through the UUID-level self-loop guard as a literal-object edge. Differently named endpoints that collapse onto one UUID are still dropped and counted in `edges_dropped_self_loop`, as here.
+
 **Status**: Accepted
 **Date**: 2026-10-02
 **Issue**: #666 (remainder of #645; builds on [ADR-0650](0650-identifier-mismatch-veto-for-extraction-dedup.md))

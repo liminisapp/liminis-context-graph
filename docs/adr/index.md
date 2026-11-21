@@ -174,6 +174,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0819](0819-graph-integrity-eval.md) | `lcg-eval graph-integrity`: Deterministic Graph Scoring Over a Copied DB | 2026-11-21 |
 | [0820](0820-caller-plans-walk-no-lcg-llm.md) | Caller-Planned Typed Walk: LCG Makes No LLM Call | 2026-11-21 |
 | [0821](0821-graph-qa-eval-and-kept-workspaces.md) | `lcg-eval graph-qa`, Ontology Ingest and Kept Workspaces | 2026-11-21 |
+| [0823](0823-literal-object-edges-as-self-loops.md) | Literal-Object Edges as Self-Loops Under an Ontology | 2026-11-21 |
 | [0824](0824-own-source-id-entity-filter.md) | Drop Extracted Entities Named After the Episode's Own Source ID or a Cited Note ID | 2026-11-21 |
 
 ## Historical numbering
