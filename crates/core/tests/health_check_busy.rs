@@ -99,7 +99,7 @@ async fn idle_reports_healthy_unchanged() {
     let state = make_state(Some(db));
     assert_eq!(
         health(&state).await,
-        json!({"ok": true, "healthy": true, "state": "healthy", "ready_for_reads": true})
+        json!({"ok": true, "healthy": true, "state": "healthy", "ready_for_reads": true, "providers": {"embedder": "real", "extractor": "real"}})
     );
 }
 
@@ -160,6 +160,7 @@ async fn write_held_without_job_reports_writing() {
             "state": "busy",
             "ready_for_reads": true,
             "activity": "writing",
+            "providers": {"embedder": "real", "extractor": "real"},
         })
     );
 }
@@ -335,6 +336,6 @@ async fn returns_to_healthy_after_writer_releases() {
     }
     assert_eq!(
         health(&state).await,
-        json!({"ok": true, "healthy": true, "state": "healthy", "ready_for_reads": true})
+        json!({"ok": true, "healthy": true, "state": "healthy", "ready_for_reads": true, "providers": {"embedder": "real", "extractor": "real"}})
     );
 }
