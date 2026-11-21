@@ -843,6 +843,9 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
 
     // ── Kept workspace (FR-006) ───────────────────────────────────────────────
     let mut kept_manifest: Option<(PathBuf, workspace::WorkspaceManifest)> = None;
+    // A failure to keep the workspace must not cost the computed results either: it is reported,
+    // the report is still written, and the run then fails with it.
+    let mut keep_error: Option<String> = None;
     if let (Some(dest), Some(guard)) = (&a.keep_workspace, _service_guards.pop()) {
         let manifest = workspace::WorkspaceManifest {
             format: 1,
@@ -864,13 +867,23 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             cassette: a.replay_cassette.clone().or(a.record_cassette.clone()),
             lcg_build: meta.lcg_build.clone(),
         };
-        guard.shutdown_and_keep(dest).await?;
-        eprintln!(
-            "lcg-eval retrieval: kept the ingested workspace at {}",
-            dest.display()
-        );
-        meta.kept_workspace = Some(dest.display().to_string());
-        kept_manifest = Some((dest.clone(), manifest));
+        match guard.shutdown_and_keep(dest).await {
+            Ok(()) => {
+                eprintln!(
+                    "lcg-eval retrieval: kept the ingested workspace at {}",
+                    dest.display()
+                );
+                meta.kept_workspace = Some(dest.display().to_string());
+                kept_manifest = Some((dest.clone(), manifest));
+            }
+            Err(e) => {
+                eprintln!(
+                    "lcg-eval retrieval: ERROR could not keep the workspace: {e}; writing the \
+                     report anyway"
+                );
+                keep_error = Some(e);
+            }
+        }
     }
     // The manifest is written last, after the report: a manifest that cannot be written must cost
     // neither the ingest nor the computed results, so its failure is a warning naming the kept
@@ -902,7 +915,10 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
 
     let written = write_report(&report, a.out.as_deref());
     write_kept_manifest();
-    written
+    match keep_error {
+        Some(e) => Err(e),
+        None => written,
+    }
 }
 
 fn write_report(report: &Report, out: Option<&Path>) -> Result<(), String> {
