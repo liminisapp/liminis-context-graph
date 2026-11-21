@@ -63,7 +63,7 @@ An operator who wants the note itself represented in the graph relies on the `Do
 ### Edge Cases
 
 - The model names the entity with a variant of the note ID (different case, with/without file extension, surrounding punctuation, path prefix); these should be treated as the same identifier.
-- A genuine real-world entity legitimately shares a name with a note ID (for instance, a project literally called "project-quill-core-1" mentioned in the text of another note); the rule targets an entity matching *its own episode's* source ID, not any other note's ID.
+- A genuine real-world entity legitimately shares a name with a note ID (for instance, a project literally called "project-quill-core-1" mentioned in the text of another note); the rule targets an entity matching *its own episode's* source ID, or an ID-shaped `[[wikilink]]` target cited in *this episode's* body — not an arbitrary other note's ID that this episode does not cite.
 - A chunk that has no note ID or source identifier in its header: behaviour is unchanged.
 - An extracted edge whose endpoint is the dropped note-ID entity: it must not leave dangling references or recreate the entity implicitly.
 - Free-form (no ontology) extraction, which already has a small residual of such entities (2 on v2), should not regress and may benefit.
@@ -78,7 +78,7 @@ An operator who wants the note itself represented in the graph relies on the `Do
 - **FR-004**: Matching of the note ID to entity names MUST tolerate trivial variations (case, surrounding whitespace/punctuation, file extension).
 - **FR-005**: Relationships that reference a dropped note-ID entity MUST be handled so that no junk node is created and no unrelated entity or edge is lost.
 - **FR-006**: The asserted `Document`/`Source` entity supplied by Liminis MUST remain unaffected.
-- **FR-007**: Entities that match some *other* note's ID (not the episode's own) MUST NOT be dropped by this rule.
+- **FR-007** *(amended after the maintainer's trace of the 13 v2 nodes — all are other notes' IDs cited as `[[wikilinks]]`, none is the note's own ID)*: An extracted entity MUST also be dropped when its normalised name equals the target of a `[[wikilink]]` in the episode body *and* that target is ID-shaped (no whitespace; a letter plus a `-`, `_` or digit). Edges to it are dropped as for the own-ID rule, and it counts in the same `entities_dropped_source_id` counter. A link to a real entity (`[[Quill Core]]`) is not ID-shaped and MUST survive, and an ID-shaped name that is neither the episode's own ID nor linked in its body MUST NOT be dropped. The own-ID rule (FR-001) is kept.
 - **FR-008**: A unit test MUST cover: a chunk whose header carries a note ID yields no entity of that name.
 - **FR-009**: The change MUST apply under ontology extraction; it MUST NOT change behaviour for chunks without a source identifier.
 

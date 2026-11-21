@@ -713,10 +713,19 @@ pub async fn add_episode_with_opts(
             !hit
         });
         entities_dropped_source_id = before - extraction.entities.len();
+        let edges_before = extraction.edges.len();
         extraction.edges.retain(|edge| {
             !(crate::source_id::matches_source_id(&edge.source_name, &own_source_ids)
                 || crate::source_id::matches_source_id(&edge.target_name, &own_source_ids))
         });
+        let edges_discarded = edges_before - extraction.edges.len();
+        if entities_dropped_source_id > 0 || edges_discarded > 0 {
+            // The discarded edges have no response counter (they are an intentional discard, not
+            // `edges_dropped_unresolvable`), so log the number to keep the loss measurable.
+            eprintln!(
+                "liminis-context-graph: source-ID filter dropped {entities_dropped_source_id} entit(ies) and discarded {edges_discarded} edge(s)"
+            );
+        }
     }
 
     // Strict-mode entity filtering (issue #312): an entity is never dropped for its entity_type
