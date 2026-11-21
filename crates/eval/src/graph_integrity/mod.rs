@@ -107,7 +107,26 @@ fn run(a: &GraphIntegrityArgs) -> Result<i32, (i32, String)> {
 
     let markdown = report.render_markdown();
     println!("{markdown}");
-    let mut compare_md = None;
+    // Write the report before comparing: an incompatible `--compare` must not discard the
+    // freshly computed (expensive) report.
+    if let Some(dir) = &a.out {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            (
+                EXIT_RUNTIME,
+                format!("cannot create --out {}: {e}", dir.display()),
+            )
+        })?;
+        write_out(dir, "report.md", &markdown)?;
+        write_out(
+            dir,
+            "report.json",
+            &serde_json::to_string_pretty(&report.to_json()).expect("report serializes"),
+        )?;
+        eprintln!(
+            "lcg-eval graph-integrity: wrote report to {}",
+            dir.display()
+        );
+    }
     if let Some(prev) = &previous {
         let rows = compare(prev, &report).map_err(|e| match e {
             CompareError::Incompatible(m) => (
@@ -122,28 +141,9 @@ fn run(a: &GraphIntegrityArgs) -> Result<i32, (i32, String)> {
         })?;
         let md = render_compare_markdown(&rows);
         println!("{md}");
-        compare_md = Some(md);
-    }
-    if let Some(dir) = &a.out {
-        std::fs::create_dir_all(dir).map_err(|e| {
-            (
-                EXIT_RUNTIME,
-                format!("cannot create --out {}: {e}", dir.display()),
-            )
-        })?;
-        write_out(dir, "report.md", &markdown)?;
-        write_out(
-            dir,
-            "report.json",
-            &serde_json::to_string_pretty(&report.to_json()).expect("report serializes"),
-        )?;
-        if let Some(md) = &compare_md {
-            write_out(dir, "compare.md", md)?;
+        if let Some(dir) = &a.out {
+            write_out(dir, "compare.md", &md)?;
         }
-        eprintln!(
-            "lcg-eval graph-integrity: wrote report to {}",
-            dir.display()
-        );
     }
     Ok(EXIT_OK)
 }
@@ -226,6 +226,33 @@ mod tests {
         let r = compare(&base_report(71), &worse).unwrap();
         let junk = r.iter().find(|r| r.name == "junk.nodes").unwrap();
         assert_eq!((junk.delta, junk.verdict), (Some(7), "worse"));
+    }
+
+    #[test]
+    fn compare_judges_ratios_by_rate_not_numerator() {
+        // free-form 35/35 (100%) vs ontology 56/71 (79%): numerator grew, rate fell.
+        let mut before = base_report(71);
+        before.links.total.direction_correct = Ratio::new(35, 35);
+        let mut after = base_report(71);
+        after.links.total.direction_correct = Ratio::new(56, 71);
+        let rows = compare(&before, &after).unwrap();
+        let r = rows
+            .iter()
+            .find(|r| r.name == "links.total.direction_correct")
+            .unwrap();
+        assert_eq!(r.delta, Some(21));
+        assert_eq!(r.verdict, "worse rate (denominators differ)");
+        // same numerator change with a denominator that grew in step: rate unchanged
+        let mut before = base_report(71);
+        before.links.total.direction_correct = Ratio::new(1, 2);
+        let mut after = base_report(71);
+        after.links.total.direction_correct = Ratio::new(2, 4);
+        let rows = compare(&before, &after).unwrap();
+        let r = rows
+            .iter()
+            .find(|r| r.name == "links.total.direction_correct")
+            .unwrap();
+        assert_eq!(r.verdict, "unchanged rate (denominators differ)");
     }
 
     #[test]

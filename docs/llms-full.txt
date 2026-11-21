@@ -6219,7 +6219,11 @@ junk. This is measured here and fixed elsewhere.
 `--compare <report.json>` prints, for every metric, the earlier value, this run's value, the signed
 delta (`this − earlier`) and whether it is an improvement (higher is better for found, typed, links
 and stated; lower is better for split, misattached, junk, marks, reversed and neither). `run_meta`
-(workspace path, version, timestamp) is ignored. A different skeleton or mapping hash exits 2; a file
+(workspace path, version, timestamp) is ignored. For ratio metrics the verdict is judged by the
+rate (`num/den`), not the numerator, because the denominator can differ between graphs (for example
+direction-correct is `35/35` on a free-form graph and `56/71` under an ontology: the delta is `+21`
+but the verdict is "worse rate"); such rows are marked "(denominators differ)". A different skeleton
+or mapping hash exits 2, but `report.md` and `report.json` are still written to `--out` first; a file
 that is not a valid report exits 1 naming the file.
 
 ## Determinism

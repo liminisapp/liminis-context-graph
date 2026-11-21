@@ -443,13 +443,17 @@ pub fn compare(before: &Report, after: &Report) -> Result<Vec<DeltaRow>, Compare
             let (delta, verdict) = match (bm, am) {
                 (Some(x), Some(y)) => {
                     let d = y.num as i64 - x.num as i64;
-                    let v = match (d, y.better) {
-                        (0, _) => "unchanged",
-                        (d, Better::Higher) if d > 0 => "improved",
-                        (d, Better::Lower) if d < 0 => "improved",
-                        _ => "worse",
+                    // A ratio metric is judged by its rate, not its numerator: the denominator can
+                    // differ between graphs (e.g. the number of typed links), so 35/35 -> 56/71 is
+                    // a fall in rate even though the numerator grew.
+                    let ord = match (x.den, y.den) {
+                        (Some(xd), Some(yd)) if xd > 0 && yd > 0 => {
+                            (y.num as u128 * xd as u128).cmp(&(x.num as u128 * yd as u128))
+                        }
+                        _ => y.num.cmp(&x.num),
                     };
-                    (Some(d), v)
+                    let den_differs = x.den != y.den;
+                    (Some(d), verdict_for(ord, y.better, den_differs))
                 }
                 _ => (None, "n/a"),
             };
@@ -462,6 +466,20 @@ pub fn compare(before: &Report, after: &Report) -> Result<Vec<DeltaRow>, Compare
             }
         })
         .collect())
+}
+
+fn verdict_for(ord: std::cmp::Ordering, better: Better, den_differs: bool) -> &'static str {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    match (ord, better, den_differs) {
+        (Equal, _, false) => "unchanged",
+        (Equal, _, true) => "unchanged rate (denominators differ)",
+        (Greater, Better::Higher, false) | (Less, Better::Lower, false) => "improved",
+        (Greater, Better::Higher, true) | (Less, Better::Lower, true) => {
+            "improved rate (denominators differ)"
+        }
+        (_, _, false) => "worse",
+        (_, _, true) => "worse rate (denominators differ)",
+    }
 }
 
 fn fmt_val(v: &Option<(usize, Option<usize>)>) -> String {
