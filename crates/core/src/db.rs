@@ -5018,9 +5018,11 @@ impl<'db> Conn<'db> {
              rn.episodes, rn.warrant, rn.valid_at_source",
             serde_json::json!({ "uuid": entity_uuid }),
         )?;
-        // Incoming edges (entity is target)
+        // Incoming edges (entity is target). A self-loop (#823's literal-object edge) already
+        // matched as outgoing, so it is excluded here: each edge is returned exactly once.
         edges.extend(self.collect_full_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
+             WHERE src.uuid <> $uuid \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
              rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type, rn.ingested_at, \
              rn.episodes, rn.warrant, rn.valid_at_source",

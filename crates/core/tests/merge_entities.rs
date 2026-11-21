@@ -1235,3 +1235,105 @@ fn test_explicit_merge_ignores_identifier_veto() {
     assert!(result.success, "errors: {:?}", result.errors);
     assert_eq!(result.merged_count, 1);
 }
+
+// ── #823: literal-object self-loops survive a merge ──────────────────────────
+
+/// ADR-0823: an alias's pre-existing self-loops (literal-valued facts about the alias itself,
+/// e.g. a budget and a headcount) both move to the canonical — they are not merge-created
+/// self-loops, and the `(src, dst, name)` dedup does not collapse them into one.
+#[test]
+fn test_pre_existing_self_loops_move_to_canonical() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical = "mc-canon";
+    let alias = "mc-alias";
+    conn.insert_entity(&make_entity(
+        canonical,
+        "Marlin Core",
+        "2026-01-01 00:00:00",
+    ))
+    .unwrap();
+    conn.insert_entity(&make_entity(alias, "Marlin Core", "2026-01-01 00:01:00"))
+        .unwrap();
+    for fact in [
+        "Marlin Core has a monthly budget of $4,200",
+        "Marlin Core has a headcount of 12",
+    ] {
+        let mut e = make_edge(alias, alias, "Marlin Core → Marlin Core", TS);
+        e.fact = fact.to_string();
+        e.relation_type = Some("HAS_MEASURE".to_string());
+        e.attributes = "{\"literal_object\":true}".to_string();
+        conn.insert_relates_to_edge(&e).unwrap();
+    }
+    // Each self-loop is returned once, not once per incident hop.
+    assert_eq!(conn.get_full_edges_for_entity(alias).unwrap().len(), 2);
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some(canonical.to_string()),
+        alias_uuids: vec![alias.to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+    assert!(result.success, "{:?}", result.errors);
+    assert_eq!(result.edges_deduplicated, 0);
+
+    let active: Vec<_> = conn
+        .get_full_edges_for_entity(canonical)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.invalid_at.is_none())
+        .collect();
+    assert_eq!(active.len(), 2, "{active:?}");
+    for e in &active {
+        assert_eq!(e.source_node_uuid, canonical);
+        assert_eq!(e.target_node_uuid, canonical);
+        assert!(e.attributes.contains("literal_object"));
+    }
+    let mut facts: Vec<_> = active.iter().map(|e| e.fact.as_str()).collect();
+    facts.sort();
+    assert_eq!(
+        facts,
+        vec![
+            "Marlin Core has a headcount of 12",
+            "Marlin Core has a monthly budget of $4,200"
+        ]
+    );
+    assert!(conn
+        .get_full_edges_for_entity(alias)
+        .unwrap()
+        .iter()
+        .all(|e| e.invalid_at.is_some()));
+}
+
+/// FR-010 unchanged by ADR-0823: an edge that only *becomes* a self-loop through the merge
+/// (alias → canonical) is still invalidated.
+#[test]
+fn test_merge_created_self_loop_still_invalidated() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    conn.insert_entity(&make_entity("c-1", "X", "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity("a-1", "X", "2026-01-01 00:01:00"))
+        .unwrap();
+    conn.insert_relates_to_edge(&make_edge("a-1", "c-1", "rel", TS))
+        .unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some("c-1".to_string()),
+        alias_uuids: vec!["a-1".to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+    assert!(result.success, "{:?}", result.errors);
+    assert!(conn
+        .get_full_edges_for_entity("c-1")
+        .unwrap()
+        .iter()
+        .all(|e| e.invalid_at.is_some()));
+}
