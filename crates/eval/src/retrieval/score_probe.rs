@@ -314,7 +314,7 @@ fn sep_json(pos: &[f64], neg: &[f64], floors: &[f64]) -> Value {
 pub fn summarize(obs: &[Observation], modes: &[String], floors: &[f64]) -> Value {
     let mut by_mode = serde_json::Map::new();
     for mode in modes {
-        let vector_mode = mode == "vector";
+        let vector_mode = mode.starts_with("vector");
         let stats: [(&str, Box<dyn Fn(&Observation) -> Option<f64>>); 2] = [
             ("top1_score", Box::new(|o: &Observation| o.top1_score())),
             (
@@ -395,7 +395,15 @@ pub fn summarize(obs: &[Observation], modes: &[String], floors: &[f64]) -> Value
                 }),
             );
         }
-        per_stat.insert("lexical_only_hits".into(), Value::Object(leak));
+        // `similarity` is never set in vector mode, so the count only means something in hybrid.
+        per_stat.insert(
+            "lexical_only_hits".into(),
+            if vector_mode {
+                Value::Null
+            } else {
+                Value::Object(leak)
+            },
+        );
         by_mode.insert(mode.clone(), Value::Object(per_stat));
     }
     Value::Object(by_mode)
@@ -429,15 +437,40 @@ pub fn parse_hits(resp: &Value) -> Vec<Hit> {
         .collect()
 }
 
-fn mode_of(name: &str) -> Result<PassageMode, String> {
-    match name {
-        "vector" => Ok(PassageMode::Raw),
-        "hybrid" => Ok(PassageMode::Hybrid),
-        "hybrid-belief" => Ok(PassageMode::HybridBelief),
-        other => Err(format!(
-            "unknown mode '{other}' (vector, hybrid, hybrid-belief)"
-        )),
+/// A mode name, optionally with a `@<floor>` suffix: `hybrid@0.5` runs hybrid with `min_score`
+/// 0.5, i.e. what #812's default does to that mode.
+fn mode_of(name: &str) -> Result<(PassageMode, Option<f64>), String> {
+    let (base, floor) = match name.split_once('@') {
+        Some((b, f)) => (
+            b,
+            Some(
+                f.parse::<f64>()
+                    .map_err(|e| format!("bad floor in '{name}': {e}"))?,
+            ),
+        ),
+        None => (name, None),
+    };
+    let m = match base {
+        "vector" => PassageMode::Raw,
+        "hybrid" => PassageMode::Hybrid,
+        "hybrid-belief" => PassageMode::HybridBelief,
+        other => {
+            return Err(format!(
+                "unknown mode '{other}' (vector, hybrid, hybrid-belief; optionally @<floor>)"
+            ))
+        }
+    };
+    Ok((m, floor))
+}
+
+/// The `knowledge_search_passages` request for a mode name.
+fn request_for(mode: &str, q: &str, k: usize) -> Result<Value, String> {
+    let (m, floor) = mode_of(mode)?;
+    let mut r = m.request(q, k);
+    if let Some(f) = floor {
+        r["min_score"] = json!(f);
     }
+    Ok(r)
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────────────────────
@@ -448,13 +481,19 @@ pub struct ProbeArgs {
     pub service_bin: Option<PathBuf>,
     pub embedder_http: Option<String>,
     pub embedder_uds: Option<String>,
+    /// Extraction endpoint. Passage search reads only Episodic nodes, so a stub that extracts
+    /// nothing is enough; when set, no cassette is replayed by default.
+    pub extractor_http: Option<String>,
+    /// `LCG_EMBEDDING_PROFILE` (the record's standard setup uses `bge-v1.5`); `None` leaves the
+    /// service default.
+    pub embedding_profile: Option<String>,
     pub replay_cassette: Option<String>,
     pub offtopic: Option<PathBuf>,
     pub k: usize,
     pub modes: Vec<String>,
     pub floors: Vec<f64>,
     pub out: Option<PathBuf>,
-    /// Extra queries for the FTS any-term check (see `--fts-check`).
+    /// `<term>,<nonsense>` for the FTS any-term check (see `--fts-check`).
     pub fts_check: Option<(String, String)>,
 }
 
@@ -468,15 +507,23 @@ OPTIONS:
     --corpus <DIR>           Fixture directory (default crates/eval/fixtures/retrieval-v2).
     --service-bin <PATH>     liminis-context-graph binary (default: next to this executable).
     --embedder-uds/-http     Real embedder for the spawned service (mock/hash are refused).
-    --replay-cassette <F>    Extraction cassette (default <corpus>/cassette.jsonl when present).
+    --extractor-http <URL>   Extraction endpoint (OpenAI-compatible). Passage search needs no
+                             entities, so an endpoint that extracts nothing is enough; giving one
+                             disables the default cassette.
+    --embedding-profile <P>  Embedding instruction profile (the record's standard setup: bge-v1.5).
+    --replay-cassette <F>    Extraction cassette (default <corpus>/cassette.jsonl when present and no
+                             --extractor-http). Recorded cassettes go stale when the extraction
+                             prompt changes; a miss aborts the ingest.
     --offtopic <FILE>        Off-topic queries (default <corpus>/offtopic-queries.jsonl).
     --k <N>                  Hits per query (default 10).
-    --modes <LIST>           Subset of vector,hybrid,hybrid-belief (default: all three).
+    --modes <LIST>           Subset of vector,hybrid,hybrid-belief (default: all three). A mode may
+                             carry a floor, e.g. hybrid@0.5 sends min_score=0.5 (what #812's default
+                             does), to see what the floor leaves behind.
     --floors <LIST>          Floors to evaluate, comma-separated (default 0.5, the #812 default).
     --out <FILE>             Write every observation as JSONL (the summary goes to stdout).
-    --fts-check <A>,<B>      Also run hybrid queries 'A', 'B' and 'A B' and report the lexical-only
-                             hit counts (does the FTS leg match any term or all terms?). A is a
-                             term in the corpus, B a nonsense token."
+    --fts-check <A>,<B>      Also count the FTS index's matches for 'A', 'B' and 'A B', with and
+                             without `conjunctive := true` (does the FTS leg match any term or all
+                             terms?). A is a term in the corpus, B a nonsense token."
 }
 
 pub fn parse_args(args: &[String]) -> Result<Option<ProbeArgs>, String> {
@@ -485,6 +532,8 @@ pub fn parse_args(args: &[String]) -> Result<Option<ProbeArgs>, String> {
         service_bin: None,
         embedder_http: None,
         embedder_uds: None,
+        extractor_http: None,
+        embedding_profile: None,
         replay_cassette: None,
         offtopic: None,
         k: 10,
@@ -508,6 +557,8 @@ pub fn parse_args(args: &[String]) -> Result<Option<ProbeArgs>, String> {
             "--service-bin" => a.service_bin = Some(PathBuf::from(val("--service-bin")?)),
             "--embedder-http" => a.embedder_http = Some(val("--embedder-http")?),
             "--embedder-uds" => a.embedder_uds = Some(val("--embedder-uds")?),
+            "--extractor-http" => a.extractor_http = Some(val("--extractor-http")?),
+            "--embedding-profile" => a.embedding_profile = Some(val("--embedding-profile")?),
             "--replay-cassette" => a.replay_cassette = Some(val("--replay-cassette")?),
             "--offtopic" => a.offtopic = Some(PathBuf::from(val("--offtopic")?)),
             "--k" => {
@@ -583,17 +634,27 @@ async fn run(a: ProbeArgs) -> Result<(), String> {
         }
     };
     let queries = build_queries(&fx, offtopic);
-    let cassette = a.replay_cassette.clone().or_else(|| {
-        let p = a.corpus.join("cassette.jsonl");
-        p.exists().then(|| p.display().to_string())
-    });
+    // The service runs in a temp workspace, so every path it is handed must be absolute.
+    let absolute = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let cassette = a
+        .replay_cassette
+        .as_deref()
+        .map(|c| absolute(Path::new(c)))
+        .or_else(|| {
+            let p = a.corpus.join("cassette.jsonl");
+            (a.extractor_http.is_none() && p.exists()).then(|| absolute(&p))
+        })
+        .map(|p| p.display().to_string());
     let opts = lcg::ServiceOpts {
         bin: a
             .service_bin
-            .clone()
+            .as_deref()
+            .map(absolute)
             .unwrap_or_else(super::default_service_bin),
         embedder_http: a.embedder_http.clone(),
         embedder_uds: a.embedder_uds.clone(),
+        extractor_http: a.extractor_http.clone(),
+        embedding_profile: a.embedding_profile.clone(),
         replay_cassette: cassette,
         ..Default::default()
     };
@@ -612,10 +673,7 @@ async fn run(a: ProbeArgs) -> Result<(), String> {
     for q in &queries {
         for m in &a.modes {
             let resp = t
-                .call(
-                    "knowledge_search_passages",
-                    mode_of(m)?.request(&q.text, a.k),
-                )
+                .call("knowledge_search_passages", request_for(m, &q.text, a.k)?)
                 .await?;
             obs.push(Observation {
                 query: q.clone(),
@@ -630,6 +688,7 @@ async fn run(a: ProbeArgs) -> Result<(), String> {
     let mut summary = json!({
         "service": guard.version,
         "embedder": a.embedder_http.clone().or(a.embedder_uds.clone()),
+        "embedding_profile": a.embedding_profile,
         "k": a.k,
         "corpus": a.corpus.display().to_string(),
         "corpus_hash": fx.corpus_hash,
@@ -643,21 +702,25 @@ async fn run(a: ProbeArgs) -> Result<(), String> {
         "modes": summarize(&obs, &a.modes, &a.floors),
     });
     if let Some((term, junk)) = &a.fts_check {
+        // Straight at the FTS index through the cypher escape hatch (read-only, throwaway
+        // workspace), so the vector leg cannot mask the answer. Default call = what
+        // `fts_search_episodic` sends; `conjunctive := true` is the explicit all-terms form.
         let mut rows = Vec::new();
         for q in [term.clone(), junk.clone(), format!("{term} {junk}")] {
-            // A large num_results so the vector leg's over-draw (3 x n) covers the corpus and any
-            // hit that is still lexical-only is a BM25 hit the vector leg did not return.
-            let resp = t
-                .call(
-                    "knowledge_search_passages",
-                    PassageMode::Hybrid.request(&q, 100),
-                )
-                .await?;
-            let hits = parse_hits(&resp);
-            rows.push(json!({
-                "query": q, "hits": hits.len(),
-                "lexical_only": hits.iter().filter(|h| h.similarity.is_none()).count(),
-            }));
+            for conj in [false, true] {
+                let opt = if conj { ", conjunctive := true" } else { "" };
+                let cypher = format!(
+                    "CALL QUERY_FTS_INDEX('Episodic', 'episode_content', '{}'{opt}) RETURN count(*)",
+                    q.replace('\'', "")
+                );
+                let r = t
+                    .call("knowledge_query_cypher", json!({ "query": cypher }))
+                    .await;
+                rows.push(json!({
+                    "query": q, "conjunctive": conj,
+                    "result": r.unwrap_or_else(|e| json!({"error": e})),
+                }));
+            }
         }
         summary["fts_check"] = Value::Array(rows);
     }
@@ -840,5 +903,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(f.fts_check, Some(("cedar".into(), "zzqx".into())));
+    }
+
+    #[test]
+    fn mode_names_carry_an_optional_floor() {
+        assert_eq!(mode_of("hybrid").unwrap(), (PassageMode::Hybrid, None));
+        assert_eq!(
+            mode_of("vector@0.5").unwrap(),
+            (PassageMode::Raw, Some(0.5))
+        );
+        assert!(mode_of("hybrid@x").is_err());
+        assert!(mode_of("rerank").is_err());
+        let r = request_for("hybrid@0.5", "q", 7).unwrap();
+        assert_eq!(
+            (r["min_score"].as_f64(), r["mode"].as_str()),
+            (Some(0.5), Some("hybrid"))
+        );
+        assert_eq!(
+            request_for("hybrid", "q", 7).unwrap()["min_score"],
+            json!(0.0)
+        );
     }
 }
