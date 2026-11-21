@@ -3517,6 +3517,57 @@ impl<'db> Conn<'db> {
         Ok((edges, neighbor_uuids))
     }
 
+    /// Edges incident to any entity in `frontier` (both directions), for `knowledge_walk`
+    /// (issue #820). Unlike [`Self::get_entity_neighbors`] there is no `LIMIT` (a cap would
+    /// silently drop walk candidates) and each edge carries its `fact_embedding`.
+    /// `group_ids: None` or an empty slice means every group. Invalidated edges are returned only
+    /// when `include_invalidated` is set. Results are ordered by edge uuid (deterministic).
+    pub fn get_walk_edges(
+        &self,
+        frontier: &[String],
+        group_ids: Option<&[&str]>,
+        include_invalidated: bool,
+    ) -> Result<Vec<RelatesToEdge>, Error> {
+        if frontier.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut conds: Vec<&str> = Vec::new();
+        if matches!(group_ids, Some(g) if !g.is_empty()) {
+            conds.push("rn.group_id IN $gids");
+        }
+        if !include_invalidated {
+            conds.push("rn.invalid_at IS NULL");
+        }
+        let mut params = serde_json::json!({ "uuids": frontier });
+        if let Some(gids) = group_ids {
+            if !gids.is_empty() {
+                params["gids"] = serde_json::json!(gids);
+            }
+        }
+        let extra = if conds.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", conds.join(" AND "))
+        };
+        let ret = "RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
+             rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, \
+             rn.relation_type, rn.ingested_at, rn.episodes, rn.warrant, rn.valid_at_source";
+        let out_sql = format!(
+            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+             WHERE src.uuid IN $uuids{extra} {ret}"
+        );
+        let in_sql = format!(
+            "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
+             WHERE dst.uuid IN $uuids{extra} {ret}"
+        );
+        let mut edges = self.collect_full_relates_to_edges(&out_sql, params.clone())?;
+        edges.extend(self.collect_full_relates_to_edges(&in_sql, params)?);
+        // An edge whose both endpoints are in the frontier matches both queries.
+        edges.sort_by(|a, b| a.uuid.cmp(&b.uuid));
+        edges.dedup_by(|a, b| a.uuid == b.uuid);
+        Ok(edges)
+    }
+
     /// Returns Entity nodes reachable via Episodic nodes whose source_description CONTAINS `source`.
     ///
     /// Uses Cypher `CONTAINS` predicate (substring semantics, FR-017). If lbug's dialect does not
@@ -7470,5 +7521,95 @@ mod fts_backstop_tests {
         conn.init_schema(4).unwrap();
         assert!(!conn.repair_fts_after(&Error::QueryFailed("boom".to_string())));
         assert_eq!(conn.fts_repair_snapshot().0, 0);
+    }
+}
+
+#[cfg(test)]
+mod walk_edges_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn ent(uuid: &str, name: &str, gid: &str, label: &str) -> EntityRow {
+        EntityRow {
+            uuid: uuid.into(),
+            name: name.into(),
+            group_id: gid.into(),
+            labels: vec!["Entity".into(), label.into()],
+            kind: label.into(),
+            created_at: "2024-01-01 00:00:00".into(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            ..Default::default()
+        }
+    }
+
+    fn edge(
+        uuid: &str,
+        src: &str,
+        dst: &str,
+        gid: &str,
+        rel: &str,
+        invalid_at: Option<&str>,
+    ) -> RelatesToEdge {
+        RelatesToEdge {
+            uuid: uuid.into(),
+            name: rel.into(),
+            source_node_uuid: src.into(),
+            target_node_uuid: dst.into(),
+            group_id: gid.into(),
+            fact: format!("fact {uuid}"),
+            fact_embedding: vec![0.0, 1.0, 0.0, 0.0],
+            created_at: "2024-01-01 00:00:00".into(),
+            invalid_at: invalid_at.map(String::from),
+            attributes: "{}".into(),
+            relation_type: Some(rel.into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn walk_edges_both_directions_group_filter_and_validity() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        for (u, n) in [("a", "A"), ("b", "B"), ("c", "C")] {
+            conn.insert_entity(&ent(u, n, "g", "Person")).unwrap();
+        }
+        conn.insert_entity(&ent("z", "Z", "other", "Person"))
+            .unwrap();
+        conn.insert_relates_to_edge(&edge("e1", "a", "b", "g", "R1", None))
+            .unwrap();
+        conn.insert_relates_to_edge(&edge("e2", "c", "a", "g", "R2", None))
+            .unwrap();
+        conn.insert_relates_to_edge(&edge(
+            "e3",
+            "a",
+            "c",
+            "g",
+            "R3",
+            Some("2024-06-01 00:00:00"),
+        ))
+        .unwrap();
+        conn.insert_relates_to_edge(&edge("e4", "a", "z", "other", "R4", None))
+            .unwrap();
+
+        let fr = vec!["a".to_string()];
+        let live = conn.get_walk_edges(&fr, Some(&["g"]), false).unwrap();
+        let ids: Vec<&str> = live.iter().map(|e| e.uuid.as_str()).collect();
+        assert_eq!(ids, vec!["e1", "e2"], "both directions, live only, group g");
+        assert_eq!(live[0].fact_embedding, vec![0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(live[0].relation_type.as_deref(), Some("R1"));
+
+        let hist = conn.get_walk_edges(&fr, Some(&["g"]), true).unwrap();
+        assert_eq!(hist.len(), 3, "history includes the invalidated edge");
+        assert!(hist.iter().any(|e| e.uuid == "e3" && e.invalid_at.is_some()));
+
+        let all_groups = conn.get_walk_edges(&fr, None, false).unwrap();
+        assert_eq!(all_groups.len(), 3, "no group filter includes group `other`");
+
+        // Both endpoints in the frontier: the edge is returned once.
+        let both = vec!["a".to_string(), "b".to_string()];
+        let e = conn.get_walk_edges(&both, Some(&["g"]), false).unwrap();
+        assert_eq!(e.iter().filter(|e| e.uuid == "e1").count(), 1);
     }
 }
