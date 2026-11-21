@@ -98,6 +98,7 @@ fn run(a: &GraphIntegrityArgs) -> Result<i32, (i32, String)> {
         signatures: graph.signatures.as_deref(),
         group: &a.group,
         ontology_source: graph.ontology_source,
+        unstated_breakdown: a.unstated_breakdown,
     });
     report.run_meta = Some(RunMeta {
         workspace: a.workspace.display().to_string(),
@@ -199,6 +200,7 @@ mod tests {
                 marked_by_type: BTreeMap::new(),
                 fit: None,
             },
+            unstated_breakdown: None,
             run_meta: None,
         }
     }
@@ -390,6 +392,7 @@ mod tests {
             signatures: None,
             group: "g",
             ontology_source: "none",
+            unstated_breakdown: false,
         });
         assert_eq!(r.typing.entities, 48);
         assert_eq!(r.typing.typed.den, 48);

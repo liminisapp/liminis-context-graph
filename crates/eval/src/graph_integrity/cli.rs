@@ -17,6 +17,8 @@ pub struct GraphIntegrityArgs {
     pub db_path: Option<PathBuf>,
     pub out: Option<PathBuf>,
     pub compare: Option<PathBuf>,
+    /// Classify the not-stated value facts by cause (#823). Off by default.
+    pub unstated_breakdown: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -41,6 +43,9 @@ OPTIONS:
     --db-path <PATH>     DB location relative to the workspace. Default: .lcg/db/liminis.db (then .graphiti/db)
     --out <DIR>          Also write report.md and report.json (and compare.md with --compare) here
     --compare <FILE>     An earlier report.json; print per-metric deltas against it
+    --unstated-breakdown Also classify the value facts not stated on any edge of their entity by
+                         cause (in the entity's summary / on another entity / in another surface
+                         form / absent). Adds a report section and an `unstated_breakdown` JSON key
     -h, --help           Print this help
 
 No network, extraction provider or LLM is used.
@@ -62,6 +67,7 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
         db_path: None,
         out: None,
         compare: None,
+        unstated_breakdown: false,
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -80,6 +86,7 @@ pub fn parse_args(args: &[String]) -> Result<Parsed, String> {
             "--db-path" => a.db_path = Some(PathBuf::from(val("--db-path")?)),
             "--out" => a.out = Some(PathBuf::from(val("--out")?)),
             "--compare" => a.compare = Some(PathBuf::from(val("--compare")?)),
+            "--unstated-breakdown" => a.unstated_breakdown = true,
             other => return Err(format!("unknown argument {other:?} (see --help)")),
         }
     }
@@ -138,6 +145,11 @@ mod tests {
         assert_eq!(a.mapping, Some(PathBuf::from("m.json")));
         assert_eq!(a.compare, Some(PathBuf::from("c.json")));
         assert_eq!(a.db_path, Some(PathBuf::from("d")));
+        assert!(!a.unstated_breakdown, "off by default");
+        let Parsed::Run(a) = p(&["--workspace", "w", "--unstated-breakdown"]).unwrap() else {
+            panic!()
+        };
+        assert!(a.unstated_breakdown);
     }
 
     #[test]
