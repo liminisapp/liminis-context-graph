@@ -204,15 +204,28 @@ async fn run(cli: Args) -> Result<(), String> {
         .cloned()
         .ok_or_else(|| format!("--reference '{reference_name}' matched no run result"))?;
 
+    // #821 FR-019: the judge's endpoint resolves like the service's (ANTHROPIC_BASE_URL,
+    // LCG_ANTHROPIC_ENDPOINT, ANTHROPIC_AUTH_TOKEN), so a gateway or the subscription bridge works
+    // without an API key.
+    let no_flags = lcg_core::anthropic_config::AnthropicCliArgs::default();
     let judge_client: Option<Arc<dyn JudgeClient>> =
-        std::env::var("ANTHROPIC_API_KEY").ok().map(|key| {
-            Arc::new(AnthropicJudgeClient::new(key, cli.judge_model.clone()))
-                as Arc<dyn JudgeClient>
-        });
+        if lcg_eval::llm_client::provider_configured(&lcg_eval::llm_client::process_env, &no_flags)
+        {
+            let cfg = lcg_core::anthropic_config::AnthropicEndpointConfig::resolve(
+                &lcg_eval::llm_client::process_env,
+                &no_flags,
+            )?;
+            Some(Arc::new(AnthropicJudgeClient::with_config(
+                cfg,
+                cli.judge_model.clone(),
+            )) as Arc<dyn JudgeClient>)
+        } else {
+            None
+        };
     if judge_client.is_none() {
         eprintln!(
-            "lcg-eval: ANTHROPIC_API_KEY not set — skipping LLM-as-judge scoring, reporting \
-             strict-string F1 only"
+            "lcg-eval: no judge provider configured (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or \
+             ANTHROPIC_BASE_URL) — skipping LLM-as-judge scoring, reporting strict-string F1 only"
         );
     }
     let judge_cache = JudgeCache::load(&cli.judge_cache)?;

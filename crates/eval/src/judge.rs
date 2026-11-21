@@ -8,13 +8,12 @@
 //! whichever backends are under test (including when comparing two non-Anthropic
 //! candidates against each other).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
-
 use futures::future::BoxFuture;
+use lcg_core::anthropic_config::AnthropicEndpointConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::time::sleep;
+
+use crate::llm_client::{MessagesClient, ModelClient, ModelRequest};
 
 /// Verbatim from the ported Python source, `JUDGE_PROMPT` in `judge.py` — the `{prompt_name}`/
 /// `{ref}`/`{cand}` placeholders are substituted via `str::replace` (not `format!`, so the
@@ -287,11 +286,9 @@ pub trait JudgeClient: Send + Sync {
 /// under test (Research Constraint 3: the judge isn't an `Extractor` in the ported source
 /// either — it's a raw `messages.create` call).
 pub struct AnthropicJudgeClient {
-    api_key: String,
     model: String,
-    client: reqwest::Client,
-    /// Consecutive failures, reset by any success. See `CONSECUTIVE_FAILURE_LIMIT`.
-    breaker: CircuitBreaker,
+    /// The shared Messages client (endpoint, auth, retries, breaker).
+    pub(crate) inner: MessagesClient,
 }
 
 /// Response schema for a matching verdict, enforced by the API via
@@ -346,226 +343,48 @@ fn pairwise_verdict_schema() -> Value {
     })
 }
 
-/// How many judge calls may fail back-to-back before the client stops making requests.
-///
-/// Judge failures are deliberately non-fatal per call, because one bad response should not
-/// discard hours of scoring. That is right for transient faults and wrong for systemic
-/// ones: an invalid model id, an exhausted credit balance, or a revoked key fails *every*
-/// call, and without a breaker a ~6000-call scoring phase would grind through all of them
-/// and report a clean-looking run with 6000 judge errors. A run this size will not
-/// legitimately produce ten failures in a row.
-pub const CONSECUTIVE_FAILURE_LIMIT: usize = 10;
-
-/// The consecutive-failure breaker, split out from the HTTP path so its state transitions
-/// are testable without a network round trip or a mock transport: every rule that matters
-/// (closed below the limit, opens at it, any success resets) lives here and nowhere else.
-#[derive(Debug)]
-pub struct CircuitBreaker {
-    consecutive: AtomicUsize,
-    limit: usize,
-}
-
-impl CircuitBreaker {
-    pub fn new(limit: usize) -> Self {
-        Self {
-            consecutive: AtomicUsize::new(0),
-            limit,
-        }
-    }
-
-    /// `Err` once the breaker is open — the caller must not issue the request.
-    pub fn check(&self) -> Result<(), String> {
-        let failures = self.consecutive.load(Ordering::Relaxed);
-        if failures >= self.limit {
-            return Err(format!(
-                "judge circuit breaker open after {failures} consecutive failures — \
-                 not issuing further requests. Fix the underlying cause and re-run; \
-                 verdicts already cached will be re-served for free."
-            ));
-        }
-        Ok(())
-    }
-
-    /// Resets on success rather than decaying: an isolated transient fault in a
-    /// multi-thousand-call run must not accumulate toward the limit over hours.
-    pub fn record<T, E>(&self, result: &Result<T, E>) {
-        match result {
-            Ok(_) => self.consecutive.store(0, Ordering::Relaxed),
-            Err(_) => {
-                self.consecutive.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    pub fn consecutive_failures(&self) -> usize {
-        self.consecutive.load(Ordering::Relaxed)
-    }
-}
-
-/// A stalled/unresponsive judge call would otherwise block the whole harness run
-/// indefinitely (there's no other progress signal or retry budget above this client);
-/// bound it generously since a large reference/candidate payload can legitimately take
-/// a while to judge.
-const JUDGE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Cap on the raw-body fallback when the API's error JSON cannot be parsed. Bytes, not
-/// chars — enough to identify the failure without dumping an HTML error page into stderr.
-const ERROR_BODY_FALLBACK_BYTES: usize = 500;
+pub use crate::llm_client::{CircuitBreaker, CONSECUTIVE_FAILURE_LIMIT};
 
 impl AnthropicJudgeClient {
     pub fn model(&self) -> &str {
         &self.model
     }
 
+    /// Stock endpoint, `x-api-key` auth.
     pub fn new(api_key: String, model: String) -> Self {
+        Self::with_config(AnthropicEndpointConfig::default_with_key(api_key), model)
+    }
+
+    /// Any resolved Anthropic-compatible endpoint (gateway, subscription bridge) — #821 FR-019.
+    pub fn with_config(cfg: AnthropicEndpointConfig, model: String) -> Self {
         Self {
-            api_key,
             model,
-            client: reqwest::Client::builder()
-                .timeout(JUDGE_REQUEST_TIMEOUT)
-                .build()
-                .expect("reqwest client with a fixed timeout is infallible to build"),
-            breaker: CircuitBreaker::new(CONSECUTIVE_FAILURE_LIMIT),
+            inner: MessagesClient::new(cfg),
         }
     }
-}
 
-impl AnthropicJudgeClient {
-    /// Shared request/retry/text-extraction path for both `judge()` and `judge_pairwise()`
-    /// — the only difference between the two is the prompt text and the response shape
-    /// parsed out of the returned text, so the HTTP + backoff scaffolding lives here once.
+    /// Endpoint and auth scheme for logs and reports — never the credential.
+    pub fn describe(&self) -> String {
+        self.inner.describe()
+    }
+
+    /// Shared request/retry/text-extraction path for both `judge()` and `judge_pairwise()`. The
+    /// schema constrains the output via `output_config.format`; a grammar-compilation timeout
+    /// falls back to an unconstrained call, which `extract_json_block` and the sentinel
+    /// normalisation then parse.
     pub(crate) async fn request_judge_text(
         &self,
         prompt: String,
         schema: Value,
     ) -> Result<String, String> {
-        self.breaker.check()?;
-        let result = self.request_judge_text_inner(prompt, Some(schema)).await;
-        self.breaker.record(&result);
-        result
-    }
-
-    /// `schema: None` issues the same call without `output_config.format`. That is the
-    /// fallback for a grammar-compilation timeout, and the reason `extract_json_block` and
-    /// the sentinel normalisation are still worth keeping: they are what parses the
-    /// unconstrained response.
-    fn request_judge_text_inner(
-        &self,
-        prompt: String,
-        schema: Option<Value>,
-    ) -> BoxFuture<'_, Result<String, String>> {
-        Box::pin(async move {
-            let mut body = json!({
-                "model": self.model,
-                "max_tokens": 4096,
-                "messages": [{"role": "user", "content": prompt.clone()}],
-                // Explicit, not inherited from the model's default. Sonnet 4.6 runs
-                // thinking-off when `thinking` is omitted, but Sonnet 5 runs adaptive thinking
-                // by default — so `--judge-model claude-sonnet-5` would silently switch it on
-                // across every call of a ~6000-call scoring phase, changing cost, latency and
-                // verdicts at once, with nothing in the output saying so.
-                //
-                // Disabled rather than adaptive on purpose. Judging is index enumeration, which
-                // is exactly where thinking measured *worse* on this corpus:
-                // docs/history/extraction-eval-2026-04.md has qwen3.6-27b at 0.894 entity F1
-                // without thinking and 0.772 with. A judge is a measuring instrument — cheap,
-                // fast and repeatable beats deliberative.
-                "thinking": {"type": "disabled"}
-            });
-            if let Some(schema) = &schema {
-                body["output_config"] =
-                    json!({"format": {"type": "json_schema", "schema": schema}});
-            }
-
-            // Retry 429/529 with exponential backoff, mirroring `AnthropicExtractor`
-            // (`crates/core/src/extractor.rs`) so a rate-limited judge call doesn't fail
-            // the whole harness run.
-            let mut attempt = 0u32;
-            let resp: Value = loop {
-                let sent = self
-                    .client
-                    .post("https://api.anthropic.com/v1/messages")
-                    .header("x-api-key", &self.api_key)
-                    .header("anthropic-version", "2023-06-01")
-                    .header("content-type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await;
-
-                // Transport errors are retried on the same ladder as 429/529. They were not
-                // retried at all before, so a single dropped connection propagated straight
-                // out — which is precisely how the #248 scoring run died 99 minutes and 1379
-                // pairwise verdicts in. Over ~6000 sequential calls a transient network fault
-                // is close to certain; treating it as fatal made the run's success depend on
-                // an unbroken hour of perfect connectivity.
-                let http_resp = match sent {
-                    Ok(r) => r,
-                    Err(_) if attempt < 3 => {
-                        sleep(Duration::from_secs(1u64 << attempt)).await;
-                        attempt += 1;
-                        continue;
-                    }
-                    Err(e) => return Err(format!("judge request failed after retries: {e}")),
-                };
-
-                let status = http_resp.status();
-                if (status.as_u16() == 429 || status.as_u16() == 529) && attempt < 3 {
-                    let delay = Duration::from_secs(1u64 << attempt);
-                    sleep(delay).await;
-                    attempt += 1;
-                    continue;
-                }
-
-                // The API puts the *reason* in the response body, and `error_for_status()`
-                // discards it — a 400 for an invalid model, an oversized prompt, or an
-                // exhausted credit balance are indistinguishable without it. During the #248
-                // run that left every judge call reporting only "HTTP status client error
-                // (400 Bad Request)", which is true and useless.
-                if !status.is_success() {
-                    let body = http_resp.text().await.unwrap_or_default();
-
-                    // "Grammar compilation timed out" is the API failing to compile the
-                    // constrained-output grammar, not a problem with the request's content — a
-                    // failure mode that only exists because we ask for output_config.format.
-                    // Retrying the same constrained request would time out again, so drop the
-                    // constraint and let extract_json_block plus the sentinel normalisation
-                    // handle the response, which is what they existed for before the schema.
-                    // Losing the constraint on one call is strictly better than losing the
-                    // call.
-                    if body.contains("Grammar compilation") && schema.is_some() {
-                        eprintln!(
-                            "lcg-eval: judge grammar compilation timed out — retrying this call \
-                         without the schema constraint"
-                        );
-                        return self.request_judge_text_inner(prompt, None).await;
-                    }
-
-                    let detail = serde_json::from_str::<Value>(&body)
-                        .ok()
-                        .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
-                        .unwrap_or_else(|| {
-                            // Truncate by BYTES at a char boundary: `chars().take(500)` can
-                            // yield ~2 KB of UTF-8 and contradict the documented cap.
-                            let mut end = body.len().min(ERROR_BODY_FALLBACK_BYTES);
-                            while end > 0 && !body.is_char_boundary(end) {
-                                end -= 1;
-                            }
-                            body[..end].to_owned()
-                        });
-                    return Err(format!("judge request failed ({status}): {detail}"));
-                }
-
-                break http_resp
-                    .json()
-                    .await
-                    .map_err(|e| format!("judge response not JSON: {e}"))?;
-            };
-
-            resp["content"][0]["text"]
-                .as_str()
-                .map(str::to_string)
-                .ok_or_else(|| "judge response missing content[0].text".to_string())
-        })
+        let req = ModelRequest {
+            model: self.model.clone(),
+            system: None,
+            user: prompt,
+            schema: Some(schema),
+            max_tokens: 4096,
+        };
+        self.inner.complete(&req).await
     }
 }
 
@@ -1143,7 +962,7 @@ reference index 8 is also "Birthplace of Alan Shepard". Let me re-examine.
     async fn judge_circuit_breaker_stops_issuing_requests_after_repeated_failures() {
         let client = AnthropicJudgeClient::new("not-a-real-key".into(), "some-model".into());
         for _ in 0..CONSECUTIVE_FAILURE_LIMIT {
-            client.breaker.record::<(), ()>(&Err(()));
+            client.inner.breaker.record::<(), ()>(&Err(()));
         }
 
         let err = client

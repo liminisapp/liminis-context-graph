@@ -13,6 +13,7 @@ pub mod failure_taxonomy;
 pub mod graph_integrity;
 pub mod judge;
 pub mod judge_cache;
+pub mod llm_client;
 pub mod metrics;
 pub mod pairwise;
 pub mod plan;
