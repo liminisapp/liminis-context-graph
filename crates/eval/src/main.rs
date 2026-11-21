@@ -48,6 +48,10 @@ async fn main() {
     if args.first().map(String::as_str) == Some("retrieval-variants") {
         std::process::exit(lcg_eval::retrieval::generator::variants::run_cli(&args[1..]).await);
     }
+    // `lcg-eval retrieval-score-probe …` (#863): eval-only score-separation probe for #848.
+    if args.first().map(String::as_str) == Some("retrieval-score-probe") {
+        std::process::exit(lcg_eval::retrieval::score_probe::run_cli(&args[1..]).await);
+    }
     // `lcg-eval graph-integrity …` (#819): deterministic graph-quality report over a workspace.
     if args.first().map(String::as_str) == Some("graph-integrity") {
         std::process::exit(lcg_eval::graph_integrity::run_cli(&args[1..]));

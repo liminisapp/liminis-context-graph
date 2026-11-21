@@ -101,3 +101,15 @@ target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2
 
 `cargo test -p lcg-eval --test retrieval_v2` checks the skeleton against the scenario, the pipeline
 against a template-prose test double, and (once rendered) the checked-in prose against the skeleton.
+
+## `offtopic-queries.jsonl` (#863, eval-only)
+
+34 hand-written queries with **no answer anywhere in the corpus**, used only by
+`lcg-eval retrieval-score-probe` to measure how retrieval scores separate answerable queries from
+irrelevant ones (the #848 question: is an absolute score floor safe in hybrid mode?). Each line is
+`{"id","kind","text"}`; `kind` is `unrelated-domain` (16: cooking, astronomy, health, geography,
+music), `gibberish` (8: keyboard mash, nonsense tokens, hex) or `common-words` (10: stopword-only
+questions such as "what is the"). It is a separate file so `questions.jsonl` and its hash are
+unchanged and no other eval reads it. The set is constructed, not sampled, and small: a score
+distribution measured on it carries that limit. The 34 `negative` questions in `questions.jsonl`
+are the *hard* negatives (real-sounding entities or attributes); these are the *easy* ones.
