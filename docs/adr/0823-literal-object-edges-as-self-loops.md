@@ -106,6 +106,18 @@ definitions. False positives (a fact naming an endpoint by a nickname) and negat
 glues in the other entity's name without it taking part) are expected, which is why it marks
 rather than drops. A value-free role fact ("Lena is the project lead") is not flagged.
 
+The heuristic also never examines a literal-object self-loop: it only looks at edges between two
+*different* entities. That leaves the inverse failure unmarked. If the model ignores the prompt's
+"no other listed entity takes part" condition and emits `Marlin Core → Marlin Core` for "Tomas
+Kowalski set Marlin Core's budget at $4,200", the edge is stored with `literal_object: true`, and
+nothing records that Tomas took part. The value is still on the right entity, so `graph-integrity`
+counts it as stated and not misattached. What is lost is the link to Tomas, which is a link-recall
+cost that SC-003's "true links present" comparison is there to catch. Marking a self-loop whose
+fact names another entity from the batch would surface the case. It is not done here: it needs the
+batch's entity names in Phase C, plus a new mark and counter, for a failure the prompt explicitly
+tells the model to avoid. If the maintainer's v2 run shows link recall falling, it is the first
+thing to add.
+
 ## Alternatives considered
 
 - **A value node** ("$4,200" as an entity). An `Entity` row appears in entity search and typing

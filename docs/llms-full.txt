@@ -3549,7 +3549,10 @@ whose fact states a literal value (it contains a digit or one of `$ € £ ¥`) 
 endpoints (case-insensitive, whole-word) is stored unchanged with `"suspected_misattachment": true`
 and counted in `edges_suspected_misattachment`. It is never dropped: the check is a text heuristic,
 so a fact that refers to an endpoint by a nickname is a false positive. Use the mark to find
-residual pins.
+residual pins. A literal-object self-loop is never checked, so the inverse error goes unmarked: a
+self-loop whose fact names a second entity that does take part ("Tomas Kowalski set Marlin Core's
+budget at $4,200" stored as `Marlin Core → Marlin Core`) loses the link to Tomas silently. See
+[ADR-0823](adr/0823-literal-object-edges-as-self-loops.md) for why this is not marked.
 
 **Graphs extracted before this change are not repaired.** Re-process a group to get the new
 representation.
