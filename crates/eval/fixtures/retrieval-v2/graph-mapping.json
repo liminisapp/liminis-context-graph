@@ -1,0 +1,46 @@
+{
+  "mapping_version": 1,
+  "kinds": {
+    "project": { "node_types": ["Project"] },
+    "vendor": { "node_types": ["Vendor", "Organization", "Company"] },
+    "person": { "node_types": ["Person"] },
+    "policy": { "node_types": ["Policy"] }
+  },
+  "links": {
+    "Owner": {
+      "relation_types": [
+        { "name": "OWNED_BY", "direction": "subject_to_object" },
+        { "name": "OWNS", "direction": "object_to_subject" }
+      ]
+    },
+    "Supplier": {
+      "relation_types": [
+        { "name": "SUPPLIED_BY", "direction": "subject_to_object" },
+        { "name": "HAS_SUPPLIER", "direction": "subject_to_object" },
+        { "name": "USES_SUPPLIER", "direction": "subject_to_object" },
+        { "name": "SUPPLIES", "direction": "object_to_subject" }
+      ]
+    },
+    "Account manager": {
+      "relation_types": [
+        { "name": "HAS_ACCOUNT_MANAGER", "direction": "subject_to_object" },
+        { "name": "MANAGES", "direction": "object_to_subject" },
+        { "name": "MANAGER_OF", "direction": "object_to_subject" }
+      ]
+    },
+    "Reports to": {
+      "relation_types": [
+        { "name": "REPORTS_TO", "direction": "subject_to_object" }
+      ]
+    },
+    "Exception approver": {
+      "relation_types": [
+        { "name": "HAS_EXCEPTION_APPROVER", "direction": "subject_to_object" },
+        { "name": "APPROVES_EXCEPTIONS_FOR", "direction": "object_to_subject" }
+      ]
+    }
+  },
+  "junk": {
+    "prefixes": ["project-", "vendor-", "person-", "policy-", "decision-", "recap-", "digest-", "clip-", "answer-", "wiki-", "journal-"]
+  }
+}
