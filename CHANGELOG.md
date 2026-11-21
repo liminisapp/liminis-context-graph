@@ -102,6 +102,12 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Upgrading
 
+- **Source identity columns (#853), no storage-version change.** `Episodic` gains two nullable
+  columns, `source_file` and `chunk_id`. Existing rows read them as NULL and are matched by the
+  legacy rule; nothing is backfilled, so legacy episodes report neither field. A 0.19.1 binary
+  still opens and operates on an upgraded database, but it cannot *rebuild* from a WAL this release
+  wrote: the new `CREATE (:Episodic …)` statements fail to prepare on its schema and those episodes
+  are dropped. The #752, #292 and #785 columns already carry the same limitation.
 - **`knowledge_search_passages` result order changes by default** (#806): see *Changed*. Callers that
   rely on cosine `score` thresholds or on the old order should send `belief_aware: false` or set
   `LCG_PASSAGE_BELIEF_AWARE=off`.
@@ -195,6 +201,26 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Fixed
 
+- **`knowledge_delete_by_source` no longer deletes other sources' episodes, and
+  `knowledge_get_entities_by_source` returns only the requested source's live entities** (#829,
+  #830, #853). Both matched the composed `source_description = "<source_file>:<chunk_id>"`
+  loosely: delete-by-source prefix-matched, so deleting `https://a.com` also **permanently
+  deleted** every episode of `https://a.com:8443/...`; entities-by-source substring-matched, so
+  `https://a.com/p` also returned `/page`, `?x=1` and `/sub` entities, superseded episodes
+  included. Episodes now store `source_file` and `chunk_id` separately, and both operations match
+  the stored `source_file` exactly, byte for byte. Episodes written before this change fall back
+  to a safe legacy rule that derives the source from the episode's own name and never matches a
+  different source. Entities-by-source now counts live (not superseded, committed) episodes only.
+  `knowledge_mark_chunk_removed` and `knowledge_delete_chunk_episode` were checked: they match the
+  chunk ID exactly and are unchanged. See [ADR-0853](docs/adr/0853-episode-source-identity-and-exact-source-matching.md).
+  - **Behaviour change** for clients that relied on substring or prefix matching. In particular, a
+    `knowledge_add_episode` row with `source_description = "file:section"` is no longer deleted or
+    returned for source `"file"`; a raw episode matches only its exact `source_description`. Use
+    `knowledge_delete_chunk_episode` for a legacy row the rule cannot attribute.
+  - **Additive response fields:** `source_file` and `chunk_id` on `knowledge_get_episodes` items
+    (projectable with `fields`), `knowledge_search_passages` passages and
+    `knowledge_get_affected_work` candidates. They are omitted for legacy episodes. Request shapes
+    are unchanged.
 - The D1 identity-set guard now detects an identity removal when the group's stamp
   (`.lcg/identity-set/<group>.json`) is missing (#778). Previously a missing stamp read as the empty
   set, so removing `identity: true` from a group's only identity type compared equal and

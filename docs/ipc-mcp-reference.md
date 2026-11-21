@@ -1150,7 +1150,7 @@ additive parameters; with none of them the response is exactly `{<collection>, c
 | `group_ids` (array) | both | Groups to read. `knowledge_get_episodes` also accepts the single-group alias `group_id`; both given ⇒ their deduplicated union. **Neither given ⇒ every group** (episodes used to default to `liminis`). An explicit `[]` also means all groups. |
 | `last_n` / `num_results` | episodes / entities | Page size (defaults 50 / 500, unchanged). |
 | `cursor` | both | Opaque keyset cursor. Send `""` for the first page, then send back each response's `next_cursor` until it is `null`. |
-| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
+| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, source_file, chunk_id`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
 | `name_prefix` | both | Names starting with this prefix, matched literally. Case-insensitive for entities (via Cypher `lower()`, so non-ASCII folds only as far as lbug does); case-sensitive for episodes. |
 
 `next_cursor` appears only when the request contained `cursor`, `fields` or `name_prefix`; it is
@@ -1199,6 +1199,59 @@ explicitly:
 This is a different contract from the read-tool one above — omitting `group_ids` here never means
 "all groups"; it means "reject the call." A `group_ids` naming a group with no matching rows still
 succeeds, returning `deleted_count: 0`.
+
+**`knowledge_delete_by_source` matches the source exactly (issue #853).** It deletes the episodes
+whose stored `source_file` equals the request byte for byte, superseded episodes included. It no
+longer prefix-matches the composed `source_description`, so deleting `https://a.com` leaves every
+episode of `https://a.com:8443/x` alone, and deleting `notes/a` leaves `notes/ab` alone. Episodes
+written before #853 are matched by the safe legacy rule described under
+[Source identity](#source-identity-source_file-and-chunk_id-issue-853). An episode that rule cannot
+attribute is never deleted by source; remove it with `knowledge_delete_chunk_episode` by its chunk
+ID.
+
+> **Behaviour change.** A client that wrote `source_description = "file:section"` through
+> `knowledge_add_episode` and relied on `delete_by_source("file")` prefix-matching it will now get
+> `deleted_count: 0` for those rows. A raw episode matches only its exact `source_description`.
+
+### Source identity: `source_file` and `chunk_id` (issue #853)
+
+Every episode written by `knowledge_process_chunk` or `knowledge_process_document` stores its
+source file and chunk ID as two separate values, alongside the unchanged display value
+`source_description = "<source_file>:<chunk_id>"`. A URL contains colons, so the display value
+cannot be split back reliably. Read the two fields instead of parsing it.
+
+- **Where they appear.** `source_file` and `chunk_id` are additive fields on
+  `knowledge_get_episodes` items (projectable with `fields`), `knowledge_search_passages` passages
+  and `knowledge_get_affected_work` candidates. For a chunk ingest they are the request's
+  `source_file` and `chunk_id`. For a document ingest they are the `source_path` (or the `doc_id`
+  when no path was given) and the minted chunk name (`{doc_id}::{hex}`).
+- **Legacy episodes** carry neither field, and the keys are omitted from the response. Those are
+  episodes written before #853, replayed from a pre-#853 WAL, or created by `knowledge_add_episode`
+  (which takes no structured source). There is no backfill.
+
+Two operations match a source on this identity, byte for byte, with no URL normalisation (case,
+trailing slash and default port all count):
+
+- **`knowledge_delete_by_source`**: see [Deletion](#deletion-delete_chunk_episode-delete_by_source).
+- **`knowledge_get_entities_by_source`** returns the entities mentioned by the **live** episodes
+  of the source. A live episode is one that is not superseded, or whose document supersession is
+  not yet effective, and that does not belong to an uncommitted document revision. An entity is
+  returned when at least one live episode of the source mentions it. `https://a.com/p` no longer
+  returns entities that only `https://a.com/page`, `https://a.com/p?x=1` or `https://a.com/p/sub`
+  support. The optional `group_ids` filter applies to the entity's group, as before.
+
+**The legacy rule.** For an episode without a stored `source_file`, the source is derived from its
+own `name`, never by splitting on a colon. Each episode maps to at most one source, so it can never
+match two different requests.
+
+| Episode | Source it belongs to |
+|---|---|
+| chunk- or document-path (`write_path` `chunk`/`document`) | `source_description` minus `":" + name`; none if it does not end that way |
+| written before 0.19.0 (no `write_path`) | `source_description` minus `":" + name` when it ends that way, otherwise the whole `source_description` |
+| raw `knowledge_add_episode` (`write_path` `episode`) | the whole `source_description` (exact equality only) |
+
+The rule may fail to attribute a legacy episode. It never attributes one to a different source.
+See [ADR-0853](adr/0853-episode-source-identity-and-exact-source-matching.md).
 
 ### Direct assertion (`assert_entity`, `assert_relationship`)
 
