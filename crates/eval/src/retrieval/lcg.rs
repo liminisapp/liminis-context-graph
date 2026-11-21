@@ -155,6 +155,14 @@ pub struct ServiceOpts {
     /// `LCG_EXPANSION_URL`, else the sidecar.
     pub expander_http: Option<String>,
     pub expander_uds: Option<String>,
+    /// `--ontology` (#821): staged into the workspace as `.lcg/ontology.yaml` in `ontology_mode`
+    /// before the service starts; `ontology_hash` is what the staged file must hash to.
+    pub ontology_file: Option<PathBuf>,
+    pub ontology_mode: Option<lcg_core::OntologyMode>,
+    pub ontology_hash: Option<String>,
+    /// An existing workspace to run on (`graph-qa`): it is **copied** into the temp workspace and
+    /// the service runs on the copy, so the original is never opened, migrated or checkpointed.
+    pub seed_workspace: Option<PathBuf>,
 }
 
 /// Mock and hash embedders produce meaningless vectors, so a real embedder must be named
@@ -200,6 +208,48 @@ pub struct ServiceGuard {
     _child: tokio::process::Child,
     _workspace: tempfile::TempDir,
     pub version: String,
+}
+
+/// How long a kept run waits for the service to exit after `knowledge_close`.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(60);
+
+impl ServiceGuard {
+    /// The (temporary) workspace the service runs in.
+    pub fn workspace_path(&self) -> &Path {
+        self._workspace.path()
+    }
+
+    /// Shuts the service down gracefully (`knowledge_close`, then waits for it to exit so lbug and
+    /// the WAL are flushed), then moves the workspace to `dest` (#821 FR-006). A service that does
+    /// not exit within [`SHUTDOWN_GRACE`] is killed with a warning; the workspace is kept anyway.
+    pub async fn shutdown_and_keep(self, dest: &Path) -> Result<(), String> {
+        let ServiceGuard {
+            client,
+            _child: mut child,
+            _workspace: ws,
+            ..
+        } = self;
+        // The service replies, then shuts down; a closed connection is also fine here.
+        let _ = tokio::time::timeout(
+            Duration::from_secs(30),
+            client.call("knowledge_close", json!({})),
+        )
+        .await;
+        drop(client);
+        match tokio::time::timeout(SHUTDOWN_GRACE, child.wait()).await {
+            Ok(Ok(_)) => {}
+            _ => {
+                eprintln!(
+                    "lcg-eval: WARNING: the service did not exit within {}s of knowledge_close; \
+                     killing it — the kept workspace may need WAL replay when reopened",
+                    SHUTDOWN_GRACE.as_secs()
+                );
+                let _ = child.kill().await;
+            }
+        }
+        let src = ws.keep();
+        super::workspace::persist_workspace(&src, dest)
+    }
 }
 
 /// Version string of the service binary (`--version`), for the reproduction block.
@@ -261,6 +311,17 @@ fn apply_embedding_profile_env(cmd: &mut tokio::process::Command, profile: Optio
 pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     validate_embedder(o, std::env::var("LCG_EMBEDDING_URL").ok().as_deref())?;
     let ws = tempfile::tempdir().map_err(|e| format!("cannot create workspace: {e}"))?;
+    if let Some(seed) = &o.seed_workspace {
+        super::workspace::copy_workspace(seed, ws.path()).map_err(|e| {
+            format!(
+                "cannot copy the workspace {} to run on: {e}",
+                seed.display()
+            )
+        })?;
+    }
+    if let (Some(f), Some(m), Some(h)) = (&o.ontology_file, &o.ontology_mode, &o.ontology_hash) {
+        super::workspace::stage_ontology(f, m, ws.path(), h)?;
+    }
     // Keep the service's stderr so a startup failure can be reported with its real cause.
     let stderr_path = ws.path().join("service.stderr.log");
     let stderr_file = std::fs::File::create(&stderr_path)
@@ -284,6 +345,15 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     cmd.env_remove("LCG_PASSAGE_SEARCH_MODE")
         .env_remove("LCG_PASSAGE_BELIEF_AWARE")
         .env_remove("LCG_SEARCH_MIN_SCORE");
+    // The DB, WAL and socket must live in this workspace (#821): an operator's overrides would put
+    // the DB outside a kept workspace, or point the eval at another service.
+    // The service also reads the legacy `GRAPHITI_*` names as fallbacks (`lcg_env_var`).
+    cmd.env_remove("LCG_DB_PATH")
+        .env_remove("LCG_WAL_DIR")
+        .env_remove("LCG_SOCKET_PATH")
+        .env_remove("GRAPHITI_DB_PATH")
+        .env_remove("GRAPHITI_WAL_DIR")
+        .env_remove("GRAPHITI_SOCKET_PATH");
     let mut child = cmd.spawn().map_err(|e| {
         format!(
             "cannot start service '{}': {e} (pass --service-bin, or build with `cargo build --release -p lcg-service`)",

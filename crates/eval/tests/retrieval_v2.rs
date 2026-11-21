@@ -2041,3 +2041,189 @@ fn a_full_render_clears_earlier_notes_and_questions_and_a_short_journal_only_war
         check::describe(&f)
     );
 }
+
+// ── graph question set (#821) ───────────────────────────────────────────────────
+
+use lcg_eval::retrieval::generator::graph_questions::{self, GraphQuestion};
+
+fn e13_ref_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/e13")
+}
+
+fn generated_graph_questions() -> Vec<GraphQuestion> {
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    graph_questions::generate(&sk).unwrap()
+}
+
+#[test]
+fn graph_questions_equal_the_generator_output_byte_for_byte() {
+    let on_disk = std::fs::read_to_string(v2_dir().join(graph_questions::FILE)).unwrap();
+    let fresh = graph_questions::to_jsonl(&generated_graph_questions());
+    assert!(
+        on_disk == fresh,
+        "graph-questions.jsonl drifted from the skeleton; run `lcg-eval retrieval-gen --spec crates/eval/fixtures/retrieval-v2/scenario.json --out crates/eval/fixtures/retrieval-v2`"
+    );
+    // Deterministic: a second generation is identical.
+    assert_eq!(
+        fresh,
+        graph_questions::to_jsonl(&generated_graph_questions())
+    );
+    assert_eq!(graph_questions::parse_jsonl(&on_disk).unwrap().len(), 144);
+}
+
+#[test]
+fn e13_questions_match_the_reference_set_field_for_field() {
+    let reference: Vec<Value> =
+        std::fs::read_to_string(e13_ref_dir().join("graph-questions-v2.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+    let gen = generated_graph_questions();
+    let e13: Vec<&GraphQuestion> = gen.iter().filter(|q| q.set == "e13").collect();
+    assert_eq!((reference.len(), e13.len()), (129, 129));
+    for (r, g) in reference.iter().zip(&e13) {
+        let g = serde_json::to_value(g).unwrap();
+        for k in ["id", "family", "cq", "shape", "text", "answers", "hops"] {
+            assert_eq!(r[k], g[k], "question {} field {k}", r["id"]);
+        }
+    }
+    let mut shapes: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut families = BTreeSet::new();
+    for q in &e13 {
+        *shapes.entry(q.shape.as_str()).or_default() += 1;
+        families.insert(q.family.as_str());
+        let want = graph_questions::scoring_for_shape(&q.shape);
+        assert_eq!(q.scoring, want, "{}", q.id);
+    }
+    assert_eq!(
+        shapes,
+        BTreeMap::from([
+            ("chain-2", 48),
+            ("chain-3", 24),
+            ("history", 12),
+            ("join", 14),
+            ("list", 31)
+        ])
+    );
+    // 13 families; shared-supplier yields nothing on this skeleton (every supplier is unique).
+    assert_eq!(families.len(), 13);
+    assert!(!families.contains("shared-supplier"));
+}
+
+#[test]
+fn e13_split_reproduces_the_reference_dev_half() {
+    let dev: BTreeSet<String> = serde_json::from_str(
+        &std::fs::read_to_string(e13_ref_dir().join("split-dev.json")).unwrap(),
+    )
+    .unwrap();
+    let gen = generated_graph_questions();
+    let e13: Vec<&GraphQuestion> = gen.iter().filter(|q| q.set == "e13").collect();
+    let got: BTreeSet<String> = e13
+        .iter()
+        .filter(|q| q.split == "dev")
+        .map(|q| q.id.clone())
+        .collect();
+    assert_eq!(got.len(), 67);
+    assert_eq!(got, dev);
+    assert_eq!(e13.iter().filter(|q| q.split == "test").count(), 62);
+}
+
+#[test]
+fn inverse_questions_ask_the_source_side_with_gold_from_the_skeleton() {
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    // Current value of (entity, attribute) from primary notes, as the generator reads it.
+    let cur = |e: &str, a: &str| -> Option<String> {
+        let mut xs: Vec<(String, String)> = sk
+            .notes
+            .iter()
+            .filter(|n| n.origin == "primary")
+            .flat_map(|n| {
+                n.facts
+                    .iter()
+                    .filter(|f| f.entity == e && f.attribute == a)
+                    .map(|f| (n.reference_time.clone(), f.value.clone()))
+            })
+            .collect();
+        xs.sort();
+        xs.last().map(|x| x.1.clone())
+    };
+    let gen = generated_graph_questions();
+    let inv: Vec<&GraphQuestion> = gen.iter().filter(|q| q.set == "inverse").collect();
+    assert!(inv.len() >= 10, "{}", inv.len());
+    let e13_texts: BTreeSet<&str> = gen
+        .iter()
+        .filter(|q| q.set == "e13")
+        .map(|q| q.text.as_str())
+        .collect();
+    let mut relations = BTreeSet::new();
+    for q in &inv {
+        assert_eq!(q.shape, "inverse");
+        assert!(q.id.starts_with('i'));
+        assert!(!q.answers.is_empty());
+        assert!(
+            !e13_texts.contains(q.text.as_str()),
+            "duplicates E13: {}",
+            q.text
+        );
+        assert!(matches!(q.split.as_str(), "dev" | "test"));
+        for s in &q.path {
+            relations.insert(s.relation.clone().unwrap());
+        }
+        // Each answer's own fact (its hop) leads to the question's target.
+        for a in &q.answers {
+            let target = q.text.trim_end_matches('?').rsplit(" to ").next().unwrap();
+            match q.family.as_str() {
+                "reports-to-single" => {
+                    assert_eq!(cur(a, "Reports to").as_deref(), Some(target))
+                }
+                "account-manager-of" => {
+                    let who = q.text.strip_prefix("Which suppliers is ").unwrap();
+                    let who = who.strip_suffix(" the account manager for?").unwrap();
+                    assert_eq!(cur(a, "Account manager").as_deref(), Some(who));
+                }
+                "projects-of-reports" => {
+                    let owner = cur(a, "Owner").unwrap();
+                    assert_eq!(cur(&owner, "Reports to").as_deref(), Some(target));
+                }
+                f => panic!("unexpected inverse family {f}"),
+            }
+        }
+    }
+    assert!(relations.contains("REPORTS_TO") && relations.contains("OWNS"));
+    assert!(inv.iter().any(|q| q.scoring == "single") && inv.iter().any(|q| q.scoring == "set"));
+}
+
+#[test]
+fn retrieval_gen_check_reports_a_hand_edit_of_the_graph_questions() {
+    let tmp = tempfile::tempdir().unwrap();
+    for f in ["skeleton.json", graph_questions::FILE] {
+        std::fs::copy(v2_dir().join(f), tmp.path().join(f)).unwrap();
+    }
+    let run = |dir: &Path| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_lcg-eval"))
+            .args([
+                "retrieval-gen",
+                "--spec",
+                v2_dir().join("scenario.json").to_str().unwrap(),
+                "--out",
+                dir.to_str().unwrap(),
+                "--check",
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(run(tmp.path()).status.success());
+    let p = tmp.path().join(graph_questions::FILE);
+    let edited = std::fs::read_to_string(&p)
+        .unwrap()
+        .replacen("Noor Okafor", "Noor O.", 1);
+    std::fs::write(&p, edited).unwrap();
+    let out = run(tmp.path());
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("graph-questions.jsonl differs") && err.contains("line 1"),
+        "{err}"
+    );
+}

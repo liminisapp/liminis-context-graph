@@ -1,0 +1,2920 @@
+{
+ "model": "claude-haiku-4-5-20251001",
+ "ontology": "ontology-v3.1.yaml",
+ "planner_prompt": "PLAN3_SYS / PLAN3_SCHEMA in answer-eval.py",
+ "plans": {
+  "g000": {
+   "route": "graph",
+   "start": "Tern Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier that provides to Tern Core",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager or contact person",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g001": {
+   "route": "graph",
+   "start": "Nimbus Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager contact",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g002": {
+   "route": "graph",
+   "start": "Sable Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier organization",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR",
+      "WORKS_WITH"
+     ],
+     "phrase": "account manager",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g003": {
+   "route": "graph",
+   "start": "Fable Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier that provides to Fable Core",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager contact for the supplier",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g004": {
+   "route": "graph",
+   "start": "Marlin Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier that supplies Marlin Core",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager contact for the supplier",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g005": {
+   "route": "graph",
+   "start": "Juniper Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier that provides to this project",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager contact at the supplier",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g006": {
+   "route": "graph",
+   "start": "Lumen Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager or contact person",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g007": {
+   "route": "graph",
+   "start": "Quill Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier that supplies Quill Core",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager contact for the supplier",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g008": {
+   "route": "graph",
+   "start": "Orbit Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "suppliers of Orbit Core",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager contact",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g009": {
+   "route": "graph",
+   "start": "Cedar Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier organization",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager contact",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g010": {
+   "route": "graph",
+   "start": "Helix Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier organization",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager or contact person",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g011": {
+   "route": "graph",
+   "start": "Basalt Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplied by",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager contact for supplier",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g012": {
+   "route": "graph",
+   "start": "Sable Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "PARTY_TO"
+     ],
+     "phrase": "agreement or contract",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "renewal date or contract terms",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g013": {
+   "route": "graph",
+   "start": "Sable Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "contract price",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g014": {
+   "route": "graph",
+   "start": "Nimbus Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "contract price",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g015": {
+   "route": "graph",
+   "start": "Fable Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "uptime commitment",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g016": {
+   "route": "graph",
+   "start": "Nimbus Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "renewal date or contract terms",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g017": {
+   "route": "graph",
+   "start": "Marlin Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "uptime commitment",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g018": {
+   "route": "graph",
+   "start": "Lumen Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "who supplies Lumen Core",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "renewal date or contract terms",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g019": {
+   "route": "graph",
+   "start": "Quill Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "renewal date",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g020": {
+   "route": "graph",
+   "start": "Juniper Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "contract price",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g021": {
+   "route": "graph",
+   "start": "Tern Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "contract price",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g022": {
+   "route": "graph",
+   "start": "Nimbus Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "uptime commitment",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g023": {
+   "route": "graph",
+   "start": "Marlin Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "HAS_TERM"
+     ],
+     "phrase": "contract price or terms",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "g024": {
+   "route": "graph",
+   "start": "Quill Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Quill Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "reports to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g025": {
+   "route": "graph",
+   "start": "Sable Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Sable Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who the owner reports to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g026": {
+   "route": "graph",
+   "start": "Helix Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "find the owner of Helix Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "find who the owner reports to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g027": {
+   "route": "graph",
+   "start": "Orbit Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns this project/system",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who does the owner report to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g028": {
+   "route": "graph",
+   "start": "Cedar Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Cedar Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "reports to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g029": {
+   "route": "graph",
+   "start": "Basalt Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of this project",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "reports to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g030": {
+   "route": "graph",
+   "start": "Fable Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "find the owner of Fable Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "find who the owner reports to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g031": {
+   "route": "graph",
+   "start": "Tern Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Tern Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who does the owner report to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g032": {
+   "route": "graph",
+   "start": "Juniper Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns this project",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who this person reports to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g033": {
+   "route": "graph",
+   "start": "Marlin Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Marlin Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who the owner reports to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g034": {
+   "route": "graph",
+   "start": "Lumen Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Lumen Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "reports to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g035": {
+   "route": "graph",
+   "start": "Nimbus Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Nimbus Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who does this person report to",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g036": {
+   "route": "graph",
+   "start": "Nimbus Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Nimbus Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the owner is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g037": {
+   "route": "graph",
+   "start": "Quill Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Quill Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the owner is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g038": {
+   "route": "graph",
+   "start": "Orbit Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Orbit Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the owner is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g039": {
+   "route": "graph",
+   "start": "Helix Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of this system",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the owner is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g040": {
+   "route": "graph",
+   "start": "Fable Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Fable Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the owner is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g041": {
+   "route": "graph",
+   "start": "Tern Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Tern Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the owner is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g042": {
+   "route": "graph",
+   "start": "Juniper Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns this project",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where is the owner based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g043": {
+   "route": "graph",
+   "start": "Sable Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Sable Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the owner is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g044": {
+   "route": "graph",
+   "start": "Basalt Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Basalt Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the owner is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g045": {
+   "route": "graph",
+   "start": "Marlin Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Marlin Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where is the owner based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g046": {
+   "route": "graph",
+   "start": "Lumen Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Lumen Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the owner is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g047": {
+   "route": "graph",
+   "start": "Cedar Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Cedar Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the owner is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g048": {
+   "route": "graph",
+   "start": "Lumen Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager contact",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g049": {
+   "route": "graph",
+   "start": "Orbit Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager or contact",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location where based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g050": {
+   "route": "graph",
+   "start": "Cedar Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g051": {
+   "route": "graph",
+   "start": "Sable Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g052": {
+   "route": "graph",
+   "start": "Juniper Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager or contact",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g053": {
+   "route": "graph",
+   "start": "Nimbus Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g054": {
+   "route": "graph",
+   "start": "Basalt Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager contact",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g055": {
+   "route": "graph",
+   "start": "Marlin Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager or contact person",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location where based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g056": {
+   "route": "graph",
+   "start": "Tern Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager or contact person",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location where based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g057": {
+   "route": "graph",
+   "start": "Quill Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager or contact person",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location where based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g058": {
+   "route": "graph",
+   "start": "Helix Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g059": {
+   "route": "graph",
+   "start": "Fable Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g060": {
+   "route": "graph",
+   "start": "Tern Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Tern Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "manager of the owner",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the manager is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g061": {
+   "route": "graph",
+   "start": "Helix Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Helix Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "manager of the owner",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the manager is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g062": {
+   "route": "graph",
+   "start": "Sable Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Sable Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who is the owner's manager",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where is the manager located",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g063": {
+   "route": "graph",
+   "start": "Nimbus Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Nimbus Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who does the owner report to",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where is the manager located",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g064": {
+   "route": "graph",
+   "start": "Cedar Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Cedar Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who manages this person",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where is the manager based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g065": {
+   "route": "graph",
+   "start": "Marlin Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Marlin Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who is the manager of the owner",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where is the manager based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g066": {
+   "route": "graph",
+   "start": "Basalt Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Basalt Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "manager of the owner",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the manager is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g067": {
+   "route": "graph",
+   "start": "Quill Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Quill Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who does the owner report to",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where is that manager based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g068": {
+   "route": "graph",
+   "start": "Juniper Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns this project",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "who manages this person",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where is this person based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g069": {
+   "route": "graph",
+   "start": "Fable Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns Fable Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "manager of the owner",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the manager is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g070": {
+   "route": "graph",
+   "start": "Lumen Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner of Lumen Core",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "manager of the owner",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "location of the manager",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g071": {
+   "route": "graph",
+   "start": "Orbit Core",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "who owns this project",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "manager of the owner",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "where the manager is based",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Location"
+  },
+  "g072": {
+   "route": "graph",
+   "start": "Marcus Haddad",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "projects owned by",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g073": {
+   "route": "graph",
+   "start": "Bram Tanaka",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owns projects",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g074": {
+   "route": "graph",
+   "start": "Callum Brennan",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owns projects",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g075": {
+   "route": "graph",
+   "start": "Ines Lindqvist",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owns a project",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g076": {
+   "route": "graph",
+   "start": "Lena Moreau",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "projects owned",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g077": {
+   "route": "graph",
+   "start": "Tomas Kowalski",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owns projects",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g078": {
+   "route": "graph",
+   "start": "Diego Ferreira",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owns projects",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g079": {
+   "route": "graph",
+   "start": "Fable Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects supplied by",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g080": {
+   "route": "graph",
+   "start": "Juniper Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects that Juniper Supply supplies",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g081": {
+   "route": "graph",
+   "start": "Orbit Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects supplied by Orbit Supply",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g082": {
+   "route": "graph",
+   "start": "Quill Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects that Quill Supply supplies to",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g083": {
+   "route": "graph",
+   "start": "Marlin Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects supplied by this organization",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g084": {
+   "route": "graph",
+   "start": "Tern Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects that Tern Supply supplies",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g085": {
+   "route": "graph",
+   "start": "Cedar Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects that Cedar Supply supplies",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g086": {
+   "route": "graph",
+   "start": "Sable Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects that Sable Supply supplies",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g087": {
+   "route": "graph",
+   "start": "Lumen Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects that are supplied by",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g088": {
+   "route": "graph",
+   "start": "Basalt Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects that are supplied by Basalt Supply",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g089": {
+   "route": "graph",
+   "start": "Helix Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects supplied by Helix Supply",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g090": {
+   "route": "graph",
+   "start": "Nimbus Supply",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects supplied by Nimbus Supply",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g091": {
+   "route": "graph",
+   "start": "Marcus Haddad",
+   "hops": [
+    {
+     "types": [
+      "APPROVES"
+     ],
+     "phrase": "can approve exceptions to",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Policy"
+  },
+  "g092": {
+   "route": "graph",
+   "start": "Yara Nakamura",
+   "hops": [
+    {
+     "types": [
+      "APPROVES"
+     ],
+     "phrase": "can approve exceptions to",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "APPLIES_TO"
+     ],
+     "phrase": "which policies",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Policy"
+  },
+  "g093": {
+   "route": "graph",
+   "start": "Sofia Petrov",
+   "hops": [
+    {
+     "types": [
+      "APPROVES"
+     ],
+     "phrase": "can approve exceptions to",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "APPLIES_TO"
+     ],
+     "phrase": "policies that apply",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Policy"
+  },
+  "g094": {
+   "route": "graph",
+   "start": "Aiko Osei",
+   "hops": [
+    {
+     "types": [
+      "APPROVES"
+     ],
+     "phrase": "can approve exceptions to",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Policy"
+  },
+  "g095": {
+   "route": "graph",
+   "start": "Priya Varga",
+   "hops": [
+    {
+     "types": [
+      "APPROVES"
+     ],
+     "phrase": "can approve exceptions to",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Policy"
+  },
+  "g096": {
+   "route": "graph",
+   "start": "Tomas Kowalski",
+   "hops": [
+    {
+     "types": [
+      "APPROVES"
+     ],
+     "phrase": "can approve exceptions to",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "APPLIES_TO"
+     ],
+     "phrase": "policy that applies to",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Policy"
+  },
+  "g097": {
+   "route": "graph",
+   "start": "Callum Brennan",
+   "hops": [
+    {
+     "types": [
+      "APPROVES"
+     ],
+     "phrase": "can approve exceptions to",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Policy"
+  },
+  "g098": {
+   "route": "graph",
+   "start": "Diego Ferreira",
+   "hops": [
+    {
+     "types": [
+      "APPROVES"
+     ],
+     "phrase": "can approve exceptions to",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "APPLIES_TO"
+     ],
+     "phrase": "policies that apply",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Policy"
+  },
+  "g099": {
+   "route": "graph",
+   "start": "Bram Tanaka",
+   "hops": [
+    {
+     "types": [
+      "APPROVES"
+     ],
+     "phrase": "can approve exceptions to",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Policy"
+  },
+  "g100": {
+   "route": "graph",
+   "start": "Marcus Haddad",
+   "hops": [
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "people who report to",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g101": {
+   "route": "graph",
+   "start": "Aiko Osei",
+   "hops": [
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "people who report to",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g102": {
+   "route": "graph",
+   "start": "Noor Okafor",
+   "hops": [
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "people who report to this person",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "g103": {
+   "route": "graph",
+   "start": "Cork",
+   "hops": [
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "people based in Cork",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "projects owned by this person",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g104": {
+   "route": "graph",
+   "start": "Gdansk",
+   "hops": [
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "people based in this location",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "projects owned by this person",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g105": {
+   "route": "graph",
+   "start": "Bergen",
+   "hops": [
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "people based in this location",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "projects owned by this person",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g106": {
+   "route": "graph",
+   "start": "Lisbon",
+   "hops": [
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "people based in this location",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "projects owned by this person",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g107": {
+   "route": "graph",
+   "start": "Valencia",
+   "hops": [
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "people based in this location",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "projects owned by this person",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g108": {
+   "route": "graph",
+   "start": "Ghent",
+   "hops": [
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "people based in this location",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "projects owned by this person",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g109": {
+   "route": "graph",
+   "start": "Tampere",
+   "hops": [
+    {
+     "types": [
+      "LOCATED_IN"
+     ],
+     "phrase": "people based in Tampere",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "projects owned by those people",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g110": {
+   "route": "graph",
+   "start": "Ines Lindqvist",
+   "hops": [
+    {
+     "types": [
+      "HAS_ROLE"
+     ],
+     "phrase": "is an account manager",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "at the supplier",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g111": {
+   "route": "graph",
+   "start": "Tomas Kowalski",
+   "hops": [
+    {
+     "types": [
+      "HAS_ROLE"
+     ],
+     "phrase": "is an account manager",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects supplied by this organization",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g112": {
+   "route": "graph",
+   "start": "Noor Okafor",
+   "hops": [
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "is account manager or contact for",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "supplied by this supplier",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g113": {
+   "route": "graph",
+   "start": "Bram Tanaka",
+   "hops": [
+    {
+     "types": [
+      "HAS_ROLE"
+     ],
+     "phrase": "is an account manager",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects supplied by the organization",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g114": {
+   "route": "graph",
+   "start": "Priya Varga",
+   "hops": [
+    {
+     "types": [
+      "HAS_ROLE"
+     ],
+     "phrase": "is an account manager at a supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects supplied by that organization",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g115": {
+   "route": "graph",
+   "start": "Aiko Osei",
+   "hops": [
+    {
+     "types": [
+      "HAS_ROLE"
+     ],
+     "phrase": "is an account manager",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "suppliers to projects",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g116": {
+   "route": "graph",
+   "start": "Yara Nakamura",
+   "hops": [
+    {
+     "types": [
+      "CONTACT_FOR"
+     ],
+     "phrase": "account manager contact for supplier",
+     "direction": "out"
+    },
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "projects supplied by this organization",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "g117": {
+   "route": "passages",
+   "start": "Juniper Core",
+   "hops": [],
+   "list": true,
+   "history": true,
+   "answer_type": "Organization"
+  },
+  "g118": {
+   "route": "passages",
+   "start": "Sable Core",
+   "hops": [],
+   "list": true,
+   "history": true,
+   "answer_type": "System"
+  },
+  "g119": {
+   "route": "passages",
+   "start": "Orbit Core",
+   "hops": [],
+   "list": true,
+   "history": true,
+   "answer_type": "value"
+  },
+  "g120": {
+   "route": "graph",
+   "start": "Orbit Core",
+   "hops": [
+    {
+     "types": [
+      "SUPPLIED_BY"
+     ],
+     "phrase": "hosting provider",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": true,
+   "answer_type": "Organization"
+  },
+  "g121": {
+   "route": "passages",
+   "start": "Sable Core",
+   "hops": [],
+   "list": false,
+   "history": true,
+   "answer_type": "value"
+  },
+  "g122": {
+   "route": "passages",
+   "start": "Basalt Core",
+   "hops": [],
+   "list": true,
+   "history": true,
+   "answer_type": "System"
+  },
+  "g123": {
+   "route": "passages",
+   "start": "Juniper Core",
+   "hops": [],
+   "list": true,
+   "history": true,
+   "answer_type": "System"
+  },
+  "g124": {
+   "route": "passages",
+   "start": "Marlin Core",
+   "hops": [],
+   "list": true,
+   "history": true,
+   "answer_type": "value"
+  },
+  "g125": {
+   "route": "passages",
+   "start": "Orbit Core",
+   "hops": [],
+   "list": true,
+   "history": true,
+   "answer_type": "System"
+  },
+  "g126": {
+   "route": "passages",
+   "start": "Juniper Core",
+   "hops": [],
+   "list": true,
+   "history": true,
+   "answer_type": "value"
+  },
+  "g127": {
+   "route": "passages",
+   "start": "Quill Core",
+   "hops": [],
+   "list": true,
+   "history": true,
+   "answer_type": "System"
+  },
+  "g128": {
+   "route": "passages",
+   "start": "Cedar Core",
+   "hops": [],
+   "list": true,
+   "history": true,
+   "answer_type": "value"
+  }
+ },
+ "route_planned5_scores": {
+  "g000": 1.0,
+  "g001": 1.0,
+  "g002": 1.0,
+  "g003": 1.0,
+  "g004": 1.0,
+  "g005": 1.0,
+  "g006": 1.0,
+  "g007": 1.0,
+  "g008": 0.0,
+  "g009": 1.0,
+  "g010": 1.0,
+  "g011": 1.0,
+  "g012": 0.0,
+  "g013": 1.0,
+  "g014": 1.0,
+  "g015": 1.0,
+  "g016": 1.0,
+  "g017": 1.0,
+  "g018": 1.0,
+  "g019": 0.0,
+  "g020": 0.0,
+  "g021": 1.0,
+  "g022": 1.0,
+  "g023": 0.0,
+  "g024": 1.0,
+  "g025": 1.0,
+  "g026": 1.0,
+  "g027": 0.0,
+  "g028": 1.0,
+  "g029": 1.0,
+  "g030": 1.0,
+  "g031": 1.0,
+  "g032": 1.0,
+  "g033": 1.0,
+  "g034": 1.0,
+  "g035": 1.0,
+  "g036": 1.0,
+  "g037": 1.0,
+  "g038": 1.0,
+  "g039": 1.0,
+  "g040": 1.0,
+  "g041": 1.0,
+  "g042": 1.0,
+  "g043": 1.0,
+  "g044": 1.0,
+  "g045": 1.0,
+  "g046": 1.0,
+  "g047": 1.0,
+  "g048": 1.0,
+  "g049": 0.0,
+  "g050": 1.0,
+  "g051": 1.0,
+  "g052": 1.0,
+  "g053": 1.0,
+  "g054": 1.0,
+  "g055": 1.0,
+  "g056": 1.0,
+  "g057": 1.0,
+  "g058": 1.0,
+  "g059": 1.0,
+  "g060": 1.0,
+  "g061": 1.0,
+  "g062": 1.0,
+  "g063": 1.0,
+  "g064": 1.0,
+  "g065": 1.0,
+  "g066": 1.0,
+  "g067": 1.0,
+  "g068": 1.0,
+  "g069": 1.0,
+  "g070": 1.0,
+  "g071": 1.0,
+  "g072": 0.6666666666666666,
+  "g073": 1.0,
+  "g074": 1.0,
+  "g075": 0.8,
+  "g076": 0.8571428571428571,
+  "g077": 0.6666666666666666,
+  "g078": 1.0,
+  "g079": 1.0,
+  "g080": 1.0,
+  "g081": 0.0,
+  "g082": 1.0,
+  "g083": 1.0,
+  "g084": 1.0,
+  "g085": 1.0,
+  "g086": 1.0,
+  "g087": 1.0,
+  "g088": 1.0,
+  "g089": 1.0,
+  "g090": 1.0,
+  "g091": 1.0,
+  "g092": 1.0,
+  "g093": 1.0,
+  "g094": 1.0,
+  "g095": 1.0,
+  "g096": 1.0,
+  "g097": 1.0,
+  "g098": 1.0,
+  "g099": 1.0,
+  "g100": 1.0,
+  "g101": 1.0,
+  "g102": 1.0,
+  "g103": 0.6666666666666666,
+  "g104": 1.0,
+  "g105": 1.0,
+  "g106": 0.8,
+  "g107": 1.0,
+  "g108": 0.8571428571428571,
+  "g109": 0.6666666666666666,
+  "g110": 0.0,
+  "g111": 1.0,
+  "g112": 1.0,
+  "g113": 1.0,
+  "g114": 1.0,
+  "g115": 1.0,
+  "g116": 1.0,
+  "g117": 1.0,
+  "g118": 1.0,
+  "g119": 1.0,
+  "g120": 1.0,
+  "g121": 1.0,
+  "g122": 1.0,
+  "g123": 1.0,
+  "g124": 1.0,
+  "g125": 1.0,
+  "g126": 1.0,
+  "g127": 1.0,
+  "g128": 1.0
+ }
+}
