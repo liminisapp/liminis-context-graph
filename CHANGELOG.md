@@ -51,6 +51,23 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- **Replay embedding recompute retries transient embedder failures and records the rows it could
+  not embed (#808, ADR-0808).** During WAL replay, a timeout, connection reset, HTTP 5xx/503 or 429
+  from the embedder is now retried with exponential backoff and jitter instead of zero-filling a
+  whole 64-row window; when retries are exhausted the window is split and the halves retried down
+  to a single row, so one text the embedder cannot process fails only its own row. Non-transient
+  errors (other 4xx, wrong dimension, non-finite values) are never retried. Bounded by
+  `LCG_REPLAY_EMBED_RETRIES` (default 4; 0 disables retry and splitting),
+  `LCG_REPLAY_EMBED_BACKOFF_MS` (500) and `LCG_REPLAY_EMBED_BACKOFF_MAX_MS` (10000), validated at
+  startup (an invalid value is fatal and names itself), plus a per-window budget and a
+  cross-window breaker so a dead embedder costs about one timeout per window after the first
+  window (the first window of an outage can spend its whole budget, about 23 minutes at the defaults). Rows that still end
+  up with a fallback zero vector are recorded durably per group, in the same transaction as the
+  row, and `knowledge_status` reports `wal_groups.<gid>.zero_vector_rows`
+  (`{"total", "by_kind": {name, fact, summary, content}}`, always present, exact, survives a
+  restart). A full rebuild resets the record to its own failures. Additive; replay only — live
+  ingest is unchanged. This reverses ADR-0510/0541's no-retry-on-timeout for the replay path only.
+  See [operations](docs/operations.md#embedding-failures-during-replay-retry-and-the-zero-vector-record).
 - **Hybrid passage search: `knowledge_search_passages` `mode` and `belief_aware` (#789,
   ADR-0789).** `mode: "hybrid"` fuses BM25 over episode text (the existing `episode_content`
   full-text index) with the vector ranking by *weighted* Reciprocal Rank Fusion (lexical weight 0.4,

@@ -112,7 +112,10 @@ runtime history.
   path has the same class of hazard but uses a hand-rolled hyper connection pool, not reqwest, so
   `Client::builder()` cannot reach it. Out of scope for this issue; may be filed separately.
 - **Retry-on-timeout behavior.** This ADR bounds how long a hang can hold the write lock: it does
-  not add retries for a timed-out request.
+  not add retries for a timed-out request. *(Superseded in part by
+  [ADR-0808](0808-replay-embed-retry-and-zero-vector-record.md): WAL replay's embedding recompute
+  now retries a timed-out request with bounded backoff. The transport itself, and live ingest,
+  still do not retry a timeout.)*
 
 ## Consequences
 

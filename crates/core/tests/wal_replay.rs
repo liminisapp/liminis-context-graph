@@ -3371,6 +3371,8 @@ fn throughput_half2_vs_half1_flat() {
                 progress_log_fn: None,
                 recompute_embed_fn: lcg_core::zero_vector_embed_fn(4),
                 recompute_embed_dim: 4,
+                group_id: None,
+                embed_retry: None,
             },
         )
         .expect("replay must succeed");

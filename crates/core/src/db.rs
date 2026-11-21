@@ -344,7 +344,11 @@ impl Db {
             let recompute_embed_fn = build_sync_recompute_fn(&embedder)?;
             let stats = crate::replay::WalReplayer::new(wal_dir).replay_opts(
                 &conn,
-                crate::replay::ReplayOptions::new(recompute_embed_fn, embedding_dim),
+                crate::replay::ReplayOptions {
+                    // #808: fresh DB, so the record holds only this rebuild's own failures.
+                    group_id: Some(crate::wal_group::DEFAULT_GROUP_ID.to_string()),
+                    ..crate::replay::ReplayOptions::new(recompute_embed_fn, embedding_dim)
+                },
             )?;
             if let Some(ref warning) = stats.fidelity_warning {
                 eprintln!("[WAL REBUILD WARNING] {warning}");

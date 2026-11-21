@@ -45,6 +45,7 @@ pub mod read_page;
 pub mod rebuild_job;
 pub mod recovery;
 pub mod replay;
+pub mod replay_embed_retry;
 pub mod reprocess_relations;
 pub mod rerank;
 pub mod schema;
@@ -64,6 +65,7 @@ pub mod wal_generation;
 pub mod wal_group;
 pub mod wal_strip;
 pub mod write_policy;
+pub mod zero_vector_record;
 
 pub use app_state::AppState;
 pub use cassette::{CassetteRecord, CassetteWriter, RecordingExtractor, ReplayingExtractor};

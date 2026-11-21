@@ -59,6 +59,10 @@ the existing single-retry-on-broken-connection path. This is a spec requirement 
 "Adding retry-on-timeout behavior"), not an oversight — a hang and a definite dead-connection
 signal are different failure shapes and stay on different paths.
 
+*Superseded in part by [ADR-0808](0808-replay-embed-retry-and-zero-vector-record.md): the
+**transport** still never retries a timeout, but WAL replay's embedding recompute now retries a
+timed-out request itself, with bounded backoff, above the transport.*
+
 ### Reuse existing `is_transport_error` prefixes — no code change to that function
 
 New timeout error messages are worded to start with the same prefixes `is_transport_error`

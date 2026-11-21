@@ -1166,6 +1166,13 @@ a WAL root is configured it now also carries `"scope": "default_group"`, `"defau
 "liminis"` and `"see": "wal_groups"`, so `exists: false` there means the default group has no
 stream — read `wal_groups` for every group's position. With no WAL root the block is unchanged.
 
+Each `wal_groups.<gid>` entry also carries `zero_vector_rows`
+(`{"total": N, "by_kind": {"name": …, "fact": …, "summary": …, "content": …}}`, issue #808): how
+many rows of that group are stored with a fallback zero vector because the embedder failed during
+replay, and so are missing from vector search. Always present (all zeros when clean), exact, and
+durable across restarts; additive, so a client that ignores unknown fields is unaffected. See
+[Operations](operations.md#embedding-failures-during-replay-retry-and-the-zero-vector-record).
+
 ### Deletion (`delete_chunk_episode`, `delete_by_source`)
 
 > For a chunk that merely disappeared from its document, prefer
