@@ -53,6 +53,7 @@ title: Configuration
 | `LCG_RERANK_SUPERSEDED_FACTOR` | No | Demotion multiplier applied to a superseded passage's whole blended score — first-stage rank prior and sigmoid logit together, before the recency term is added — in `0..=1` (default `0.5`); a value above `1` would boost superseded notes and stops the service at startup. |
 | `LCG_RERANK_RECENCY_WEIGHT` | No | Weight of the small recency prior used to prefer later notes among near-equal matches (default `0.05`; `0` disables it). |
 | `LCG_RERANK_RANK_WEIGHT_TOP` / `_MID` / `_TAIL` | No | Weight of the **first-stage rank** in the rerank blend (`a·reciprocal-rank + (1−a)·sigmoid(logit)`) at ranks 1–3, 4–10 and beyond (defaults `0.30`, `0.20`, `0.10`; each `0..=1`, a larger value stops the service at startup; `0` for all three orders by the cross-encoder alone). A cross-encoder alone can bury a first-stage top result, so the first stage keeps most weight at the top. Tuned on corpus v2 only; the v1 holdout was then measured by the maintainer (0.935 against 0.894 for `lcg-passages-belief`); see ADR-0796. |
+| `LCG_SUMMARY_UNITS` | No | `on` (or `1`/`true`) writes one LLM **summary unit** per ingested episode, for `knowledge_search_passages` calls that set `summaries: true` (#850, an opt-in probe). **Off by default**: with it unset, ingest makes no extra LLM call and stores nothing extra. Costs one extra extractor call per episode at ingest, never at query time. Affects episodes ingested after it is turned on (no backfill). Case-insensitive; read per ingest; an unrecognised value logs a warning once and counts as off. Workspace-wide only (a per-group switch is follow-up work). See [Summary units](#summary-units-opt-in-probe). |
 | `LCG_EXPANSION_URL` | No | HTTP endpoint of an OpenAI-compatible LLM for query expansion (a base URL; a trailing `/v1/...` is stripped). LCG appends `/v1/chat/completions` to it, so the provider must serve that OpenAI-style path under the base: a provider whose API version segment is not `/v1` is not supported directly. Used when `--expander-*` is not passed; with neither, the embedder's sidecar (Apple Foundation Models) is used. |
 | `LCG_EXPANSION_MODEL` | No | Model name sent to the expansion endpoint (default `apple-foundation`). |
 | `LCG_EXPANSION_API_KEY` | No | Bearer token for the expansion endpoint named by `LCG_EXPANSION_URL`. It is sent **only** to that endpoint: an endpoint chosen with `--expander-http`/`--expander-uds`, or defaulted to the sidecar, never receives it (a note is logged at startup if the key is set but ignored). |
@@ -532,6 +533,36 @@ rerank score multiplied by `LCG_RERANK_SUPERSEDED_FACTOR`, and is always placed 
 when both are among the candidates. Notes with no supersession record get a small recency preference
 (`LCG_RERANK_RECENCY_WEIGHT`) so that of two equally good matches the later note ranks first. A
 document superseded with a *future* effective date is still current until then.
+
+## Summary units (opt-in probe)
+
+Passage search is weakest on **paraphrased** questions, which describe a note in words the note
+never uses. A summary unit is a short description of one note (3–6 plain sentences and one
+key-concepts sentence, written by the extractor's LLM at ingest), searched *beside* the note's
+passages. In an offline probe (E14) adding summaries as rerank candidates lifted paraphrase nDCG@10
+from 0.397 to 0.526 against the same reranker without them. This implementation is a probe too: until
+the maintainer's v2 eval clears the bar in [ADR-0850](adr/0850-summary-units-as-rerank-candidates.md),
+it is not a recommended setting.
+
+Two switches, both off by default:
+
+1. **Generate** (operator, at ingest): `LCG_SUMMARY_UNITS=on`. Each episode of
+   `knowledge_process_chunk`, `knowledge_add_episode` and `knowledge_process_document` then gets one
+   summarize call (`call_type: "summarize"` in an LLM cassette) through the configured extractor, and
+   the summary is embedded with the passage embedder. A body under 20 non-whitespace characters is
+   skipped. A failed or empty summarize call never fails the ingest: the episode simply has no
+   summary unit, and the provider's failure is reported like any other extraction failure. The one
+   exception is a **cassette miss under replay** (`LCG_REPLAY_LLM`), which fails the ingest so a replay
+   can never silently run without summaries.
+2. **Use** (caller, per search): `summaries: true` on `knowledge_search_passages`. See
+   [IPC reference: summary units](ipc-mcp-reference.md#summary-units-as-candidates-summaries-issue-850).
+
+Granularity is **one summary per episode** (per chunk): for a single-chunk note that is one per note.
+A re-ingested chunk gets a new episode and a new summary; the old summary is demoted with the old
+episode, exactly like its passage. Summaries survive `knowledge_dump_wal` and
+`knowledge_rebuild_from_wal` (the vector is recomputed from the stored summary text; no LLM call), and
+deleting or purging an episode deletes its summary. Episodes ingested before the switch was turned on
+get no summary until they are re-ingested.
 
 ## Extractor: local or hosted
 

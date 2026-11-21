@@ -552,6 +552,58 @@ below its successor) is applied to each first-stage list, not to the fused resul
 and **without** `rerank` it is not guaranteed; `expand: true` together with `rerank: true` ranks a
 replacement above the note it supersedes when both are among the reranked candidates (`rerank_candidates`). See [Passage rerank and query expansion](configuration.md#passage-rerank-and-query-expansion).
 
+### Summary units as candidates: `summaries` (issue #850)
+
+An **opt-in probe** for paraphrased questions (a question that describes a note in words the note
+does not use). When the operator has turned on `LCG_SUMMARY_UNITS`, ingest writes one short
+LLM-written description per episode, a *summary unit* (see
+[Configuration: summary units](configuration.md#summary-units-opt-in-probe)). A call that sets
+`summaries: true` adds the summaries nearest the query to the candidates. With the key omitted,
+`null` or `false` the call is byte-identical to before, whatever else it sends.
+
+| Param | Type | Meaning |
+|-------|------|---------|
+| `summaries` | boolean | Add summary units to the candidates. Default off; `null` means "not specified"; any other non-boolean is an invalid-params error. |
+| `max_summary_slots` | integer ≥ 0 | At most this many returned results may come in via a summary (default `3`; `0` disables them). Validated only when `summaries` is true, with the `rerank_candidates` convention: absent takes the default; a non-integer, negative or `null` value is an error. Ignored otherwise. |
+
+How it works:
+
+- **Before belief-aware ranking and any rerank.** The 10 summary units nearest the user's own query
+  join that query's **vector** candidates, merged by cosine and subject to `min_score`, before the
+  `belief_aware` rules run and before RRF in `hybrid` mode. They are not fused in afterwards. LLM
+  expansion variants and caller `queries` variants get no summaries; the primary query's own leg does.
+  With `rerank`, the cross-encoder scores the summary's text.
+- **Belief is the episode's.** A summary carries its source episode's group, origin and supersession
+  state, so a superseded note's summary ranks below its successor exactly as its passage does, and a
+  `derived`/`answer` note's summary ranks below the primary note it cites. With `belief_aware: false`
+  summaries join without those rules, as passages do. A summary whose episode was removed
+  (`knowledge_mark_chunk_removed`) or deleted yields nothing. `group_ids` and `origins` filter a
+  summary through its episode, so a summary never brings in a passage the filters exclude.
+- **Results stay passages.** A summary that lands in the results is replaced by **its own episode's
+  passage**, the text the summary describes, so citations stay exact. That result has every ordinary
+  field plus `via: "summary"`, and its `score`, `similarity`, `rerank_score` and `belief` are the
+  summary candidate's (so `score` stays in rank order). Summary text never appears in a response. A
+  note appears at most once: if its passage was also retrieved directly, it keeps the better of the
+  two positions (`via` only when the summary placed it) and the next candidate fills the freed slot.
+  Results that did not come in through a summary have no `via` key.
+- **A response block**, present whenever `summaries: true` was sent:
+  `summaries: {applied, candidates, results?, reason?}` — `candidates` is how many summary units
+  entered the pool, `results` how many returned results came in via one. When summaries cannot
+  apply the call never fails: it returns the ordinary results with `applied: false` and a `reason`:
+  `no_units` (no summary units in the searched groups), `disabled` (`max_summary_slots: 0`) or
+  `no_candidates` (units exist but none entered the pool).
+- **No LLM call at query time** (ADR-0820): summaries are found by the query embedding alone.
+
+```json
+{"passages": [{"uuid": "…", "content": "…the passage text…", "score": 0.81, "via": "summary", "…": "…"}],
+ "count": 10,
+ "summaries": {"applied": true, "candidates": 10, "results": 2}}
+```
+
+Measured only as `lcg-passages-belief-rerank-summaries` (belief-aware first stage plus rerank); the
+other combinations (`expand`, `queries`, `hybrid`, rerank off) compose without errors but are
+unmeasured. See [ADR-0850](adr/0850-summary-units-as-rerank-candidates.md).
+
 ### group_ids semantics: omitted vs. empty
 
 Every read tool that accepts `group_ids` treats an **omitted or `null` `group_ids` uniformly as
