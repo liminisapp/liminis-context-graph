@@ -5296,6 +5296,94 @@ impl<'db> Conn<'db> {
         }
     }
 
+    /// Page of a group's fully wired edges with both endpoints' identity and stored labels, for
+    /// the direction repair pass (#816). Edges missing either hop (e.g. unbound cross-group
+    /// pointers) simply do not appear.
+    /// Columns: [rn.uuid, rn.name, rn.attributes, src.uuid, src.name, src.labels, dst.uuid,
+    /// dst.name, dst.labels]
+    pub(crate) fn dump_relatos_endpoints_page(
+        &self,
+        group_id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        self.query_params(
+            "MATCH (s:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(d:Entity) \
+             WHERE rn.group_id = $gid \
+             RETURN rn.uuid, rn.name, rn.attributes, s.uuid, s.name, s.labels, \
+             d.uuid, d.name, d.labels \
+             ORDER BY rn.uuid SKIP $offset LIMIT $limit",
+            serde_json::json!({ "gid": group_id, "offset": offset as i64, "limit": limit as i64 }),
+        )
+    }
+
+    /// Re-wires one edge to `new_src → new_dst` (#816 repair swap). An edge is three structures —
+    /// the `RelatesToNode_` shadow node (all data, no endpoint columns), the direct
+    /// `Entity→Entity` rel (its own copy of the data), and the two hop rels — so a swap deletes
+    /// the old direct rel and hops and recreates them reversed, rebuilding the direct rel from
+    /// the shadow node's own columns. `attributes` (already read-merged by the caller) and
+    /// `new_name` are written to the shadow node first; the `name` write is non-fatal because
+    /// `name` is FTS-indexed and lbug may refuse a plain `SET` on an indexed column — in that
+    /// case the stored name keeps its old orientation. Every statement goes through
+    /// `exec_params`, so it is WAL-logged and replays.
+    pub fn swap_relates_to_endpoints(
+        &self,
+        rn_uuid: &str,
+        new_src: &str,
+        new_dst: &str,
+        new_name: Option<&str>,
+        attributes: Option<&str>,
+    ) -> Result<(), Error> {
+        if let Some(attrs) = attributes {
+            self.update_relates_to_attributes(rn_uuid, attrs)?;
+        }
+        if let Some(name) = new_name {
+            if let Err(e) = self.exec_params(
+                "MATCH (rn:RelatesToNode_ {uuid: $uuid}) SET rn.name = $name",
+                serde_json::json!({ "uuid": rn_uuid, "name": name }),
+            ) {
+                eprintln!(
+                    "liminis-context-graph: SET name on RelatesToNode_ failed during endpoint swap (non-fatal): {e}"
+                );
+            }
+        }
+        self.delete_relates_to_direct(rn_uuid)?;
+        self.delete_relates_to_hop(rn_uuid, EndpointSide::Src)?;
+        self.delete_relates_to_hop(rn_uuid, EndpointSide::Dst)?;
+        self.create_relates_to_hop(rn_uuid, EndpointSide::Src, new_src)?;
+        self.create_relates_to_hop(rn_uuid, EndpointSide::Dst, new_dst)?;
+        self.exec_params(
+            "MATCH (rn:RelatesToNode_ {uuid: $rn}), (src:Entity {uuid: $src}), \
+                   (dst:Entity {uuid: $dst}) \
+             MERGE (src)-[:RELATES_TO {uuid: rn.uuid, name: rn.name, group_id: rn.group_id, \
+             fact: rn.fact, valid_at: rn.valid_at, invalid_at: rn.invalid_at, \
+             attributes: rn.attributes}]->(dst)",
+            serde_json::json!({ "rn": rn_uuid, "src": new_src, "dst": new_dst }),
+        )
+    }
+
+    /// Writes the (already read-merged) `attributes` JSON for an edge whose
+    /// `signature_mismatch` mark changed (#816), and best-effort syncs the direct rel's copy —
+    /// reusing `invalidate_edge`'s non-fatal `SET`-on-rel pattern, since lbug may not support
+    /// `SET` on rel properties.
+    pub fn set_relates_to_signature_mark(
+        &self,
+        rn_uuid: &str,
+        attributes: &str,
+    ) -> Result<(), Error> {
+        self.update_relates_to_attributes(rn_uuid, attributes)?;
+        if let Err(e) = self.exec_params(
+            "MATCH (src:Entity)-[r:RELATES_TO {uuid: $uuid}]->(dst:Entity) \
+             SET r.attributes = $attributes",
+            serde_json::json!({ "uuid": rn_uuid, "attributes": attributes }),
+        ) {
+            eprintln!(
+                "liminis-context-graph: SET attributes on RELATES_TO rel unsupported or failed (non-fatal): {e}"
+            );
+        }
+        Ok(())
+    }
+
     /// Page of Community rows for dump.
     /// Columns: [uuid, name, group_id, created_at, name_embedding, summary]
     pub(crate) fn dump_community_page(

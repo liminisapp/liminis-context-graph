@@ -11,7 +11,7 @@
 //!
 //! Crash mid-pass: only committed batches appear in the WAL. The pass is idempotent, so
 //! re-running after recovery is safe — a second run adds zero new WAL mutations.
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use regex::Regex;
@@ -21,6 +21,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     app_state::AppState,
     db::{cosine_similarity, value_as_string},
+    direction::{self, Orientation},
     embedder::EmbedRole,
     error::Error,
     ontology::{normalize_relation_type, Ontology},
@@ -47,7 +48,24 @@ pub struct CanonicalizeReport {
     pub noise_count: usize,
     pub residual_count: usize,
     pub embedding_fallback_promoted: usize,
+    /// Edges whose endpoints were (or, in a dry run, would be) swapped (#816).
+    pub swapped_count: usize,
+    /// Edges that are (or would be) marked `signature_mismatch` (#816).
+    pub signature_mismatch_count: usize,
+    /// Per relation type direction counts (#816). Empty when the ontology declares no
+    /// signature and no inverse alias.
+    pub by_type: BTreeMap<String, TypeDirectionCounts>,
     pub dry_run: bool,
+}
+
+/// Direction-check counts for one relation type (#816): `checked` = edges that could be
+/// evaluated (typed endpoints, signature declared), `swapped` and `mismatched` as in the ingest
+/// rules.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypeDirectionCounts {
+    pub checked: usize,
+    pub swapped: usize,
+    pub mismatched: usize,
 }
 
 impl CanonicalizeReport {
@@ -60,6 +78,13 @@ impl CanonicalizeReport {
             "noise_count": self.noise_count,
             "residual_count": self.residual_count,
             "embedding_fallback_promoted": self.embedding_fallback_promoted,
+            "swapped_count": self.swapped_count,
+            "signature_mismatch_count": self.signature_mismatch_count,
+            "by_type": self.by_type.iter().map(|(t, c)| (t.clone(), json!({
+                "checked": c.checked,
+                "swapped": c.swapped,
+                "mismatched": c.mismatched,
+            }))).collect::<serde_json::Map<String, Value>>(),
             "mapped_pct": if total > 0.0 { (self.mapped_count as f64 / total * 100.0).round() } else { 0.0 },
             "noise_pct": if total > 0.0 { (self.noise_count as f64 / total * 100.0).round() } else { 0.0 },
             "residual_pct": if total > 0.0 { (self.residual_count as f64 / total * 100.0).round() } else { 0.0 },
@@ -293,6 +318,128 @@ pub fn classify_edge_lexically(
     EdgeClass::Residual
 }
 
+// ── Direction plan (#816) ─────────────────────────────────────────────────────
+
+/// Both endpoints of a stored edge plus its attributes, read for the direction check.
+#[derive(Debug, Clone)]
+pub struct EndpointInfo {
+    pub src_uuid: String,
+    pub src_name: String,
+    pub src_labels: Vec<String>,
+    pub dst_uuid: String,
+    pub dst_name: String,
+    pub dst_labels: Vec<String>,
+    pub name: String,
+    pub attributes: String,
+}
+
+/// The direction write for one edge: swap its endpoints and/or change its attributes.
+#[derive(Debug, Clone)]
+pub struct DirectionWrite {
+    pub rn_uuid: String,
+    /// `Some((new_src, new_dst))` when the edge's endpoints are swapped.
+    pub swap_to: Option<(String, String)>,
+    /// `Some` only when the swapped edge's ingest-form name (`"{src} → {dst}"`) is rewritten.
+    pub new_name: Option<String>,
+    /// `Some` when the `signature_mismatch` mark changes (full read-merged attributes JSON).
+    pub new_attributes: Option<String>,
+}
+
+const SIGNATURE_MISMATCH_KEY: &str = "signature_mismatch";
+
+/// Per-type counts delta from [`plan_direction`]: `(relation type, checked, swapped, mismatched)`.
+pub type DirectionCounts = (String, usize, usize, usize);
+
+/// Decides the direction write for one edge, or `None` when nothing changes. Shared rule set with
+/// ingest ([`direction::check_orientation`]), plus the repair-only parts:
+/// - an edge retyped through an inverse alias/keyword (`inverse_forced`) is swapped first;
+/// - `signature_mismatch` is set on a mismatch and cleared once the edge fits (or is swapped to
+///   fit), so the mark always reflects the current ontology; a skipped edge keeps its mark.
+///
+/// Returns the write (if any) and the per-type counts delta.
+pub fn plan_direction(
+    onto: &Ontology,
+    final_rt: &str,
+    inverse_forced: bool,
+    rn_uuid: &str,
+    info: &EndpointInfo,
+) -> (Option<DirectionWrite>, Option<DirectionCounts>) {
+    let Some(rt_def) = onto.relation_types.iter().find(|r| r.name == final_rt) else {
+        return (None, None);
+    };
+    let src_types = direction::endpoint_types(onto, &info.src_labels);
+    let dst_types = direction::endpoint_types(onto, &info.dst_labels);
+    // An inverse reading is the direction information itself, so it is applied even when the
+    // canonical type declares no signature. Symmetric types ignore endpoint order entirely.
+    let forced = inverse_forced && !rt_def.symmetric;
+    let (eff_src, eff_dst) = if forced {
+        (dst_types.as_deref(), src_types.as_deref())
+    } else {
+        (src_types.as_deref(), dst_types.as_deref())
+    };
+    let orientation = direction::check_orientation(onto, rt_def, eff_src, eff_dst);
+    let sig_swap = orientation == Orientation::Swap;
+    let swap = forced ^ sig_swap;
+    let mismatch = orientation == Orientation::Mismatch;
+    let evaluated = orientation != Orientation::Skip;
+
+    // Mark: set on mismatch, cleared on keep/swap, untouched on skip.
+    let mut attrs: serde_json::Map<String, Value> = serde_json::from_str::<Value>(&info.attributes)
+        .ok()
+        .and_then(|v| match v {
+            Value::Object(m) => Some(m),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let has_mark = attrs.get(SIGNATURE_MISMATCH_KEY) == Some(&Value::Bool(true));
+    let mut new_attributes = None;
+    match orientation {
+        Orientation::Mismatch if !has_mark => {
+            attrs.insert(SIGNATURE_MISMATCH_KEY.to_string(), Value::Bool(true));
+            new_attributes = Some(Value::Object(attrs).to_string());
+        }
+        Orientation::Keep | Orientation::Swap if has_mark => {
+            attrs.remove(SIGNATURE_MISMATCH_KEY);
+            new_attributes = Some(Value::Object(attrs).to_string());
+        }
+        _ => {}
+    }
+
+    let counts = if evaluated || forced {
+        Some((
+            rt_def.name.clone(),
+            usize::from(evaluated),
+            usize::from(swap),
+            usize::from(mismatch),
+        ))
+    } else {
+        None
+    };
+    if !swap && new_attributes.is_none() {
+        return (None, counts);
+    }
+    let (swap_to, new_name) = if swap {
+        let ingest_form = format!("{} → {}", info.src_name, info.dst_name);
+        let new_name =
+            (info.name == ingest_form).then(|| format!("{} → {}", info.dst_name, info.src_name));
+        (
+            Some((info.dst_uuid.clone(), info.src_uuid.clone())),
+            new_name,
+        )
+    } else {
+        (None, None)
+    };
+    (
+        Some(DirectionWrite {
+            rn_uuid: rn_uuid.to_string(),
+            swap_to,
+            new_name,
+            new_attributes,
+        }),
+        counts,
+    )
+}
+
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 /// Runs the canonicalization pass as a four-phase async operation.
@@ -351,6 +498,47 @@ pub async fn canonicalize_relations(
         Ok::<_, Error>(all)
     })
     .await??;
+    // ── Phase A2: endpoints + labels for the direction check (#816) ───────────
+    // Skipped entirely when the ontology declares no signature and no inverse alias, so an
+    // ontology without direction info pays nothing and behaves exactly as before.
+    let endpoints: HashMap<String, EndpointInfo> = if ontology.has_direction_info() {
+        let db_e = Arc::clone(&db);
+        let group_id_e = params.group_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = db_e.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+            let mut all: HashMap<String, EndpointInfo> = HashMap::new();
+            let mut offset = 0;
+            loop {
+                let rows = conn
+                    .dump_relatos_endpoints_page(&group_id_e, offset, PAGE_SIZE)
+                    .map_err(|e| Error::Ipc(format!("read edge endpoints page: {e}")))?;
+                let count = rows.len();
+                for row in &rows {
+                    all.insert(
+                        value_as_string(&row[0]),
+                        EndpointInfo {
+                            name: value_as_string(&row[1]),
+                            attributes: value_as_string(&row[2]),
+                            src_uuid: value_as_string(&row[3]),
+                            src_name: value_as_string(&row[4]),
+                            src_labels: crate::db::value_as_str_list(&row[5]),
+                            dst_uuid: value_as_string(&row[6]),
+                            dst_name: value_as_string(&row[7]),
+                            dst_labels: crate::db::value_as_str_list(&row[8]),
+                        },
+                    );
+                }
+                if count < PAGE_SIZE {
+                    break;
+                }
+                offset += count;
+            }
+            Ok::<_, Error>(all)
+        })
+        .await??
+    } else {
+        HashMap::new()
+    };
     drop(_read_guard);
 
     let total_edges = edges.len();
@@ -469,6 +657,52 @@ pub async fn canonicalize_relations(
         }
     }
 
+    // ── Phase B2: direction plan (#816) ───────────────────────────────────────
+    // One write per edge at most, parallel to `classifications`. An edge's final relation type is
+    // its mapped canonical type, or (noise/residual) the type it already has.
+    let mut direction_writes: Vec<Option<DirectionWrite>> =
+        Vec::with_capacity(classifications.len());
+    let mut by_type: BTreeMap<String, TypeDirectionCounts> = BTreeMap::new();
+    let mut swapped_count = 0usize;
+    let mut signature_mismatch_count = 0usize;
+    for (edge, class) in &classifications {
+        let planned = endpoints.get(&edge.uuid).and_then(|info| {
+            let (final_rt, inverse) = match class {
+                EdgeClass::Mapped(c) => (c.as_str(), false),
+                // The inverse reading is consumed by the retype: once the edge carries the
+                // canonical type, a name still spelling the inverse alias must not swap it
+                // again (idempotency).
+                EdgeClass::MappedInverse(c) => (
+                    c.as_str(),
+                    edge.relation_type.as_deref() != Some(c.as_str()),
+                ),
+                EdgeClass::Noise | EdgeClass::Residual => {
+                    (edge.relation_type.as_deref().unwrap_or(""), false)
+                }
+            };
+            if final_rt.is_empty() {
+                return None;
+            }
+            Some(plan_direction(
+                &ontology, final_rt, inverse, &edge.uuid, info,
+            ))
+        });
+        match planned {
+            Some((write, counts)) => {
+                if let Some((rt, checked, swapped, mismatched)) = counts {
+                    let c = by_type.entry(rt).or_default();
+                    c.checked += checked;
+                    c.swapped += swapped;
+                    c.mismatched += mismatched;
+                    swapped_count += swapped;
+                    signature_mismatch_count += mismatched;
+                }
+                direction_writes.push(write);
+            }
+            None => direction_writes.push(None),
+        }
+    }
+
     let report = CanonicalizeReport {
         group_id: params.group_id.clone(),
         total_edges,
@@ -476,6 +710,9 @@ pub async fn canonicalize_relations(
         noise_count,
         residual_count,
         embedding_fallback_promoted,
+        swapped_count,
+        signature_mismatch_count,
+        by_type,
         dry_run: params.dry_run,
     };
 
@@ -493,11 +730,15 @@ pub async fn canonicalize_relations(
         }));
     }
 
-    for batch in classifications.chunks(WRITE_BATCH_SIZE) {
+    for (batch, batch_dir) in classifications
+        .chunks(WRITE_BATCH_SIZE)
+        .zip(direction_writes.chunks(WRITE_BATCH_SIZE))
+    {
         let batch_data: Vec<(String, Option<String>, EdgeClass)> = batch
             .iter()
             .map(|(edge, class)| (edge.uuid.clone(), edge.relation_type.clone(), class.clone()))
             .collect();
+        let batch_dir: Vec<Option<DirectionWrite>> = batch_dir.to_vec();
 
         let db_d = Arc::clone(&db);
         let state_c = Arc::clone(&state);
@@ -506,7 +747,7 @@ pub async fn canonicalize_relations(
         tokio::task::spawn_blocking(move || -> Result<(), Error> {
             let conn = db_d.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
             let mut exec_result: Result<(), Error> = Ok(());
-            for (uuid, current_rt, class) in &batch_data {
+            for ((uuid, current_rt, class), dir_write) in batch_data.iter().zip(batch_dir.iter()) {
                 let res = match class {
                     EdgeClass::Mapped(canonical) | EdgeClass::MappedInverse(canonical) => {
                         // Idempotency: skip if already set to the target value
@@ -549,6 +790,27 @@ pub async fn canonicalize_relations(
                 if res.is_err() {
                     exec_result = res;
                     break;
+                }
+                // Direction write (#816): after the retype, so a retyped-and-reversed edge
+                // converges in one pass. Idempotent on re-run: a swapped edge now fits.
+                if let Some(w) = dir_write {
+                    let res = match &w.swap_to {
+                        Some((new_src, new_dst)) => conn.swap_relates_to_endpoints(
+                            &w.rn_uuid,
+                            new_src,
+                            new_dst,
+                            w.new_name.as_deref(),
+                            w.new_attributes.as_deref(),
+                        ),
+                        None => match &w.new_attributes {
+                            Some(attrs) => conn.set_relates_to_signature_mark(&w.rn_uuid, attrs),
+                            None => Ok(()),
+                        },
+                    };
+                    if res.is_err() {
+                        exec_result = res;
+                        break;
+                    }
                 }
             }
             // Always flush whatever succeeded before any failure — the DB already committed
@@ -798,5 +1060,289 @@ mod tests {
                 panic!("expected Mapped(AFFILIATED_WITH) via relation_type keyword, got {class:?}")
             }
         }
+    }
+    // ── #816: direction ──────────────────────────────────────────────────────
+
+    fn direction_ontology() -> Ontology {
+        let mut o = make_ontology_with_rules();
+        o.mode = OntologyMode::Strict;
+        o.relation_types[0].inverse_aliases = vec!["HAS_AUTHOR".to_string()];
+        o
+    }
+
+    #[test]
+    fn directed_alias_map_marks_inverse_and_forward_wins_collisions() {
+        let mut o = direction_ontology();
+        // Collides with the forward alias WROTE of the same type: forward reading wins.
+        o.relation_types[0]
+            .inverse_aliases
+            .push("WROTE".to_string());
+        let m = build_alias_map_directed(&o);
+        assert_eq!(m["HAS_AUTHOR"], ("AUTHORED".to_string(), true));
+        assert_eq!(m["WROTE"], ("AUTHORED".to_string(), false));
+        assert_eq!(m["AUTHORED"], ("AUTHORED".to_string(), false));
+        // The undirected projection is unchanged shape.
+        assert_eq!(build_alias_map(&o)["HAS_AUTHOR"], "AUTHORED");
+    }
+
+    #[test]
+    fn classify_inverse_alias_and_inverse_keyword() {
+        let idx = build_lexical_index(&direction_ontology());
+        match classify_edge_lexically("HAS_AUTHOR", None, &idx) {
+            EdgeClass::MappedInverse(t) => assert_eq!(t, "AUTHORED"),
+            other => panic!("expected MappedInverse, got {other:?}"),
+        }
+        // Forward alias unchanged.
+        assert!(matches!(
+            classify_edge_lexically("WROTE", None, &idx),
+            EdgeClass::Mapped(_)
+        ));
+        // Keyword hit ("author") on text that also spells an inverse alias reads inversely...
+        assert!(matches!(
+            classify_edge_lexically("x", Some("HAS_AUTHOR_OF_RECORD_HAS_AUTHOR"), &idx),
+            EdgeClass::MappedInverse(_)
+        ));
+        // ...a plain keyword hit does not.
+        assert!(matches!(
+            classify_edge_lexically("co-authored", None, &idx),
+            EdgeClass::Mapped(_)
+        ));
+    }
+
+    fn info(src: &[&str], dst: &[&str], name: &str, attrs: &str) -> EndpointInfo {
+        EndpointInfo {
+            src_uuid: "S".into(),
+            src_name: "Sable".into(),
+            src_labels: src.iter().map(|s| s.to_string()).collect(),
+            dst_uuid: "D".into(),
+            dst_name: "Lena".into(),
+            dst_labels: dst.iter().map(|s| s.to_string()).collect(),
+            name: name.into(),
+            attributes: attrs.into(),
+        }
+    }
+
+    fn signature_ontology() -> Ontology {
+        let mut o = make_ontology_with_rules();
+        o.entity_types.push(EntityTypeDef {
+            name: "Project".to_string(),
+            description: None,
+            parent: None,
+            identity: false,
+            extract: true,
+        });
+        o.ancestor_map = crate::ontology::compute_ancestor_map(&o.entity_types);
+        o.relation_types[0].source_types = vec!["Person".to_string()];
+        o
+    }
+
+    #[test]
+    fn plan_direction_swap_rewrites_ingest_form_name_only() {
+        let o = signature_ontology();
+        let reversed = info(
+            &["Entity", "Project"],
+            &["Entity", "Person"],
+            "Sable → Lena",
+            "{}",
+        );
+        let (w, counts) = plan_direction(&o, "AUTHORED", false, "rn", &reversed);
+        let w = w.unwrap();
+        assert_eq!(w.swap_to, Some(("D".to_string(), "S".to_string())));
+        assert_eq!(w.new_name.as_deref(), Some("Lena → Sable"));
+        assert_eq!(counts, Some(("AUTHORED".to_string(), 1, 1, 0)));
+
+        let custom = info(
+            &["Entity", "Project"],
+            &["Entity", "Person"],
+            "owned by",
+            "{}",
+        );
+        let (w, _) = plan_direction(&o, "AUTHORED", false, "rn", &custom);
+        assert_eq!(
+            w.unwrap().new_name,
+            None,
+            "non-ingest-form names are left alone"
+        );
+    }
+
+    #[test]
+    fn plan_direction_mark_set_cleared_and_idempotent() {
+        let o = signature_ontology();
+        // Neither way: mark.
+        let bad = info(
+            &["Entity", "Project"],
+            &["Entity", "Project"],
+            "x",
+            "{\"k\":1}",
+        );
+        let (w, counts) = plan_direction(&o, "AUTHORED", false, "rn", &bad);
+        let attrs: Value = serde_json::from_str(&w.unwrap().new_attributes.unwrap()).unwrap();
+        assert_eq!(attrs["signature_mismatch"], true);
+        assert_eq!(attrs["k"], 1);
+        assert_eq!(counts, Some(("AUTHORED".to_string(), 1, 0, 1)));
+        // Already marked and still mismatched: no write.
+        let marked = info(
+            &["Entity", "Project"],
+            &["Entity", "Project"],
+            "x",
+            "{\"signature_mismatch\":true}",
+        );
+        assert!(plan_direction(&o, "AUTHORED", false, "rn", &marked)
+            .0
+            .is_none());
+        // Now fits: mark cleared.
+        let fits = info(
+            &["Entity", "Person"],
+            &["Entity", "Project"],
+            "x",
+            "{\"signature_mismatch\":true,\"k\":1}",
+        );
+        let attrs: Value = serde_json::from_str(
+            &plan_direction(&o, "AUTHORED", false, "rn", &fits)
+                .0
+                .unwrap()
+                .new_attributes
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(attrs.get("signature_mismatch").is_none());
+        assert_eq!(attrs["k"], 1);
+        // Untyped endpoint: skipped, an existing mark is left alone.
+        let untyped = info(
+            &["Entity"],
+            &["Entity", "Project"],
+            "x",
+            "{\"signature_mismatch\":true}",
+        );
+        assert!(plan_direction(&o, "AUTHORED", false, "rn", &untyped)
+            .0
+            .is_none());
+    }
+
+    #[test]
+    fn plan_direction_inverse_forces_swap_even_without_signature() {
+        let o = direction_ontology(); // no signatures at all
+        let i = info(&["Entity"], &["Entity"], "HAS_AUTHOR", "{}");
+        let (w, counts) = plan_direction(&o, "AUTHORED", true, "rn", &i);
+        assert_eq!(w.unwrap().swap_to, Some(("D".to_string(), "S".to_string())));
+        assert_eq!(counts, Some(("AUTHORED".to_string(), 0, 1, 0)));
+        // Not forced: nothing to do.
+        assert!(plan_direction(&o, "AUTHORED", false, "rn", &i).0.is_none());
+    }
+
+    #[test]
+    fn plan_direction_forced_swap_that_also_fits_is_not_swapped_back() {
+        let o = signature_ontology(); // AUTHORED: Person → any
+                                      // Inverse reading: extracted Project → Person; forcing the swap gives Person → Project.
+        let i = info(
+            &["Entity", "Project"],
+            &["Entity", "Person"],
+            "HAS_AUTHOR",
+            "{}",
+        );
+        let (w, counts) = plan_direction(&o, "AUTHORED", true, "rn", &i);
+        assert_eq!(w.unwrap().swap_to, Some(("D".to_string(), "S".to_string())));
+        assert_eq!(counts, Some(("AUTHORED".to_string(), 1, 1, 0)));
+        // Inverse reading but extracted already Person → Project: forced swap makes it
+        // Project → Person, which fails Person → any, so the signature swap undoes it.
+        let j = info(
+            &["Entity", "Person"],
+            &["Entity", "Project"],
+            "HAS_AUTHOR",
+            "{}",
+        );
+        assert!(plan_direction(&o, "AUTHORED", true, "rn", &j).0.is_none());
+    }
+
+    /// Structural integrity of a swap on a real DB: still exactly one source hop, one target hop
+    /// and one direct rel, pointing the new way.
+    #[test]
+    fn swap_relates_to_endpoints_rewires_all_three_structures() {
+        use crate::{EntityRow, RelatesToEdge};
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = crate::db::Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        let mk = |n: &str| EntityRow {
+            uuid: format!("u-{n}"),
+            name: n.to_string(),
+            group_id: "g".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: n.to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        };
+        conn.insert_entity(&mk("a")).unwrap();
+        conn.insert_entity(&mk("b")).unwrap();
+        conn.insert_relates_to_edge(&RelatesToEdge {
+            uuid: "rn1".to_string(),
+            name: "a → b".to_string(),
+            source_node_uuid: "u-a".to_string(),
+            target_node_uuid: "u-b".to_string(),
+            group_id: "g".to_string(),
+            fact: "a rel b".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            attributes: "{}".to_string(),
+            relation_type: Some("REL".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        conn.swap_relates_to_endpoints(
+            "rn1",
+            "u-b",
+            "u-a",
+            Some("b → a"),
+            Some("{\"signature_mismatch\":true}"),
+        )
+        .unwrap();
+
+        let count = |cypher: &str| -> usize {
+            conn.query_params(cypher, serde_json::json!({}))
+                .unwrap()
+                .len()
+        };
+        assert_eq!(
+            count("MATCH (s:Entity {uuid:'u-b'})-[:RELATES_TO]->(rn:RelatesToNode_ {uuid:'rn1'}) RETURN rn.uuid"),
+            1
+        );
+        assert_eq!(
+            count("MATCH (rn:RelatesToNode_ {uuid:'rn1'})-[:RELATES_TO]->(d:Entity {uuid:'u-a'}) RETURN rn.uuid"),
+            1
+        );
+        assert_eq!(
+            count("MATCH (s:Entity)-[:RELATES_TO]->(rn:RelatesToNode_ {uuid:'rn1'}) RETURN s.uuid"),
+            1,
+            "exactly one source hop"
+        );
+        assert_eq!(
+            count("MATCH (rn:RelatesToNode_ {uuid:'rn1'})-[:RELATES_TO]->(d:Entity) RETURN d.uuid"),
+            1,
+            "exactly one target hop"
+        );
+        assert_eq!(
+            count("MATCH (s:Entity {uuid:'u-b'})-[r:RELATES_TO {uuid:'rn1'}]->(d:Entity {uuid:'u-a'}) RETURN r.uuid"),
+            1,
+            "direct rel points the new way"
+        );
+        assert_eq!(
+            count("MATCH (s:Entity)-[r:RELATES_TO {uuid:'rn1'}]->(d:Entity) RETURN r.uuid"),
+            1,
+            "exactly one direct rel"
+        );
+        let rows = conn
+            .query_params(
+                "MATCH (rn:RelatesToNode_ {uuid:'rn1'}) RETURN rn.name, rn.attributes",
+                serde_json::json!({}),
+            )
+            .unwrap();
+        assert_eq!(
+            crate::db::value_as_string(&rows[0][1]),
+            "{\"signature_mismatch\":true}"
+        );
+        assert_eq!(crate::db::value_as_string(&rows[0][0]), "b → a");
     }
 }
