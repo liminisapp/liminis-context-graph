@@ -1666,7 +1666,9 @@ result fields exist for that, both introduced in 0.13.2.
   an entity whose normalised name equals the ID-shaped target of a `[[wikilink]]` in the chunk text
   (a citation such as `Sources: [[project-quill-core-1]]`; `[[Quill Core]]` is not ID-shaped and is
   kept). The host-asserted `Document`/`Source` entity is the supported way to represent the note.
-  An ID-shaped name that is neither the own ID nor linked in the chunk text is never matched. The count is a top-level field, always present (`0` when nothing was
+  An ID-shaped name that is neither the own ID nor linked in the chunk text is never matched.
+  "ID-shaped" is a letter plus a `-`, `_` or digit, so a link to a hyphenated or versioned concept
+  page (`[[GPT-4]]`, `[[machine-learning]]`) is also a citation target. The count is a top-level field, always present (`0` when nothing was
   dropped); the discarded edges are *not* counted in `edges_dropped_unresolvable`.
 
 - **`edges_dropped_self_loop` counts edges dropped because both endpoints resolved to one entity.**

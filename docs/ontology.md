@@ -476,7 +476,9 @@ filed under its subject's name such as `Alice.md` has no ID to match, so the rea
 plus any edge touching it
 ([ADR-0824](adr/0824-own-source-id-entity-filter.md)). The asserted `Document`/`Source` entity your
 host supplies is the supported way to represent the note. An ID-shaped name that is neither the
-episode's own ID nor linked in its body is kept. The drop is reported as `entities_dropped_source_id` on `knowledge_process_chunk`.
+episode's own ID nor linked in its body is kept. Caveat: "ID-shaped" means a letter plus a `-`, `_`
+or digit, so a link to a hyphenated or versioned concept page (`[[GPT-4]]`, `[[machine-learning]]`)
+counts too, and an entity extracted under exactly that name is dropped from that episode. The drop is reported as `entities_dropped_source_id` on `knowledge_process_chunk`.
 
 ## Modes
 

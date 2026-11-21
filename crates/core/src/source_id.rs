@@ -324,6 +324,28 @@ mod tests {
         assert_eq!(got.len(), 2);
     }
 
+    // Documents a known, accepted limit (ADR-0824): the ID-shape gate cannot tell a hyphenated or
+    // versioned *concept* link from a note-ID link, so these are citation targets too and an entity
+    // extracted under exactly that name is dropped. Pinned so a change is deliberate, not silent.
+    #[test]
+    fn hyphenated_and_versioned_concept_links_are_citation_targets() {
+        let got = citation_targets(
+            "We migrated to [[GPT-4]] and [[machine-learning]]; see [[covid-19]], [[Node-RED]], [[S3]], [[e-commerce]].",
+        );
+        for t in [
+            "gpt-4",
+            "machine-learning",
+            "covid-19",
+            "node-red",
+            "s3",
+            "e-commerce",
+        ] {
+            assert!(got.contains(t), "{t}: {got:?}");
+        }
+        // Bare words and spaced names are still real entities.
+        assert!(citation_targets("[[Postgres]] [[Quill Core]]").is_empty());
+    }
+
     #[test]
     fn citation_targets_ignore_unclosed_and_multiline_brackets() {
         assert!(citation_targets("an [[unclosed-id-1 link").is_empty());

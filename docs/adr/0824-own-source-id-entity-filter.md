@@ -82,8 +82,18 @@ deterministic name predicate in `episode.rs`.
   exempt by the ID-shape gate above.
 - An entity that legitimately shares a name with an ID-shaped `[[wikilink]]` target in the same
   episode body is dropped (e.g. a project literally named `project-quill-core-1` that the body
-  also links as a source). Accepted: an ID-shaped citation target is overwhelmingly a note ID, and
-  the real entity is still reachable from other episodes that do not link it.
+  also links as a source).
+- **Known limit: the ID-shape gate also admits hyphenated and versioned concept links.** The gate
+  is a letter plus a `-`, `_` or digit, so `[[GPT-4]]`, `[[machine-learning]]`, `[[covid-19]]`,
+  `[[Node-RED]]`, `[[S3]]` and `[[e-commerce]]` are citation targets too. In a vault that links to
+  such pages, a real entity the model extracts under exactly that name (a `GPT-4` Technology) is
+  dropped, with its edges, in that episode; the only trace is the stderr line and the
+  `entities_dropped_source_id` count. The rule applies to every body on every path. The gate is the
+  one the maintainer specified for the v2 fix; a stricter shape (e.g. a trailing numeric segment)
+  would not exclude `GPT-4`/`covid-19` and could miss v2 nodes, so it was not applied. Mitigations:
+  the drop is per-episode and exact-name only, the entity is still extracted from episodes that do
+  not link it, and a corpus whose note IDs are distinguishable from concept names could narrow the
+  gate later. Pinned by `hyphenated_and_versioned_concept_links_are_citation_targets`.
 - **SC-001 is a prediction until measured.** The citation-target rule is aimed at the traced
   origin of all 13 v2 nodes, but the 13 → 0 figure depends on the extractor naming the node
   exactly as the link target. The `entities_dropped_source_id` counter makes the post-merge run
