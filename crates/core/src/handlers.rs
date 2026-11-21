@@ -1264,6 +1264,8 @@ async fn handle_knowledge_process_chunk(
         // writes recognisable to a later revise.
         write_path: episode::WritePath::Chunk,
         document: None,
+        // Issue #853: store the two halves of `source_description` separately.
+        source_file: Some(source_file.clone()),
     };
     let result = episode::add_episode_with_opts(
         Arc::clone(&state),

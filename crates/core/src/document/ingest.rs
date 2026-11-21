@@ -379,6 +379,8 @@ pub async fn process_document(
                     chunk_hash: chunk.chunk_hash.clone(),
                     context,
                 }),
+                // Issue #853: the same source file the display value is composed from.
+                source_file: Some(source_path_or_doc.clone()),
             };
             extraction_calls += 1;
             let result = episode::add_episode_with_opts(

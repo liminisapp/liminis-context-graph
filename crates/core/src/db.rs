@@ -856,7 +856,9 @@ impl<'db> Conn<'db> {
 
     pub fn insert_episodic(&self, row: &EpisodicRow) -> Result<(), Error> {
         // Document-mode rows (issue #785) take their own template, so the chunk-mode statement —
-        // and with it every chunk-mode WAL line — is byte-identical to before (FR-019).
+        // and with it every chunk-mode WAL line — is byte-identical to before (FR-019). Source
+        // identity (issue #853, ADR-0853) deliberately extends both templates with
+        // `source_file`/`chunk_id`, appended last, so a rebuild restores them (FR-009).
         if row.revision_id.is_some() {
             return self.insert_document_episodic(row);
         }
@@ -868,7 +870,7 @@ impl<'db> Conn<'db> {
              superseded_at: $superseded_at, superseded_by: $superseded_by, \
              superseded_by_kind: $superseded_by_kind, \
              supersession_reason: $supersession_reason, doc_id: $doc_id, origin: $origin, \
-             write_path: $write_path})",
+             write_path: $write_path, source_file: $source_file, chunk_id: $chunk_id})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -889,6 +891,8 @@ impl<'db> Conn<'db> {
                 "doc_id": row.doc_id,
                 "origin": row.origin,
                 "write_path": row.write_path,
+                "source_file": row.source_file,
+                "chunk_id": row.chunk_id,
             }),
         )
     }
@@ -907,7 +911,8 @@ impl<'db> Conn<'db> {
              supersession_reason: $supersession_reason, doc_id: $doc_id, origin: $origin, \
              write_path: $write_path, revision_id: $revision_id, \
              revision_committed_at: $revision_committed_at, byte_start: $byte_start, \
-             byte_end: $byte_end, heading_path: $heading_path, chunk_hash: $chunk_hash})",
+             byte_end: $byte_end, heading_path: $heading_path, chunk_hash: $chunk_hash, \
+             source_file: $source_file, chunk_id: $chunk_id})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -934,6 +939,8 @@ impl<'db> Conn<'db> {
                 "byte_end": row.byte_end,
                 "heading_path": row.heading_path.clone().unwrap_or_default(),
                 "chunk_hash": row.chunk_hash,
+                "source_file": row.source_file,
+                "chunk_id": row.chunk_id,
             }),
         )
     }
@@ -3343,7 +3350,7 @@ impl<'db> Conn<'db> {
              WITH node, distance {where_clause} \
              RETURN node.uuid, node.name, node.content, node.source_description, \
              node.group_id, node.created_at, node.valid_at, node.attributes, distance, \
-             coalesce(node.origin, '') \
+             coalesce(node.origin, ''), node.source_file, node.chunk_id \
              ORDER BY distance ASC LIMIT $limit"
         );
         let mut params = serde_json::json!({
@@ -3355,7 +3362,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(&cypher, params)?;
         Ok(result
             .iter()
-            .map(|row| passage_from_row(row, value_as_f64(&row[8]), &row[9]))
+            .map(|row| passage_from_row(row, value_as_f64(&row[8]), 9))
             .collect())
     }
 
@@ -3398,12 +3405,12 @@ impl<'db> Conn<'db> {
             "MATCH (node:Episodic) WHERE node.uuid IN $uuids \
              RETURN node.uuid, node.name, node.content, node.source_description, \
              node.group_id, node.created_at, node.valid_at, node.attributes, \
-             coalesce(node.origin, '')",
+             coalesce(node.origin, ''), node.source_file, node.chunk_id",
             serde_json::json!({ "uuids": uuids }),
         )?;
         Ok(result
             .iter()
-            .map(|row| passage_from_row(row, 0.0, &row[8]))
+            .map(|row| passage_from_row(row, 0.0, 8))
             .collect())
     }
 
@@ -5346,7 +5353,7 @@ impl<'db> Conn<'db> {
     ///            content_embedding, valid_at, entity_edges, attributes, ingested_at,
     ///            superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, origin,
     ///            write_path, revision_id, revision_committed_at, byte_start, byte_end,
-    ///            heading_path, chunk_hash]
+    ///            heading_path, chunk_hash, source_file, chunk_id]
     pub(crate) fn dump_episodics_page(
         &self,
         group_id: Option<&str>,
@@ -5361,7 +5368,7 @@ impl<'db> Conn<'db> {
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
                  n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin, n.write_path, \
                  n.revision_id, n.revision_committed_at, n.byte_start, n.byte_end, \
-                 n.heading_path, n.chunk_hash \
+                 n.heading_path, n.chunk_hash, n.source_file, n.chunk_id \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -5373,7 +5380,7 @@ impl<'db> Conn<'db> {
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
                  n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin, n.write_path, \
                  n.revision_id, n.revision_committed_at, n.byte_start, n.byte_end, \
-                 n.heading_path, n.chunk_hash \
+                 n.heading_path, n.chunk_hash, n.source_file, n.chunk_id \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -6294,8 +6301,10 @@ fn add_episodic_filter_params(
 
 /// Builds a [`PassageResult`] from a row of the columns
 /// `uuid, name, content, source_description, group_id, created_at, valid_at, attributes` at
-/// indices 0..=7, with the (coalesced) origin at `origin_col`.
-fn passage_from_row(row: &[Value], score: f64, origin_col: &Value) -> PassageResult {
+/// indices 0..=7, with the (coalesced) origin at `origin_idx` followed by `source_file` and
+/// `chunk_id` (issue #853) at `origin_idx + 1` and `origin_idx + 2`.
+fn passage_from_row(row: &[Value], score: f64, origin_idx: usize) -> PassageResult {
+    let origin_col = &row[origin_idx];
     let valid_at = match value_as_optional_timestamp_str(&row[6]) {
         Some(s) if s.is_empty() => None,
         other => other,
@@ -6317,6 +6326,8 @@ fn passage_from_row(row: &[Value], score: f64, origin_col: &Value) -> PassageRes
         matched_queries: None,
         rerank_score: None,
         belief: None,
+        source_file: value_as_optional_string(&row[origin_idx + 1]),
+        chunk_id: value_as_optional_string(&row[origin_idx + 2]),
     }
 }
 

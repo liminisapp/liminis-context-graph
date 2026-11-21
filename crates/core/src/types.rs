@@ -216,6 +216,17 @@ pub struct EpisodicRow {
     /// SHA-256 of the logical chunk's text (shared by every split unit of it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chunk_hash: Option<String>,
+    /// Source identity (issue #853, ADR-0853): the source file this episode came from, stored
+    /// separately from the composed display value `source_description` (`"{source_file}:{chunk_id}"`)
+    /// because a URL source contains colons and the composed string cannot be split back. Set by
+    /// the chunk and document ingest paths; `None` on a legacy row (written before #853, replayed
+    /// from a pre-#853 WAL, or created by raw `knowledge_add_episode`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<String>,
+    /// Source identity (issue #853): the chunk ID half of `source_description`. Always equal to
+    /// `name` where it is set. `None` on a legacy row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<String>,
 }
 
 /// `Episodic.write_path` value stamped by `knowledge_process_chunk` (issue #292, ADR-0292).
@@ -456,6 +467,13 @@ pub struct PassageResult {
     /// reranked passage whose supersession state is known; omitted otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub belief: Option<&'static str>,
+    /// The originating episode's source file (issue #853, ADR-0853), stored separately from the
+    /// composed `source_description`. Omitted for a legacy episode with no stored source identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_file: Option<String>,
+    /// The originating episode's chunk ID (issue #853). Omitted for a legacy episode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<String>,
 }
 
 /// Why an entity was returned by `knowledge_find_entities` (issue #629): the fused RRF score

@@ -239,6 +239,11 @@ pub struct EpisodeOpts {
     /// Document-mode stamp (issue #785). `None` on every other path, which leaves the episode's
     /// revision columns NULL and its extraction prompt free of any document context.
     pub document: Option<DocumentEpisode>,
+    /// Source identity (issue #853, ADR-0853): the source file the episode's `name` is a chunk of.
+    /// When set, the episode is stamped with `source_file` and with `chunk_id = name`, so
+    /// `source_description == source_file + ":" + chunk_id` holds by construction. Set only by
+    /// `knowledge_process_chunk` and document ingest; `None` leaves the episode a legacy row.
+    pub source_file: Option<String>,
 }
 
 /// Phase C's result: `(edges_inserted, edges_dropped_unresolvable,
@@ -1559,6 +1564,9 @@ pub async fn add_episode_with_opts(
     let chunk_guard = opts.guard_chunk_collision;
     let write_path_stamp = opts.write_path.as_str();
     let document_stamp = opts.document;
+    let source_file_stamp = opts.source_file.filter(|s| !s.is_empty());
+    // Source identity (issue #853): the chunk ID is this episode's name.
+    let chunk_id_stamp = source_file_stamp.as_ref().map(|_| name.to_string());
     let chunk_name_for_supersede = name.to_string();
     // `attributes` is expected to already be a serialized JSON object (handlers.rs's
     // `attributes_param_to_string` guarantees this for the two IPC entry points), but
@@ -1908,6 +1916,8 @@ pub async fn add_episode_with_opts(
             byte_end: document_stamp.as_ref().map(|d| d.byte_end),
             heading_path: document_stamp.as_ref().map(|d| d.heading_path.clone()),
             chunk_hash: document_stamp.as_ref().map(|d| d.chunk_hash.clone()),
+            source_file: source_file_stamp,
+            chunk_id: chunk_id_stamp,
             ..Default::default()
         })?;
 

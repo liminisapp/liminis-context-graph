@@ -404,6 +404,57 @@ fn migrate_adds_document_mode_episodic_columns_on_existing_db() {
     assert_eq!(rows[0][0], "3", "a second migrate must not disturb values");
 }
 
+/// Issue #853: a pre-source-identity `Episodic` table gains the nullable `source_file` and
+/// `chunk_id` columns (no backfill: an existing row reads them back NULL, i.e. a legacy row), and
+/// a second migrate is a no-op.
+#[test]
+fn migrate_adds_source_identity_episodic_columns_on_existing_db() {
+    let dir = TempDir::new().unwrap();
+    let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+    let conn = db.connect().unwrap();
+    conn.run_cypher(
+        "CREATE NODE TABLE Episodic (uuid STRING PRIMARY KEY, name STRING, \
+         source_description STRING)",
+    )
+    .unwrap();
+    conn.run_cypher(
+        "CREATE (:Episodic {uuid:'ep1', name:'c1', source_description:'https://a.com:c1'})",
+    )
+    .unwrap();
+    let probe = "MATCH (n:Episodic) RETURN n.source_file, n.chunk_id LIMIT 0";
+    assert!(
+        conn.run_cypher(probe).is_err(),
+        "precondition: columns absent"
+    );
+
+    schema::migrate(&conn, 4);
+    conn.run_cypher(probe)
+        .expect("source-identity columns must bind after migrate");
+    let rows = conn
+        .cypher_query(
+            "MATCH (n:Episodic {uuid:'ep1'}) RETURN n.source_file IS NULL, n.chunk_id IS NULL, \
+             n.source_description",
+        )
+        .unwrap();
+    assert_eq!(rows[0], vec!["True", "True", "https://a.com:c1"]);
+    conn.run_cypher(
+        "MATCH (n:Episodic {uuid:'ep1'}) SET n.source_file = 'https://a.com', n.chunk_id = 'c1'",
+    )
+    .expect("the new columns are writable");
+
+    schema::migrate(&conn, 4);
+    conn.run_cypher(probe)
+        .expect("still present after a second migrate");
+    let rows = conn
+        .cypher_query("MATCH (n:Episodic {uuid:'ep1'}) RETURN n.source_file, n.chunk_id")
+        .unwrap();
+    assert_eq!(
+        rows[0],
+        vec!["https://a.com", "c1"],
+        "a second migrate must not disturb values"
+    );
+}
+
 #[test]
 fn init_creates_the_doc_revision_table() {
     let dir = TempDir::new().unwrap();
