@@ -5194,13 +5194,15 @@ A hashed bag of words over whole words and character trigrams, L2-normalised.
 
 How it works, so you can reason about results:
 
-- **Tokens** are maximal runs of alphanumeric characters. Only ASCII letters are case-folded
-  (`Alice` = `alice`); other characters are kept verbatim.
+- **Tokens** are maximal runs of ASCII letters and digits and non-ASCII characters. Only ASCII
+  characters separate tokens (space, punctuation, symbols), so no Unicode table is consulted; a
+  non-ASCII character, punctuation included, is part of its token. Only ASCII letters are
+  case-folded (`Alice` = `alice`); other characters are kept verbatim.
 - Each *distinct* token contributes one **word feature** (weight 2) and one weight-1 **trigram
   feature** per character trigram of `^token$`. Features are hashed with 64-bit FNV-1a over UTF-8
   bytes into a dimension-sized vector with a ±1 sign, accumulated in exact integer arithmetic, then
   normalised. No floating-point reduction order, no `DefaultHasher`, no locale.
-- **Blank text** (empty, whitespace or punctuation only) yields a fixed, non-zero unit vector, so it
+- **Blank text** (empty, whitespace or ASCII punctuation only) yields a fixed, non-zero unit vector, so it
   is never confused with the all-zero "failed embed" record.
 - The trigrams are what keep unrelated single-word names far apart even when two word hashes
   collide: unrelated names stay well below the engine's 0.85 entity-merge threshold, while
@@ -5233,7 +5235,8 @@ The first form has relation `RELATED_TO`. The second has the named relation.
 3. The line is split at the first `-[` or `->`. In the named form, `REL_NAME` runs to the next
    `]`, which must be followed immediately by `->`.
 4. `DST` and the fact are separated by the **first `:` after the arrow**. Colons and arrows inside
-   the fact text are part of the fact. Names may not contain `:`, `->` or `-[`.
+   the fact text are part of the fact. Names may not contain `:`, `->` or `-[`. A line whose
+   `SRC` contains `:` (such as prose like `Note: Alice -> Acme: ...`) is ignored.
 5. `SRC`, `DST`, the relation and the fact are trimmed.
 6. A line is **ignored** (never an error) if `SRC`, `DST` or the fact is empty, if the relation is
    empty after normalisation, or if the named form is malformed.
@@ -5290,6 +5293,16 @@ entity: Acme
 entity: Bob
 edge: Alice -[RELATED_TO]-> Acme : Alice works at Acme
 edge: Bob -[REPORTS_TO]-> Alice : Bob reports to Alice
+```
+
+A source containing a colon is not a fact line, so prose with a colon in front of an arrow never
+creates a surprising entity:
+
+```fact-lines
+Note: Alice -> Acme: works at
+```
+
+```expect
 ```
 
 Text with no fact lines extracts nothing:

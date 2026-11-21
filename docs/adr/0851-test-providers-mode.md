@@ -32,7 +32,8 @@ shipped binary anyway.
 3. **Embedder: signed hashed bag of words plus character trigrams, L2-normalised.** Word features
    weigh 2, trigrams of `^token$` weigh 1; 64-bit FNV-1a, `h % dim` bucket, bit 63 as sign; exact
    integer accumulation, then one `sqrt` and a correctly-rounded divide, so vectors are bit-identical
-   on every platform. Case folding is ASCII-only so Rust's Unicode tables cannot change a vector.
+   on every platform. Tokenisation and case folding are ASCII-only (only ASCII characters separate tokens; non-ASCII
+   characters are token characters), so no Unicode-table lookup can change a vector across Rust releases.
    Trigrams are load-bearing: with words alone, two unrelated names collide in a 768-dimension space
    with probability 1/768 and would then score cosine 1.0, crossing the engine's 0.85 merge
    threshold, which is the #1359 failure class. With trigrams a single colliding word scores about

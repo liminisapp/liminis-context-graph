@@ -104,11 +104,13 @@ impl Default for TestEmbedder {
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-/// Splits on non-alphanumeric characters and folds ASCII case only (so Rust's Unicode table
-/// version can never change a vector). Distinct tokens only, first-appearance order.
+/// Splits on ASCII non-alphanumeric characters and folds ASCII case only. Every non-ASCII
+/// character is part of a token, never a separator, so no Unicode-table lookup (which a Rust
+/// release could change) can alter token boundaries or a vector. Distinct tokens only,
+/// first-appearance order.
 fn tokenize(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for raw in text.split(|c: char| !c.is_alphanumeric()) {
+    for raw in text.split(|c: char| c.is_ascii() && !c.is_ascii_alphanumeric()) {
         if raw.is_empty() {
             continue;
         }
@@ -250,6 +252,12 @@ fn parse_line(line: &str) -> Option<FactLine> {
     };
     let colon = rest.find(':')?;
     let source = source.trim();
+    // Names may not contain `:` (documented contract). A colon in the source is almost always
+    // prose such as `Note: Alice -> Acme: ...`, so the line is ignored rather than accepted with
+    // a surprising entity name.
+    if source.contains(':') {
+        return None;
+    }
     let target = rest[..colon].trim();
     let fact = rest[colon + 1..].trim();
     if source.is_empty() || target.is_empty() || fact.is_empty() || relation.is_empty() {
@@ -613,6 +621,27 @@ mod tests {
         let p = parse_fact_lines("A -> A: self");
         assert_eq!(p.edges.len(), 1);
         assert_eq!(p.entities.len(), 1);
+    }
+
+    #[test]
+    fn colon_in_source_is_ignored() {
+        assert!(parse_fact_lines("Note: Alice -> Acme: works at")
+            .edges
+            .is_empty());
+        assert!(parse_fact_lines("Note: Alice -[WORKS_AT]-> Acme: works at")
+            .edges
+            .is_empty());
+        // A colon after the arrow still belongs to the fact.
+        let p = parse_fact_lines("Alice -> Acme: note: works at");
+        assert_eq!(p.edges[0].fact, "note: works at");
+    }
+
+    #[test]
+    fn tokenisation_depends_only_on_ascii_classification() {
+        // Non-ASCII characters never separate tokens, so no Unicode table decides boundaries.
+        assert_eq!(tokenize("Zoë—Smith naïve"), vec!["zoë—smith", "naïve"]);
+        assert_eq!(tokenize("日本語 テスト"), vec!["日本語", "テスト"]);
+        assert_eq!(tokenize("Foo,bar;BAZ"), vec!["foo", "bar", "baz"]);
     }
 
     #[test]
