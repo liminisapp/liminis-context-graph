@@ -786,9 +786,28 @@ clears the entries of those groups that live on the purged table (an `Episodic` 
 other tables' entries alone; a delete of a relationship hop only (`RelatesToNode_` hop
 deletes) removes no row, so it leaves entries alone, and a delete by any other shape (for example a
 free-form `knowledge_query_cypher` mutation) is not recognised and can leave a stale entry, which
-the repair tool removes. Repair is a separate tool (which lists the rows
-with `Conn::list_zero_vector_rows` and removes entries with `Conn::remove_zero_vector_rows`);
-until it exists, a full rebuild against a healthy embedder re-embeds everything.
+the repair tool removes.
+
+**Repairing them: `knowledge_reembed_missing`.** Once the embedder is healthy again, run
+`knowledge_reembed_missing` for the group (admin scope; see the
+[tool reference](ipc-mcp-reference.md#repairing-zero-vector-rows-reembed_missing) and
+[ADR-0809](adr/0809-reembed-missing-zero-vectors.md)) instead of a full rebuild. It re-embeds
+exactly the recorded rows from their stored text, for any of the four kinds, removes each repaired
+row from the record, and leaves a failed row recorded so you can run it again. A suggested routine:
+
+1. Read `zero_vector_rows` in `knowledge_status` to see which kinds are affected.
+2. Run it with `"dry_run": true` — it reports per-kind `candidates` and does nothing else.
+3. Run it for real, at a quiet time. All embedding happens first with the service unaffected; then
+   the vector indexes of the affected kinds are dropped, written and rebuilt. Those indexes span
+   **all** groups, so for that window writes are blocked everywhere and vector search for every
+   group waits for the rebuild — repairing one group is not isolated to that group. A group with
+   nothing to repair costs nothing: no lock is taken and no index is touched.
+4. Check `zero_vector_rows` again. It should be `0`, or equal to the `failed` count if the embedder
+   is still flaky.
+
+If an index rebuild fails the result says so (`index_rebuild_errors`) and the next search rebuilds
+every index automatically, which takes time proportional to database size. The retry policy is the
+`LCG_REPLAY_EMBED_*` settings above. `--writable-groups` applies: an unlisted group is refused.
 
 ## Streaming progress
 
