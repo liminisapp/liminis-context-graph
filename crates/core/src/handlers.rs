@@ -368,6 +368,35 @@ fn busy_health_payload(state: &AppState) -> Value {
 ///   (alive, reads served, not ready for writes), answered without connecting to the DB;
 ///   `ready_for_reads` follows from the DB being loaded, not from a probe.
 async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
+    let providers = providers_payload(&state);
+    let mut result = handle_health_check_inner(state).await?;
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("providers".to_string(), providers);
+    }
+    Ok(result)
+}
+
+/// Additive `providers` object (#851) reported by `health_check` and `knowledge_status`:
+/// `{"embedder": "test"|"real", "extractor": "test"|"real"|"none"}`. `"test"` means the built-in
+/// deterministic provider selected by `--embedder test` / `--extractor test`; `"none"` means no
+/// extractor is configured.
+pub fn providers_payload(state: &AppState) -> Value {
+    let embedder = if state.embedder.is_test_provider() {
+        "test"
+    } else {
+        "real"
+    };
+    let extractor = if state.extractor.is_test_provider() {
+        "test"
+    } else if state.extractor.is_configured() {
+        "real"
+    } else {
+        "none"
+    };
+    json!({"embedder": embedder, "extractor": extractor})
+}
+
+async fn handle_health_check_inner(state: Arc<AppState>) -> Result<Value, Error> {
     let db_opt = state.db.load_full();
     match db_opt {
         None => {
@@ -483,11 +512,14 @@ enum StatusOutcome {
     },
 }
 
-/// `knowledge_status` wrapper: adds the additive top-level `search_min_score_default` (issue
+/// `knowledge_status` wrapper: adds the additive top-level `providers` (#851) and
+/// `search_min_score_default` (issue
 /// #812) to every response shape (degraded, queryable, not-queryable) in one place.
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
+    let providers = providers_payload(&state);
     let mut result = handle_knowledge_status_inner(state).await?;
     if let Some(obj) = result.as_object_mut() {
+        obj.insert("providers".to_string(), providers);
         obj.insert(
             "search_min_score_default".to_string(),
             serde_json::json!(crate::search_config::default_min_score()),
