@@ -279,6 +279,25 @@ async fn other_notes_id_is_kept() {
     );
 }
 
+// A note filed under its subject's name (`people/Alice.md`) has no slug-shaped ID: the real `Alice`
+// entity the note is about must survive, with its edges.
+#[tokio::test]
+async fn subject_named_note_does_not_drop_the_subject_entity() {
+    let (db, _d) = make_db();
+    let state = make_state(
+        Arc::clone(&db),
+        Some(ontology(OntologyMode::Open)),
+        vec![ExtractionResult {
+            entities: vec![ent("Alice", "Person"), ent("Bob", "Person")],
+            edges: vec![edge("Alice", "Bob", "KNOWS")],
+        }],
+    );
+    let r = process_chunk(&state, "people/Alice.md").await;
+    assert_eq!(r["entities_dropped_source_id"], json!(0), "{r}");
+    assert_eq!(entity_names(&db), vec!["Alice", "Bob"]);
+    assert_eq!(edge_facts(&db), vec!["Alice KNOWS Bob"]);
+}
+
 // FR-009: a free-form `knowledge_add_episode` name is not a source ID — an entity that happens to
 // share it is kept — but an explicit `doc_id` still applies on every path.
 #[tokio::test]

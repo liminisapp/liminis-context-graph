@@ -29,6 +29,11 @@ endpoint.
   `knowledge_process_chunk`) also the chunk id with its `#<n>` suffix removed and the `source_file`
   part of `source_description` (the trailing `:{name}` stripped). A free-form
   `knowledge_add_episode` name (`"Alice"`) is not a source ID and is never used.
+- **ID-shaped only**: a candidate own ID is used only if it is slug-shaped — no whitespace and at
+  least one `-`, `_` or digit (`project-quill-core-1`). A note filed under its subject's name
+  (`people/Alice.md`, `Postgres.md`) has no distinguishable ID, so its stem is never an own ID and
+  the real `Alice`/`Postgres` entity is kept. This also keeps the `#`/`/` normalisation from making
+  a short name like `C#` or `AC/DC` collide with an ID of `c`/`dc`.
 - **Normalisation** (both sides): strip control characters, trim, lowercase, wrapping punctuation
   (`[[ ]]`, backticks, quotes, brackets), a `#fragment`, a path prefix and one `.md`/`.markdown`/
   `.mdx`/`.txt` extension. An empty result is never an ID.
@@ -54,8 +59,9 @@ deterministic name predicate in `episode.rs`.
 
 - The asserted `Document`/`Source` entity is untouched; nothing in `crates/core` creates it and the
   filter only removes extracted entities.
-- An entity that legitimately shares a name with the episode's own ID is dropped (strict normalised
-  equality, not fuzzy). Accepted by the spec.
+- An entity that legitimately shares a name with the episode's own *ID-shaped* ID is dropped (strict
+  normalised equality, not fuzzy). Accepted by the spec. Subject-named notes (`Alice.md`) are
+  exempt by the ID-shape gate above.
 - **Known risk: SC-001 may not reach 0 on v2.** The #819 junk metric counts a node named after *any*
   note ID. If the cited-ID path dominates, the own-ID filter is correct per FR-001/FR-007 but leaves
   most of the 13 in place. The `entities_dropped_source_id` counter makes the post-merge run

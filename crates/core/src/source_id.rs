@@ -83,6 +83,10 @@ fn trim_wrapping(s: &str) -> &str {
 ///   free-form `knowledge_add_episode` name such as `"Alice"` is not a source ID, and matching on
 ///   it would drop real entities (FR-009).
 ///
+/// Only **ID-shaped** identifiers are included (see [`is_id_shaped`]): a note filed under its
+/// subject's name (`people/Alice.md`, `Postgres.md`, `Quill Core.md`) has no distinguishable ID, and
+/// treating that stem as one would drop the real `Alice` entity the note is about (and, via the
+/// `#`/`/` normalisation, short names like `C#` or `AC/DC` could collide with an ID of `c`/`dc`).
 /// Empty identifiers are never included.
 pub fn own_source_ids(
     name: &str,
@@ -105,8 +109,18 @@ pub fn own_source_ids(
     candidates
         .iter()
         .map(|c| normalize_source_id(c))
-        .filter(|c| !c.is_empty())
+        .filter(|c| is_id_shaped(c))
         .collect()
+}
+
+/// Whether a normalised identifier looks like a slug/ID rather than a subject name: no whitespace,
+/// and at least one `-`, `_` or ASCII digit (`project-quill-core-1`, `note_7`, `doc3`). Bare words
+/// such as `alice` or `postgres` are not ID-shaped. Empty input is not ID-shaped.
+fn is_id_shaped(s: &str) -> bool {
+    !s.is_empty()
+        && !s.chars().any(char::is_whitespace)
+        && s.chars()
+            .any(|c| c == '-' || c == '_' || c.is_ascii_digit())
 }
 
 /// Whether `entity_name` normalises to one of the episode's own source IDs.
@@ -193,9 +207,42 @@ mod tests {
 
     #[test]
     fn source_description_without_name_suffix_yields_no_source_file() {
-        let got = ids("chunk#1", "something else entirely", None, true);
+        let got = ids("chunk-a#1", "something else entirely", None, true);
         assert_eq!(got.len(), 1);
-        assert!(got.contains("chunk"));
+        assert!(got.contains("chunk-a"));
+    }
+
+    #[test]
+    fn subject_named_files_are_not_own_ids() {
+        // A note titled after its subject has no ID to match; the real entity must survive.
+        for (name, sd, doc) in [
+            (
+                "people/Alice.md#0",
+                "people/Alice.md:people/Alice.md#0",
+                None,
+            ),
+            ("Postgres#1", "Postgres.md:Postgres#1", Some("Postgres")),
+            (
+                "Quill Core#0",
+                "Quill Core.md:Quill Core#0",
+                Some("Quill Core"),
+            ),
+            ("notes/C#.md#0", "notes/C#.md:notes/C#.md#0", None),
+        ] {
+            let got = ids(name, sd, doc, true);
+            assert!(got.is_empty(), "{name}: {got:?}");
+        }
+        let own = ids(
+            "people/Alice.md#0",
+            "people/Alice.md:people/Alice.md#0",
+            None,
+            true,
+        );
+        assert!(!matches_source_id("Alice", &own));
+        // Mixed: the slug-shaped candidate is kept, the bare-word one is not.
+        let got = ids("alice#0", "alice:alice#0", Some("note-9"), true);
+        assert_eq!(got.len(), 1);
+        assert!(got.contains("note-9"));
     }
 
     #[test]
