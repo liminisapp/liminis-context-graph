@@ -5,6 +5,7 @@ pub mod backfill;
 pub mod backfill_summary_embeddings;
 pub mod belief;
 pub mod canonicalize;
+pub mod capabilities;
 pub mod cassette;
 pub(crate) mod checkpoint;
 pub mod correction_reads;

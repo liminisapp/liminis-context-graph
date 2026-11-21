@@ -157,6 +157,9 @@ async fn handle(
         req.method.as_str(),
         "health_check"
             | "knowledge_status"
+            // Static build information (issue #854): no DB, no lock — most useful exactly when
+            // the server is degraded, so a client can learn which version it is talking to.
+            | "knowledge_capabilities"
             | "knowledge_recover"
             | "knowledge_recover_full"
             | "knowledge_close"
@@ -191,6 +194,7 @@ async fn handle(
     match req.method.as_str() {
         "health_check" => handle_health_check(state).await,
         "knowledge_status" => handle_knowledge_status(state).await,
+        "knowledge_capabilities" => Ok(crate::capabilities::payload()),
         "knowledge_process_chunk" => handle_knowledge_process_chunk(req, state).await,
         "knowledge_process_document" => {
             handle_knowledge_process_document(req, state, progress_tx).await
@@ -330,7 +334,7 @@ fn busy_health_payload(state: &AppState) -> Value {
                     .then_with(|| a.job_id.cmp(&b.job_id))
             });
         if let Some(job) = running {
-            return json!({
+            return crate::capabilities::with_version_fields(json!({
                 "ok": true,
                 "healthy": false,
                 "state": "busy",
@@ -343,16 +347,16 @@ fn busy_health_payload(state: &AppState) -> Value {
                     "wal_files_total": job.wal_files_total,
                     "elapsed_seconds": job.elapsed_seconds(),
                 },
-            });
+            }));
         }
     }
-    json!({
+    crate::capabilities::with_version_fields(json!({
         "ok": true,
         "healthy": false,
         "state": "busy",
         "ready_for_reads": true,
         "activity": "writing",
-    })
+    }))
 }
 
 /// Liveness/readiness probe. Never waits on the write lock (issue #628).
@@ -406,13 +410,13 @@ async fn handle_health_check_inner(state: Arc<AppState>) -> Result<Value, Error>
                 .ok()
                 .and_then(|g| g.clone())
                 .unwrap_or_else(|| "unknown".to_string());
-            Ok(json!({
+            Ok(crate::capabilities::with_version_fields(json!({
                 "ok": false,
                 "healthy": false,
                 "state": "degraded",
                 "ready_for_reads": false,
                 "reason": reason,
-            }))
+            })))
         }
         Some(db) => {
             let Ok(_guard) = state.write_lock.try_read() else {
@@ -424,12 +428,12 @@ async fn handle_health_check_inner(state: Arc<AppState>) -> Result<Value, Error>
             })
             .await??;
             drop(_guard);
-            Ok(json!({
+            Ok(crate::capabilities::with_version_fields(json!({
                 "ok": true,
                 "healthy": true,
                 "state": "healthy",
                 "ready_for_reads": true,
-            }))
+            })))
         }
     }
 }
