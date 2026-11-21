@@ -1657,6 +1657,15 @@ result fields exist for that, both introduced in 0.13.2.
   was dropped, so it can be iterated unconditionally. `edges_dropped_unresolvable`'s existing
   meaning is unchanged, and a caller reading only the count is unaffected (issue #411).
 
+- **`entities_dropped_source_id` counts extracted entities dropped for being named after the
+  episode's own source ID (issue #824).** An entity whose normalised name (case, surrounding
+  punctuation / `[[ ]]`, path prefix, one `.md`/`.markdown`/`.mdx`/`.txt` extension) equals the
+  chunk's own note ID — the `source_file`, `doc_id`, or the `chunk_id` before its `#<n>` suffix —
+  is the model extracting the note itself and is dropped, together with any edge touching it. The
+  host-asserted `Document`/`Source` entity is the supported way to represent the note. Another
+  note's ID is never matched. The count is a top-level field, always present (`0` when nothing was
+  dropped); the discarded edges are *not* counted in `edges_dropped_unresolvable`.
+
 - **`edges_dropped_self_loop` counts edges dropped because both endpoints resolved to one entity.**
   Two differently named endpoints can resolve to the same entity UUID (through dedup merges or
   salvage); inserting that edge would create a self-loop, so Phase C drops it. The count is a

@@ -312,6 +312,16 @@ that does not use them is unaffected), so it shows up as drift until the group i
 
 ### Entity type hierarchy
 
+**An extracted entity named after its own source note is dropped.** Declaring a `Document` type
+can invite the model to extract the note it is reading as an entity named after the note's ID
+(e.g. `project-quill-core-1`), which then absorbs edges that belong to the real entities. Extraction
+deterministically drops an entity whose name equals the episode's *own* source ID (the chunk's
+`source_file`, `doc_id`, or `chunk_id` prefix, compared case-insensitively and ignoring path
+prefix, wikilink brackets and a `.md`-style extension), plus any edge touching it
+([ADR-0824](adr/0824-own-source-id-entity-filter.md)). The asserted `Document`/`Source` entity your
+host supplies is the supported way to represent the note. An entity named after a *different*
+note's ID is kept. The drop is reported as `entities_dropped_source_id` on `knowledge_process_chunk`.
+
 The optional `parent: <TypeName>` field on an entity type declares a single-parent (tree) subtype relationship. A node typed `Rfc` will carry labels `["Entity", "Document", "Rfc"]` — enabling both specific queries (`WHERE 'Rfc' IN e.labels`) and rollup queries (`WHERE 'Document' IN e.labels`).
 
 - **Additive**: the specific type is never replaced by its parent; ancestor labels are added alongside it.

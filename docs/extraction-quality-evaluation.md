@@ -215,6 +215,17 @@ deliberately does **not** include a default-socket auto-detection tier for extra
 embedder, which does auto-detect the same sidecar): a live sidecar being present is not, by itself,
 evidence that its default model is a good extraction choice.
 
+## Note-ID entities and the own-source-ID filter
+
+Under an ontology with a `Document` type the model sometimes extracts a *junk* entity named after a
+note ID (`project-quill-core-1`); the graph-integrity report (#819) counts these as "Nodes named
+like note IDs". Extraction now drops an entity named after the episode's **own** source ID
+(ADR-0824) and reports the count as `entities_dropped_source_id`. The filter is own-ID only: a
+node named after a *different* note's ID — for example one cited as a `[[wikilink]]` in a derived
+note — is not matched, and the #819 metric counts those too. The 13 → 0 figure on the v2 corpus
+therefore needs a maintainer-run #819 evaluation; if cited-ID nodes remain, the follow-up is a
+citation-target rule (a separate issue).
+
 ## Guidance
 
 - **Quality-first, fully local**: `qwen3.6-27b`. The best-scoring local candidate on both corpora,
