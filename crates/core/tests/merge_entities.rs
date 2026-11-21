@@ -1337,3 +1337,57 @@ fn test_merge_created_self_loop_still_invalidated() {
         .iter()
         .all(|e| e.invalid_at.is_some()));
 }
+
+/// ADR-0823 on the corrections path: `apply_same_as` moves an alias's pre-existing self-loops
+/// (two distinct literal-valued facts sharing `(alias, alias, HAS_MEASURE)`) to the canonical
+/// without the `(src, dst, name)` dedup collapsing them into one.
+#[test]
+fn test_same_as_correction_moves_pre_existing_self_loops() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical = "sa-canon";
+    let alias = "sa-alias";
+    conn.insert_entity(&make_entity(
+        canonical,
+        "Marlin Core",
+        "2026-01-01 00:00:00",
+    ))
+    .unwrap();
+    conn.insert_entity(&make_entity(alias, "Marlin", "2026-01-01 00:01:00"))
+        .unwrap();
+    for fact in [
+        "Marlin has a monthly budget of $4,200",
+        "Marlin has a headcount of 12",
+    ] {
+        let mut e = make_edge(alias, alias, "HAS_MEASURE", TS);
+        e.fact = fact.to_string();
+        e.attributes = "{\"literal_object\":true}".to_string();
+        conn.insert_relates_to_edge(&e).unwrap();
+    }
+
+    let liminis_dir = dir.path().join(".liminis");
+    std::fs::create_dir_all(&liminis_dir).unwrap();
+    std::fs::write(
+        liminis_dir.join("knowledge-corrections.yaml"),
+        format!(
+            "corrections:\n  - id: \"c1\"\n    type: \"same_as\"\n    canonical_uuid: \"{canonical}\"\n    aliases: [\"Marlin\"]\n"
+        ),
+    )
+    .unwrap();
+    let result = apply_corrections_file(&conn, dir.path(), false);
+    assert!(result.success, "{:?}", result.errors);
+    assert_eq!(result.applied, 1);
+
+    let active: Vec<_> = conn
+        .get_full_edges_for_entity(canonical)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.invalid_at.is_none())
+        .collect();
+    assert_eq!(active.len(), 2, "{active:?}");
+    assert!(active
+        .iter()
+        .all(|e| e.source_node_uuid == canonical && e.target_node_uuid == canonical));
+}
