@@ -40,6 +40,9 @@ pub const EPISODE_FIELDS: &[&str] = &[
     "byte_end",
     "heading_path",
     "chunk_hash",
+    // Source identity (issue #853, ADR-0853): absent on a legacy episode.
+    "source_file",
+    "chunk_id",
 ];
 
 /// Serialized keys of an entity item (embeddings are `#[serde(skip)]`, never projectable).
