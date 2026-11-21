@@ -2937,7 +2937,13 @@ async fn handle_walk(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Er
         query: query_emb,
     };
 
-    let ontology = state.peek_or_load_ontology(&group_ids[0]);
+    // One effective ontology per walked group: `signature_mismatch` is checked against the
+    // ontology of each edge's own group.
+    let ontologies: std::collections::HashMap<String, Option<Arc<crate::ontology::Ontology>>> =
+        group_ids
+            .iter()
+            .map(|g| (g.clone(), state.peek_or_load_ontology(g)))
+            .collect();
     let db = load_db(&state)?;
     let _guard = state.write_lock.read().await;
     let gids = group_ids.clone();
@@ -2953,7 +2959,8 @@ async fn handle_walk(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Er
             conn: &conn,
             group_ids: gids,
         };
-        let outcome = walk::run(&graph, ontology.as_deref(), &plan, &embeddings)?;
+        let resolve = |gid: &str| ontologies.get(gid).and_then(|o| o.as_deref());
+        let outcome = walk::run_with_ontologies(&graph, &resolve, &plan, &embeddings)?;
         Ok(Some((starts, outcome)))
     })
     .await??;

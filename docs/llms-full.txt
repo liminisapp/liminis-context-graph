@@ -2411,7 +2411,11 @@ Response:
   has none.
 - `signature_mismatch` uses the flag persisted on the edge when present (`attributes`), otherwise
   recomputes whether the endpoint types violate the relation's declared `source_type` /
-  `target_type`; `false` with no ontology, no declared signature or an untyped endpoint.
+  `target_type`; `false` with no ontology, no declared signature or an untyped endpoint. With
+  several `group_ids`, each edge is checked against the ontology of its own `group_id`.
+- An edge whose fact embedding is unusable — a zero vector, or a different dimension from the
+  query embedding (the embedder changed since the edge was written) — cannot be scored: it gets
+  `score: 0.0`, no direction bonus, and ranks after every scorable candidate.
 - `facts_text` is the typed reader format, **deduplicated by edge uuid**, in hop then rank order:
   `- <fact> (<source> [<Type>] -> <target> [<Type>]) [from <date> until <date>]`. An untyped
   endpoint drops its `[Type]`; the validity suffix is omitted when both dates are absent and shows
@@ -2420,7 +2424,10 @@ Response:
 - An embedder failure is an explicit error, never a walk over zero vectors.
 
 **Known limit:** each hop loads every incident edge (with its fact embedding) of the frontier, so a
-hub entity with thousands of edges costs proportionally; the beam keeps later frontiers small.
+hub entity with thousands of edges costs proportionally; the beam keeps later frontiers small. There
+is deliberately no cap, since a cap would silently drop candidates; each hop reports its
+`candidate_count` (the unfiltered candidates after visited-node exclusion) so a caller can see how
+wide a hop was.
 
 ### Ontology reload (`knowledge_reload_ontology`)
 

@@ -363,9 +363,12 @@ pub fn facts_text(hops: &[WalkHop]) -> String {
 
 // ── The walk ──────────────────────────────────────────────────────────────────
 
+/// Resolves the effective ontology of a group (by `group_id`), for `signature_mismatch`.
+pub type OntologyResolver<'a> = &'a dyn Fn(&str) -> Option<&'a Ontology>;
+
 struct Walker<'a, G: WalkGraph> {
     graph: &'a G,
-    ontology: Option<&'a Ontology>,
+    ontologies: OntologyResolver<'a>,
     entities: HashMap<String, EntityRow>,
 }
 
@@ -421,7 +424,7 @@ impl<'a, G: WalkGraph> Walker<'a, G> {
             score: c.score,
             direction_matched: c.matched,
             signature_mismatch: signature_mismatch(
-                self.ontology,
+                (self.ontologies)(&e.group_id),
                 e,
                 self.labels(&e.source_node_uuid),
                 self.labels(&e.target_node_uuid),
@@ -469,12 +472,25 @@ impl<'a, G: WalkGraph> Walker<'a, G> {
     }
 }
 
+/// Whether the edge's fact embedding can be compared with `target`: non-zero and the same
+/// dimension. A zero vector (embedder was unavailable at write time) or a length mismatch (the
+/// embedder or its dimension changed since the edge was written) is unscorable —
+/// `cosine_similarity` would return 0.0 for it and the direction bonus could lift it above a
+/// genuinely relevant edge — so such edges rank last.
+fn has_usable_embedding(c: &Candidate, target: &[f32]) -> bool {
+    c.edge.fact_embedding.len() == target.len() && c.edge.fact_embedding.iter().any(|x| *x != 0.0)
+}
+
 /// Scores `cands` against `target` (+ `bonus` for direction matches), sorts best-first (edges
 /// without a usable embedding last; ties by uuid) and keeps the top `beam`.
 fn rank(cands: &mut Vec<Candidate>, target: &[f32], bonus: f32, beam: usize) {
+    let usable: HashSet<String> = cands
+        .iter()
+        .filter(|c| has_usable_embedding(c, target))
+        .map(|c| c.edge.uuid.clone())
+        .collect();
     for c in cands.iter_mut() {
-        let has_emb = c.edge.fact_embedding.iter().any(|x| *x != 0.0);
-        c.score = if has_emb {
+        c.score = if usable.contains(&c.edge.uuid) {
             cosine_similarity(target, &c.edge.fact_embedding)
                 + if c.matched == Some(true) { bonus } else { 0.0 }
         } else {
@@ -482,20 +498,32 @@ fn rank(cands: &mut Vec<Candidate>, target: &[f32], bonus: f32, beam: usize) {
         };
     }
     cands.sort_by(|a, b| {
-        let a_emb = a.edge.fact_embedding.iter().any(|x| *x != 0.0);
-        let b_emb = b.edge.fact_embedding.iter().any(|x| *x != 0.0);
-        b_emb
-            .cmp(&a_emb)
+        usable
+            .contains(&b.edge.uuid)
+            .cmp(&usable.contains(&a.edge.uuid))
             .then_with(|| b.score.total_cmp(&a.score))
             .then_with(|| a.edge.uuid.cmp(&b.edge.uuid))
     });
     cands.truncate(beam);
 }
 
-/// Runs the plan. `plan` must already be validated; `emb.hops` must have one vector per hop.
+/// Runs the plan with a single ontology applied to every edge. `plan` must already be validated;
+/// `emb.hops` must have one vector per hop.
 pub fn run<G: WalkGraph>(
     graph: &G,
     ontology: Option<&Ontology>,
+    plan: &WalkPlan,
+    emb: &WalkEmbeddings,
+) -> Result<WalkOutcome, Error> {
+    run_with_ontologies(graph, &|_| ontology, plan, emb)
+}
+
+/// Like [`run`], but each edge's `signature_mismatch` is checked against the ontology of the
+/// edge's own `group_id`, so a walk over several groups never applies one group's relation
+/// signatures to another group's edges.
+pub fn run_with_ontologies<'a, G: WalkGraph>(
+    graph: &'a G,
+    ontologies: OntologyResolver<'a>,
     plan: &WalkPlan,
     emb: &WalkEmbeddings,
 ) -> Result<WalkOutcome, Error> {
@@ -509,7 +537,7 @@ pub fn run<G: WalkGraph>(
     let beam = plan.mode.beam();
     let mut w = Walker {
         graph,
-        ontology,
+        ontologies,
         entities: HashMap::new(),
     };
 
@@ -1192,6 +1220,63 @@ mod tests {
                 .unwrap()
                 .signature_mismatch
         );
+    }
+
+    #[test]
+    fn signature_mismatch_uses_each_edges_group_ontology() {
+        use crate::ontology::{OntologyMode, RelationTypeDef};
+        let onto = Ontology {
+            mode: OntologyMode::Open,
+            entity_types: vec![],
+            relation_types: vec![RelationTypeDef {
+                name: "OWNS".into(),
+                description: None,
+                source_type: Some("Person".into()),
+                target_type: Some("Project".into()),
+                aliases: vec![],
+                keywords: vec![],
+                extract: true,
+            }],
+            ancestor_map: HashMap::new(),
+        };
+        let mut g = MemGraph::default();
+        g.ent("a", "Company").ent("b", "Project");
+        // Same shape in two groups; only group `ga` has an ontology.
+        g.edge("in_ga", "a", "b", "OWNS", [1.0, 0.0])
+            .edge("in_gb", "a", "b", "OWNS", [1.0, 0.0]);
+        g.edges[0].group_id = "ga".into();
+        g.edges[1].group_id = "gb".into();
+        let mut p = plan("b", vec![hop(&["OWNS"], Direction::Any)]);
+        p.mode = WalkMode::List;
+        let resolve = |gid: &str| (gid == "ga").then_some(&onto);
+        let o = run_with_ontologies(&g, &resolve, &p, &emb(1)).unwrap();
+        let by = |u: &str| {
+            o.hops[0]
+                .edges
+                .iter()
+                .find(|e| e.uuid == u)
+                .unwrap()
+                .signature_mismatch
+        };
+        assert!(by("in_ga"), "checked against its own group's ontology");
+        assert!(!by("in_gb"), "group gb has no ontology: never a mismatch");
+    }
+
+    #[test]
+    fn wrong_dimension_embedding_ranks_last_not_by_bonus() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T").ent("b", "T").ent("c", "T");
+        // `stale` has a 3-D embedding (embedder changed) but matches the direction (+0.05 bonus);
+        // `ok` is reversed but genuinely relevant. cosine(stale) would be 0.0 + 0.05.
+        g.edge("ok", "b", "a", "R", [0.01, 1.0])
+            .edge("stale", "a", "c", "R", [0.0, 0.0]);
+        g.edges[1].fact_embedding = vec![1.0, 0.0, 0.0];
+        let p = plan("a", vec![hop(&["R"], Direction::Out)]);
+        let o = run(&g, None, &p, &emb(1)).unwrap();
+        // emb(1) phrase is [1, 0]: ok scores ~0.01 (below the 0.05 bonus a stale edge would get), stale is unscorable (0.0) and ranks last.
+        assert_eq!(o.hops[0].edges[0].uuid, "ok");
+        assert_eq!(o.hops[0].edges[1].uuid, "stale");
+        assert_eq!(o.hops[0].edges[1].score, 0.0);
     }
 
     #[test]
