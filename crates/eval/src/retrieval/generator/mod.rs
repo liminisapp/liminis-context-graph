@@ -15,6 +15,7 @@
 //! can be exercised without one; it is never written into the checked-in fixture.
 
 pub mod check;
+pub mod graph_questions;
 pub mod notes;
 pub mod pyrandom;
 pub mod questions;
@@ -528,8 +529,10 @@ access or model calls. The prose is written separately, once, by `lcg-eval retri
 
 OPTIONS:
     --spec <FILE>   Scenario (quotas and seed), e.g. crates/eval/fixtures/retrieval-v2/scenario.json
-    --out <DIR>     Fixture directory (writes skeleton.json; review.json only when absent)
-    --check         Regenerate in memory and exit 1 if skeleton.json differs. If the fixture has been
+    --out <DIR>     Fixture directory (writes skeleton.json and graph-questions.jsonl; review.json
+                    only when absent)
+    --check         Regenerate in memory and exit 1 if skeleton.json or graph-questions.jsonl
+                    differs. If the fixture has been
                     rendered (render.json exists) also check the rendered notes and questions
                     against the skeleton. Writes nothing.
     --seed <N>      Override the scenario seed (write to a scratch --out)
@@ -586,11 +589,22 @@ fn run_gen(args: &[String]) -> Result<i32, String> {
         sc.seed,
         skeleton_hash(&text)
     );
+    // #821 FR-008: the graph question set is generated from the same skeleton.
+    let graph_text = graph_questions::to_jsonl(&graph_questions::generate(&g.skeleton)?);
     if check {
         let on_disk = std::fs::read_to_string(dir.join("skeleton.json")).unwrap_or_default();
         let mut failed = false;
         if on_disk != text {
             eprintln!("  drift: skeleton.json differs from the generator output for the scenario and seed");
+            failed = true;
+        }
+        let graph_on_disk =
+            std::fs::read_to_string(dir.join(graph_questions::FILE)).unwrap_or_default();
+        if let Some(d) = first_line_diff(&graph_on_disk, &graph_text) {
+            eprintln!(
+                "  drift: {} differs from the generator output ({d})",
+                graph_questions::FILE
+            );
             failed = true;
         }
         if dir.join("render.json").exists() {
@@ -614,15 +628,36 @@ fn run_gen(args: &[String]) -> Result<i32, String> {
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     std::fs::write(dir.join("skeleton.json"), &text).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(graph_questions::FILE), &graph_text).map_err(|e| e.to_string())?;
     let review = dir.join("review.json");
     if !review.exists() {
         std::fs::write(&review, review_template(&g, &text, sc.seed)).map_err(|e| e.to_string())?;
     }
     println!(
-        "retrieval-gen: wrote skeleton.json to {} ({summary})",
+        "retrieval-gen: wrote skeleton.json and {} to {} ({summary})",
+        graph_questions::FILE,
         dir.display()
     );
     Ok(0)
+}
+
+/// `None` when equal, else where the first difference is ("line N").
+fn first_line_diff(a: &str, b: &str) -> Option<String> {
+    if a == b {
+        return None;
+    }
+    let (la, lb): (Vec<&str>, Vec<&str>) = (a.lines().collect(), b.lines().collect());
+    let n = la
+        .iter()
+        .zip(&lb)
+        .position(|(x, y)| x != y)
+        .unwrap_or(la.len().min(lb.len()));
+    Some(format!(
+        "first difference at line {}; {} lines on disk, {} generated",
+        n + 1,
+        la.len(),
+        lb.len()
+    ))
 }
 
 pub fn run_cli(args: &[String]) -> i32 {
