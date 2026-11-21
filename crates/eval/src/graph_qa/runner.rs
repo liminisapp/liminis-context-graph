@@ -165,6 +165,7 @@ async fn belief_rerank_ctx(t: &Arc<dyn RpcTransport>, q: &str, k: usize) -> Resu
         rerank: true,
         expand: false,
         belief_aware: true,
+        summaries: false,
     };
     let r = t
         .call(
