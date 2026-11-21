@@ -16,6 +16,7 @@
 
 pub mod check;
 pub mod notes;
+pub mod pyrandom;
 pub mod questions;
 pub mod render;
 pub mod skeleton;
