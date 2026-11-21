@@ -255,20 +255,28 @@ async fn plan_phase(inp: &Inputs<'_>) -> Result<Vec<(Option<Value>, &'static str
         }
         return Ok(out);
     };
-    let texts: Vec<(usize, String)> = futures::stream::iter(reqs)
-        .map(|(i, req)| async move {
-            inp.cache
-                .get_or_call("planner", planner, &req)
-                .await
-                .map(|t| (i, t))
-        })
+    // One call per distinct prompt, as the reader phase does: two questions with the same text
+    // share a cache key, and running both concurrently would pay twice and leave the cached plan
+    // to whichever finished last.
+    let mut unique: Vec<ModelRequest> = Vec::new();
+    let mut slot_of: BTreeMap<String, usize> = BTreeMap::new();
+    let mut targets: Vec<(usize, usize)> = Vec::with_capacity(reqs.len());
+    for (i, req) in reqs {
+        let slot = *slot_of.entry(super::cache::key(&req)).or_insert_with(|| {
+            unique.push(req);
+            unique.len() - 1
+        });
+        targets.push((i, slot));
+    }
+    let texts: Vec<String> = futures::stream::iter(unique.iter())
+        .map(|req| inp.cache.get_or_call("planner", planner, req))
         .buffered(inp.concurrency.max(1))
         .try_collect()
         .await
         .map_err(|e| RunError::Failed(format!("planner call failed: {e}")))?;
-    for (i, t) in texts {
+    for (i, slot) in targets {
         // An unparseable response is a plan error (validated below), never a re-prompt.
-        out[i].0 = Some(prompts::parse_json_object(&t).unwrap_or(Value::Null));
+        out[i].0 = Some(prompts::parse_json_object(&texts[slot]).unwrap_or(Value::Null));
     }
     Ok(out)
 }
@@ -306,6 +314,12 @@ pub async fn run(inp: Inputs<'_>) -> Result<RunOutput, RunError> {
         .into_iter()
         .map(|(n, _)| n)
         .collect();
+    let ents: BTreeSet<String> = inp.ontology_view["entity_types"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e["name"].as_str().map(String::from))
+        .collect();
 
     // ── contexts ───────────────────────────────────────────────────────────────
     let t = inp.transport.as_ref();
@@ -321,7 +335,7 @@ pub async fn run(inp: Inputs<'_>) -> Result<RunOutput, RunError> {
             per_runner: BTreeMap::new(),
         };
         let plan: Option<Plan> = if needs_plans {
-            match plans::validate(raw.as_ref().unwrap_or(&Value::Null), &rels) {
+            match plans::validate(raw.as_ref().unwrap_or(&Value::Null), &rels, &ents) {
                 Ok(p) => {
                     qr.route = Some(p.route.clone());
                     Some(p)

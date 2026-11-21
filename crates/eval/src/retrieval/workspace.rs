@@ -241,6 +241,26 @@ fn copy_tree(src: &Path, dst: &Path, skip: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `addr` with any userinfo, query and fragment removed when it is an `http(s)` URL, so an endpoint
+/// that carries a credential (`http://user:token@host/…`, `…?key=…`) is never written to disk or
+/// printed. Anything else (a socket path) is returned trimmed.
+pub fn redact_endpoint(addr: &str) -> String {
+    let s = addr.trim();
+    let Some((scheme, rest)) = s.split_once("://") else {
+        return s.to_string();
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return s.to_string();
+    }
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
+    let (authority, path) = match rest.find('/') {
+        Some(i) => rest.split_at(i),
+        None => (rest, ""),
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    format!("{scheme}://{host}{path}")
+}
+
 /// Moves the workspace at `src` to `dest` (which must not exist, or be an empty directory):
 /// `rename` when possible, a copy then removal across devices. The socket is never kept.
 ///
@@ -416,5 +436,15 @@ mod tests {
             dest.join("other").exists(),
             "what was at dest is not touched"
         );
+    }
+
+    #[test]
+    fn endpoints_are_stored_without_credentials() {
+        assert_eq!(
+            redact_endpoint("http://user:tok@127.0.0.1:8080/v1/embeddings?key=s3cret#x"),
+            "http://127.0.0.1:8080/v1/embeddings"
+        );
+        assert_eq!(redact_endpoint("https://h/e"), "https://h/e");
+        assert_eq!(redact_endpoint(" /tmp/e.sock "), "/tmp/e.sock");
     }
 }

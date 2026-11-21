@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -336,10 +335,22 @@ async fn ontology_ingest_round_trips_and_the_kept_workspace_serves_integrity_and
     assert_eq!(stable(&r1["ingest"]), stable(&r2["ingest"]));
     assert_eq!(r2["meta"]["ontology_hash"], hash.as_str());
 
-    // 3. Replay under another ontology hash (open mode; no ontology): refused before ingest.
-    for extra in [
-        vec!["--ontology", onto.as_str(), "--ontology-mode", "open"],
-        vec![],
+    // 3. Replay under another ontology hash (open mode; no ontology): refused before ingest, and
+    //    the error names both the cassette's hash and this run's.
+    let open_hash = lcg_core::ontology::content_hash(Some(
+        &lcg_core::ontology::load_ontology_from_path(
+            Path::new(&onto),
+            lcg_core::OntologyMode::Open,
+        )
+        .unwrap(),
+    ));
+    assert_ne!(open_hash, hash);
+    for (extra, run_hash) in [
+        (
+            vec!["--ontology", onto.as_str(), "--ontology-mode", "open"],
+            open_hash.as_str(),
+        ),
+        (vec![], "none"),
     ] {
         let mut a: Vec<&str> = common.to_vec();
         a.extend([
@@ -349,12 +360,13 @@ async fn ontology_ingest_round_trips_and_the_kept_workspace_serves_integrity_and
             &cassette,
         ]);
         a.extend(extra);
-        let started = Instant::now();
+        // No wall-clock bound (it would flake on a loaded machine): the stderr checks below show
+        // the refusal comes before the service starts, and no extraction request is made.
         let o = lcg_eval(&a);
-        assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(o.status.code(), Some(1));
         let err = String::from_utf8_lossy(&o.stderr);
         assert!(err.contains(&hash), "{err}");
+        assert!(err.contains(&format!("is {run_hash}")), "{err}");
         assert!(!err.contains("starting LCG service"), "{err}");
     }
     assert_eq!(extracted.load(Ordering::SeqCst), before);

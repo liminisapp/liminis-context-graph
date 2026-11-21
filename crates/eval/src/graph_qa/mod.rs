@@ -89,7 +89,7 @@ pub fn inspect_workspace(
                      are only meaningful if both addresses serve the same embedding model.",
                     ws.display(),
                     m.embedder,
-                    embedder
+                    workspace::redact_endpoint(embedder)
                 );
             } else {
                 return Err(fail(
@@ -101,7 +101,7 @@ pub fn inspect_workspace(
                          embedding model.",
                         ws.display(),
                         m.embedder,
-                        embedder
+                        workspace::redact_endpoint(embedder)
                     ),
                 ));
             }
@@ -125,7 +125,8 @@ pub fn inspect_workspace(
 /// `localhost` and `[::1]` become `127.0.0.1`, and a trailing `/` is dropped, so the same local
 /// embedder typed two ways compares equal. Anything else (a socket path) is only trimmed.
 pub fn embedder_key(addr: &str) -> String {
-    let s = addr.trim();
+    let redacted = workspace::redact_endpoint(addr);
+    let s = redacted.as_str();
     let Some((scheme, rest)) = s.split_once("://") else {
         return s.to_string();
     };
@@ -446,6 +447,11 @@ mod tests {
             ),
             ("http://[::1]:8080", "http://localhost:8080"),
             (" /tmp/e.sock ", "/tmp/e.sock"),
+            // The manifest stores the address without credentials; the run's must still match.
+            (
+                "http://user:tok@localhost:8080/e?key=s3cret",
+                "http://127.0.0.1:8080/e",
+            ),
         ];
         for (a, b) in same {
             assert_eq!(embedder_key(a), embedder_key(b), "{a} vs {b}");

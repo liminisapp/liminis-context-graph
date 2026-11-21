@@ -57,7 +57,8 @@ fn recorded_v5_plans_become_valid_walk_requests_without_a_planner() {
     assert!(f.unknown_ids(&ids).is_empty());
     let (mut graph, mut passages) = (0, 0);
     for q in &e13 {
-        let p = plans::validate(&f.plans[&q.id], &rels).unwrap_or_else(|e| panic!("{}: {e}", q.id));
+        let p = plans::validate(&f.plans[&q.id], &rels, &ents)
+            .unwrap_or_else(|e| panic!("{}: {e}", q.id));
         match p.route.as_str() {
             "graph" => {
                 graph += 1;
@@ -744,4 +745,74 @@ fn the_smoke_questions_cover_every_shape_and_scoring_mode() {
     let modes: BTreeSet<&str> = qs.iter().map(|q| q.scoring.as_str()).collect();
     assert_eq!(modes, BTreeSet::from(["ordered", "set", "single"]));
     assert!(Path::new(&smoke().join("plans.json")).exists());
+}
+
+/// A planner that yields before answering, as a real network call does: without that, every
+/// call finishes (and is cached) before the next one starts, and duplicate prompts never race.
+struct YieldingPlanner {
+    calls: AtomicUsize,
+}
+
+impl lcg_eval::llm_client::ModelClient for YieldingPlanner {
+    fn complete<'a>(&'a self, _req: &'a ModelRequest) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            Ok(json!({"route": "graph", "start": "Ana Silva", "hops": [
+                {"types": ["REPORTS_TO"], "phrase": "people reporting", "direction": "in"}],
+                "list": false, "history": false, "answer_type": "Person"})
+            .to_string())
+        })
+    }
+}
+
+#[tokio::test]
+async fn two_questions_with_one_text_make_one_planner_call_and_share_its_plan() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = LlmCache::load(&tmp.path().join("c.jsonl")).unwrap();
+    let mut qs = questions();
+    // s006 has no recorded plan; a second question asks exactly the same thing.
+    let mut twin = qs.iter().find(|q| q.id == "s006").unwrap().clone();
+    twin.id = "s006-twin".into();
+    qs.push(twin);
+    let f = plans::load_plans(&smoke().join("plans.json")).unwrap();
+    let planner = YieldingPlanner {
+        calls: AtomicUsize::new(0),
+    };
+    let r = reader();
+    let view = ontology_view();
+    let run = runners(&["walk"]);
+    let out = runner::run(Inputs {
+        questions: &qs,
+        runners: &run,
+        transport: Arc::new(FakeLcg::new()),
+        ontology_view: &view,
+        plans_file: Some(&f),
+        plans_only: false,
+        planner: Some(&planner),
+        reader: &r,
+        planner_model: "planner-m",
+        reader_model: "reader-m",
+        cache: &cache,
+        qmd: None,
+        k: 10,
+        concurrency: 3,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        planner.calls.load(Ordering::SeqCst),
+        1,
+        "one call per distinct planner prompt"
+    );
+    let plan_of = |id: &str| {
+        out.questions
+            .iter()
+            .find(|q| q.id == id)
+            .unwrap()
+            .plan
+            .clone()
+    };
+    assert!(plan_of("s006").is_some());
+    assert_eq!(plan_of("s006"), plan_of("s006-twin"));
 }

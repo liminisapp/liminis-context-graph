@@ -83,10 +83,16 @@ pub fn walk_mode(p: &Plan) -> &'static str {
     }
 }
 
-/// Parses and validates a plan. `relation_types` is the workspace ontology's relation names; an
-/// empty set (a free-form workspace) skips the type check. `Err` is a plan error: the question is
-/// answered from an empty walk context and counted, never re-planned.
-pub fn validate(raw: &Value, relation_types: &BTreeSet<String>) -> Result<Plan, String> {
+/// Parses and validates a plan. `relation_types` and `entity_types` are the workspace ontology's
+/// relation and entity type names; an empty set (a free-form workspace) skips that check. An
+/// `answer_type` must be an entity type or `value` (no type filter). `Err` is a plan error: the
+/// question is answered from an empty walk context and counted, never re-planned, and the run goes
+/// on.
+pub fn validate(
+    raw: &Value,
+    relation_types: &BTreeSet<String>,
+    entity_types: &BTreeSet<String>,
+) -> Result<Plan, String> {
     if raw.is_null() {
         return Err("no plan".into());
     }
@@ -97,6 +103,14 @@ pub fn validate(raw: &Value, relation_types: &BTreeSet<String>) -> Result<Plan, 
     }
     if p.start.trim().is_empty() {
         return Err("empty start".into());
+    }
+    if let Some(at) = p.answer_type.as_deref().map(str::trim) {
+        if !at.is_empty() && at != "value" && !entity_types.is_empty() && !entity_types.contains(at)
+        {
+            return Err(format!(
+                "answer_type {at} is neither an ontology entity type nor \"value\""
+            ));
+        }
     }
     // A passages-routed plan may carry no hops (the walk then reads nothing, as in the probe's
     // `facts_ctx([])`); a graph-routed one must have at least one.
@@ -158,13 +172,37 @@ mod tests {
             .collect()
     }
 
+    fn ents() -> BTreeSet<String> {
+        ["Person", "Project"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn answer_type_must_be_an_entity_type_or_value() {
+        let base = json!({"route": "graph", "start": "X", "hops": [{"types": ["OWNS"], "phrase": "p", "direction": "out"}], "list": false, "history": false});
+        for ok in [json!("Person"), json!("value"), json!(null), json!("")] {
+            let mut b = base.clone();
+            b["answer_type"] = ok.clone();
+            assert!(validate(&b, &rels(), &ents()).is_ok(), "{ok}");
+        }
+        let mut b = base.clone();
+        b["answer_type"] = json!("Spaceship");
+        assert!(validate(&b, &rels(), &ents())
+            .unwrap_err()
+            .contains("Spaceship"));
+        // A free-form workspace has no entity types to check against.
+        assert!(validate(&b, &BTreeSet::new(), &BTreeSet::new()).is_ok());
+    }
+
     #[test]
     fn a_good_plan_becomes_a_soft_walk_request_the_service_accepts() {
         let raw = json!({"route": "graph", "start": "Tern Core", "hops": [
             {"types": ["OWNS"], "phrase": "owner", "direction": "in"},
             {"types": ["REPORTS_TO"], "phrase": "manager", "direction": "out"}],
             "list": false, "history": false, "answer_type": "Person"});
-        let p = validate(&raw, &rels()).unwrap();
+        let p = validate(&raw, &rels(), &ents()).unwrap();
         let r = walk_request(&p, "Who does the owner of Tern Core report to?");
         assert_eq!(r["mode"], "single");
         assert_eq!(r["direction_mode"], "soft");
@@ -181,26 +219,32 @@ mod tests {
     #[test]
     fn malformed_plans_are_errors() {
         let base = json!({"route": "graph", "start": "X", "hops": [{"types": ["OWNS"], "phrase": "p", "direction": "out"}], "list": false, "history": false, "answer_type": "value"});
-        assert!(validate(&base, &rels()).is_ok());
-        assert!(validate(&Value::Null, &rels()).is_err());
-        assert!(validate(&json!("nonsense"), &rels()).is_err());
+        assert!(validate(&base, &rels(), &ents()).is_ok());
+        assert!(validate(&Value::Null, &rels(), &ents()).is_err());
+        assert!(validate(&json!("nonsense"), &rels(), &ents()).is_err());
         let mut b = base.clone();
         b["route"] = json!("maybe");
-        assert!(validate(&b, &rels()).unwrap_err().contains("route"));
+        assert!(validate(&b, &rels(), &ents())
+            .unwrap_err()
+            .contains("route"));
         let mut b = base.clone();
         b["hops"][0]["types"] = json!(["MADE_UP"]);
-        assert!(validate(&b, &rels()).unwrap_err().contains("MADE_UP"));
+        assert!(validate(&b, &rels(), &ents())
+            .unwrap_err()
+            .contains("MADE_UP"));
         // A free-form workspace has no types to check against.
-        assert!(validate(&b, &BTreeSet::new()).is_ok());
+        assert!(validate(&b, &BTreeSet::new(), &BTreeSet::new()).is_ok());
         let mut b = base.clone();
         b["hops"][0]["direction"] = json!("up");
-        assert!(validate(&b, &rels()).is_err());
+        assert!(validate(&b, &rels(), &ents()).is_err());
         let mut b = base;
         b["hops"] = json!([]);
-        assert!(validate(&b, &rels()).unwrap_err().contains("no hops"));
+        assert!(validate(&b, &rels(), &ents())
+            .unwrap_err()
+            .contains("no hops"));
         b["route"] = json!("passages");
         assert!(
-            validate(&b, &rels()).is_ok(),
+            validate(&b, &rels(), &ents()).is_ok(),
             "a passages plan needs no hops"
         );
     }

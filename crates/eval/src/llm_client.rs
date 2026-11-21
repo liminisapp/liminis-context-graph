@@ -107,6 +107,13 @@ pub fn provider_configured(env: &dyn Fn(&str) -> Option<String>, cli: &Anthropic
         || !cli.is_empty()
 }
 
+/// A `reqwest` error for an error message. Its `Display` includes the request URL, and the endpoint
+/// can carry userinfo or a token query (`http://user:token@host/…`, `…?key=…`), so the URL is
+/// dropped: a credential must never reach stderr, a log or a report.
+pub fn request_error(e: reqwest::Error) -> String {
+    e.without_url().to_string()
+}
+
 /// The process environment, as [`AnthropicEndpointConfig::resolve`] wants it.
 pub fn process_env(k: &str) -> Option<String> {
     std::env::var(k).ok()
@@ -162,9 +169,13 @@ impl MessagesClient {
         )?))
     }
 
-    /// Endpoint and auth scheme for logs and reports — never the credential.
+    /// Endpoint and auth scheme for logs and reports — never the credential: the endpoint URL is
+    /// shown without userinfo or query.
     pub fn describe(&self) -> String {
-        self.cfg.startup_summary()
+        self.cfg.startup_summary().replace(
+            &self.cfg.url,
+            &crate::retrieval::workspace::redact_endpoint(&self.cfg.url),
+        )
     }
 
     pub fn breaker(&self) -> &CircuitBreaker {
@@ -228,7 +239,12 @@ impl MessagesClient {
                         attempt += 1;
                         continue;
                     }
-                    Err(e) => return Err(format!("model request failed after retries: {e}")),
+                    Err(e) => {
+                        return Err(format!(
+                            "model request failed after retries: {}",
+                            request_error(e)
+                        ))
+                    }
                 };
                 let status = http_resp.status();
                 if (status.as_u16() == 429 || status.as_u16() == 529) && attempt < 3 {
@@ -264,7 +280,7 @@ impl MessagesClient {
                 break http_resp
                     .json()
                     .await
-                    .map_err(|e| format!("model response not JSON: {e}"))?;
+                    .map_err(|e| format!("model response not JSON: {}", request_error(e)))?;
             };
             response_text(&resp)
         })
@@ -535,5 +551,36 @@ mod tests {
         }
         let e = c.complete(&req(None)).await.unwrap_err();
         assert!(e.contains("circuit breaker open"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn request_errors_never_carry_the_endpoint_credential() {
+        let e = reqwest::Client::new()
+            .get("http://user:s3cret@127.0.0.1:1/v1/messages?key=t0ken")
+            .send()
+            .await
+            .unwrap_err();
+        // reqwest already drops userinfo from its Display, but not a token in the query.
+        assert!(
+            e.to_string().contains("t0ken"),
+            "reqwest prints the URL: {e}"
+        );
+        let msg = request_error(e);
+        assert!(!msg.contains("s3cret") && !msg.contains("t0ken"), "{msg}");
+    }
+
+    #[test]
+    fn describe_shows_the_endpoint_without_its_credential() {
+        let env = |k: &str| match k {
+            "ANTHROPIC_API_KEY" => Some("k".to_string()),
+            "LCG_ANTHROPIC_ENDPOINT" => {
+                Some("http://user:s3cret@127.0.0.1:9/v1/messages?key=t0ken".to_string())
+            }
+            _ => None,
+        };
+        let cfg = AnthropicEndpointConfig::resolve(&env, &AnthropicCliArgs::default()).unwrap();
+        let d = MessagesClient::new(cfg).describe();
+        assert!(d.contains("127.0.0.1:9/v1/messages"), "{d}");
+        assert!(!d.contains("s3cret") && !d.contains("t0ken"), "{d}");
     }
 }

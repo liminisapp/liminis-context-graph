@@ -705,8 +705,9 @@ call would miss. A cassette recorded before this change has no sidecar. Replayin
 `--ontology` prints a warning that the hash cannot be verified and carries on.
 
 **The manifest.** `lcg-eval-workspace.json` records how the workspace was built: group, corpus
-version and hash, ontology hash and mode, embedder, embedding profile, extractor, cassette and LCG
-build. `graph-qa` refuses a workspace whose embedder differs from the one it is given (exit 3). The
+version and hash, ontology hash and mode, embedder (any userinfo, query or fragment stripped from its
+URL, so no credential is written to disk), embedding profile, extractor, cassette and LCG build.
+`graph-qa` refuses a workspace whose embedder differs from the one it is given (exit 3). The
 addresses are compared after normalising loopback aliases (`localhost`, `127.0.0.1`, `[::1]`), case
 and a trailing slash; `--allow-embedder-mismatch` downgrades a remaining mismatch to a warning, for
 the same embedding model reached at a new address (a relocated socket, say). A genuinely different
@@ -809,6 +810,7 @@ One plan per question serves both `walk` and `route`. A plan is a **plan error**
 - it does not parse;
 - it names an unknown route or direction;
 - a hop's relation type is not in the ontology;
+- its `answer_type` is neither an ontology entity type nor `value`;
 - a graph route has no hops.
 
 The question is then answered from an empty walk and counted; it is never re-planned. A start

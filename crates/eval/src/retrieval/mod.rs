@@ -22,7 +22,7 @@ pub mod variants;
 pub mod workspace;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -842,6 +842,7 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
     .await;
 
     // ── Kept workspace (FR-006) ───────────────────────────────────────────────
+    let mut kept_manifest: Option<(PathBuf, workspace::WorkspaceManifest)> = None;
     if let (Some(dest), Some(guard)) = (&a.keep_workspace, _service_guards.pop()) {
         let manifest = workspace::WorkspaceManifest {
             format: 1,
@@ -850,35 +851,64 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             corpus_hash: meta.corpus_hash.clone(),
             ontology_hash: onto.hash.clone(),
             ontology_mode: onto.mode.clone(),
-            embedder: a
-                .embedder_http
-                .clone()
-                .or(a.embedder_uds.clone())
-                .or_else(|| std::env::var("LCG_EMBEDDING_URL").ok())
-                .unwrap_or_default(),
+            // Redacted: the manifest is on disk next to the data, so no endpoint credential.
+            embedder: workspace::redact_endpoint(
+                &a.embedder_http
+                    .clone()
+                    .or(a.embedder_uds.clone())
+                    .or_else(|| std::env::var("LCG_EMBEDDING_URL").ok())
+                    .unwrap_or_default(),
+            ),
             embedding_profile: a.embedding_profiles.first().cloned(),
             extractor: meta.extractor.clone(),
             cassette: a.replay_cassette.clone().or(a.record_cassette.clone()),
             lcg_build: meta.lcg_build.clone(),
         };
-        workspace::write_manifest(guard.workspace_path(), &manifest)?;
         guard.shutdown_and_keep(dest).await?;
         eprintln!(
             "lcg-eval retrieval: kept the ingested workspace at {}",
             dest.display()
         );
         meta.kept_workspace = Some(dest.display().to_string());
+        kept_manifest = Some((dest.clone(), manifest));
     }
-    let outcomes = evaluated?;
+    // The manifest is written last, after the report: a manifest that cannot be written must cost
+    // neither the ingest nor the computed results, so its failure is a warning naming the kept
+    // workspace.
+    let write_kept_manifest = || {
+        if let Some((dest, manifest)) = &kept_manifest {
+            if let Err(e) = workspace::write_manifest(dest, manifest) {
+                eprintln!(
+                    "lcg-eval retrieval: WARNING the ingested workspace is kept at {} but its {} \
+                     could not be written: {e}; graph-qa will treat its provenance as unknown",
+                    dest.display(),
+                    workspace::MANIFEST_FILE
+                );
+            }
+        }
+    };
+    let outcomes = match evaluated {
+        Ok(o) => o,
+        Err(e) => {
+            write_kept_manifest();
+            return Err(e);
+        }
+    };
     let report = Report {
         meta,
         ingest: ingest_cost,
         configs: outcomes,
     };
 
+    let written = write_report(&report, a.out.as_deref());
+    write_kept_manifest();
+    written
+}
+
+fn write_report(report: &Report, out: Option<&Path>) -> Result<(), String> {
     let markdown = report.render_markdown();
     println!("{markdown}");
-    if let Some(dir) = &a.out {
+    if let Some(dir) = out {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create --out {}: {e}", dir.display()))?;
         std::fs::write(dir.join("report.md"), &markdown)
