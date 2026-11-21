@@ -789,7 +789,7 @@ Exit codes:
 - 1: the run failed (service, model provider or I/O).
 - 2: usage error.
 - 3: unusable workspace (missing, not ingested, or an embedder mismatch).
-- 4: questions without a plan, and no planner may be called.
+- 4: questions without a plan, and no planner may be called. With no model provider configured, a planner response already in `--llm-cache` still counts as a plan, so a fully cached rerun works offline; only questions with no recorded or cached plan are uncovered.
 
 ### Runners
 

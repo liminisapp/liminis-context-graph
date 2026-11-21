@@ -418,6 +418,88 @@ async fn a_fully_cached_second_run_makes_no_model_call_and_identical_scores() {
     assert_eq!(second["meta"]["cache"]["reader"]["paid_calls"], 0);
 }
 
+/// `runner::run` with no planner and `reader` as the only model client.
+async fn run_without_provider(
+    qs: &[GraphQuestion],
+    f: &PlansFile,
+    run: &[String],
+    reader: &ScriptedModel,
+    cache: &LlmCache,
+) -> Result<RunOutput, RunError> {
+    let view = ontology_view();
+    runner::run(Inputs {
+        questions: qs,
+        runners: run,
+        transport: Arc::new(FakeLcg::new()),
+        ontology_view: &view,
+        plans_file: Some(f),
+        plans_only: false,
+        planner: None,
+        reader,
+        planner_model: "planner-m",
+        reader_model: "reader-m",
+        cache,
+        qmd: None,
+        k: 10,
+        concurrency: 3,
+    })
+    .await
+}
+
+/// A cached rerun with no model provider at all (no planner, a reader that always errors): cached
+/// planner responses are still used, and only a question with no cached plan is uncovered.
+#[tokio::test]
+async fn a_fully_cached_rerun_needs_no_planner_and_only_real_misses_are_uncovered() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("c.jsonl");
+    let qs = questions();
+    let f = plans::load_plans(&smoke().join("plans.json")).unwrap();
+    let run = runners(&["passages", "walk", "route"]);
+    let first = {
+        let cache = LlmCache::load(&path).unwrap();
+        let (p, r) = (planner(), reader());
+        let out = run_once(
+            &qs,
+            &f,
+            false,
+            &run,
+            &p,
+            &r,
+            &cache,
+            Arc::new(FakeLcg::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(p.calls(), 1, "s006 has no recorded plan");
+        report_json(&out, &qs, &f, &cache).0
+    };
+    let offline = ScriptedModel::new(|_| Err("no provider".into()));
+    let cache = LlmCache::load(&path).unwrap();
+    let out = run_without_provider(&qs, &f, &run, &offline, &cache)
+        .await
+        .unwrap();
+    assert_eq!(offline.calls(), 0);
+    let by: BTreeMap<&str, _> = out.questions.iter().map(|q| (q.id.as_str(), q)).collect();
+    assert_eq!(by["s006"].plan_source, "planner");
+    assert!(by["s006"].plan_error.is_none());
+    let second = report_json(&out, &qs, &f, &cache).0;
+    assert_eq!(
+        serde_json::to_string(&first["scores"]).unwrap(),
+        serde_json::to_string(&second["scores"]).unwrap()
+    );
+    assert_eq!(second["meta"]["cache"]["planner"]["cache_hits"], 1);
+    // An empty cache: the uncovered question is named, before any reader call.
+    let empty = LlmCache::load(&tmp.path().join("empty.jsonl")).unwrap();
+    match run_without_provider(&qs, &f, &run, &offline, &empty)
+        .await
+        .unwrap_err()
+    {
+        RunError::Uncovered(ids) => assert_eq!(ids, vec!["s006"]),
+        e => panic!("{e}"),
+    }
+    assert_eq!(offline.calls(), 0);
+}
+
 #[tokio::test]
 async fn plans_only_fails_before_any_reader_call_naming_the_uncovered_ids() {
     let tmp = tempfile::tempdir().unwrap();

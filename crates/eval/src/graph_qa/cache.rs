@@ -90,6 +90,20 @@ impl LlmCache {
         }
     }
 
+    /// The cached response for `req`, if any (counted as a hit). Never calls a model.
+    pub fn lookup(&self, role: &str, req: &ModelRequest) -> Option<String> {
+        let v = self
+            .entries
+            .lock()
+            .expect("cache lock")
+            .get(&key(req))
+            .cloned();
+        if v.is_some() {
+            self.bump(role, true);
+        }
+        v
+    }
+
     /// The cached response for `req`, else `client`'s (then cached). A client error is returned
     /// and nothing is cached.
     pub async fn get_or_call(

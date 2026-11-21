@@ -55,7 +55,8 @@ pub struct Inputs<'a> {
     pub plans_file: Option<&'a PlansFile>,
     /// Fail when a question has no recorded plan, rather than calling the planner.
     pub plans_only: bool,
-    /// `None`: no planner configured (uncovered questions fail the run).
+    /// `None`: no planner configured. Cached planner responses are still used; questions with no
+    /// recorded or cached plan fail the run.
     pub planner: Option<&'a dyn ModelClient>,
     pub reader: &'a dyn ModelClient,
     pub planner_model: &'a str,
@@ -69,7 +70,8 @@ pub struct Inputs<'a> {
 
 #[derive(Debug)]
 pub enum RunError {
-    /// Questions with no recorded plan and no planner to ask (exit 4), before any reader call.
+    /// Questions with no recorded (or, without a planner, cached) plan and no planner to ask
+    /// (exit 4), before any reader call.
     Uncovered(Vec<String>),
     Failed(String),
 }
@@ -215,10 +217,9 @@ async fn plan_phase(inp: &Inputs<'_>) -> Result<Vec<(Option<Value>, &'static str
     if uncovered.is_empty() {
         return Ok(out);
     }
-    let planner = match inp.planner {
-        Some(p) if !inp.plans_only => p,
-        _ => return Err(RunError::Uncovered(uncovered)),
-    };
+    if inp.plans_only {
+        return Err(RunError::Uncovered(uncovered));
+    }
     let system = prompts::planner_system(inp.ontology_view);
     let schema = prompts::planner_schema(inp.ontology_view);
     let reqs: Vec<(usize, ModelRequest)> = inp
@@ -239,6 +240,21 @@ async fn plan_phase(inp: &Inputs<'_>) -> Result<Vec<(Option<Value>, &'static str
             )
         })
         .collect();
+    let Some(planner) = inp.planner else {
+        // No planner to call: a cached plan is still a plan (a fully cached rerun needs no
+        // provider, FR-020); only the questions with no cached plan are uncovered.
+        let mut missing = Vec::new();
+        for (i, req) in &reqs {
+            match inp.cache.lookup("planner", req) {
+                Some(t) => out[*i].0 = Some(prompts::parse_json_object(&t).unwrap_or(Value::Null)),
+                None => missing.push(inp.questions[*i].id.clone()),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(RunError::Uncovered(missing));
+        }
+        return Ok(out);
+    };
     let texts: Vec<(usize, String)> = futures::stream::iter(reqs)
         .map(|(i, req)| async move {
             inp.cache

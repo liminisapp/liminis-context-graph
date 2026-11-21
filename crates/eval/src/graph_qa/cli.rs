@@ -96,7 +96,8 @@ OPTIONS:
 
 EXIT CODES:
     0 ok · 1 run failed (service, model provider, I/O) · 2 usage error · 3 unusable workspace
-    (missing, not ingested, embedder mismatch) · 4 questions without a plan and no planner
+    (missing, not ingested, embedder mismatch) · 4 questions without a plan (recorded, or cached
+    when no provider is set) and no planner
 ",
         all = RUNNERS.join(", "),
         default = DEFAULT_RUNNERS.join(","),
