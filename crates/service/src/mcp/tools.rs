@@ -772,7 +772,7 @@ pub fn registry() -> Vec<ToolSpec> {
                         },
                         "hops": {
                             "type": "array",
-                            "description": "The planned hops, in order.",
+                            "description": "The planned hops, in order. Required unless `answer_type` is an entity type and `query` is set, in which case it may be omitted or `[]` to run only the completion hop from the start entities.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -794,7 +794,7 @@ pub fn registry() -> Vec<ToolSpec> {
                         "mode": {"type": "string", "enum": ["single", "list", "history"], "default": "single", "description": "single: top 3 per hop; list: top 10; history: top 10 and includes invalidated edges."},
                         "direction_mode": {"type": "string", "enum": ["soft", "hard"], "default": "soft", "description": "soft: matching edges get a +0.05 ranking bonus; hard: only matching edges are kept (falls back if none)."}
                     },
-                    "required": ["start", "hops"]
+                    "required": ["start"]
                 })
             },
         },
@@ -2489,9 +2489,9 @@ mod walk_tool_tests {
     }
 
     #[test]
-    fn walk_schema_requires_start_and_hops() {
+    fn walk_schema_requires_only_start() {
         let schema = (tool("knowledge_walk").input_schema)();
-        assert_eq!(schema["required"], json!(["start", "hops"]));
+        assert_eq!(schema["required"], json!(["start"]));
         assert_eq!(
             schema["properties"]["hops"]["items"]["properties"]["direction"]["enum"],
             json!(["out", "in", "any"])

@@ -1348,13 +1348,13 @@ Request:
 |-------|---------|
 | `start` (required) | Entity name or UUID. A UUID-shaped value is tried as a UUID first, then as a name. A name is resolved in every listed group across all kinds, following `Merged` tombstones; an ambiguous name **walks from every match** (it is not an error, unlike `knowledge_resolve_entity`). |
 | `group_ids` | Groups to walk in. Omitted: the default group `liminis` (not "all groups"). |
-| `hops` (required) | `[{relation_types: [..], phrase, direction}]`. `phrase` (required) is a short description of the hop used for ranking, e.g. "supplier of the project". `direction` is `out`, `in` or `any` (default `any`). Empty `relation_types` means no relation filter. |
+| `hops` (required unless completion-only, see below) | `[{relation_types: [..], phrase, direction}]`. `phrase` (required) is a short description of the hop used for ranking, e.g. "supplier of the project". `direction` is `out`, `in` or `any` (default `any`). Empty `relation_types` means no relation filter. |
 | `answer_type` | An entity type name, or `"value"` (no entity-type semantics). An unknown type is not an error: it matches nothing, so the type filter falls back and is reported. |
 | `query` | The question text; ranks the completion hop. |
 | `mode` | `single` (default, top 3 per hop), `list` (top 10) or `history` (top 10; includes invalidated edges). |
 | `direction_mode` | `soft` (default) or `hard`. |
 
-`hops` may be empty only when `answer_type` is an entity type and `query` is given — then only the
+`hops` may be empty or omitted only when `answer_type` is an entity type and `query` is given — then only the
 completion hop runs, from the start entities. Anything else with empty `hops`, an unknown
 `mode` / `direction_mode` / `direction`, a missing `start` or `phrase`, or malformed `hops` is a
 `-32000` validation error.
