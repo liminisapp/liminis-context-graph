@@ -44,6 +44,39 @@ This is the record of every retrieval experiment and its result: what was tried,
 
 Newest first. **Δ** is against the stated baseline, paired on v2 unless marked.
 
+### E14: LLM note summaries as extra retrieval units (offline probe, main @ `86f135dc` service, v2, 2026-11-21). Promising for paraphrase, borderline overall
+
+The question: does an LLM-written summary per note, indexed beside the raw passages, close the paraphrase gap (0.328 against qmd-rerank's 0.475)? The idea comes from a review of WebBrain's retrieval design ([#843](https://github.com/liminisapp/liminis-context-graph/issues/843)–[#849](https://github.com/liminisapp/liminis-context-graph/issues/849) are the related suggestions). This is an offline probe with no LCG change.
+
+- **Method:**
+  - Haiku 4.5 wrote one summary per note (408 calls): 3–6 plain sentences plus one key-concepts sentence, no headings. BGE embeds them.
+  - The baseline (a) is shipped `knowledge_search_passages` top 10 with `belief_aware` and rerank, on a copy of the free-form v2 workspace. It reproduces the record: 0.758 against 0.759, and the default 0.653 against 0.653.
+  - Note-level nDCG@10 by `lcg-eval`'s rules.
+  - The mxbai rerank sidecar scored the summaries.
+
+| v2 nDCG@10 | overall | direct | paraphrase | temporal | answer | multi-hop | passage |
+|---|---|---|---|---|---|---|---|
+| (a) passages, belief + rerank | 0.758 | 0.910 | 0.328 | 0.800 | 0.935 | 0.740 | 0.913 |
+| (b) summaries only, dense | 0.540 | 0.716 | 0.346 | 0.580 | 0.747 | 0.621 | 0.223 |
+| (c) RRF(a, b) | 0.677 | 0.855 | 0.366 | 0.707 | 0.878 | 0.721 | 0.568 |
+| (d0) a's passages re-scored by mxbai alone (control) | 0.710 | 0.863 | 0.397 | 0.716 | 0.784 | 0.596 | 0.954 |
+| (d) mxbai over a's passages + top-10 summaries | 0.731 | 0.862 | **0.526** | 0.682 | 0.784 | 0.616 | 0.954 |
+| (d2) a's order, summary notes inserted by rerank score | **0.771** | 0.914 | 0.412 | 0.800 | 0.935 | 0.717 | 0.913 |
+
+- **Result:**
+  - **RRF fusion loses.** (c) is −0.081 [−0.109, −0.054] overall and −0.093 on temporal. Summaries carry no supersession signal, so (b) is −0.22 on temporal.
+  - **Summaries as rerank candidates help paraphrase.** (d) against its own control (d0) is +0.129 [+0.029, +0.233] on paraphrase, +0.021 [−0.005, +0.047] overall, and −0.034 [−0.101, +0.033] on temporal. Its paraphrase score of 0.526 is above qmd-rerank's 0.475.
+  - **Kept inside LCG's belief-aware order (d2):**
+    - Overall +0.014 [−0.003, +0.033].
+    - Paraphrase +0.084 [+0.002, +0.181]. That's 7 wins and 6 losses of 40, so it's fragile.
+    - Temporal unchanged.
+    - Multi-hop −0.023 [−0.046, −0.003], because summary notes push passages out of the top 10.
+- **Learned:**
+  - Re-scoring LCG's passages with the raw reranker alone (d0) loses 0.048 overall against the shipped ranking, so LCG's belief blend is worth about 0.05.
+  - The (d2) merge is crude. A proper version puts summary units into LCG's own candidate pool before the belief-aware rerank.
+  - There's no dev/test split for these questions, so this is tuned on v2.
+- **Decision:** it meets the bar only at the margin, through (d2) on paraphrase. That's worth an implementation probe in LCG: summary passages as rerank candidates inside `knowledge_search_passages`, with belief-aware ordering, and a citation mapped back to the source passage. Not filed yet.
+
 ### E13: graph multi-hop probes and an ontology ([#815](https://github.com/liminisapp/liminis-context-graph/issues/815), local probe on main @ `19759906`, v2). Promising, not shipped
 
 The question: does the graph answer what chunk search can't (chains, joins, inverse lookups), and does an ontology make it usable?
