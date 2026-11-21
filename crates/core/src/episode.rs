@@ -731,7 +731,7 @@ pub async fn add_episode_with_opts(
 
     // Strict-mode relation_type filtering (issue #310): an edge is never dropped for its
     // relation_type alone. First alias-normalise against the ontology's declared alias map
-    // (FR-001, reusing `canonicalize::build_alias_map` rather than a second parallel map) so a
+    // (FR-001, reusing `canonicalize::build_alias_map_directed` rather than a second parallel map) so a
     // declared alias like `LAUNCHED_BY` is rewritten to its canonical `LAUNCHED` instead of
     // being destroyed. An edge whose relation_type is outside the vocabulary even after
     // normalisation is reclassified to `UNCLASSIFIED`, with the original label preserved on
