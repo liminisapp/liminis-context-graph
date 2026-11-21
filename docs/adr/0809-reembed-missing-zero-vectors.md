@@ -78,8 +78,9 @@ proportional to database size, which the docs call out.
 ### 5. Writes are unrecorded; the record is cleared per batch
 
 Vectors are a local cache stripped from the WAL and recomputed on replay (ADR-0526), so a repair adds
-nothing a replay could not recompute; the writes use `exec_params_unrecorded` and put nothing in the
-WAL. (The backfill stays WAL-recorded, as its behaviour must not change.) A row leaves the record
+nothing a replay could not recompute; the writes run through a prepared statement
+(`conn.prepare(set_cypher(kind))` executed with `execute_prepared_returning_count`, which calls the
+driver directly and never records a mutation), so nothing reaches the WAL. (The backfill stays WAL-recorded, as its behaviour must not change.) A row leaves the record
 only after its new vector was written, per batch. A crash between the `SET` and the removal leaves a
 real vector that is still recorded; the next run re-embeds it harmlessly.
 
