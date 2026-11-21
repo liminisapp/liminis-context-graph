@@ -88,8 +88,13 @@ self-loop, invalidate one a rewrite *creates*.
   as two dedup-merged entities extracted from different episodes each carry, is invalidated and
   counted as deduplicated. `(src, dst, name)` would also be the wrong key, because ingest names
   an edge after its endpoints, so an alias's self-loop never matches the canonical's by name.
-  An edge that only becomes a self-loop through the merge is invalidated on both paths: `merge_entities_inner` already did this
-  (FR-010), and `apply_same_as`, which previously left such an edge in place as an unmarked
+  The fact comparison is **exact**, so it collapses only byte-identical copies. The edge prompt
+  asks the model to paraphrase, so two episodes stating the same value in different words leave
+  two active self-loops on the canonical. That is deliberate: a looser key (case folding,
+  similarity) risks merging two different values ("$4,200" and "$4,500" in otherwise identical
+  sentences). Paraphrased copies cost a beam slot on a value walk's last hop, not correctness.
+  An edge that only becomes a self-loop through the merge is invalidated on both paths:
+  `merge_entities_inner` already did this (FR-010), and `apply_same_as`, which previously left such an edge in place as an unmarked
   self-loop, now does too.
 - Cross-group rebind (`cross_group.rs`, phase 2) does not invalidate when the actual hop pair was
   already a self-loop, and applies the same fact-and-relation-type duplicate check to it.
