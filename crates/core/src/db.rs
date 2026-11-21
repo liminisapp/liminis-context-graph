@@ -7602,10 +7602,16 @@ mod walk_edges_tests {
 
         let hist = conn.get_walk_edges(&fr, Some(&["g"]), true).unwrap();
         assert_eq!(hist.len(), 3, "history includes the invalidated edge");
-        assert!(hist.iter().any(|e| e.uuid == "e3" && e.invalid_at.is_some()));
+        assert!(hist
+            .iter()
+            .any(|e| e.uuid == "e3" && e.invalid_at.is_some()));
 
         let all_groups = conn.get_walk_edges(&fr, None, false).unwrap();
-        assert_eq!(all_groups.len(), 3, "no group filter includes group `other`");
+        assert_eq!(
+            all_groups.len(),
+            3,
+            "no group filter includes group `other`"
+        );
 
         // Both endpoints in the frontier: the edge is returned once.
         let both = vec!["a".to_string(), "b".to_string()];
