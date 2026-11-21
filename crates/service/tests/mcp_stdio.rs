@@ -150,11 +150,12 @@ fn scope_read_advertises_only_read_tools_and_rejects_write() {
     let tools = client.list_tools();
     assert_eq!(
         tools.len(),
-        21,
-        "read scope should advertise exactly 21 tools"
+        22,
+        "read scope should advertise exactly 22 tools"
     );
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"knowledge_status"));
+    assert!(names.contains(&"knowledge_capabilities"));
     assert!(names.contains(&"knowledge_lint"));
     assert!(!names.contains(&"knowledge_add_episode"));
     assert!(!names.contains(&"knowledge_query_cypher"));
@@ -163,6 +164,22 @@ fn scope_read_advertises_only_read_tools_and_rejects_write() {
         !names.contains(&"knowledge_reload_ontology"),
         "reload is admin-only, got {names:?}"
     );
+
+    // `knowledge_capabilities` (issue #854) succeeds under the read scope and reports the same
+    // fields as over IPC.
+    let caps = client.call_tool("knowledge_capabilities", json!({}));
+    assert!(
+        caps["result"]["isError"].as_bool() != Some(true),
+        "knowledge_capabilities should not error: {caps:?}"
+    );
+    let payload = &caps["result"]["structuredContent"];
+    assert_eq!(
+        payload["server_version"],
+        env!("CARGO_PKG_VERSION"),
+        "{caps:?}"
+    );
+    assert_eq!(payload["protocol_version"], 1, "{caps:?}");
+    assert!(payload["features"].is_array() && payload["methods"].is_array());
 
     // Calling an out-of-scope tool must be rejected cleanly, not silently ignored.
     let resp = client.call_tool(
@@ -252,7 +269,7 @@ fn scope_union_advertises_both_sets() {
     client.initialize();
 
     let tools = client.list_tools();
-    assert_eq!(tools.len(), 38, "read(21) + admin(17) = 38");
+    assert_eq!(tools.len(), 39, "read(22) + admin(17) = 39");
 
     client.shutdown();
 }

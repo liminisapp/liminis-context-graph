@@ -338,6 +338,33 @@ fn socket_service_answers_over_the_platform_transport_and_closes_cleanly() {
         "knowledge_status: {status}"
     );
 
+    // Issue #854: the socket describes itself, and `health_check` carries the versions.
+    let caps = call_checked(
+        &mut conn,
+        &mut service.child,
+        4,
+        "knowledge_capabilities",
+        json!({}),
+    );
+    assert_eq!(
+        caps.pointer("/result/server_version"),
+        Some(&json!(env!("CARGO_PKG_VERSION"))),
+        "knowledge_capabilities: {caps}"
+    );
+    assert_eq!(caps.pointer("/result/protocol_version"), Some(&json!(1)));
+    let methods = caps
+        .pointer("/result/methods")
+        .and_then(Value::as_array)
+        .expect("methods array");
+    assert!(methods.contains(&json!("knowledge_capabilities")));
+    assert!(methods.contains(&json!("health_check")));
+    let health = call_checked(&mut conn, &mut service.child, 5, "health_check", json!({}));
+    assert_eq!(
+        health.pointer("/result/protocol_version"),
+        Some(&json!(1)),
+        "health_check: {health}"
+    );
+
     let closed = call_checked(
         &mut conn,
         &mut service.child,

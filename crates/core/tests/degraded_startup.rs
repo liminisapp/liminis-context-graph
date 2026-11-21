@@ -133,6 +133,9 @@ async fn test_degraded_mode_from_corrupt_wal() {
     assert_eq!(resp["result"]["state"], "degraded");
     assert_eq!(resp["result"]["ready_for_reads"], false);
     assert_eq!(resp["result"]["reason"], "lbug_wal_corrupt");
+    // Issue #854: the degraded shape carries the version fields too.
+    assert_eq!(resp["result"]["server_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(resp["result"]["protocol_version"], 1);
 
     // knowledge_status should also work and include recovery options
     let status_resp = dispatch_val(2, "knowledge_status", json!({}), Arc::clone(&state)).await;

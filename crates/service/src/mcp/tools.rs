@@ -142,11 +142,11 @@ fn with_belief(mut props: Value) -> Value {
     props
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (52 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (57 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
-        // ── read (17) ──────────────────────────────────────────────────────────────
+        // ── read (22) ──────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_status",
             description: "Get knowledge graph status: entity/episode/relationship counts, \
@@ -172,6 +172,20 @@ pub fn registry() -> Vec<ToolSpec> {
                            `default_group` and `see: \"wal_groups\"` (issue #667), so \
                            `exists: false` there means the default group has no stream, not \
                            that WAL is broken — read `wal_groups` for every group.",
+            scope: Scope::Read,
+            input_schema: empty_schema,
+        },
+        ToolSpec {
+            name: "knowledge_capabilities",
+            description: "Describe this server (issue #854): `server_version` (the crate \
+                           version, as `initialize` reports it), `protocol_version` (integer, \
+                           1 today; bumped only on a breaking change to the socket protocol), \
+                           `features` (sorted array of stable lower_snake_case feature strings; \
+                           append-only, so test for the one you need and ignore unknown ones) \
+                           and `methods` (sorted names of every IPC method the dispatcher \
+                           accepts). Static build information: no database access, no lock, so \
+                           it answers in degraded mode and while a write or rebuild is running. \
+                           Takes no parameters.",
             scope: Scope::Read,
             input_schema: empty_schema,
         },
@@ -864,7 +878,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── write (15) ────────────────────────────────────────────────────────────
+        // ── write (18) ────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_process_chunk",
             description: "Ingest a text chunk as an episode: extracts entities/relationships \
@@ -2108,7 +2122,7 @@ mod tests {
     fn scope_bucket_sizes_match_fr_004_table() {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
-        assert_eq!(count(Scope::Read), 21);
+        assert_eq!(count(Scope::Read), 22);
         assert_eq!(count(Scope::Write), 18);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 17);
