@@ -792,7 +792,7 @@ pub fn registry() -> Vec<ToolSpec> {
                         "answer_type": {"type": "string", "description": "An entity type name, or \"value\". On the last hop (not in history mode) far ends of this type are preferred; if the hops end short of it a completion hop runs. With \"value\" (or when absent), the last hop also offers the frontier entities' own literal-valued facts (self-loops such as a budget or price) as candidates."},
                         "query": {"type": "string", "description": "The question text; ranks the completion hop (which does not run without it)."},
                         "mode": {"type": "string", "enum": ["single", "list", "history"], "default": "single", "description": "single: top 3 per hop; list: top 10; history: top 10 and includes invalidated edges."},
-                        "direction_mode": {"type": "string", "enum": ["soft", "hard"], "default": "soft", "description": "soft: matching edges get a +0.05 ranking bonus; hard: only matching edges are kept (falls back if none)."}
+                        "direction_mode": {"type": "string", "enum": ["soft", "hard"], "default": "soft", "description": "soft: matching edges get a +0.05 ranking bonus; hard: only matching edges are kept (falls back to all if no moving edge matches). A frontier entity's own self-loop (a value fact, offered on the last hop of a value walk) matches either direction: it gets the soft bonus, is always kept in hard mode, and never decides the fallback."}
                     },
                     "required": ["start"]
                 })
