@@ -1,0 +1,124 @@
+{
+ "model": "claude-haiku-4-5-20251001",
+ "ontology": "smoke",
+ "planner_prompt": "PLAN3_SYS / PLAN3_SCHEMA",
+ "plans": {
+  "s001": {
+   "route": "graph",
+   "start": "Harbor",
+   "hops": [
+    {
+     "types": [
+      "HOSTED_BY"
+     ],
+     "phrase": "hosted project",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "Person"
+  },
+  "s002": {
+   "route": "graph",
+   "start": "Nobody",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "owner",
+     "direction": "in"
+    },
+    {
+     "types": [
+      "REPORTS_TO"
+     ],
+     "phrase": "manager",
+     "direction": "out"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  },
+  "s003": {
+   "route": "graph",
+   "start": "Ana Silva",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "projects owned",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "s004": {
+   "route": "graph",
+   "start": "Lisbon",
+   "hops": [
+    {
+     "types": [
+      "MADE_UP"
+     ],
+     "phrase": "people based there",
+     "direction": "in"
+    }
+   ],
+   "list": true,
+   "history": false,
+   "answer_type": "Project"
+  },
+  "s005": {
+   "route": "passages",
+   "start": "Tern",
+   "hops": [
+    {
+     "types": [
+      "HOSTED_BY"
+     ],
+     "phrase": "hosting provider",
+     "direction": "out"
+    }
+   ],
+   "list": true,
+   "history": true,
+   "answer_type": "value"
+  },
+  "zzz": {
+   "route": "graph",
+   "start": "X",
+   "hops": [
+    {
+     "types": [
+      "OWNS"
+     ],
+     "phrase": "o",
+     "direction": "in"
+    }
+   ],
+   "list": false,
+   "history": false,
+   "answer_type": "value"
+  }
+ },
+ "route_planned5_scores": {
+  "s001": 1.0,
+  "s002": 0.0,
+  "s003": 1.0,
+  "s004": 0.0,
+  "s005": 1.0
+ }
+}

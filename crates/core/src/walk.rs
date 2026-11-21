@@ -680,8 +680,136 @@ fn unique_far_ends(cands: &[Candidate]) -> Vec<String> {
         .collect()
 }
 
+/// Parses `hops` (absent ⇒ empty). Each hop: `{relation_types?, phrase, direction?}`;
+/// `direction` defaults to `any`.
+pub fn parse_hops(v: &serde_json::Value) -> Result<Vec<Hop>, Error> {
+    let arr = match v {
+        serde_json::Value::Null => return Ok(vec![]),
+        serde_json::Value::Array(a) => a,
+        _ => return Err(Error::Ipc("hops must be an array".to_string())),
+    };
+    arr.iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let n = i + 1;
+            let obj = h
+                .as_object()
+                .ok_or_else(|| Error::Ipc(format!("hops[{n}] must be an object")))?;
+            let relation_types = match obj.get("relation_types") {
+                None | Some(serde_json::Value::Null) => vec![],
+                Some(serde_json::Value::Array(a)) => a
+                    .iter()
+                    .map(|r| {
+                        r.as_str().map(str::to_string).ok_or_else(|| {
+                            Error::Ipc(format!(
+                                "hops[{n}].relation_types must be an array of strings"
+                            ))
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                Some(_) => {
+                    return Err(Error::Ipc(format!(
+                        "hops[{n}].relation_types must be an array of strings"
+                    )))
+                }
+            };
+            let phrase = obj
+                .get("phrase")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| Error::Ipc(format!("hops[{n}].phrase is required")))?
+                .to_string();
+            let direction = match obj.get("direction") {
+                None | Some(serde_json::Value::Null) => Direction::Any,
+                Some(serde_json::Value::String(s)) => Direction::parse(s)?,
+                Some(_) => return Err(Error::Ipc(format!("hops[{n}].direction must be a string"))),
+            };
+            Ok(Hop {
+                relation_types,
+                phrase,
+                direction,
+            })
+        })
+        .collect()
+}
+
+fn str_param<'a>(v: &'a serde_json::Value, name: &str) -> Result<Option<&'a str>, Error> {
+    match v {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(s) => Ok(Some(s.as_str())),
+        _ => Err(Error::Ipc(format!("{name} must be a string"))),
+    }
+}
+
+/// A parsed `knowledge_walk` request: the raw start name and a shape-validated plan whose `start`
+/// is a placeholder until the handler resolves the name to entities.
+#[derive(Debug, Clone)]
+pub struct ParsedWalkRequest {
+    pub start: String,
+    pub plan: WalkPlan,
+}
+
+/// Parses and validates the params of a `knowledge_walk` request (everything except `group_ids`,
+/// which the handler resolves against its default group). Pure: no DB, no embedder.
+pub fn parse_request(p: &serde_json::Value) -> Result<ParsedWalkRequest, Error> {
+    let start = p["start"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| Error::Ipc("start is required".to_string()))?
+        .to_string();
+    let mode = WalkMode::parse(str_param(&p["mode"], "mode")?.unwrap_or("single"))?;
+    let direction_mode =
+        DirectionMode::parse(str_param(&p["direction_mode"], "direction_mode")?.unwrap_or("soft"))?;
+    let hops = parse_hops(&p["hops"])?;
+    let answer_type = parse_answer_type(str_param(&p["answer_type"], "answer_type")?);
+    let query = str_param(&p["query"], "query")?
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    // Validate the plan shape up front (start entities are filled in after resolution).
+    let plan = WalkPlan {
+        start: vec![String::new()],
+        hops,
+        answer_type,
+        query,
+        mode,
+        direction_mode,
+    };
+    plan.validate()?;
+    Ok(ParsedWalkRequest { start, plan })
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn parse_request_accepts_a_plan_and_rejects_bad_shapes() {
+        let ok = serde_json::json!({"start": " Tern Core ", "mode": "list", "direction_mode": "soft",
+            "hops": [{"relation_types": ["OWNS"], "phrase": "owner", "direction": "in"}],
+            "answer_type": "value", "query": "q"});
+        let r = parse_request(&ok).unwrap();
+        assert_eq!(r.start, "Tern Core");
+        assert_eq!(r.plan.hops.len(), 1);
+        assert_eq!(r.plan.hops[0].direction, Direction::In);
+        assert_eq!(r.plan.mode, WalkMode::List);
+        assert!(r.plan.answer_type.is_none(), "value means no type filter");
+        let bad_dir =
+            serde_json::json!({"start": "x", "hops": [{"phrase": "p", "direction": "up"}]});
+        assert!(parse_request(&bad_dir).is_err());
+        let no_hops = serde_json::json!({"start": "x", "hops": []});
+        assert!(parse_request(&no_hops)
+            .unwrap_err()
+            .to_string()
+            .contains("hops is empty"));
+        let completion = serde_json::json!({"start": "x", "answer_type": "Person", "query": "who"});
+        assert!(parse_request(&completion).is_ok());
+        assert!(parse_request(&serde_json::json!({"hops": []})).is_err());
+        assert!(parse_request(&serde_json::json!({"start": "x", "mode": 3,
+            "hops": [{"phrase": "p"}]}))
+        .is_err());
+    }
     use super::*;
 
     /// In-memory hand-built graph.

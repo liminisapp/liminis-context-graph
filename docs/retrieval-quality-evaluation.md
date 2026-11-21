@@ -660,8 +660,8 @@ notebook or the questions is checked in or written into the report.**
    or `lcg-eval retrieval --private --corpus ... --out ... --judge-cache ...` (use `--no-grounded`
    to skip the judge and its cache).
 3. **What `--private` does.** It requires an explicit `--out` (and `--judge-cache` unless
-   `--no-grounded`) and **refuses any such path, and any `--record-cassette` path, that is inside a
-   git working tree** (it looks for a `.git` above the path), so private text cannot land in a
+   `--no-grounded`) and **refuses any such path, and any `--record-cassette` or `--keep-workspace` path,
+   that is inside a git working tree** (it looks for a `.git` above the path), so private text cannot land in a
    commit. The report's disclaimer says the corpus is a private notebook, not a synthetic one. The report contains aggregate
    metrics, counts, versions and hashes only: it never prints note or question text, and the detail
    of a failed query is withheld (`id: error (detail withheld)`) because a service error can echo the
@@ -674,6 +674,243 @@ notebook or the questions is checked in or written into the report.**
 
 The same statistics apply: with a few dozen of your own questions the intervals will be wide, and
 the report will say so.
+
+## Ingesting under an ontology and keeping the workspace (#821)
+
+Graph-shaped questions are answered from a graph extracted under an ontology, and graph-quality
+tools (`graph-integrity`, `graph-qa`) read an ingested workspace. `lcg-eval retrieval` does both:
+
+```bash
+target/release/lcg-eval retrieval --corpus crates/eval/fixtures/retrieval-v2 \
+  --ontology crates/eval/fixtures/retrieval-v2/ontology-v3.1.yaml \
+  --keep-workspace ~/lcg-ws/v2-onto31 \
+  --embedder-uds <socket> --record-cassette ~/lcg-ws/v2-onto31.cassette.jsonl
+```
+
+| Flag | Meaning |
+|---|---|
+| `--ontology <FILE>` | Every extraction call is constrained by this ontology. It is written into the workspace as `.lcg/ontology.yaml`, which is where the service reads it. |
+| `--ontology-mode open\|strict` | The mode applied to the ontology (default `strict`, as in the extraction eval). It needs `--ontology`. The mode is part of the ontology hash. |
+| `--keep-workspace <DIR>` | After the run, the service is shut down gracefully (`knowledge_close`) and the ingested workspace (DB, WAL, ontology) is moved to `DIR`, with an `lcg-eval-workspace.json` manifest. `DIR` must not exist or must be empty. It takes one `--embedding-profile` at most, and needs at least one `lcg-*` config in `--configs` (a qmd-only run ingests nothing into LCG). Without the flag the temporary workspace is removed, as before. |
+
+**The ontology hash.** The report records the ontology's hash and mode in its Reproduction block
+and in `meta.ontology_hash` / `meta.ontology_mode`. It is `lcg_core::ontology::content_hash`, the
+hash LCG already computes; a run without an ontology records `none`.
+
+**The cassette check.** A cassette's records carry no ontology, so `--record-cassette C` also
+writes `C.meta.json` with the hash it was recorded under (`none` without an ontology). Replaying
+`C` under a different hash (another ontology, another mode, or no ontology at all) fails before the
+service starts. The error names both hashes, and no extraction call is made: without the check every
+call would miss. A cassette recorded before this change has no sidecar. Replaying it with
+`--ontology` prints a warning that the hash cannot be verified and carries on.
+
+**The manifest.** `lcg-eval-workspace.json` records how the workspace was built: group, corpus
+version and hash, ontology hash and mode, embedder (any userinfo, query or fragment stripped from its
+URL, so no credential is written to disk), embedding profile, extractor, cassette and LCG build.
+`graph-qa` refuses a workspace whose embedder differs from the one it is given (exit 3). The
+addresses are compared after normalising loopback aliases (`localhost`, `127.0.0.1`, `[::1]`), case
+and a trailing slash; `--allow-embedder-mismatch` downgrades a remaining mismatch to a warning, for
+the same embedding model reached at a new address (a relocated socket, say). A genuinely different
+embedder would make the stored vectors incomparable and the numbers silently meaningless.
+
+## Model provider (judge, planner, reader)
+
+The retrieval judge, the extraction judge and graph-qa's planner and reader all call an
+Anthropic-compatible Messages endpoint. They resolve it the way the service does (ADR-0346):
+
+| Setting | Meaning |
+|---|---|
+| `--anthropic-base-url <URL>` / `ANTHROPIC_BASE_URL` | Base URL; `/v1/messages` is appended. Use this for the local subscription bridge or a gateway. |
+| `--anthropic-endpoint <URL>` / `LCG_ANTHROPIC_ENDPOINT` | The full endpoint, used verbatim. |
+| `ANTHROPIC_API_KEY` | Sent as `x-api-key`. |
+| `ANTHROPIC_AUTH_TOKEN` | Sent as `Authorization: Bearer` when a base URL or endpoint is configured. |
+
+Any one of these enables the judge, so a bridge that needs no credential needs no dummy key. The
+flags are on `retrieval` and `graph-qa`; the extraction eval reads the environment variables.
+
+## Graph question answering (`graph-qa`, #821)
+
+`lcg-eval graph-qa` answers the retrieval-v2 graph question set over a kept workspace and compares
+how each retrieval route serves a reader. It is the reproducible form of experiment E13 (#815) and
+the regression check for `knowledge_walk` (#820).
+
+### The graph question set
+
+`crates/eval/fixtures/retrieval-v2/graph-questions.jsonl` is generated from the skeleton by
+`retrieval-gen`, and `retrieval-gen --check` reports any drift. It has 144 questions:
+
+- **E13** (`set: "e13"`, ids `g000`–`g128`): 129 questions, the same as the E13 reference
+  question for question. By shape: chain-2 48, chain-3 24, list 31, join 14, history 12. They fall
+  into 13 finer families, such as `supplier-contact`, `owner-manager-location` and `change-history`.
+- **Inverse** (`set: "inverse"`, `shape: "inverse"`, ids `i000`–`i014`): 15 new
+  questions that ask for the *source* side of a relation given its target, so the answer depends
+  on edge direction:
+  - `reports-to-single`: "Who reports to X?", for managers with one report;
+  - `account-manager-of`: "Which suppliers is X the account manager for?";
+  - `projects-of-reports`: "Which projects are owned by someone who reports to X?".
+
+Each line carries `id`, `set`, `family`, `cq`, `shape`, `text`, `answers` (ordered for history),
+`scoring` (`single`, `set` or `ordered`), `split` (`dev` or `test`), `hops` (the facts a complete
+answer rests on, with every primary note stating each value) and `path` (the expected relation
+types and directions, for later path-level analysis).
+
+**Dev/test split.** The split is fixed, with seed 815. For each family, in order of first
+appearance, its ids are shuffled with one shared `random.Random(815)`, and the first half (rounded
+up) is dev. The E13 part gives the reference 67 dev / 62 test. The inverse family is split the
+same way, from its own `Random(815)`. Questions are chosen with Python-compatible RNGs (a Rust
+MT19937) so the E13 set matches the probe exactly.
+
+### Running it
+
+```bash
+target/release/lcg-eval graph-qa --workspace ~/lcg-ws/v2-onto31 --embedder-uds <socket> \
+  --plans crates/eval/fixtures/retrieval-v2/e13-v5-plans.json \
+  --runners passages,passages-belief-rerank,walk,route --out /tmp/graph-qa
+```
+
+The workspace is **copied** to a temporary directory and the service runs on the copy. The
+workspace itself, including its WAL, is never modified.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--workspace <DIR>` | required | An ingested workspace (for example from `retrieval --keep-workspace`). A free-form workspace is allowed; the report records which kind it is. |
+| `--corpus <DIR>` | `crates/eval/fixtures/retrieval-v2` | The fixture; `qmd` reads its notes. |
+| `--questions <FILE>` | `<corpus>/graph-questions.jsonl` | The question set. |
+| `--runners <LIST>` | `passages,walk,route` | Any of `passages`, `passages-belief-rerank`, `qmd`, `walk`, `route`. |
+| `--plans <FILE>` | none | Recorded plans, used instead of planner calls for the questions they cover. |
+| `--plans-only` | off | Never call the planner. A question with no recorded plan fails the run before any reader call (exit 4). |
+| `--allow-reader-errors` | off | Report a runner whose reader replies fail to parse more than 10% of the time as a warning instead of failing the run (exit 1). |
+| `--planner-model`, `--reader-model` | `claude-haiku-4-5-20251001` | Through the provider configuration above. |
+| `--llm-cache <FILE>` | `graph-qa-llm-cache.jsonl` | The response cache. |
+| `--embedder-*`, `--embedding-profile`, `--reranker-*`, `--service-bin` | | As for `retrieval`; the embedder must be the ingest embedder (exit 3 otherwise, unless `--allow-embedder-mismatch`). `--embedding-profile` defaults to the one recorded in the workspace manifest, and a different one is refused (exit 3). |
+| `--qmd-bin`, `--qmd-index` | `qmd`, `lcg-eval-<corpus>-<hash8>` | For the `qmd` runner. |
+| `--k`, `--concurrency` | 10, 6 | Passages per question; parallel model calls. |
+| `--bootstrap-seed`, `--bootstrap-resamples` | 788, 10000 | Paired bootstrap, as in `retrieval` (ADR-0788). |
+| `--out <DIR>` | none | Writes `graph-qa.md` and `graph-qa.json`. |
+
+Exit codes:
+
+- 0: the run succeeded.
+- 1: the run failed (service, model provider or I/O), or a runner's reader replies failed to parse
+  more than 10% of the time. Unparseable replies score 0, so a reader that answers in prose (a
+  provider or bridge that ignores `output_config.format`) would otherwise yield an all-zero report
+  that looks like a measurement. The report is still written; its Overall section and stderr give
+  the parse-error count per runner. `--allow-reader-errors` turns this failure into a warning.
+- 2: usage error.
+- 3: unusable workspace (missing, not ingested, or an embedder mismatch).
+- 4: questions without a plan, and no planner may be called. With no model provider configured, a planner response already in `--llm-cache` still counts as a plan, so a fully cached rerun works offline; only questions with no recorded or cached plan are uncovered.
+
+### Runners
+
+| Runner | Context given to the reader |
+|---|---|
+| `passages` | The shipped default `knowledge_search_passages`, top k, as `Passages from the notes:` followed by `[note, date]` blocks. |
+| `passages-belief-rerank` | The same, reranked over a belief-aware first stage. It needs a reranker, and a stage that did not apply fails the run rather than being scored as first-stage results. |
+| `qmd` | The whole note for each qmd hit (E13 step 3). It is skipped with a notice when qmd cannot run, as `retrieval` does. |
+| `walk` | An LLM planner sees only the question and the workspace's `knowledge_get_ontology` menu (no family, no gold). It returns `{route, start, hops: [{types, phrase, direction}], list, history, answer_type}`. The plan runs through `knowledge_walk`, mapped as follows: `types` → `relation_types`, mode history / list / single, `direction_mode: soft`, and `query` set to the question. The reader gets `Facts from the knowledge graph:` followed by the walk's `facts_text`, or `(none found)`. |
+| `route` | The planner's route for each question: `passages` context when it routes to passages, otherwise the walk's context. This is E13's "route v5". |
+
+One plan per question serves both `walk` and `route`. A plan is a **plan error** in these cases:
+
+- it does not parse;
+- it names an unknown route or direction;
+- a hop's relation type is not in the ontology;
+- its `answer_type` is neither an ontology entity type nor `value`;
+- a graph route has no hops.
+
+The question is then answered from an empty walk and counted; it is never re-planned. A start
+entity that matches no node is counted as unresolved, and the question scores 0.
+
+### The reader and scoring
+
+Every runner's context goes to one reader prompt, ported word for word from the probe
+(`e13-read-v1`); the user turn is `<context>\n\nQuestion: <text>`. The planner prompt is the probe's
+v5 (`e13-plan-v5`). Both versions are recorded in the report. Identical prompts are sent once, so
+the same context always gets the same answer.
+
+Scoring is the probe's `score()`. Answers are normalised first: lowercased, runs of characters
+other than letters, digits, `%`, `$` and `.` become a space, and spaces and dots are stripped from
+the ends. An answer matches a gold value when it contains it, or when the answer has 3 or more
+characters and the gold contains the answer.
+
+- `single`: 1 when the first answer matches, else 0.
+- `set` (lists, joins, many-valued inverses): set F1.
+- `ordered` (history): 1 only for the same number of values, each matching in order.
+
+### Plans files and caching
+
+A plans file has the probe's `v5-plans.json` format:
+
+- top-level `model`, `ontology` and `planner_prompt`;
+- `plans`, keyed by question id;
+- optional `route_planned5_scores`, which the report shows as a reference.
+
+Plan ids that name no question are ignored and listed as warnings. Questions the file does not
+cover (the inverse family, for `e13-v5-plans.json`) go to the planner, unless `--plans-only` is set.
+
+Planner and reader responses are cached in `--llm-cache`. Each entry is keyed by
+`sha256` of the model, system prompt, user prompt and schema, and is written as it arrives. Any
+change to a prompt byte or the model is a cache miss. A fully cached run makes no model call and
+gives byte-identical `scores`. A provider failure aborts the run rather than scoring the remaining
+questions as wrong, and a rerun resumes from the cache.
+
+### The report
+
+`graph-qa.md` and `graph-qa.json` contain:
+
+- **Overall:** the mean score per runner on E13, its dev and test halves, and all questions
+  (E13 plus inverse) with their halves. The E13 numbers stay comparable with E13.
+- **By shape:** chain-2, chain-3, list, join, history and inverse, for all questions and for each
+  half.
+- **By family:** a secondary table.
+- **Paired differences:** for every pair of runners, the mean difference with a 95% paired
+  bootstrap interval, over E13, all, each half and each shape.
+- **Diagnostics:** routes by shape, plan sources (file or planner), plan errors and unresolved
+  starts by shape, reader responses that did not parse, plans-file warnings and the plans file's
+  reference scores.
+- **Per question:** route, plan and its source, whether the start resolved, answers, gold and
+  score.
+- **Reproduction:** the workspace's ontology hash and manifest, the models, prompt versions and
+  cache counts.
+
+In `graph-qa.json`, everything the questions, plans and responses determine is under `scores`.
+Run facts such as cache counts are under `meta`.
+
+## Standard setup for graph-QA results
+
+Graph-QA numbers (E13 and later) are produced this way, and only this way:
+
+1. **Ingest v2 under ontology v3.1 and keep the workspace**, with the BGE embedder the passage
+   numbers use:
+
+   ```bash
+   target/release/lcg-eval retrieval --corpus crates/eval/fixtures/retrieval-v2 \
+     --ontology crates/eval/fixtures/retrieval-v2/ontology-v3.1.yaml \
+     --keep-workspace <ws> --embedder-uds <socket> --record-cassette <ws>.cassette.jsonl
+   ```
+
+   Replaying that cassette later reproduces the same graph without extraction calls.
+
+2. **Run graph-qa with the recorded E13 v5 plans:**
+
+   ```bash
+   target/release/lcg-eval graph-qa --workspace <ws> --embedder-uds <socket> \
+     --plans crates/eval/fixtures/retrieval-v2/e13-v5-plans.json \
+     --runners passages,passages-belief-rerank,walk,route --out <dir>
+   ```
+
+   A question the plans file covers never reaches the planner, so every E13 plan is the recorded
+   one. Only the inverse family is planned, live and then cached. Add `--plans-only` when no
+   planner call may be made at all. It needs a question file that the plans cover, since an
+   uncovered question then fails the run (exit 4).
+
+3. **Report `route` on E13 and on E13/test** from the Overall table, with the paired differences
+   against `passages`. The E13 reference is route v5 at 0.915 (E13) and 0.940 (E13 test). It was
+   measured before the #817 prompt change, so a fresh extraction is needed to compare
+   (#823 and #824).
+
+`graph-integrity --workspace <ws>` reads the same workspace (see
+[graph-integrity-evaluation.md](graph-integrity-evaluation.md)).
 
 ## Out of scope
 

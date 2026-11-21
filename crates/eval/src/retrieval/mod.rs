@@ -19,9 +19,10 @@ pub mod qmd;
 pub mod report;
 pub mod stats;
 pub mod variants;
+pub mod workspace;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -444,7 +445,7 @@ pub async fn evaluate(
     out
 }
 
-fn default_service_bin() -> PathBuf {
+pub fn default_service_bin() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let p = dir.join("liminis-context-graph");
@@ -508,6 +509,14 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
     for w in &plan.warnings {
         eprintln!("lcg-eval retrieval: WARNING {w}");
     }
+    // #821 FR-001..FR-005: the ontology this ingest runs under, checked against the replayed
+    // cassette's sidecar before anything is started, so a mismatch makes no extraction call.
+    let onto = workspace::ontology_identity(a.ontology.as_deref(), a.ontology_mode.as_ref())?;
+    if let Some(c) = &a.replay_cassette {
+        if let Some(w) = workspace::preflight_cassette(std::path::Path::new(c), &onto)? {
+            eprintln!("lcg-eval retrieval: WARNING {w}");
+        }
+    }
     // Query variants (#802): validated before the service is spawned or anything is ingested. A
     // missing file makes the config a skipped row; a stale or leaking one aborts the run.
     let query_variants = if a
@@ -539,6 +548,10 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             resamples: a.bootstrap_resamples,
         },
         private: a.private,
+        ontology_hash: a.ontology.as_ref().map(|_| onto.hash.clone()),
+        ontology_mode: onto.mode.clone(),
+        ontology_file: a.ontology.as_ref().map(|p| p.display().to_string()),
+        kept_workspace: None,
     };
     let mut ingest_cost = IngestCost::default();
     let mut lcg_slots: BTreeMap<String, Slot> = BTreeMap::new();
@@ -570,6 +583,10 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                 replay_cassette: a.replay_cassette.clone(),
                 record_cassette: a.record_cassette.clone(),
                 embedding_profile: profile.clone(),
+                ontology_file: a.ontology.clone(),
+                ontology_mode: a.ontology_mode.clone(),
+                ontology_hash: a.ontology.as_ref().map(|_| onto.hash.clone()),
+                seed_workspace: None,
             };
             eprintln!(
                 "lcg-eval retrieval: starting LCG service ({}){}",
@@ -604,6 +621,11 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             );
             let transport: Arc<dyn lcg::RpcTransport> = guard.client.clone();
             let map = Arc::new(lcg::ingest(transport.as_ref(), &fx).await?);
+            // FR-003: the cassette this ingest recorded carries the ontology it was recorded under
+            // (also "none"), so a later replay can be checked either way.
+            if let Some(c) = &a.record_cassette {
+                workspace::write_cassette_meta(std::path::Path::new(c), &onto, &guard.version)?;
+            }
             // Ingest cost accumulates across profile runs (each re-ingests the corpus).
             ingest_cost.lcg_seconds = Some(ingest_cost.lcg_seconds.unwrap_or(0.0) + map.seconds);
             ingest_cost.lcg_chunks += map.chunks;
@@ -775,44 +797,134 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
         }
     }
 
-    // ── Judge ───────────────────────────────────────────────────────────────
-    let anthropic = if a.no_grounded {
-        None
-    } else {
-        std::env::var("ANTHROPIC_API_KEY")
-            .ok()
-            .map(|k| crate::judge::AnthropicJudgeClient::new(k, a.judge_model.clone()))
-    };
-    let skip_reason = if a.no_grounded {
-        "--no-grounded"
-    } else {
-        "ANTHROPIC_API_KEY not set"
-    };
-    let cached = match &anthropic {
-        Some(j) => Some(CachedEvidenceJudge::load(
-            j as &dyn EvidenceJudge,
-            &a.judge_cache,
-        )?),
-        None => None,
-    };
+    // Judge and evaluate. Errors here are held until a kept workspace has been persisted: the
+    // ingest already succeeded, so keeping it is worth more than failing fast.
+    let evaluated: Result<Vec<_>, String> = async {
+        // ── Judge ───────────────────────────────────────────────────────────
+        // #821 FR-019: any configured Anthropic-compatible provider (key, bearer token, or a
+        // gateway / subscription-bridge URL) enables the judge.
+        let anthropic = if a.no_grounded
+            || !crate::llm_client::provider_configured(&crate::llm_client::process_env, &a.anthropic)
+        {
+            None
+        } else {
+            let cfg = lcg_core::anthropic_config::AnthropicEndpointConfig::resolve(
+                &crate::llm_client::process_env,
+                &a.anthropic,
+            )?;
+            Some(crate::judge::AnthropicJudgeClient::with_config(
+                cfg,
+                a.judge_model.clone(),
+            ))
+        };
+        let skip_reason = if a.no_grounded {
+            "--no-grounded"
+        } else {
+            "no judge provider configured (ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN or ANTHROPIC_BASE_URL)"
+        };
+        let cached = match &anthropic {
+            Some(j) => Some(CachedEvidenceJudge::load(
+                j as &dyn EvidenceJudge,
+                &a.judge_cache,
+            )?),
+            None => None,
+        };
 
-    // Slots in the order the user asked for them.
-    let mut slots = Vec::new();
-    for id in &plan.expanded_configs() {
-        if let Some(s) = lcg_slots.remove(id).or_else(|| qmd_slots.remove(id)) {
-            slots.push(s);
+        // Slots in the order the user asked for them.
+        let mut slots = Vec::new();
+        for id in &plan.expanded_configs() {
+            if let Some(s) = lcg_slots.remove(id).or_else(|| qmd_slots.remove(id)) {
+                slots.push(s);
+            }
+        }
+        Ok(evaluate(&fx, a.k, slots, cached.as_ref(), skip_reason).await)
+    }
+    .await;
+
+    // ── Kept workspace (FR-006) ───────────────────────────────────────────────
+    let mut kept_manifest: Option<(PathBuf, workspace::WorkspaceManifest)> = None;
+    // A failure to keep the workspace must not cost the computed results either: it is reported,
+    // the report is still written, and the run then fails with it.
+    let mut keep_error: Option<String> = None;
+    if let (Some(dest), Some(guard)) = (&a.keep_workspace, _service_guards.pop()) {
+        let manifest = workspace::WorkspaceManifest {
+            format: 1,
+            group_id: lcg::EVAL_GROUP.to_string(),
+            corpus_version: meta.corpus_version.clone(),
+            corpus_hash: meta.corpus_hash.clone(),
+            ontology_hash: onto.hash.clone(),
+            ontology_mode: onto.mode.clone(),
+            // Redacted: the manifest is on disk next to the data, so no endpoint credential.
+            embedder: workspace::redact_endpoint(
+                &a.embedder_http
+                    .clone()
+                    .or(a.embedder_uds.clone())
+                    .or_else(|| std::env::var("LCG_EMBEDDING_URL").ok())
+                    .unwrap_or_default(),
+            ),
+            embedding_profile: a.embedding_profiles.first().cloned(),
+            extractor: meta.extractor.clone(),
+            cassette: a.replay_cassette.clone().or(a.record_cassette.clone()),
+            lcg_build: meta.lcg_build.clone(),
+        };
+        match guard.shutdown_and_keep(dest).await {
+            Ok(()) => {
+                eprintln!(
+                    "lcg-eval retrieval: kept the ingested workspace at {}",
+                    dest.display()
+                );
+                meta.kept_workspace = Some(dest.display().to_string());
+                kept_manifest = Some((dest.clone(), manifest));
+            }
+            Err(e) => {
+                eprintln!(
+                    "lcg-eval retrieval: ERROR could not keep the workspace: {e}; writing the \
+                     report anyway"
+                );
+                keep_error = Some(e);
+            }
         }
     }
-    let outcomes = evaluate(&fx, a.k, slots, cached.as_ref(), skip_reason).await;
+    // The manifest is written last, after the report: a manifest that cannot be written must cost
+    // neither the ingest nor the computed results, so its failure is a warning naming the kept
+    // workspace.
+    let write_kept_manifest = || {
+        if let Some((dest, manifest)) = &kept_manifest {
+            if let Err(e) = workspace::write_manifest(dest, manifest) {
+                eprintln!(
+                    "lcg-eval retrieval: WARNING the ingested workspace is kept at {} but its {} \
+                     could not be written: {e}; graph-qa will treat its provenance as unknown",
+                    dest.display(),
+                    workspace::MANIFEST_FILE
+                );
+            }
+        }
+    };
+    let outcomes = match evaluated {
+        Ok(o) => o,
+        Err(e) => {
+            write_kept_manifest();
+            return Err(e);
+        }
+    };
     let report = Report {
         meta,
         ingest: ingest_cost,
         configs: outcomes,
     };
 
+    let written = write_report(&report, a.out.as_deref());
+    write_kept_manifest();
+    match keep_error {
+        Some(e) => Err(e),
+        None => written,
+    }
+}
+
+fn write_report(report: &Report, out: Option<&Path>) -> Result<(), String> {
     let markdown = report.render_markdown();
     println!("{markdown}");
-    if let Some(dir) = &a.out {
+    if let Some(dir) = out {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create --out {}: {e}", dir.display()))?;
         std::fs::write(dir.join("report.md"), &markdown)

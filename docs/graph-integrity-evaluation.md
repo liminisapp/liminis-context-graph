@@ -30,9 +30,11 @@ target/release/lcg-eval graph-integrity --workspace <other-workspace> --out /tmp
   --compare /tmp/gi-ontology/report.json
 ```
 
-The input is a workspace directory that a service has ingested into, for example one kept from a
-retrieval run (the retrieval runner removes its temporary workspace by default, so keep one by other
-means). The command accepts any workspace whose DB a service could open.
+The input is a workspace directory that a service has ingested into. The usual source is
+`lcg-eval retrieval --keep-workspace <DIR>` (#821), which keeps the ingested workspace (with
+`--ontology <file>`, one built under that ontology) instead of removing its temporary workspace;
+see [Ingesting under an ontology and keeping the workspace](retrieval-quality-evaluation.md#ingesting-under-an-ontology-and-keeping-the-workspace-821).
+The command accepts any workspace whose DB a service could open.
 
 | Flag | Default | Meaning |
 |---|---|---|
