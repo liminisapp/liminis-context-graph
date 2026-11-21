@@ -5,6 +5,14 @@ title: Testing & Evaluation
 
 # Testing & Evaluation
 
+## Running lcg in your own tests
+
+Start the shipped binary with `--embedder test --extractor test` to get the real engine with
+lcg-owned, deterministic, offline providers: no sidecar, no LLM, no network. The extractor reads
+**fact lines** (`SRC -> DST: fact text`) from the chunk text, and the embedder is a hashed bag of
+words, so texts that share words are closer than unrelated ones. The fact-line syntax is a stable
+contract, tested in lcg's own CI. See [Test Providers](test-providers.md).
+
 ## Record/replay cassettes
 
 Every test that exercises the real extraction pipeline used to face a choice: pay for a live

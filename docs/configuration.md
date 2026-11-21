@@ -9,6 +9,8 @@ title: Configuration
 
 | Flag | Description |
 |------|-------------|
+| `--embedder test` | **Tests only.** Use the built-in deterministic, offline embedder (a hashed bag of words): no sidecar, network or credentials. Dimension is `LCG_EMBEDDING_DIM`, else 768. Never inferred from the environment. Mutually exclusive with `--embedder-uds`/`--embedder-http`; not valid with `--connect`. See [Test Providers](test-providers.md). |
+| `--extractor test` | **Tests only.** Use the built-in deterministic, offline extractor, which extracts only from fact lines (`SRC -> DST: fact`, `SRC -[REL]-> DST: fact`): no LLM, network or credentials. Never inferred from the environment. Mutually exclusive with `--extractor-uds`/`--extractor-http`; not valid with `--connect` or with `LCG_RECORD_LLM`/`LCG_REPLAY_LLM`. See [Test Providers](test-providers.md). |
 | `--embedder-uds <path>` | Unix domain socket for the embedder sidecar (default on macOS: `/tmp/liminis-inference.sock`, auto-detected). |
 | `--embedder-http <url>` | HTTP URL for an OpenAI-compatible embedding endpoint. Mutually exclusive with `--embedder-uds`. |
 | `--extractor-uds <path>` | Unix domain socket for a local OpenAI-compatible extraction endpoint. |
@@ -26,6 +28,8 @@ title: Configuration
 | `--version` | Print the binary's version and exit. |
 
 `--embedder-uds`/`--embedder-http` are for the embedding sidecar; `--extractor-uds`/`--extractor-http` are for the extraction LLM. See [Embedder sidecar](#embedder-sidecar) and [Extractor: local or hosted](#extractor-local-or-hosted) below.
+
+`--embedder test` / `--extractor test` are the only way to select the built-in test providers: no environment variable, default or fallback ever does. `knowledge_status` and `health_check` report which providers are active in a `providers` object. See [Test Providers](test-providers.md).
 
 ## Environment variables
 
