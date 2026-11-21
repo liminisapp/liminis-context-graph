@@ -25,6 +25,18 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `swapped_count`, `signature_mismatch_count` and per-type `by_type`. An undeclared type in a
   signature logs a load warning and is ignored.
 
+- **`lcg-eval graph-integrity`: score an extracted graph against the fixture skeleton (#819,
+  ADR-0819).** Retrieval evals score passage ranking and never read an edge's type, direction or
+  endpoints, so a badly wrong graph could score well (#816). The new subcommand is a deterministic
+  report over an ingested workspace (no LLM, network or extraction provider; the workspace is read
+  from a copy and never written): skeleton entities found, split and typed; true links per attribute
+  present, with the expected relation type and in the right direction; value facts stated on an edge
+  of the right entity and misattached to another skeleton entity; junk nodes named like note IDs;
+  and `signature_mismatch` marks plus per-type fit / reversed / neither against the ontology's
+  signatures. The entity-kind and relation mapping is data (`retrieval-v2/graph-mapping.json`).
+  `--out` writes `report.md` and `report.json`; `--compare <report.json>` prints per-metric deltas.
+  Measurement only; see `docs/graph-integrity-evaluation.md`.
+
 - **`LCG_SEARCH_MIN_SCORE`: configurable default `min_score` for `knowledge_search_passages`
   (#812, ADR-0812).** The default floor used when a request omits `min_score` was a hard-coded 0.5,
   which can let unrelated passages through for some embedders (#811). Operators can now set it per
