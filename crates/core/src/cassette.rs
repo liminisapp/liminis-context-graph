@@ -42,6 +42,12 @@
 //!   the **rendered** consolidation system/user prompts (via
 //!   [`crate::summary_merge::consolidation_prompts`]), so a prompt edit invalidates stale entries.
 //!
+//! - **`summarize`** (#850): the episode body and the **rendered** summarize system/user prompts
+//!   (via [`crate::summary_units::summarize_prompts`]) — nothing extraction-dependent (no group,
+//!   ontology, reference time or chunk key), so a `summarize` record depends only on the text it
+//!   describes and can be moved between cassettes. Two episodes with the same body share one key;
+//!   the recorder appends that key once.
+//!
 //! Explicitly **excluded** from every hash: wall-clock timestamps, request nonces/IDs, and
 //! anything provider/transport-specific (headers, API keys, URLs) — none of which ever reach
 //! this module, since the decorator operates at the [`Extractor`] trait boundary, strictly
@@ -152,6 +158,18 @@ fn consolidate_summary_request_value(entity_name: &str, existing: &str, incoming
     })
 }
 
+fn summarize_request_value(episode_body: &str) -> Value {
+    // Rendered prompts are hashed so a prompt edit invalidates stale entries loudly. Deliberately
+    // nothing else: the key must not depend on extraction inputs (group, ontology, chunk key).
+    let (system, user) = crate::summary_units::summarize_prompts(episode_body);
+    json!({
+        "call_type": "summarize",
+        "episode_body": episode_body,
+        "system_prompt": system,
+        "user_prompt": user,
+    })
+}
+
 fn judge_duplicates_request_value(pairs: &[DuplicatePair]) -> Value {
     json!({
         "call_type": "judge_duplicates",
@@ -168,7 +186,7 @@ pub struct CassetteRecord {
     /// SHA-256 hex digest of the canonical request value — see the module doc for scope.
     pub key: String,
     /// Which `Extractor` method produced this record: `"extract"`, `"classify_entities"`,
-    /// `"classify_relations"`, or `"consolidate_summary"`.
+    /// `"classify_relations"`, `"consolidate_summary"`, `"judge_duplicates"`, or `"summarize"`.
     pub call_type: String,
     pub provider: String,
     pub model: String,
@@ -177,7 +195,8 @@ pub struct CassetteRecord {
     /// Human-readable request content (the same value the hash was computed over).
     pub request: Value,
     /// The call's return value, serialized (`ExtractionResult` for `extract`, `Vec<String>` for
-    /// the two classify methods, the consolidated `String` for `consolidate_summary`).
+    /// the two classify methods, the consolidated `String` for `consolidate_summary`, the
+    /// cleaned summary `String` for `summarize`).
     pub response: Value,
 }
 
@@ -318,6 +337,9 @@ pub struct RecordingExtractor {
     /// Keys of `judge_duplicates` records already written by this process. A repeat of the same
     /// request must not append the same key again, or `load_records` rejects the cassette.
     judged_keys: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Keys of `summarize` records already written by this process: two episodes with the same
+    /// body share a key, and a second append would make the cassette fail `load_records`.
+    summarized_keys: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl RecordingExtractor {
@@ -333,6 +355,7 @@ impl RecordingExtractor {
             model: model.into(),
             writer,
             judged_keys: std::sync::Mutex::new(std::collections::HashSet::new()),
+            summarized_keys: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -418,6 +441,23 @@ impl Extractor for RecordingExtractor {
                 .await?;
             let response = serde_json::to_value(&result)?;
             self.record("consolidate_summary", key, request, &response)?;
+            Ok(result)
+        })
+    }
+
+    fn summarize<'a>(
+        &'a self,
+        body: &'a str,
+        chunk_key: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        let request = summarize_request_value(body);
+        let key = request_key(&request);
+        Box::pin(async move {
+            let result = self.inner.summarize(body, chunk_key).await?;
+            if self.summarized_keys.lock().unwrap().insert(key.clone()) {
+                let response = serde_json::to_value(&result)?;
+                self.record("summarize", key, request, &response)?;
+            }
             Ok(result)
         })
     }
@@ -544,6 +584,21 @@ impl Extractor for ReplayingExtractor {
         ));
         Box::pin(async move {
             let response = self.pop("consolidate_summary", &key)?;
+            Ok(serde_json::from_value(response)?)
+        })
+    }
+
+    /// An unrecorded summarize call is a loud [`Error::CassetteMiss`]. Unlike every other
+    /// summarize failure it fails the ingest (`episode.rs`), so a replay run against a cassette
+    /// with no `summarize` records cannot silently measure the baseline under a summaries config.
+    fn summarize<'a>(
+        &'a self,
+        body: &'a str,
+        _chunk_key: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        let key = request_key(&summarize_request_value(body));
+        Box::pin(async move {
+            let response = self.pop("summarize", &key)?;
             Ok(serde_json::from_value(response)?)
         })
     }
@@ -957,6 +1012,60 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::CassetteMiss(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn summarize_record_then_replay_roundtrip_dedup_and_miss() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = Arc::clone(&calls);
+        let inner = crate::extractor::ConfigurableExtractor::new(vec![]).with_summarize(Arc::new(
+            move |body: &str| {
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(format!("A note about {}.", body.len()))
+            },
+        ));
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("cassette.jsonl");
+        let writer = Arc::new(CassetteWriter::open(&path).unwrap());
+        let recorder = RecordingExtractor::new(Arc::new(inner), "mock", "m", writer);
+        let body = "The solar kiln dries timber slowly over a season.";
+        let first = recorder.summarize(body, Some("chunk-a")).await.unwrap();
+        // Same body under a different chunk key: forwarded live, but recorded once, since the
+        // key ignores the chunk key and a duplicate key would make the cassette unloadable.
+        let second = recorder.summarize(body, Some("chunk-b")).await.unwrap();
+        assert_eq!(first, second);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        let records = load_records(&path).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].call_type, "summarize");
+        assert_eq!(records[0].request["episode_body"], body);
+        assert!(records[0].request.get("chunk_key").is_none());
+
+        let replayer = ReplayingExtractor::load(&path).unwrap();
+        assert_eq!(replayer.summarize(body, None).await.unwrap(), first);
+        let err = replayer
+            .summarize("A different note body entirely.", None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::CassetteMiss(ref m) if m.contains("summarize")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn summarize_key_depends_only_on_the_body() {
+        let a = request_key(&summarize_request_value("same body"));
+        let b = request_key(&summarize_request_value("same body"));
+        let c = request_key(&summarize_request_value("other body"));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let v = summarize_request_value("same body");
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            vec!["call_type", "episode_body", "system_prompt", "user_prompt"]
+        );
     }
 
     #[tokio::test]

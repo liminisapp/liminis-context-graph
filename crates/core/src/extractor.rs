@@ -106,6 +106,26 @@ pub trait Extractor: Send + Sync {
         })
     }
 
+    /// Writes one short retrieval summary of an episode body (issue #850, ADR-0850): 3–6 plain
+    /// sentences plus one key-concepts sentence, no headings or labels. The returned text is
+    /// already cleaned (`summary_units::parse_summary_reply`) and never empty. `chunk_key`
+    /// identifies the chunk in failure telemetry only; it is not part of the cassette key.
+    ///
+    /// Called at ingest only when summary units are enabled (`LCG_SUMMARY_UNITS`); a failure never
+    /// fails the ingest, except a cassette miss (see `episode::summarize_episode`). The default
+    /// implementation returns `Error::Config`, so test doubles need no code.
+    fn summarize<'a>(
+        &'a self,
+        _body: &'a str,
+        _chunk_key: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(async {
+            Err(Error::Config(
+                "summarization is not supported by this extractor".to_string(),
+            ))
+        })
+    }
+
     /// Judges whether each `(existing, incoming)` pair names the same real-world entity
     /// (issue #652, ADR-0652). Returns exactly one verdict per input pair, in order.
     ///
@@ -779,6 +799,89 @@ impl AnthropicExtractor {
         }
     }
 
+    /// One summarize call (issue #850): plain text request, 429/529 retry, and an
+    /// `ExtractionFailure` event (`call_type: "summarize"`) for an HTTP error, a non-JSON body or
+    /// a reply with no usable summary text.
+    async fn do_summarize(
+        &self,
+        episode_body: &str,
+        chunk_key: Option<&str>,
+    ) -> Result<String, Error> {
+        let (system_text, user_text) = crate::summary_units::summarize_prompts(episode_body);
+        let system_value: Value = if self.caching_enabled() {
+            json!([{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}])
+        } else {
+            json!(system_text)
+        };
+        let max_tokens = crate::summary_units::SUMMARIZE_MAX_TOKENS;
+        let mut body = json!({
+            "model": &self.model,
+            "max_tokens": max_tokens,
+            "system": system_value,
+            "messages": [{"role": "user", "content": user_text}]
+        });
+        self.shape_body(&mut body);
+        let chunk_key = chunk_key.map(str::to_string);
+        let resp = match self.send_with_retry(&body).await {
+            SendOutcome::Ok(v) => v,
+            SendOutcome::HttpFailure { status, body: raw } => {
+                self.sink.emit(TelemetryEvent::ExtractionFailure {
+                    ts_ms: now_ms(),
+                    model: self.model.clone(),
+                    call_type: "summarize".to_string(),
+                    chunk_key,
+                    classification: "http_error".to_string(),
+                    raw_body: raw,
+                    finish_reason: None,
+                    completion_tokens: None,
+                    max_tokens,
+                    entities_extracted: None,
+                });
+                return Err(Error::Ipc(format!("summarize HTTP {status}")));
+            }
+            SendOutcome::MalformedBody { body: raw } => {
+                self.sink.emit(TelemetryEvent::ExtractionFailure {
+                    ts_ms: now_ms(),
+                    model: self.model.clone(),
+                    call_type: "summarize".to_string(),
+                    chunk_key,
+                    classification: "malformed".to_string(),
+                    raw_body: raw,
+                    finish_reason: None,
+                    completion_tokens: None,
+                    max_tokens,
+                    entities_extracted: None,
+                });
+                return Err(Error::Ipc(
+                    "summarize: response body was not valid JSON".to_string(),
+                ));
+            }
+            SendOutcome::Transport(e) => return Err(e),
+        };
+        self.emit_token_usage(&resp);
+        let summary = resp["content"]
+            .as_array()
+            .and_then(|arr| arr.first())
+            .and_then(|block| block["text"].as_str())
+            .and_then(crate::summary_units::parse_summary_reply);
+        match summary {
+            Some(s) => Ok(s),
+            None => {
+                self.emit_extraction_failure(
+                    "summarize",
+                    chunk_key,
+                    "malformed",
+                    &resp,
+                    max_tokens,
+                    None,
+                );
+                Err(Error::Ipc(
+                    "summarize reply held no summary text".to_string(),
+                ))
+            }
+        }
+    }
+
     async fn do_classify_entities(
         &self,
         entities: &[(&str, &str)],
@@ -1125,6 +1228,14 @@ impl Extractor for AnthropicExtractor {
         incoming: &'a str,
     ) -> BoxFuture<'a, Result<String, Error>> {
         Box::pin(self.do_consolidate_summary(entity_name, existing, incoming))
+    }
+
+    fn summarize<'a>(
+        &'a self,
+        body: &'a str,
+        chunk_key: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(self.do_summarize(body, chunk_key))
     }
 
     fn judge_duplicates<'a>(
@@ -2170,6 +2281,81 @@ impl OaiExtractor {
         parse_consolidation_reply(content)
     }
 
+    /// One summarize call (issue #850) through the chat endpoint, with an `ExtractionFailure`
+    /// event (`call_type: "summarize"`) for an HTTP error, a non-JSON body or a reply with no
+    /// usable summary text.
+    async fn do_summarize(
+        &self,
+        episode_body: &str,
+        chunk_key: Option<&str>,
+    ) -> Result<String, Error> {
+        let (system_text, user_text) = crate::summary_units::summarize_prompts(episode_body);
+        let max_tokens = crate::summary_units::SUMMARIZE_MAX_TOKENS;
+        let chunk_key = chunk_key.map(str::to_string);
+        let resp = match self.send_chat(&system_text, &user_text, max_tokens).await {
+            Ok(v) => v,
+            Err(ChatFailure::Http { status, body }) => {
+                self.sink.emit(TelemetryEvent::ExtractionFailure {
+                    ts_ms: now_ms(),
+                    model: self.model.clone(),
+                    call_type: "summarize".to_string(),
+                    chunk_key,
+                    classification: "http_error".to_string(),
+                    raw_body: body,
+                    finish_reason: None,
+                    completion_tokens: None,
+                    max_tokens,
+                    entities_extracted: None,
+                });
+                return Err(Error::Ipc(format!("summarize HTTP {status}")));
+            }
+            Err(ChatFailure::Malformed { body }) => {
+                self.sink.emit(TelemetryEvent::ExtractionFailure {
+                    ts_ms: now_ms(),
+                    model: self.model.clone(),
+                    call_type: "summarize".to_string(),
+                    chunk_key,
+                    classification: "malformed".to_string(),
+                    raw_body: body,
+                    finish_reason: None,
+                    completion_tokens: None,
+                    max_tokens,
+                    entities_extracted: None,
+                });
+                return Err(Error::Ipc(
+                    "summarize: response body was not valid JSON".to_string(),
+                ));
+            }
+            Err(ChatFailure::Transport(e)) => return Err(e),
+        };
+        self.emit_token_usage(&resp);
+        let summary = (oai_finish_reason(&resp) != Some("length"))
+            .then(|| oai_message_content(&resp))
+            .flatten()
+            .and_then(crate::summary_units::parse_summary_reply);
+        match summary {
+            Some(s) => Ok(s),
+            None => {
+                let classification = if oai_finish_reason(&resp) == Some("length") {
+                    "truncation"
+                } else {
+                    "malformed"
+                };
+                self.emit_extraction_failure(
+                    "summarize",
+                    chunk_key,
+                    classification,
+                    &resp,
+                    max_tokens,
+                    None,
+                );
+                Err(Error::Ipc(
+                    "summarize reply held no summary text".to_string(),
+                ))
+            }
+        }
+    }
+
     async fn do_classify_entities(
         &self,
         entities: &[(&str, &str)],
@@ -2361,6 +2547,14 @@ impl Extractor for OaiExtractor {
         Box::pin(self.do_consolidate_summary(entity_name, existing, incoming))
     }
 
+    fn summarize<'a>(
+        &'a self,
+        body: &'a str,
+        chunk_key: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(self.do_summarize(body, chunk_key))
+    }
+
     fn judge_duplicates<'a>(
         &'a self,
         pairs: &'a [DuplicatePair],
@@ -2520,13 +2714,25 @@ impl Extractor for MockExtractor {
 /// returns an empty ExtractionResult (no entities, no edges).
 pub struct ConfigurableExtractor {
     queue: Arc<std::sync::Mutex<std::collections::VecDeque<ExtractionResult>>>,
+    summarize: Option<SummarizeFn>,
 }
+
+/// A test double's `summarize` behaviour: episode body in, summary (or error) out.
+pub type SummarizeFn = Arc<dyn Fn(&str) -> Result<String, Error> + Send + Sync>;
 
 impl ConfigurableExtractor {
     pub fn new(results: Vec<ExtractionResult>) -> Self {
         Self {
             queue: Arc::new(std::sync::Mutex::new(results.into_iter().collect())),
+            summarize: None,
         }
+    }
+
+    /// Opts this double in to `summarize` (issue #850): each call returns `f(body)`. Without it
+    /// `summarize` keeps the trait default (`Error::Config`).
+    pub fn with_summarize(mut self, f: SummarizeFn) -> Self {
+        self.summarize = Some(f);
+        self
     }
 }
 
@@ -2555,6 +2761,20 @@ impl Extractor for ConfigurableExtractor {
     ) -> BoxFuture<'a, Result<Vec<String>, Error>> {
         let count = edges.len();
         Box::pin(async move { Ok(vec![String::new(); count]) })
+    }
+
+    fn summarize<'a>(
+        &'a self,
+        body: &'a str,
+        _chunk_key: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        let result = match &self.summarize {
+            Some(f) => f(body),
+            None => Err(Error::Config(
+                "summarization is not supported by this extractor".to_string(),
+            )),
+        };
+        Box::pin(async move { result })
     }
 }
 
@@ -3689,6 +3909,44 @@ mod tests {
             .consolidate_summary("A", "x.", "y.")
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn oai_summarize_returns_cleaned_summary() {
+        let (url, _server) = spawn_stub_http_server(oai_response_body(
+            r#"{"summary": "Summary: A note about a solar kiln. It dries timber slowly."}"#,
+        ))
+        .await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+        let out = extractor
+            .summarize("The kiln note body.", Some("kiln#0"))
+            .await
+            .unwrap();
+        assert_eq!(out, "A note about a solar kiln. It dries timber slowly.");
+    }
+
+    #[tokio::test]
+    async fn oai_summarize_empty_reply_is_err_and_emits_failure() {
+        let (url, _server) =
+            spawn_stub_http_server(oai_response_body(r#"{"summary": "  "}"#)).await;
+        let sink = Arc::new(CaptureSink::new());
+        let extractor = OaiExtractor::new_http(url, "test-model", Arc::clone(&sink) as _);
+        assert!(extractor.summarize("Body.", Some("c#1")).await.is_err());
+        assert!(sink.events().iter().any(|e| matches!(
+            e,
+            TelemetryEvent::ExtractionFailure { call_type, chunk_key, .. }
+                if call_type == "summarize" && chunk_key.as_deref() == Some("c#1")
+        )));
+    }
+
+    #[tokio::test]
+    async fn default_summarize_is_config_error() {
+        let err = UnconfiguredExtractor
+            .summarize("Body.", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
     }
 
     #[tokio::test]

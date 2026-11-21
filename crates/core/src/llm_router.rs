@@ -224,6 +224,30 @@ impl LlmRouter {
         }
     }
 
+    /// Primary → fallback for the summarize call (issue #850). Like consolidation, it is
+    /// best-effort (a failed summary only means the episode has no summary unit), so a failure
+    /// never latches `primary_failed`; the fallback is tried for this call only. A cassette miss is
+    /// returned as-is rather than retried on the fallback, so it stays identifiable.
+    async fn do_summarize(&self, body: &str, chunk_key: Option<&str>) -> Result<String, Error> {
+        let primary_ok = !self.primary_failed.load(Ordering::Acquire);
+        if primary_ok {
+            return match self.primary.summarize(body, chunk_key).await {
+                Ok(s) => Ok(s),
+                Err(err @ Error::CassetteMiss(_)) => Err(err),
+                Err(err) => match &self.fallback {
+                    Some(fb) => fb.summarize(body, chunk_key).await,
+                    None => Err(err),
+                },
+            };
+        }
+        match &self.fallback {
+            Some(fb) => fb.summarize(body, chunk_key).await,
+            None => Err(Error::Ipc(
+                "BUG: primary_failed set without fallback".to_string(),
+            )),
+        }
+    }
+
     async fn do_classify_relations(
         &self,
         edges: &[(&str, &str)],
@@ -396,6 +420,14 @@ impl Extractor for LlmRouter {
         incoming: &'a str,
     ) -> BoxFuture<'a, Result<String, Error>> {
         Box::pin(self.do_consolidate_summary(entity_name, existing, incoming))
+    }
+
+    fn summarize<'a>(
+        &'a self,
+        body: &'a str,
+        chunk_key: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<String, Error>> {
+        Box::pin(self.do_summarize(body, chunk_key))
     }
 
     fn judge_duplicates<'a>(
@@ -713,5 +745,47 @@ mod tests {
         assert!(!router.primary_failed.load(Ordering::Acquire));
         assert!(sink.events().is_empty());
         assert!(router.is_configured());
+    }
+    #[tokio::test]
+    async fn summarize_falls_back_without_latching_and_keeps_a_cassette_miss() {
+        use crate::extractor::ConfigurableExtractor;
+        let failing = Arc::new(
+            ConfigurableExtractor::new(vec![])
+                .with_summarize(Arc::new(|_: &str| Err(Error::Ipc("down".into())))),
+        );
+        let fallback = Arc::new(
+            ConfigurableExtractor::new(vec![])
+                .with_summarize(Arc::new(|_: &str| Ok("From the fallback.".to_string()))),
+        );
+        let sink = Arc::new(CaptureSink::new());
+        let router = LlmRouter::new(
+            failing as Arc<dyn Extractor>,
+            "primary-model".to_string(),
+            Some(Arc::clone(&fallback) as Arc<dyn Extractor>),
+            "fallback-model".to_string(),
+            Arc::clone(&sink) as Arc<dyn TelemetrySink>,
+        );
+        assert_eq!(
+            router.summarize("Body.", None).await.unwrap(),
+            "From the fallback."
+        );
+        assert!(!router.primary_failed.load(Ordering::Acquire));
+
+        let missing = Arc::new(ConfigurableExtractor::new(vec![]).with_summarize(Arc::new(
+            |_: &str| {
+                Err(Error::CassetteMiss(
+                    "no cassette record for summarize".into(),
+                ))
+            },
+        )));
+        let router = LlmRouter::new(
+            missing as Arc<dyn Extractor>,
+            "primary-model".to_string(),
+            Some(fallback as Arc<dyn Extractor>),
+            "fallback-model".to_string(),
+            sink as Arc<dyn TelemetrySink>,
+        );
+        let err = router.summarize("Body.", None).await.unwrap_err();
+        assert!(matches!(err, Error::CassetteMiss(_)), "got {err:?}");
     }
 }
