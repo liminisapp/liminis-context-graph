@@ -158,8 +158,44 @@ The question: does the graph answer what chunk search can't (chains, joins, inve
   - **Simulated fix:** checking endpoint types against full signatures (test ontology v3.2: type lists, `inverse_aliases`, symmetric `WORKS_WITH`) and swapping on a reversed fit, over the existing graph. Reversed links went from 48/142 to **1/142** without re-extraction.
   - **38% of typed edges fit neither way.** They are mostly incidental facts with loose entity types, so the fix flags them and keeps them.
   - The walk results above don't depend on direction, since direction is only a ranking bonus there.
+- **Step 5: the [#816](https://github.com/liminisapp/liminis-context-graph/issues/816) repair on the stored graph (PR [#817](https://github.com/liminisapp/liminis-context-graph/pull/817) @ `e4ba1191`), 2026-11-21.** `knowledge_canonicalize_relations` was run on a copy of the v3.1 workspace, with the ontology swapped for v3.2.
+  - **Repair counts:** 164 edges swapped and 975 marked `signature_mismatch`; none dropped (2,620 edges before and after). The dry run matched the real run. A second run swapped 0.
+  - **Reversed known-true links:** 48/142 → **1/142 (0.7%)**: `APPROVES` 22 → 0, `CONTACT_FOR` 18 → 1, `OWNS` 6 → 0, `SUPPLIED_BY` 2 → 0. Results posted on PR [#817](https://github.com/liminisapp/liminis-context-graph/pull/817).
+  - **The repair also retypes.** Under v3.2's alias cleanup, 467 edges changed relation type (439 of them without a swap). For example, `DISCUSSED` went 242 → 350 and `WORKS_ON` 540 → 466. A swap-only arm applies the 136 swaps on edges whose type didn't change, keeping the v3.1 types.
+
+| runner (mean score) | chain-2 | chain-3 | list | join | history | **all** |
+|---|---|---|---|---|---|---|
+| v3 (hard direction), old graph | 0.85 | 0.96 | 0.90 | 0.55 | 1.00 | 0.86 |
+| v3, swap-only repair | 0.85 | 0.96 | 0.94 | 0.80 | 1.00 | 0.90 |
+| v5 (soft direction), old graph | 0.88 | 0.96 | 0.94 | 0.86 | 1.00 | **0.91** |
+| v5, swap-only repair | 0.88 | 0.96 | 0.94 | 0.80 | 1.00 | 0.91 |
+| v5, full repair (v3.1 menu) | 0.83 | 0.96 | 0.94 | 0.80 | 1.00 | 0.89 |
+| v5, full repair (v3.2 menu) | 0.79 | 0.92 | 0.89 | 0.77 | 1.00 | 0.87 |
+
+  - **Hard direction now works.** On the swap-only graph, v3 gains +0.036 [+0.012, +0.067] over the old graph, which was its whole deficit to v5.
+  - **No net gain over v5.** v5 against v5 swap-only: -0.006 [-0.023, +0.005]. The soft bonus had already absorbed most of the reversal damage, and this question set has almost no question whose answer turns on direction (inverse lookups such as "who reports to X").
+  - **The v3.2 retyping and menu cost slightly:** full repair with the v3.1 menu is -0.022 [-0.053, +0.002] against v5; with the v3.2 menu, -0.040 [-0.078, -0.010]. The planner and walk were tuned on v3.1 types (dev half), so this is a re-tuning cost, not evidence against v3.2.
+  - **Decision:** the typed walk keeps direction as a soft preference by default. It's robust to residual errors and equal to hard direction on a clean graph.
+- **Graph integrity baseline against the skeleton (no LLM).** Filed as [#819](https://github.com/liminisapp/liminis-context-graph/issues/819), `lcg-eval graph-integrity`.
+
+| | free-form | ontology v3.1 | v3.1 + repair |
+|---|---|---|---|
+| skeleton entities typed correctly | 35/48 | 47/48 | 47/48 |
+| true links present (any edge) | 72/72 | 72/72 | 72/72 |
+| true links with expected relation type | 35/72 | 71/72 | 71/72 |
+| typed true links, direction correct | 35/35 | 56/71 | **71/71** |
+| value facts stated on the right entity | 259/428 | 290/428 | 290/428 |
+| value facts pinned to an unrelated entity | 2 | 29 (12 with no correct copy) | 29 |
+| note-ID junk nodes | 2 | 13 | 13 |
+
+  - **Free-form graphs never reverse,** because the model names the relation as the sentence reads. They just aren't typed: 35/72.
+  - **Two new extraction problems:**
+    - **Misattached value facts.** "Marlin Core has a monthly budget of $4,200" is stored as `Marlin Core HAS_MEASURE Tomas Kowalski`.
+    - **About a third of value facts are not on their entity's edges at all.** The check is an exact string match, so this is a lower bound.
 - **Next:**
-  - #816: the edge-direction fix and the repair pass, then re-measure direction.
+  - [#816](https://github.com/liminisapp/liminis-context-graph/issues/816) / PR [#817](https://github.com/liminisapp/liminis-context-graph/pull/817): done and validated (step 5); waiting to merge.
+  - [#819](https://github.com/liminisapp/liminis-context-graph/issues/819): `lcg-eval graph-integrity`, then the value-fact misattachment fix.
+  - Inverse-direction questions ("who reports to X", "what does Lena own") in the next question set, since v2 can't show a direction gain.
   - A wider held-out test, since n = 62 can't separate +0.05.
   - `lcg-eval --ontology`.
   - A second corpus with fan-out and the CQs v2 can't instantiate (P3, S2, meetings, provenance).
