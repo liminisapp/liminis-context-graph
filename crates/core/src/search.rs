@@ -1623,6 +1623,8 @@ mod tests {
             belief: None,
             source_file: None,
             chunk_id: None,
+            via: None,
+            summary_of: None,
         };
         let mk = |superseded_at_us| crate::belief::EpisodeSupersession {
             superseded_at_us,

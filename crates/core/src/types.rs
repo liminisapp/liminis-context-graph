@@ -474,6 +474,37 @@ pub struct PassageResult {
     /// The originating episode's chunk ID (issue #853). Omitted for a legacy episode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_id: Option<String>,
+    /// `Some("summary")` on a result that holds its slot because its note's summary unit matched
+    /// (issue #850, FR-012). Omitted otherwise, so a result that did not come in through a summary
+    /// — and every response of a call without `summaries: true` — serializes as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<&'static str>,
+    /// Internal (issue #850): set only on a *summary candidate* inside a summaries-on search, where
+    /// `uuid`/`content` are the summary unit's and this names the source episode. Never
+    /// serialized; every summary candidate is resolved to its episode's passage before a response
+    /// is built (`summary_units::resolve_results`).
+    #[serde(skip)]
+    pub summary_of: Option<crate::summary_units::SummarySource>,
+}
+
+impl PassageResult {
+    /// The uuid of the episode whose belief state, origin and lifecycle this row stands for: the
+    /// source episode for a summary candidate, the row's own uuid otherwise (issue #850). Every
+    /// supersession lookup on the read path keys on this, so a summary candidate is demoted exactly
+    /// like its episode's passage.
+    pub fn belief_key(&self) -> &str {
+        self.summary_of
+            .as_ref()
+            .map_or(self.uuid.as_str(), |s| s.episode_uuid.as_str())
+    }
+
+    /// The passage text whose `[[wikilinks]]` the derived-below-cited rule reads: the source
+    /// episode's text for a summary candidate, the row's own `content` otherwise.
+    pub fn cited_text(&self) -> &str {
+        self.summary_of
+            .as_ref()
+            .map_or(self.content.as_str(), |s| s.episode_content.as_str())
+    }
 }
 
 /// Why an entity was returned by `knowledge_find_entities` (issue #629): the fused RRF score

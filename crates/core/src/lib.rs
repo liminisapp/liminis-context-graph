@@ -63,6 +63,7 @@ pub mod source_id;
 pub mod source_identity;
 pub mod staged_search;
 pub mod summary_merge;
+pub mod summary_units;
 pub mod telemetry;
 pub mod test_providers;
 pub mod token_budget;
