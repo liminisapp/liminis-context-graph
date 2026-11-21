@@ -1131,8 +1131,13 @@ pub fn registry() -> Vec<ToolSpec> {
                            or the default group, since a hydrated, read-only group must never be \
                            mutated as a side effect of canonicalizing the group this node owns. \
                            Mutations are attributed to group_id's own WAL stream, never the \
-                           default group's. Supports MCP progress notifications when called with \
-                           a progress token.",
+                           default group's. When the ontology declares relation signatures \
+                           (source_type/target_type) or inverse_aliases, also repairs edge \
+                           direction (#816): edges that fit the signature only reversed are \
+                           swapped, edges that fit neither way are marked signature_mismatch \
+                           (never dropped); reports swapped_count, signature_mismatch_count and \
+                           per-type by_type counts. Idempotent. Supports MCP progress \
+                           notifications when called with a progress token.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -1142,7 +1147,7 @@ pub fn registry() -> Vec<ToolSpec> {
                             "type": "string",
                             "description": "Restricts candidate selection and WAL attribution to this group only (required; no default — #447)."
                         },
-                        "dry_run": {"type": "boolean", "default": false, "description": "Preview without writing."},
+                        "dry_run": {"type": "boolean", "default": false, "description": "Preview without writing; the report includes the direction swap and signature-mismatch counts."},
                         "embedding_threshold": {
                             "type": "number",
                             "description": "Optional similarity threshold override for matching relation types."

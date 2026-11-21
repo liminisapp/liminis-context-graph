@@ -45,13 +45,22 @@ struct RelationTypeRaw {
     name: String,
     #[serde(default)]
     description: Option<String>,
+    /// Source entity type(s): a single name or a list (#816). Unset accepts any type.
     #[serde(default)]
-    source_type: Option<String>,
+    source_type: Option<StringOrList>,
+    /// Target entity type(s): a single name or a list (#816). Unset accepts any type.
     #[serde(default)]
-    target_type: Option<String>,
+    target_type: Option<StringOrList>,
     /// Exact SCREAMING_SNAKE_CASE name variants that map to this canonical type.
     #[serde(default)]
     aliases: Option<Vec<String>>,
+    /// Names that read the relation backwards (#816): they resolve to this canonical type with
+    /// source and target swapped.
+    #[serde(default)]
+    inverse_aliases: Option<Vec<String>>,
+    /// Endpoint order carries no meaning (#816): never checked or swapped.
+    #[serde(default)]
+    symmetric: bool,
     /// Lowercase substring keywords — if any keyword appears in the normalized name, maps here.
     #[serde(default)]
     keywords: Option<Vec<String>>,
@@ -62,6 +71,23 @@ struct RelationTypeRaw {
 
 fn default_true() -> bool {
     true
+}
+
+/// A YAML value that is either one string or a list of strings (#816).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum StringOrList {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl StringOrList {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            StringOrList::One(s) => vec![s],
+            StringOrList::Many(v) => v,
+        }
+    }
 }
 
 // ── Runtime types ─────────────────────────────────────────────────────────────
@@ -100,10 +126,19 @@ pub struct EntityTypeDef {
 pub struct RelationTypeDef {
     pub name: String,
     pub description: Option<String>,
-    pub source_type: Option<String>,
-    pub target_type: Option<String>,
+    /// Declared source entity types, normalized, as declared (#816). Empty = unset (any type).
+    /// May name types the ontology does not declare — use
+    /// [`Ontology::effective_source_types`] for the usable set.
+    pub source_types: Vec<String>,
+    /// Declared target entity types (#816); see `source_types`.
+    pub target_types: Vec<String>,
     /// Exact SCREAMING_SNAKE_CASE name variants that map to this canonical type.
     pub aliases: Vec<String>,
+    /// Names that read this relation backwards (#816): resolve to this canonical type with
+    /// source and target swapped.
+    pub inverse_aliases: Vec<String>,
+    /// Endpoint order carries no meaning (#816): never checked or swapped.
+    pub symmetric: bool,
     /// Lowercase substring keywords for fuzzy name matching.
     pub keywords: Vec<String>,
     /// Extractable (#637): `false` makes the relation type assert-only. Defaults to `true`.
@@ -122,6 +157,36 @@ pub struct Ontology {
 }
 
 impl Ontology {
+    /// Declared source types of `rt` that name a declared entity type (#816). Undeclared names
+    /// are ignored; when none remain the side behaves as unset (empty = accepts any type).
+    pub fn effective_source_types<'a>(&self, rt: &'a RelationTypeDef) -> Vec<&'a str> {
+        self.effective_sides(&rt.source_types)
+    }
+
+    /// Declared target types of `rt` that name a declared entity type (#816).
+    pub fn effective_target_types<'a>(&self, rt: &'a RelationTypeDef) -> Vec<&'a str> {
+        self.effective_sides(&rt.target_types)
+    }
+
+    fn effective_sides<'a>(&self, declared: &'a [String]) -> Vec<&'a str> {
+        declared
+            .iter()
+            .filter(|t| self.ancestor_map.contains_key(t.as_str()))
+            .map(|t| t.as_str())
+            .collect()
+    }
+
+    /// True when any relation declares a usable signature (#816) or an inverse alias, i.e. when
+    /// the direction check has anything to do.
+    pub fn has_direction_info(&self) -> bool {
+        self.relation_types.iter().any(|r| {
+            !r.inverse_aliases.is_empty()
+                || (!r.symmetric
+                    && (!self.effective_source_types(r).is_empty()
+                        || !self.effective_target_types(r).is_empty()))
+        })
+    }
+
     pub fn has_entity_types(&self) -> bool {
         !self.entity_types.is_empty()
     }
@@ -539,8 +604,25 @@ fn build_ontology(file: OntologyFile, mode_override: Option<OntologyMode>) -> Op
                     raw.name, normalized
                 );
             }
-            let source_type = raw.source_type.map(|s| normalize_entity_type(&s));
-            let target_type = raw.target_type.map(|s| normalize_entity_type(&s));
+            let normalize_side = |side: Option<StringOrList>| -> Vec<String> {
+                let mut out: Vec<String> = Vec::new();
+                for t in side.map(StringOrList::into_vec).unwrap_or_default() {
+                    let n = normalize_entity_type(&t);
+                    if !n.is_empty() && !out.contains(&n) {
+                        out.push(n);
+                    }
+                }
+                out
+            };
+            let source_types = normalize_side(raw.source_type);
+            let target_types = normalize_side(raw.target_type);
+            let inverse_aliases: Vec<String> = raw
+                .inverse_aliases
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| normalize_relation_type(&a))
+                .filter(|a| !a.is_empty())
+                .collect();
             let aliases: Vec<String> = raw
                 .aliases
                 .unwrap_or_default()
@@ -558,9 +640,11 @@ fn build_ontology(file: OntologyFile, mode_override: Option<OntologyMode>) -> Op
             Some(RelationTypeDef {
                 name: normalized,
                 description: raw.description,
-                source_type,
-                target_type,
+                source_types,
+                target_types,
                 aliases,
+                inverse_aliases,
+                symmetric: raw.symmetric,
                 keywords,
                 extract: raw.extract,
             })
@@ -572,12 +656,67 @@ fn build_ontology(file: OntologyFile, mode_override: Option<OntologyMode>) -> Op
         return None;
     }
 
+    warn_direction_declarations(&entity_types, &relation_types);
+
     Some(Ontology {
         mode,
         entity_types,
         relation_types,
         ancestor_map,
     })
+}
+
+/// Load-time warnings for the direction fields (#816): signature types the ontology does not
+/// declare (that side is then ignored by the endpoint check), and inverse aliases that collide
+/// with another relation's name, alias or inverse alias. Never an error.
+fn warn_direction_declarations(entity_types: &[EntityTypeDef], relation_types: &[RelationTypeDef]) {
+    let declared: HashSet<&str> = entity_types.iter().map(|e| e.name.as_str()).collect();
+    for r in relation_types {
+        for (side, types) in [
+            ("source_type", &r.source_types),
+            ("target_type", &r.target_types),
+        ] {
+            for t in types {
+                if !declared.contains(t.as_str()) {
+                    eprintln!(
+                        "liminis-context-graph: ontology: relation type '{}' {} names '{}' \
+                         which is not a declared entity type — ignoring it in the direction check",
+                        r.name, side, t
+                    );
+                }
+            }
+        }
+    }
+    // name / alias owners (first declaration wins for the message)
+    let mut owner: HashMap<&str, &str> = HashMap::new();
+    for r in relation_types {
+        owner.entry(r.name.as_str()).or_insert(r.name.as_str());
+        for a in &r.aliases {
+            owner.entry(a.as_str()).or_insert(r.name.as_str());
+        }
+    }
+    let mut inverse_owner: HashMap<&str, &str> = HashMap::new();
+    for r in relation_types {
+        for ia in &r.inverse_aliases {
+            if let Some(o) = owner.get(ia.as_str()) {
+                eprintln!(
+                    "liminis-context-graph: ontology: inverse alias '{}' of relation type '{}' \
+                     collides with a name or alias of '{}' — the forward reading wins",
+                    ia, r.name, o
+                );
+            } else if let Some(o) = inverse_owner.get(ia.as_str()) {
+                if *o != r.name.as_str() {
+                    eprintln!(
+                        "liminis-context-graph: ontology: inverse alias '{}' is declared by both \
+                         '{}' and '{}' — the first wins",
+                        ia, o, r.name
+                    );
+                }
+            } else {
+                inverse_owner.insert(ia.as_str(), r.name.as_str());
+            }
+        }
+    }
 }
 
 // ── Parent validation and ancestor map ───────────────────────────────────────
@@ -732,8 +871,10 @@ pub fn content_hash(ontology: Option<&Ontology>) -> String {
             format!(
                 "{}\0{}\0{}\0{}\0{}\0{}",
                 r.name,
-                r.source_type.as_deref().unwrap_or(""),
-                r.target_type.as_deref().unwrap_or(""),
+                // A one-element list serializes as the legacy single string, so existing
+                // ontologies keep their hash (#816).
+                r.source_types.join("|"),
+                r.target_types.join("|"),
                 r.description.as_deref().unwrap_or(""),
                 aliases.join("\0"),
                 keywords.join("\0"),
@@ -789,6 +930,35 @@ pub fn content_hash(ontology: Option<&Ontology>) -> String {
             extract_false_entities.join("\0\0"),
             extract_false_relations.join("\0\0"),
         ));
+    }
+
+    // Direction fields (#816) follow the same append-only-when-present rule (ADR-0032).
+    let mut inverse_entries: Vec<String> = o
+        .relation_types
+        .iter()
+        .filter(|r| !r.inverse_aliases.is_empty())
+        .map(|r| {
+            let mut ia = r.inverse_aliases.clone();
+            ia.sort_unstable();
+            format!("{}\0{}", r.name, ia.join("\0"))
+        })
+        .collect();
+    inverse_entries.sort_unstable();
+    let mut symmetric_entries: Vec<&str> = o
+        .relation_types
+        .iter()
+        .filter(|r| r.symmetric)
+        .map(|r| r.name.as_str())
+        .collect();
+    symmetric_entries.sort_unstable();
+    if !inverse_entries.is_empty() {
+        canonical.push_str(&format!(
+            "\ninverse_aliases:{}",
+            inverse_entries.join("\0\0")
+        ));
+    }
+    if !symmetric_entries.is_empty() {
+        canonical.push_str(&format!("\nsymmetric:{}", symmetric_entries.join("\0\0")));
     }
 
     crate::sha256_hex::sha256_hex(canonical.as_bytes())
@@ -1151,8 +1321,10 @@ relation_types:
                 .iter()
                 .map(|(name, src, tgt, desc)| crate::ontology::RelationTypeDef {
                     name: name.to_string(),
-                    source_type: src.map(|s| s.to_string()),
-                    target_type: tgt.map(|s| s.to_string()),
+                    source_types: src.map(|s| vec![s.to_string()]).unwrap_or_default(),
+                    target_types: tgt.map(|s| vec![s.to_string()]).unwrap_or_default(),
+                    inverse_aliases: vec![],
+                    symmetric: false,
                     description: desc.map(|s| s.to_string()),
                     aliases: vec![],
                     keywords: vec![],
@@ -1620,5 +1792,115 @@ relation_types:
             content_hash(Some(&o_restored)),
             "removing all parents must restore the flat-ontology hash"
         );
+    }
+    // ── #816: direction fields ────────────────────────────────────────────────
+
+    const DIRECTION_YAML: &str = "entity_types:\n  - name: Person\n  - name: Team\n  - name: Project\n  - name: System\nrelation_types:\n  - name: OWNS\n    source_type: [Person, Team]\n    target_type: [Project, System]\n    inverse_aliases: [OWNED_BY]\n  - name: KNOWS\n    symmetric: true\n  - name: APPROVES\n    source_type: Person\n";
+
+    #[test]
+    fn direction_fields_parse_lists_inverse_aliases_symmetric() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(&dir, DIRECTION_YAML);
+        let o = load_ontology(Some(dir.path())).unwrap();
+        let owns = o.relation_types.iter().find(|r| r.name == "OWNS").unwrap();
+        assert_eq!(owns.source_types, vec!["Person", "Team"]);
+        assert_eq!(owns.target_types, vec!["Project", "System"]);
+        assert_eq!(owns.inverse_aliases, vec!["OWNED_BY"]);
+        assert!(!owns.symmetric);
+        let knows = o.relation_types.iter().find(|r| r.name == "KNOWS").unwrap();
+        assert!(knows.symmetric);
+        let approves = o
+            .relation_types
+            .iter()
+            .find(|r| r.name == "APPROVES")
+            .unwrap();
+        assert_eq!(approves.source_types, vec!["Person"]);
+        assert!(approves.target_types.is_empty());
+        assert!(o.has_direction_info());
+    }
+
+    #[test]
+    fn single_element_list_hashes_as_legacy_string() {
+        let legacy = "entity_types:\n  - name: Person\n  - name: Paper\nrelation_types:\n  - name: AUTHORED\n    source_type: Person\n    target_type: Paper\n";
+        let listed = "entity_types:\n  - name: Person\n  - name: Paper\nrelation_types:\n  - name: AUTHORED\n    source_type: [Person]\n    target_type: [Paper]\n";
+        let dir = TempDir::new().unwrap();
+        write_ontology(&dir, legacy);
+        let a = load_ontology(Some(dir.path())).unwrap();
+        write_ontology(&dir, listed);
+        let b = load_ontology(Some(dir.path())).unwrap();
+        assert_eq!(content_hash(Some(&a)), content_hash(Some(&b)));
+        // Pre-#816 canonical form: signature segments are the plain strings (entity entries
+        // sorted: "Paper\0" < "Person\0").
+        let expected = crate::sha256_hex::sha256_hex(
+            "mode:open\nentity_types:Paper\0\0\0Person\0\nrelation_types:AUTHORED\0Person\0Paper\0\0\0"
+                .as_bytes(),
+        );
+        assert_eq!(content_hash(Some(&a)), expected);
+    }
+
+    #[test]
+    fn hash_unchanged_without_new_fields_and_changes_with_them() {
+        let base = "entity_types:\n  - name: Person\n  - name: Doc\nrelation_types:\n  - name: WROTE\n    source_type: Person\n";
+        let dir = TempDir::new().unwrap();
+        write_ontology(&dir, base);
+        let o = load_ontology(Some(dir.path())).unwrap();
+        // The canonical string has no direction segments.
+        let canonical =
+            "mode:open\nentity_types:Doc\0\0\0Person\0\nrelation_types:WROTE\0Person\0\0\0\0";
+        assert_eq!(
+            content_hash(Some(&o)),
+            crate::sha256_hex::sha256_hex(canonical.as_bytes())
+        );
+        write_ontology(&dir, &format!("{base}    inverse_aliases: [WRITTEN_BY]\n"));
+        let inv = load_ontology(Some(dir.path())).unwrap();
+        assert_ne!(content_hash(Some(&inv)), content_hash(Some(&o)));
+        write_ontology(&dir, &format!("{base}    symmetric: true\n"));
+        let sym = load_ontology(Some(dir.path())).unwrap();
+        assert_ne!(content_hash(Some(&sym)), content_hash(Some(&o)));
+        assert_ne!(content_hash(Some(&sym)), content_hash(Some(&inv)));
+        // Multi-element list differs from a single element.
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Person\n  - name: Doc\nrelation_types:\n  - name: WROTE\n    source_type: [Person, Doc]\n",
+        );
+        let multi = load_ontology(Some(dir.path())).unwrap();
+        assert_ne!(content_hash(Some(&multi)), content_hash(Some(&o)));
+    }
+
+    #[test]
+    fn undeclared_signature_type_is_ignored_not_an_error() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Person\nrelation_types:\n  - name: LIKES\n    source_type: [Person, Ghost]\n    target_type: Ghost\n",
+        );
+        let o = load_ontology(Some(dir.path())).unwrap();
+        let likes = &o.relation_types[0];
+        // Declared as written (so the hash is stable)...
+        assert_eq!(likes.source_types, vec!["Person", "Ghost"]);
+        // ...but ignored by the check: Ghost is dropped, an all-undeclared side becomes unset.
+        assert_eq!(o.effective_source_types(likes), vec!["Person"]);
+        assert!(o.effective_target_types(likes).is_empty());
+    }
+
+    #[test]
+    fn blank_and_duplicate_signature_entries_are_dropped() {
+        let dir = TempDir::new().unwrap();
+        write_ontology(
+            &dir,
+            "entity_types:\n  - name: Person\nrelation_types:\n  - name: LIKES\n    source_type: [person, Person, '']\n",
+        );
+        let o = load_ontology(Some(dir.path())).unwrap();
+        assert_eq!(o.relation_types[0].source_types, vec!["Person"]);
+    }
+
+    #[test]
+    fn no_direction_info_for_flat_relations() {
+        let o = make_ontology(
+            OntologyMode::Open,
+            &[("Person", None)],
+            &[("KNOWS", None, None, None)],
+        );
+        assert!(!o.has_direction_info());
     }
 }

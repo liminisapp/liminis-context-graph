@@ -5,6 +5,11 @@
 **Context**: Issue #310 — strict ontology mode drops declared aliases and never tells the model
 the constraint
 
+> **Amended by [ADR-0816](0816-ontology-edge-direction-check-and-repair.md)**: the byte-identical
+> open-mode constraint below no longer holds for the edge prompt. The direction definition now
+> applies to every mode, and signatures render in open mode too. The `LAUNCHED_BY` inversion problem
+> noted below is addressed by `inverse_aliases` and the ingest/repair endpoint check.
+
 ## Context
 
 `strict` ontology mode was implemented only as a post-extraction filter in `episode.rs`, and

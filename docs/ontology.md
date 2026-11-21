@@ -212,9 +212,10 @@ entity_types:
 relation_types:
   - name: AUTHORED         # normalized to SCREAMING_SNAKE_CASE
     description: A person wrote a paper.
-    source_type: Person    # optional signature constraint (informational in v1)
-    target_type: Paper
+    source_type: Person    # optional signature: which entity type(s) may be the source
+    target_type: Paper     # ...and the target (a name or a list; see "Edge direction")
     aliases: [WROTE, PENNED]   # optional: alternate spellings normalized to AUTHORED
+    inverse_aliases: [AUTHORED_BY]   # optional: names that read the other way (swap endpoints)
     keywords: [author]         # optional: lowercase substrings used by the offline
                                 # knowledge_canonicalize_relations pass (fuzzy match)
   - name: AFFILIATED_WITH
@@ -227,6 +228,77 @@ relation_types:
 - **The `strict`-mode edge prompt** (`build_fact_types_section`) renders both `aliases` and `keywords` for every declared relation type, so the model can see the full set of accepted spellings and is more likely to emit the canonical name directly.
 - **Ingest-time `strict`-mode filtering** (`episode.rs`) consults only `aliases`, as an exact match after the same case/separator normalization applied to every relation type name (`normalize_relation_type`) — e.g. `wrote` normalizes to `WROTE` and resolves via the alias map to `AUTHORED`. `keywords` play no role in ingest-time filtering.
 - **The offline `knowledge_canonicalize_relations` maintenance pass** (see [IPC & MCP Reference](ipc-mcp-reference.md#relation-typing-canonicalize_relations-backfill_relation_types-reprocess_relation_types)) consults both: `aliases` via the same exact map, and `keywords` as lowercase substrings for its fuzzy-matching fallback.
+
+### Edge direction
+
+An edge is directed, and a relation's *type name* says which way: `OWNS` reads "source OWNS
+target". The extractor, left alone, tends to make the **sentence's grammatical subject** the source,
+so "Sable Core is owned by Lena Moreau" comes out as `Sable Core OWNS Lena Moreau` — reversed.
+Where direction carries meaning ("who reports to X" vs "who does X report to") that is a confidently
+wrong answer. The ontology therefore declares direction, and LCG prompts for it, checks it, and can
+repair it ([ADR-0816](adr/0816-ontology-edge-direction-check-and-repair.md)). **The ontology's reading
+of the relation wins over the sentence's subject.**
+
+Fields on a relation type, all optional and additive (an ontology that uses none of them loads
+unchanged and keeps its hash):
+
+| Field | Meaning |
+|-------|---------|
+| `source_type` / `target_type` | The entity type(s) allowed at that end: a single name (`source_type: Person`) or a list (`source_type: [Person, Team]`). A type matches if it, **or one of its declared ancestors** (`parent`), is listed. An unset side accepts any type. |
+| `inverse_aliases` | Names that read the relation the other way, e.g. `APPROVED_BY` for `APPROVES`. They resolve to the canonical type **with source and target swapped**. |
+| `symmetric: true` | Endpoint order carries no meaning (e.g. `COLLABORATES_WITH`). It is never checked or swapped. |
+
+```yaml
+relation_types:
+  - name: OWNS
+    source_type: [Person, Team]      # a person or team owns...
+    target_type: [Project, System, Policy, Agreement]
+  - name: APPROVES
+    source_type: Person              # half signature: target is "any"
+    inverse_aliases: [APPROVED_BY, HAS_EXCEPTION_APPROVER]
+  - name: COLLABORATES_WITH
+    symmetric: true
+```
+
+A signature naming an entity type the ontology does not declare logs a load warning naming the
+relation and the type. It is not an error, and that side of the signature is then ignored (if every
+listed type on a side is undeclared, the side behaves as unset). An inverse alias that collides with
+another relation's name or alias also warns; the forward reading wins.
+
+**In the extraction prompt** (every mode, including no ontology) the edge prompt states that
+`source_name` is the subject of the relation *as its type name reads*, with the worked example
+"Sable Core is owned by Lena Moreau" → `Lena Moreau OWNS Sable Core`. The relation list renders
+signatures even when only one side is declared — `(Person → any)`, `(Person | Team → Project | System)` —
+marks symmetric relations, and (strict mode) lists each inverse alias as "`APPROVED_BY` = `APPROVES`
+with source and target swapped".
+
+**At ingest** (strict *and* open mode, for every relation that declares a signature), once the
+relation type is resolved and both endpoints' entity types are known, and before the edge is written:
+
+1. An inverse alias swaps the endpoints first (strict mode resolves aliases at ingest; this applies
+   even if the canonical type declares no signature, since the inverse reading is itself the
+   direction).
+2. Endpoints fit the signature as extracted → stored as is. (If *both* orientations fit, the
+   extracted order is kept.)
+3. Endpoints fit only when reversed → **swapped**, and counted in `edges_swapped`.
+4. They fit neither way → **stored unchanged** with `"signature_mismatch": true` in the edge's
+   `attributes`, counted in `edges_signature_mismatch`. The edge is never dropped: many such edges
+   are incidental facts between loosely typed entities.
+5. Symmetric relations, relations with no usable signature, and edges with an untyped endpoint
+   (`Entity`/`Unclassified` only) are skipped.
+
+In open mode no alias resolution happens at ingest, so the check applies to edges whose relation type
+is exactly a declared name; an inverse-alias spelling in open mode is fixed by the repair pass.
+
+**For graphs that are already stored**, `knowledge_canonicalize_relations` applies the same rules
+without re-extraction (`dry_run` previews them; see the
+[IPC & MCP Reference](ipc-mcp-reference.md#relation-typing-canonicalize_relations-backfill_relation_types-reprocess_relation_types)).
+It also retypes inverse-alias edges and swaps them in one pass, clears a stale `signature_mismatch`
+mark once an edge fits, and is idempotent. `knowledge_assert_relationship` and other direct edge
+writers do **not** run the check.
+
+Editing a signature, `inverse_aliases` or `symmetric` changes the ontology content hash (an ontology
+that does not use them is unaffected), so it shows up as drift until the group is re-processed.
 
 ### Entity type hierarchy
 
@@ -350,7 +422,7 @@ relation_types:
 declared.
 
 - **Prompts.** The entity and edge extraction prompts omit the type (and its description,
-  aliases and keywords). An ontology with no `extract: false` type renders byte-identical prompts.
+  aliases and keywords). An ontology with no `extract: false` type renders the same prompts as one that never declared the flag.
   If *every* entity type is `extract: false` the entity section falls back to the default
   vocabulary; if every relation type is, the relation section is omitted.
 - **Stray extractor output.** A prompt is advisory, so an extracted entity typed with an

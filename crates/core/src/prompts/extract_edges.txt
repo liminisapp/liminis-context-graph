@@ -24,6 +24,14 @@ Only extract facts that:
 6. Use REFERENCE_TIME to resolve vague or relative temporal expressions (e.g., "last week").
 7. Do not hallucinate or infer temporal bounds from unrelated events.
 
+# DIRECTION
+
+source_name is the subject of the relation *as its type name reads*, NOT the grammatical subject of the sentence. target_name is the other end of the relation.
+- "Sable Core is owned by Lena Moreau" → Lena Moreau OWNS Sable Core (source_name: Lena Moreau, target_name: Sable Core), because OWNS reads "source OWNS target".
+- "Exceptions to the Lumen Policy require sign-off from Bram" → Bram APPROVES Lumen Policy.
+- When a relation type lists a signature such as (Person → Project), source_name must be an entity of the first type and target_name an entity of the second; "any" means no restriction.
+- When a relation type is marked symmetric, the order of source_name and target_name does not matter.
+
 # RELATION TYPE RULES
 
 {{FACT_TYPES_SECTION}}
