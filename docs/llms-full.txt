@@ -5971,10 +5971,30 @@ The question: does the graph answer what chunk search can't (chains, joins, inve
   - **Routed LCG beats qmd by a wide margin:** +0.51 [+0.41, +0.61] against `qmd` and +0.53 [+0.43, +0.63] against `qmd-rerank`.
   - **qmd's reranker hurts history** (0.08), because it ignores time. LCG's belief ranking keeps history at 0.92–1.00.
   - **Lists favour the rerankers** (0.88–0.89 against the walk's 0.77), so lists are the next place to look for a planner or walk gain.
+- **Step 4: walk and planner fixes, with a held-out half.** The questions were split per family into a dev half (67) and a test half (62), seed 815. Misses were read on the dev half only. Each fix is generic: none names a family or a relation path.
+  - **v2:** the planner also names the answer's entity type. The walk doesn't step back to nodes it has visited, keeps the final hop on that type (falling back if none match), and takes one completion hop towards that type when the planned hops end elsewhere. Joins rose (0.60 → 0.73), but history fell, because history values carry mixed types.
+  - **v3:** adds a hard per-hop edge direction, skips the type filter for history, and gives the reader each endpoint's entity type. Lists rose (0.77 → 0.90), but joins and value chains fell. **Extracted edge direction is unreliable** (for example `Nimbus Supply → Nimbus Core` for "supplied by"), so a hard filter drops correct edges.
+  - **v5 (kept):** the v3 plans, with direction as a small ranking bonus (+0.05 cosine) instead of a filter. Typed reader context and no type filter on history, as in v3.
+
+| runner (mean score) | chain-2 | chain-3 | list | join | history | **all** | dev | **test** |
+|---|---|---|---|---|---|---|---|---|
+| route, planned (step 2) | 0.90 | 0.88 | 0.77 | 0.60 | 1.00 | 0.84 | 0.80 | 0.89 |
+| route, planned v4 (v2 plans, typed context, no direction) | 0.92 | 0.88 | 0.94 | 0.86 | 0.92 | 0.91 | 0.89 | 0.92 |
+| **route, planned v5** | 0.88 | 0.96 | **0.94** | **0.86** | 1.00 | **0.91** | 0.89 | **0.94** |
+
+  - **v5 against step 2:** +0.075 [+0.027, +0.127] on all 129 questions. On the test half it is +0.052 [-0.016, +0.127], which is positive but not separable at n = 62.
+  - **v5 against the baselines:** +0.59 [+0.49, +0.68] against `qmd`, +0.62 against `qmd-rerank` and +0.54 against `lcg-passages-belief-rerank`. On the test half: +0.63, +0.67 and +0.59.
+  - **The biggest single gain is telling the reader each fact's entity types.** "Helix Core obtains goods from Tern Supply" was answered as nothing until the reader could see that Helix Core is a project.
+  - **Noise:** the embedding disk cache rounds vectors to 6 decimal places, which changed a few cosine ties. Route v2's joins moved 0.73 → 0.70 between identical runs.
+- **Why the typed graph has more nodes (769 → 1,202):** it isn't entity splitting.
+  - All 48 skeleton entities resolve to exactly one node in both graphs.
+  - The growth is the ontology's reified kinds: Policy 253, Decision 191, Topic 207, Meeting 70.
+  - Core typing is 47/48 correct; Orbit Supply is labelled Project.
+  - There are 13 note-ID junk nodes such as `project-quill-core-1`, against 2 free-form. They likely come from the Document type inviting the note itself.
+- **Harness:** the embedder sidecar twice left a request hanging with no reply. `traverse_lib.embed` now has a 60 s timeout, retries, batches of 32 and an on-disk cache.
 - **Next:**
-  - Planner fixes: vendor→project joins, and checking the type of the entity a hop lands on.
-  - Entity splitting (769 → 1,202 nodes).
-  - Lists: close the gap to the rerankers (0.77 against 0.88).
+  - Edge direction at extraction (or a direction-normalising pass), so direction can be trusted.
+  - A wider held-out test, since n = 62 can't separate +0.05.
   - `lcg-eval --ontology`.
   - A second corpus with fan-out and the CQs v2 can't instantiate (P3, S2, meetings, provenance).
 
