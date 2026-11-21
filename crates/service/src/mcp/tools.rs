@@ -577,7 +577,19 @@ pub fn registry() -> Vec<ToolSpec> {
                            search-as-you-type). When a stage is requested the \
                            response gains a `rerank` / `expansion` block with `applied` and, \
                            if it could not run, a `reason`; results then fall back to the \
-                           un-staged order rather than failing.",
+                           un-staged order rather than failing. `summaries` (issue #850, off by \
+                           default, an opt-in probe) adds each note's LLM-written summary unit \
+                           (generated at ingest only when the operator set LCG_SUMMARY_UNITS) \
+                           to the candidates before belief-aware ranking and any rerank, which \
+                           helps paraphrased questions that use none of the note's words. \
+                           Results stay passages: a summary hit is returned as its own note's \
+                           passage marked `via: \"summary\"` (with the summary candidate's \
+                           `score`, `rerank_score` and `belief`), a note appears once, and at \
+                           most `max_summary_slots` (default 3) results come in that way. Summary \
+                           text is never returned, and no LLM is called at query time. A \
+                           `summaries` block reports `applied`, `candidates` and `results`, or a \
+                           `reason` (`no_units`, `disabled`, `no_candidates`) with the ordinary \
+                           results.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -635,6 +647,14 @@ pub fn registry() -> Vec<ToolSpec> {
                         "expand": {
                             "type": "boolean", "default": false,
                             "description": "Rewrite the query with a local LLM into lexical, semantic and hypothetical-answer variants and fuse their results with RRF (runs before rerank). Expected to cost on the order of a second (not yet measured); never on by default."
+                        },
+                        "summaries": {
+                            "type": "boolean", "default": false,
+                            "description": "Add notes' summary units (written at ingest when LCG_SUMMARY_UNITS is on) to the candidates before belief-aware ranking and rerank. A summary hit comes back as its own note's passage with `via: \"summary\"`. Omitted or null means off. With no units in the searched groups the ordinary results are returned with `summaries.reason: \"no_units\"`."
+                        },
+                        "max_summary_slots": {
+                            "type": "integer", "minimum": 0, "default": 3,
+                            "description": "With `summaries`, at most this many results may come in via a summary (0 disables them). Must be a non-negative integer when summaries are on; ignored otherwise."
                         }
                     },
                     "required": ["query"]
@@ -2449,6 +2469,15 @@ mod tests {
         assert_eq!(props["rerank"]["type"], "boolean");
         assert_eq!(props["expand"]["type"], "boolean");
         assert_eq!(props["rerank_candidates"]["type"], "integer");
+        assert_eq!(props["summaries"]["type"], "boolean");
+        assert_eq!(
+            props["summaries"]["default"],
+            json!(false),
+            "summaries are opt-in"
+        );
+        assert_eq!(props["max_summary_slots"]["type"], "integer");
+        assert_eq!(props["max_summary_slots"]["default"], json!(3));
+        assert!(tool.description.contains("via") && tool.description.contains("max_summary_slots"));
         assert_eq!(
             schema["required"],
             json!(["query"]),
