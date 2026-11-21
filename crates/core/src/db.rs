@@ -5117,6 +5117,7 @@ impl<'db> Conn<'db> {
     }
 
     /// Returns all RELATES_TO edges where the entity with `entity_uuid` is either source or target.
+    /// Each edge is returned exactly once — a self-loop (#823) only via the outgoing match.
     pub fn get_edges_for_entity(&self, entity_uuid: &str) -> Result<Vec<RelatesToEdge>, Error> {
         let mut edges = self.collect_relates_to_edges(
             "MATCH (src:Entity {uuid: $uuid})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
@@ -5126,6 +5127,7 @@ impl<'db> Conn<'db> {
         )?;
         edges.extend(self.collect_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
+             WHERE src.uuid <> $uuid \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
              rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at",
             serde_json::json!({ "uuid": entity_uuid }),
