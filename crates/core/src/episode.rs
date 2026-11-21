@@ -88,6 +88,8 @@ pub struct AddEpisodeResult {
     /// Edges stored as a self-loop on one entity because, under an ontology, the model emitted a
     /// literal-valued fact about that entity with `source_name == target_name` — the sanctioned
     /// literal-object form (#823, ADR-0823). Each carries `attributes.literal_object = true`.
+    /// Admission is by name equality alone (the fact is not checked for a value, since role and
+    /// title facts carry none), so this is an upper bound on genuine literal-valued facts.
     /// Always 0 with no ontology, where such a self-reference is still dropped.
     pub edges_literal_object: usize,
     /// Edges between two different entities stored unchanged but marked

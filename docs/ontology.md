@@ -349,6 +349,13 @@ Two cases are still dropped exactly as before: differently named endpoints that 
 entity (`edges_dropped_self_loop`), and endpoints made equal by salvage. With no ontology, a
 self-reference is always dropped.
 
+The admission rule is **name equality alone**: ingest does not check that the fact actually states
+a value, because role and title facts ("HAS_ROLE: the fact text names the role") carry no digit.
+So `literal_object` means "the model emitted this as a single-entity fact", not "the fact contains
+a literal". A single-entity fact that is not a value (`Alice ALSO_KNOWN_AS Alice`) is also stored
+as a marked self-loop and counted in `edges_literal_object`, which is therefore an upper bound on
+genuine literal-valued facts. Such an edge is harmless to a walk, which never traverses it.
+
 **Suspected misattachments are marked, in every mode.** An edge between two *different* entities
 whose fact states a literal value (it contains a digit or one of `$ € £ ¥`) but does not name both
 endpoints (case-insensitive, whole-word) is stored unchanged with `"suspected_misattachment": true`

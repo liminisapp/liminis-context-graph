@@ -1696,7 +1696,9 @@ result fields exist for that, both introduced in 0.13.2.
   type, `edges_literal_object` counts edges stored as a **self-loop** on one entity because the
   model emitted a literal-valued fact about it ("Marlin Core has a monthly budget of $4,200") with
   the same name on both ends; each such edge carries `"literal_object": true` in its `attributes`.
-  It is always `0` with no ontology, where a self-reference is still dropped.
+  Admission is by name equality alone (the fact is not checked for a value), so this is an upper
+  bound on genuine literal-valued facts. It is always `0` with no ontology, where a self-reference
+  is still dropped.
   `edges_suspected_misattachment` counts edges between two different entities, in every mode,
   stored unchanged but marked `"suspected_misattachment": true` because their fact states a literal
   value (a digit or currency symbol) without naming both endpoints. Neither drops an edge. A
