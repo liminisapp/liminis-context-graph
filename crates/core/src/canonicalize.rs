@@ -364,7 +364,12 @@ pub fn plan_direction(
     rn_uuid: &str,
     info: &EndpointInfo,
 ) -> (Option<DirectionWrite>, Option<DirectionCounts>) {
-    let Some(rt_def) = onto.relation_types.iter().find(|r| r.name == final_rt) else {
+    // `extract: false` (assert-only) relations are host-asserted and never retyped or
+    // reoriented by this pass (#637), so only extractable types are looked up.
+    let Some(rt_def) = onto
+        .extractable_relation_types()
+        .find(|r| r.name == final_rt)
+    else {
         return (None, None);
     };
     let src_types = direction::endpoint_types(onto, &info.src_labels);
@@ -1217,6 +1222,24 @@ mod tests {
         assert!(plan_direction(&o, "AUTHORED", false, "rn", &untyped)
             .0
             .is_none());
+    }
+
+    #[test]
+    fn plan_direction_ignores_assert_only_relation_types() {
+        let mut o = signature_ontology(); // AUTHORED: Person → any
+        o.relation_types[0].extract = false;
+        // Would be a swap (Project → Person) if the type were extractable.
+        let reversed = info(
+            &["Entity", "Project"],
+            &["Entity", "Person"],
+            "Sable → Lena",
+            "{}",
+        );
+        let (w, counts) = plan_direction(&o, "AUTHORED", false, "rn", &reversed);
+        assert!(
+            w.is_none() && counts.is_none(),
+            "assert-only edges are left alone"
+        );
     }
 
     #[test]

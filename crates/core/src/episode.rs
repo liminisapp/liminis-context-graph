@@ -1682,7 +1682,8 @@ pub async fn add_episode_with_opts(
                     .relation_type
                     .as_deref()
                     .map(normalize_relation_type)
-                    .and_then(|n| onto.relation_types.iter().find(|r| r.name == n));
+                    // Assert-only (`extract: false`) types are never reoriented (#637).
+                    .and_then(|n| onto.extractable_relation_types().find(|r| r.name == n));
                 if let Some(rt_def) = rt_def {
                     let mut types_of = |uuid: &str| -> Result<Option<Vec<String>>, Error> {
                         if !label_cache.contains_key(uuid) {
