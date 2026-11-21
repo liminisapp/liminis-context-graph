@@ -57,6 +57,9 @@ rules feed one counter.
     filter is a noise reduction, never a reason to fail an ingest. The lookup costs one scan of the
     group's `Episodic` rows per distinct candidate link (capped at 64 per episode) and only runs
     for bodies that contain such a link.
+    The substring pre-filter is capped at 50 rows, so it orders exact-looking matches first
+    (`doc_id = target`, a name starting `target#`, a source description whose file stem starts
+    `target`) — a crowd of near-misses such as `note-10`, `note-11` cannot push the real `note-1` out.
 - The own-ID rule is retained because it is cheap and covers other corpora.
 
 - **Own IDs**: `opts.doc_id` on every path; on the chunk path only (`guard_chunk_collision`, i.e.
@@ -83,10 +86,9 @@ rules feed one counter.
   the sole authority for that counter).
 - **Observability**: additive `entities_dropped_source_id` on `AddEpisodeResult` and the
   `knowledge_process_chunk` response; each drop is logged to stderr.
-- **No prompt change.** The deterministic filter is required regardless (the model may ignore
-  guidance), and any edit to a prompt file changes every key of the committed v2 cassette
-  (3,350 calls to re-record) and risks drift in the link-recall and typing metrics this change must
-  not regress.
+- **Prompt change and cassette.** The text extraction prompt now carries the citation rule, so every
+  key of the committed v2 cassette changes (3,350 calls to re-record); see the Consequences section.
+  The deterministic filter is still required regardless, since the model may ignore guidance.
 
 This is a drop **by name**, a deliberate and narrow exception to the "never delete an entity on type
 grounds" ADRs (0033, 0037, 0310, 0312): it is a different axis, and ADR-0650 is the precedent for a

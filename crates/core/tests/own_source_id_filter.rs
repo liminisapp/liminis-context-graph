@@ -592,3 +592,34 @@ async fn doc_id_applies_on_the_free_form_path() {
     assert_eq!(entity_names(&db), vec!["Bob"]);
     assert!(edge_facts(&db).is_empty());
 }
+
+// The known-note lookup is a substring pre-filter capped at 50 rows. Near-miss notes (`note-10`,
+// `note-11`, ...) must not push the exact cited note (`note-1`) out of the cap, wherever the exact
+// note sits in storage order (first, middle or last).
+#[tokio::test]
+async fn citation_lookup_is_not_crowded_out_by_near_miss_note_ids() {
+    for exact_at in [0usize, 150, 300] {
+        let (db, _d) = make_db();
+        let mut notes: Vec<String> = (100..400).map(|i| format!("note-{i}")).collect();
+        notes.insert(exact_at, "note-1".to_string());
+        let mut queue: Vec<ExtractionResult> =
+            notes.iter().map(|_| ExtractionResult::default()).collect();
+        queue.push(ExtractionResult {
+            entities: vec![ent("Ada", "Person"), ent("note-1", "Document")],
+            edges: vec![edge("Ada", "note-1", "CITES")],
+        });
+        let state = make_state(Arc::clone(&db), Some(ontology(OntologyMode::Open)), queue);
+        for n in &notes {
+            let r = process_chunk_text(&state, n, "A note.").await;
+            assert_eq!(r["success"], json!(true), "{n}: {r}");
+        }
+        let r = process_chunk_text(&state, "wiki-note", "Ada cites it. Sources: [[note-1]]").await;
+        assert_eq!(r["success"], json!(true), "{r}");
+        assert_eq!(
+            r["entities_dropped_source_id"],
+            json!(1),
+            "exact at {exact_at}: {r}"
+        );
+        assert_eq!(entity_names(&db), vec!["Ada"], "exact at {exact_at}");
+    }
+}

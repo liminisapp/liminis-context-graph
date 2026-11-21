@@ -2270,7 +2270,11 @@ impl<'db> Conn<'db> {
     /// from the rows ([`crate::source_id::known_source_ids_of_rows`]) and compares them exactly.
     /// Uncommitted revisions (never believed) are excluded; superseded episodes still count, since
     /// the note was ingested. Case-insensitive via `lower()` (stored IDs may be mixed-case).
-    /// Capped, because one match is enough to know a note.
+    /// Capped, because one match is enough to know a note. The substring predicates over-match
+    /// (`note-1` also matches `note-10`, `xnote-1`), so rows that look like an exact source ID —
+    /// `doc_id = target`, a name starting `target#`, or a source description whose file stem starts
+    /// `target` — are ordered first; a crowd of near-misses therefore cannot push the real note out
+    /// of the cap.
     pub fn episode_id_rows_for_target(
         &self,
         group_id: &str,
@@ -2283,11 +2287,22 @@ impl<'db> Conn<'db> {
                   OR lower(ep.name) STARTS WITH $tp \
                   OR lower(ep.source_description) CONTAINS $t) \
              RETURN ep.name, ep.source_description, coalesce(ep.doc_id, ''), ep.write_path \
+             ORDER BY CASE WHEN lower(coalesce(ep.doc_id, '')) = $t \
+                            OR lower(ep.name) STARTS WITH $tp \
+                            OR lower(ep.source_description) STARTS WITH $td \
+                            OR lower(ep.source_description) STARTS WITH $tc \
+                            OR lower(ep.source_description) CONTAINS $sd \
+                            OR lower(ep.source_description) CONTAINS $sc \
+                       THEN 0 ELSE 1 END \
              LIMIT 50",
             serde_json::json!({
                 "gid": group_id,
                 "t": target,
                 "tp": format!("{target}#"),
+                "td": format!("{target}."),
+                "tc": format!("{target}:"),
+                "sd": format!("/{target}."),
+                "sc": format!("/{target}:"),
             }),
         )?;
         Ok(rows
