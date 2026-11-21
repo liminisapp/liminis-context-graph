@@ -46,6 +46,29 @@ pub const MAX_SUMMARY_CHARS: usize = 2_000;
 /// The provider's `max_tokens` for one summarize call.
 pub const SUMMARIZE_MAX_TOKENS: u32 = 512;
 
+/// One `SummaryUnit` row as written at ingest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SummaryUnitRow {
+    pub uuid: String,
+    pub group_id: String,
+    /// The episode this summary describes.
+    pub episode_uuid: String,
+    /// The cleaned summary text: what is embedded, and what the reranker scores.
+    pub content: String,
+    pub content_embedding: Vec<f32>,
+    pub created_at: String,
+}
+
+/// One nearest-neighbour hit from the `SummaryUnit` vector index.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SummaryHit {
+    pub uuid: String,
+    pub episode_uuid: String,
+    pub content: String,
+    /// Cosine *distance* (`1 - similarity`), as the index returns it.
+    pub distance: f64,
+}
+
 /// Where a summary candidate came from: its source episode. Never serialized, so a summary row
 /// that escaped resolution could not even leak this.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -518,6 +518,7 @@ pub const GROUP_SCOPED_NODE_TABLES: &[&str] = &[
     "DocRevision",
     "Community",
     "Saga",
+    "SummaryUnit",
 ];
 
 impl<'db> Conn<'db> {
@@ -1250,7 +1251,7 @@ impl<'db> Conn<'db> {
 
     // ── HNSW / FTS indexes ────────────────────────────────────────────────────
 
-    /// Creates HNSW vector indexes on Entity, Episodic, and RelatesToNode_. Idempotent — an
+    /// Creates HNSW vector indexes on Entity, Episodic, RelatesToNode_ and SummaryUnit. Idempotent — an
     /// "already exists" error (e.g. a repeat call, or one following `init_schema`) is swallowed;
     /// any other error (missing table, malformed column, ...) propagates so callers can observe a
     /// genuine index-build failure instead of silently treating it as success.
@@ -1258,10 +1259,11 @@ impl<'db> Conn<'db> {
         self.create_entity_name_embedding_index()?;
         self.create_episodic_content_embedding_index()?;
         self.create_edge_fact_embedding_index()?;
+        self.create_summary_unit_index()?;
         self.create_entity_summary_embedding_index()
     }
 
-    /// Drops the 4 HNSW vector indexes. Idempotent — errors (including "no such index") are
+    /// Drops the 5 HNSW vector indexes. Idempotent — errors (including "no such index") are
     /// suppressed so this is safe to call even when the indexes are already absent. Used by
     /// `handle_rebuild_from_wal` to ensure a from-scratch rebuild doesn't leave a stale
     /// pre-rebuild HNSW index in place after `CREATE_VECTOR_INDEX` stops treating every error
@@ -1270,6 +1272,7 @@ impl<'db> Conn<'db> {
         self.drop_entity_name_embedding_index();
         self.drop_episodic_content_embedding_index();
         self.drop_edge_fact_embedding_index();
+        self.drop_summary_unit_content_embedding_index();
         self.drop_entity_summary_embedding_index();
     }
 
@@ -1324,6 +1327,30 @@ impl<'db> Conn<'db> {
     pub fn drop_edge_fact_embedding_index(&self) {
         let _ =
             self.raw_query("CALL DROP_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx')");
+    }
+
+    /// Creates just the `SummaryUnit.content_embedding` HNSW index (issue #850). Empty unless
+    /// `LCG_SUMMARY_UNITS` was on at ingest. A database whose schema step has not created the
+    /// table yet (an older file opened by a path that builds indexes before `init_schema`) has
+    /// nothing to index, so a missing table is skipped rather than failing the whole index build;
+    /// "already exists" is swallowed as for the other indexes, and any other error propagates.
+    pub fn create_summary_unit_index(&self) -> Result<(), Error> {
+        match self.raw_query(
+            "CALL CREATE_VECTOR_INDEX('SummaryUnit', 'summary_unit_content_embedding_idx', \
+             'content_embedding', metric := 'cosine')",
+        ) {
+            Ok(()) => Ok(()),
+            Err(e) if crate::error::is_already_exists_error(&e) => Ok(()),
+            Err(e) if e.to_string().contains("SummaryUnit does not exist") => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Drops just the `SummaryUnit.content_embedding` HNSW index. Idempotent — errors suppressed.
+    pub fn drop_summary_unit_content_embedding_index(&self) {
+        let _ = self.raw_query(
+            "CALL DROP_VECTOR_INDEX('SummaryUnit', 'summary_unit_content_embedding_idx')",
+        );
     }
 
     /// Creates just the `Entity.summary_embedding` HNSW index. Idempotent, following the same
@@ -3447,6 +3474,166 @@ impl<'db> Conn<'db> {
             .iter()
             .map(|row| passage_from_row(row, 0.0, 8))
             .collect())
+    }
+
+    // ── Summary units (issue #850, ADR-0850) ──────────────────────────────────
+
+    /// Writes one `SummaryUnit` row. `CREATE` only — an HNSW-indexed vector column cannot be
+    /// `SET`, so a summary is never updated in place; a re-ingested chunk gets a new episode and a
+    /// new unit.
+    pub fn insert_summary_unit(
+        &self,
+        row: &crate::summary_units::SummaryUnitRow,
+    ) -> Result<(), Error> {
+        self.exec_params(
+            "CREATE (:SummaryUnit {uuid: $uuid, group_id: $group_id, \
+             episode_uuid: $episode_uuid, content: $content, \
+             content_embedding: $content_embedding, created_at: $created_at})",
+            serde_json::json!({
+                "uuid": row.uuid,
+                "group_id": row.group_id,
+                "episode_uuid": row.episode_uuid,
+                "content": row.content,
+                "content_embedding": row.content_embedding,
+                "created_at": row.created_at,
+            }),
+        )
+    }
+
+    /// Nearest summary units to `embedding`, best first, within `group_ids` (an empty or absent
+    /// list means every group, as for passages). `probe` is the ANN probe size; the group filter
+    /// runs after it, like [`Self::vector_search_episodic_origins`].
+    pub fn vector_search_summary_units(
+        &self,
+        embedding: &[f32],
+        group_ids: Option<&[&str]>,
+        limit: usize,
+        probe: usize,
+    ) -> Result<Vec<crate::summary_units::SummaryHit>, Error> {
+        let where_clause = episodic_where_clause(group_ids, None);
+        let cypher = format!(
+            "CALL QUERY_VECTOR_INDEX('SummaryUnit', 'summary_unit_content_embedding_idx', \
+             $emb, $probe) \
+             WITH node, distance {where_clause} \
+             RETURN node.uuid, node.episode_uuid, node.content, distance \
+             ORDER BY distance ASC LIMIT $limit"
+        );
+        let mut params = serde_json::json!({
+            "emb": embedding,
+            "limit": limit as i64,
+            "probe": probe.max(limit) as i64,
+        });
+        add_episodic_filter_params(&mut params, group_ids, None);
+        let rows = self.query_params(&cypher, params)?;
+        Ok(rows
+            .iter()
+            .map(|r| crate::summary_units::SummaryHit {
+                uuid: value_as_string(&r[0]),
+                episode_uuid: value_as_string(&r[1]),
+                content: value_as_string(&r[2]),
+                distance: value_as_f64(&r[3]),
+            })
+            .collect())
+    }
+
+    /// Whether any summary unit exists in `group_ids` (every group when absent or empty). The
+    /// cheap probe behind the `no_units` stage reason. A database without the table reads `false`.
+    pub fn has_summary_units(&self, group_ids: Option<&[&str]>) -> Result<bool, Error> {
+        let where_clause = episodic_where_clause(group_ids, None);
+        let mut params = serde_json::json!({});
+        add_episodic_filter_params(&mut params, group_ids, None);
+        match self.query_params(
+            &format!("MATCH (node:SummaryUnit) {where_clause} RETURN node.uuid LIMIT 1"),
+            params,
+        ) {
+            Ok(rows) => Ok(!rows.is_empty()),
+            Err(e) if e.to_string().contains("does not exist") => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The summary units of the given episodes, as `(uuid, episode_uuid, content)`.
+    pub fn summary_units_for_episodes(
+        &self,
+        episode_uuids: &[String],
+    ) -> Result<Vec<(String, String, String)>, Error> {
+        if episode_uuids.is_empty() {
+            return Ok(vec![]);
+        }
+        match self.query_params(
+            "MATCH (s:SummaryUnit) WHERE s.episode_uuid IN $uuids \
+             RETURN s.uuid, s.episode_uuid, s.content ORDER BY s.uuid",
+            serde_json::json!({ "uuids": episode_uuids }),
+        ) {
+            Ok(rows) => Ok(rows
+                .iter()
+                .map(|r| {
+                    (
+                        value_as_string(&r[0]),
+                        value_as_string(&r[1]),
+                        value_as_string(&r[2]),
+                    )
+                })
+                .collect()),
+            Err(e) if e.to_string().contains("does not exist") => Ok(vec![]),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Deletes the summary units of the given episodes, so a deleted episode leaves no orphan
+    /// unit behind. Probes first and issues the `DELETE` only when a unit exists, so a workspace
+    /// that never had summaries gets no new WAL line from any delete path. Returns how many were
+    /// deleted.
+    pub fn delete_summary_units_for_episodes(
+        &self,
+        episode_uuids: &[String],
+    ) -> Result<usize, Error> {
+        let n = self.summary_units_for_episodes(episode_uuids)?.len();
+        if n == 0 {
+            return Ok(0);
+        }
+        self.exec_params(
+            "MATCH (s:SummaryUnit) WHERE s.episode_uuid IN $uuids DELETE s",
+            serde_json::json!({ "uuids": episode_uuids }),
+        )?;
+        Ok(n)
+    }
+
+    /// Deletes every summary unit of the given groups (group purge, `clear_all`). Probes first,
+    /// like [`Self::delete_summary_units_for_episodes`], so a group with none logs nothing.
+    pub fn delete_summary_units_by_group_ids(&self, group_ids: &[&str]) -> Result<(), Error> {
+        if group_ids.is_empty() || !self.has_summary_units(Some(group_ids))? {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (s:SummaryUnit) WHERE s.group_id IN $gids DELETE s",
+            serde_json::json!({ "gids": group_ids }),
+        )
+    }
+
+    /// Page of `SummaryUnit` rows for dump: `uuid, group_id, episode_uuid, content, created_at`.
+    pub(crate) fn dump_summary_unit_page(
+        &self,
+        group_id: Option<&str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<Vec<lbug::Value>>, Error> {
+        const COLS: &str = "RETURN s.uuid, s.group_id, s.episode_uuid, s.content, s.created_at \
+             ORDER BY s.uuid SKIP $offset LIMIT $limit";
+        let rows = match group_id {
+            Some(gid) => self.query_params(
+                &format!("MATCH (s:SummaryUnit) WHERE s.group_id = $gid {COLS}"),
+                serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
+            ),
+            None => self.query_params(
+                &format!("MATCH (s:SummaryUnit) {COLS}"),
+                serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
+            ),
+        };
+        match rows {
+            Err(e) if e.to_string().contains("does not exist") => Ok(Vec::new()),
+            other => other,
+        }
     }
 
     /// Lists Entity nodes with optional group filter, ordered by uuid DESC.
@@ -6828,6 +7015,76 @@ mod create_vector_indexes_tests {
         assert!(
             !crate::error::is_already_exists_error(&err),
             "missing-table error must not be misclassified as already-exists: {err}"
+        );
+    }
+
+    /// Summary units (issue #850): insert, group-filtered nearest-neighbour search, the existence
+    /// probe, and probe-first deletes that log nothing when there is nothing to delete.
+    #[test]
+    fn summary_unit_storage_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let db = Db::open(dir.path().join("t.db").to_str().unwrap()).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        conn.create_vector_indexes().unwrap();
+        assert!(!conn.has_summary_units(None).unwrap());
+
+        // Probe-first deletes on an empty table record no mutation (no WAL line).
+        conn.drain_mutations();
+        assert_eq!(
+            conn.delete_summary_units_for_episodes(&["e1".to_string()])
+                .unwrap(),
+            0
+        );
+        conn.delete_summary_units_by_group_ids(&["g1"]).unwrap();
+        assert!(conn.drain_mutations().is_empty());
+
+        let unit =
+            |uuid: &str, gid: &str, ep: &str, emb: [f32; 4]| crate::summary_units::SummaryUnitRow {
+                uuid: uuid.into(),
+                group_id: gid.into(),
+                episode_uuid: ep.into(),
+                content: format!("summary {uuid}"),
+                content_embedding: emb.to_vec(),
+                created_at: "2026-01-01T00:00:00Z".into(),
+            };
+        conn.insert_summary_unit(&unit("s1", "g1", "e1", [1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        conn.insert_summary_unit(&unit("s2", "g1", "e2", [0.6, 0.8, 0.0, 0.0]))
+            .unwrap();
+        conn.insert_summary_unit(&unit("s3", "g2", "e3", [1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+
+        assert!(conn.has_summary_units(None).unwrap());
+        assert!(conn.has_summary_units(Some(&["g2"])).unwrap());
+        assert!(!conn.has_summary_units(Some(&["g9"])).unwrap());
+
+        let q = [1.0f32, 0.0, 0.0, 0.0];
+        let hits = conn
+            .vector_search_summary_units(&q, Some(&["g1"]), 10, 10)
+            .unwrap();
+        let ids: Vec<&str> = hits.iter().map(|h| h.uuid.as_str()).collect();
+        assert_eq!(ids, vec!["s1", "s2"]);
+        assert_eq!(hits[0].episode_uuid, "e1");
+        assert_eq!(hits[0].content, "summary s1");
+        assert!(hits[0].distance < hits[1].distance);
+        let all = conn.vector_search_summary_units(&q, None, 10, 10).unwrap();
+        assert_eq!(all.len(), 3);
+
+        conn.drain_mutations();
+        assert_eq!(
+            conn.delete_summary_units_for_episodes(&["e1".to_string()])
+                .unwrap(),
+            1
+        );
+        assert_eq!(conn.drain_mutations().len(), 1);
+        conn.delete_summary_units_by_group_ids(&["g2"]).unwrap();
+        assert!(!conn.has_summary_units(Some(&["g2"])).unwrap());
+        assert_eq!(
+            conn.summary_units_for_episodes(&["e2".to_string()])
+                .unwrap()
+                .len(),
+            1
         );
     }
 }

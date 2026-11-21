@@ -224,6 +224,25 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          embedding_doc_prefix STRING\
          )",
     )?;
+    // Summary units (issue #850, ADR-0850): one LLM-written description per episode, a retrieval
+    // candidate for `knowledge_search_passages` with `summaries: true` and nothing else. Written
+    // only when `LCG_SUMMARY_UNITS` is on, so with the feature off this table stays empty and no
+    // existing row, template or WAL line changes. Origin and belief are read through
+    // `episode_uuid` (origin can change after ingest); `group_id` is denormalised because it is
+    // immutable and is filtered on beside the vector probe. The columns are named
+    // `content`/`content_embedding` so the WAL strips the vector and replay recomputes it from the
+    // co-located text with no list change (ADR-0526). LCG-only: no counterpart in graphiti's
+    // `kuzu_driver.py`, so no parity change.
+    conn.raw_query(&format!(
+        "CREATE NODE TABLE IF NOT EXISTS SummaryUnit (\
+         uuid STRING PRIMARY KEY, \
+         group_id STRING, \
+         episode_uuid STRING, \
+         content STRING, \
+         content_embedding FLOAT[{dim}], \
+         created_at TIMESTAMP\
+         )"
+    ))?;
     // Durable per-group record of rows stored with a fallback zero vector because the embedder
     // failed during WAL replay recompute (issue #808, ADR-0808). lcg-only derived state, like
     // `WalPosition` — no counterpart in graphiti's `kuzu_driver.py`, so no parity change. See
