@@ -297,7 +297,8 @@ pub async fn run_on_workspace(
         ontology_mode: info.ontology_mode,
         manifest: info.manifest,
         lcg_build: guard.version.clone(),
-        embedder,
+        // The report is written to disk and stdout: never the endpoint's credential.
+        embedder: workspace::redact_endpoint(&embedder),
         questions_file: qpath.display().to_string(),
         planner_model: a.planner_model.clone(),
         reader_model: a.reader_model.clone(),

@@ -347,9 +347,13 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
         .env_remove("LCG_SEARCH_MIN_SCORE");
     // The DB, WAL and socket must live in this workspace (#821): an operator's overrides would put
     // the DB outside a kept workspace, or point the eval at another service.
+    // The service also reads the legacy `GRAPHITI_*` names as fallbacks (`lcg_env_var`).
     cmd.env_remove("LCG_DB_PATH")
         .env_remove("LCG_WAL_DIR")
-        .env_remove("LCG_SOCKET_PATH");
+        .env_remove("LCG_SOCKET_PATH")
+        .env_remove("GRAPHITI_DB_PATH")
+        .env_remove("GRAPHITI_WAL_DIR")
+        .env_remove("GRAPHITI_SOCKET_PATH");
     let mut child = cmd.spawn().map_err(|e| {
         format!(
             "cannot start service '{}': {e} (pass --service-bin, or build with `cargo build --release -p lcg-service`)",
