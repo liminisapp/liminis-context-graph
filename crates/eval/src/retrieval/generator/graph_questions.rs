@@ -146,15 +146,20 @@ struct Draft {
     path: Vec<PathStep>,
 }
 
+/// (reference_time, value, note id) of one primary statement.
+type Stated<'a> = (&'a str, &'a str, &'a str);
+/// (entity, attribute) → its statements in note order.
+type StatedMap<'a> = BTreeMap<(&'a str, &'a str), Vec<Stated<'a>>>;
+
 /// The skeleton's facts as the reference reads them: primary notes only.
 struct Facts<'a> {
     /// (entity, attribute) → [(reference_time, value, note id)] in note order.
-    stated: BTreeMap<(&'a str, &'a str), Vec<(&'a str, &'a str, &'a str)>>,
+    stated: StatedMap<'a>,
 }
 
 impl<'a> Facts<'a> {
     fn new(sk: &'a Skeleton) -> Self {
-        let mut stated: BTreeMap<(&str, &str), Vec<(&str, &str, &str)>> = BTreeMap::new();
+        let mut stated: StatedMap = BTreeMap::new();
         for n in &sk.notes {
             if n.origin != "primary" {
                 continue;
