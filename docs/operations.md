@@ -801,7 +801,8 @@ row from the record, and leaves a failed row recorded so you can run it again. A
    the vector indexes of the affected kinds are dropped, written and rebuilt. Those indexes span
    **all** groups, so for that window writes are blocked everywhere and vector search for every
    group waits for the rebuild — repairing one group is not isolated to that group. A group with
-   nothing to repair costs nothing: no lock is taken and no index is touched.
+   nothing to repair costs nothing: no index is dropped and no repair write lock is held (removing
+   stale record entries takes the write lock only briefly).
 4. Check `zero_vector_rows` again. It should be `0`, or equal to the `failed` count if the embedder
    is still flaky.
 

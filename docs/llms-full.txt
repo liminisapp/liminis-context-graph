@@ -2631,7 +2631,7 @@ attempt. The envelope can also carry `cancelled: true`, `index_rebuild_errors` (
   lock, drops **only the indexes of kinds that have something to write**, writes, and rebuilds them.
   Because those indexes span *all* groups, repairing one group blocks writes everywhere, and vector
   search for every group waits for the rebuild, while the index is down. With nothing to write — no
-  candidates, or every embed failed — no lock is taken and no index is dropped. Run `dry_run: true`
+  candidates, or every embed failed — no index is dropped and no repair write lock is held (removing stale record entries takes the write lock only briefly). Run `dry_run: true`
   first and prefer a low-traffic time for a large database.
 - **If an index rebuild fails** the result still carries the counters (the rows are already written)
   plus `index_rebuild_errors: [{"kind", "error"}]`, the service's "indexes built" state is left
@@ -4538,7 +4538,8 @@ row from the record, and leaves a failed row recorded so you can run it again. A
    the vector indexes of the affected kinds are dropped, written and rebuilt. Those indexes span
    **all** groups, so for that window writes are blocked everywhere and vector search for every
    group waits for the rebuild — repairing one group is not isolated to that group. A group with
-   nothing to repair costs nothing: no lock is taken and no index is touched.
+   nothing to repair costs nothing: no index is dropped and no repair write lock is held (removing
+   stale record entries takes the write lock only briefly).
 4. Check `zero_vector_rows` again. It should be `0`, or equal to the `failed` count if the embedder
    is still flaky.
 

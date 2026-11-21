@@ -1622,7 +1622,7 @@ attempt. The envelope can also carry `cancelled: true`, `index_rebuild_errors` (
   lock, drops **only the indexes of kinds that have something to write**, writes, and rebuilds them.
   Because those indexes span *all* groups, repairing one group blocks writes everywhere, and vector
   search for every group waits for the rebuild, while the index is down. With nothing to write — no
-  candidates, or every embed failed — no lock is taken and no index is dropped. Run `dry_run: true`
+  candidates, or every embed failed — no index is dropped and no repair write lock is held (removing stale record entries takes the write lock only briefly). Run `dry_run: true`
   first and prefer a low-traffic time for a large database.
 - **If an index rebuild fails** the result still carries the counters (the rows are already written)
   plus `index_rebuild_errors: [{"kind", "error"}]`, the service's "indexes built" state is left
