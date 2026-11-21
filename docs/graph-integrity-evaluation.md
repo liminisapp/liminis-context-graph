@@ -181,10 +181,12 @@ junk. This is measured here and fixed elsewhere.
   key name is the constant `SIGNATURE_MARK_KEY`). When **no** edge carries the key, the report says
   marks are *absent* (a graph or build without #816) so that zero is not read as "clean".
 - **Fit / reversed / neither**, per edge type, against the ontology's declared signature
-  (`source_type` → `target_type`): *fit* when the source node's labels include the source type and
-  the target's include the target type (labels already include ancestors); *reversed* when they
-  satisfy it swapped and do not fit; *neither* otherwise. An absent type on either side matches
-  anything; a relation with no endpoint types is counted as *unconstrained*. Edge types in the graph
+  (`source_type` → `target_type`, each a name or a list since #816): *fit* when the source node's
+  labels include any of the source types and the target's include any of the target types (labels
+  already include ancestors); *reversed* when they satisfy it swapped and do not fit; *neither*
+  otherwise. The declared types are resolved as #816's ingest check resolves them (names the
+  ontology does not declare are ignored). An empty side matches anything; a relation with no
+  endpoint types, and a `symmetric` relation, is counted as *unconstrained*. Edge types in the graph
   that the ontology does not declare are listed separately. With no ontology, or an ontology with no
   signatures, the section is reported as not applicable.
 

@@ -11,16 +11,18 @@ use super::report::*;
 use super::rules::{contains_bounded, effective_edge_type, normalize, type_matches, JunkRule};
 use super::skeleton::Skeleton;
 
-/// The edge-attributes JSON key under which #816 stores a signature mismatch mark. #816 is not on
-/// every build; when no edge carries the key the report says marks are absent.
+/// The edge-attributes JSON key under which #816 stores a signature mismatch mark (`true`). Graphs
+/// built before #816 carry none; when no edge carries the key the report says marks are absent.
 pub const SIGNATURE_MARK_KEY: &str = "signature_mismatch";
 
-/// One ontology relation signature, reduced to what scoring needs.
+/// One ontology relation signature, reduced to what scoring needs. Each side is the set of accepted
+/// entity types (#816 lists; ancestry is already in node labels); an empty side accepts anything.
+/// A symmetric relation is carried with both sides empty, as the ingest-time check skips it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelSig {
     pub name: String,
-    pub source_type: Option<String>,
-    pub target_type: Option<String>,
+    pub source_types: Vec<String>,
+    pub target_types: Vec<String>,
 }
 
 pub struct ScoreInput<'a> {
@@ -301,7 +303,7 @@ pub fn score(inp: ScoreInput<'_>) -> Report {
         .signatures
         .filter(|s| {
             s.iter()
-                .any(|r| r.source_type.is_some() || r.target_type.is_some())
+                .any(|r| !r.source_types.is_empty() || !r.target_types.is_empty())
         })
         .map(|sigs| fit_section(sigs, inp.nodes, inp.edges, &edge_types));
     let signature = Signature {
@@ -345,9 +347,11 @@ fn fit_section(
         .map(|s| (s.name.clone(), SigCounts::default()))
         .collect();
     let mut undeclared: BTreeMap<String, usize> = BTreeMap::new();
-    let ok = |t: &Option<String>, uuid: &str| match t {
-        None => true,
-        Some(t) => labels.get(uuid).is_some_and(|l| has_label(l, t)),
+    let ok = |ts: &[String], uuid: &str| {
+        ts.is_empty()
+            || labels
+                .get(uuid)
+                .is_some_and(|l| ts.iter().any(|t| has_label(l, t)))
     };
     for (i, e) in edges.iter().enumerate() {
         let Some(sig) = by_norm.get(&edge_types[i]) else {
@@ -358,11 +362,11 @@ fn fit_section(
         };
         let c = by_type.get_mut(&sig.name).expect("declared");
         let (s, d) = (e.source_node_uuid.as_str(), e.target_node_uuid.as_str());
-        if sig.source_type.is_none() && sig.target_type.is_none() {
+        if sig.source_types.is_empty() && sig.target_types.is_empty() {
             c.unconstrained += 1;
-        } else if ok(&sig.source_type, s) && ok(&sig.target_type, d) {
+        } else if ok(&sig.source_types, s) && ok(&sig.target_types, d) {
             c.fit += 1;
-        } else if ok(&sig.source_type, d) && ok(&sig.target_type, s) {
+        } else if ok(&sig.source_types, d) && ok(&sig.target_types, s) {
             c.reversed += 1;
         } else {
             c.neither += 1;
@@ -432,13 +436,13 @@ mod tests {
         vec![
             RelSig {
                 name: "OWNED_BY".into(),
-                source_type: Some("Project".into()),
-                target_type: Some("Person".into()),
+                source_types: vec!["Project".into()],
+                target_types: vec!["Person".into()],
             },
             RelSig {
                 name: "HAS_MEASURE".into(),
-                source_type: None,
-                target_type: None,
+                source_types: vec![],
+                target_types: vec![],
             },
         ]
     }
@@ -696,10 +700,38 @@ mod tests {
         assert!(run(&s, &m, &n, &e, None).signature.fit.is_none());
         let no_sigs = vec![RelSig {
             name: "X".into(),
-            source_type: None,
-            target_type: None,
+            source_types: vec![],
+            target_types: vec![],
         }];
         assert!(run(&s, &m, &n, &e, Some(&no_sigs)).signature.fit.is_none());
+    }
+
+    #[test]
+    fn fit_accepts_any_type_of_a_list_signature() {
+        // #816: a side is a list; a node fits when its labels include any listed type.
+        let (s, m, _, _) = hand_built();
+        let sigs = vec![RelSig {
+            name: "OWNS".into(),
+            source_types: vec!["Person".into(), "Team".into()],
+            target_types: vec!["Project".into()],
+        }];
+        let n = vec![
+            node("p", "Lena Moreau", "Person"),
+            node("t", "Core Team", "Team"),
+            node("pr", "Cedar Core", "Project"),
+        ];
+        let e = vec![
+            edge("1", "OWNS", "p", "pr", "f"),  // fits via Person
+            edge("2", "OWNS", "t", "pr", "f"),  // fits via Team
+            edge("3", "OWNS", "pr", "p", "f"),  // reversed
+            edge("4", "OWNS", "pr", "pr", "f"), // neither
+        ];
+        let c = &run(&s, &m, &n, &e, Some(&sigs))
+            .signature
+            .fit
+            .unwrap()
+            .by_type["OWNS"];
+        assert_eq!((c.fit, c.reversed, c.neither), (2, 1, 1));
     }
 
     #[test]

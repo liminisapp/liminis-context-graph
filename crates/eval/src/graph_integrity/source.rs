@@ -162,10 +162,21 @@ pub fn resolve_ontology(
 pub fn signatures_of(o: &Ontology) -> Vec<RelSig> {
     o.relation_types
         .iter()
-        .map(|r| RelSig {
-            name: r.name.clone(),
-            source_type: r.source_type.clone(),
-            target_type: r.target_type.clone(),
+        .map(|r| {
+            // Same resolution as the ingest-time check (#816): declared types that exist in the
+            // ontology, and symmetric relations are unconstrained.
+            let side = |v: Vec<&str>| -> Vec<String> {
+                if r.symmetric {
+                    Vec::new()
+                } else {
+                    v.into_iter().map(String::from).collect()
+                }
+            };
+            RelSig {
+                name: r.name.clone(),
+                source_types: side(o.effective_source_types(r)),
+                target_types: side(o.effective_target_types(r)),
+            }
         })
         .collect()
 }

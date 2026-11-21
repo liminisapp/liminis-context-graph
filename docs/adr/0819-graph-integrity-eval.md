@@ -36,9 +36,11 @@ retrieval-v2 fixture already carries the ground truth (`skeleton.json`: entities
    facts, where the E13 table uses 72 and 428 (same sum). The E13 script is not in the repository, so
    its rule could not be recovered; the discrepancy is documented, and recovering it would be a
    mapping change.
-6. **Signature marks are read from `attributes.signature_mismatch`**, a named constant, because #816's
-   storage format is not on this branch. When no edge carries it the report says marks are absent,
-   never "clean".
+6. **Signature marks are read from `attributes.signature_mismatch`**, the key #816 writes (ADR-0816),
+   held as a named constant. Graphs built before #816 carry none, so when no edge carries it the
+   report says marks are absent, never "clean". Fit / reversed / neither uses the same signature
+   resolution as #816's ingest check: declared type lists resolved through the ontology
+   (`effective_source_types` / `effective_target_types`), symmetric relations unconstrained.
 7. **Exit codes distinguish failure classes**: 3 for an unusable workspace (so an all-zero report is
    never produced), 2 for usage or incompatible `--compare`, 1 for other errors.
 
