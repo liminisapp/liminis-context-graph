@@ -131,6 +131,7 @@ async fn test_degraded_mode_from_corrupt_wal() {
     assert_eq!(resp["result"]["ok"], false);
     assert_eq!(resp["result"]["healthy"], false);
     assert_eq!(resp["result"]["state"], "degraded");
+    assert_eq!(resp["result"]["ready_for_reads"], false);
     assert_eq!(resp["result"]["reason"], "lbug_wal_corrupt");
 
     // knowledge_status should also work and include recovery options
