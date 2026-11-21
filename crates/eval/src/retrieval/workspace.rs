@@ -243,7 +243,19 @@ fn copy_tree(src: &Path, dst: &Path, skip: &Path) -> std::io::Result<()> {
 
 /// Moves the workspace at `src` to `dest` (which must not exist, or be an empty directory):
 /// `rename` when possible, a copy then removal across devices. The socket is never kept.
+///
+/// On failure the workspace is left at `src` and the error names it, so an expensive ingest is
+/// never stranded in an unnamed temp dir; a partial copy at `dest` is removed.
 pub fn persist_workspace(src: &Path, dest: &Path) -> Result<(), String> {
+    move_workspace(src, dest).map_err(|e| {
+        format!(
+            "{e}; the ingested workspace is still at {} (move it there by hand)",
+            src.display()
+        )
+    })
+}
+
+fn move_workspace(src: &Path, dest: &Path) -> Result<(), String> {
     let _ = std::fs::remove_file(src.join(SOCKET_FILE));
     if dest.exists() {
         // `check_keep_dir` already refused a non-empty one; an empty one is replaced.
@@ -260,12 +272,14 @@ pub fn persist_workspace(src: &Path, dest: &Path) -> Result<(), String> {
     if std::fs::rename(src, dest).is_ok() {
         return Ok(());
     }
-    copy_workspace(src, dest).map_err(|e| {
-        format!(
+    if let Err(e) = copy_workspace(src, dest) {
+        // `dest` did not exist (or was an empty dir we removed), so everything in it is ours.
+        let _ = std::fs::remove_dir_all(dest);
+        return Err(format!(
             "cannot copy the workspace to --keep-workspace {}: {e}",
             dest.display()
-        )
-    })?;
+        ));
+    }
     let _ = std::fs::remove_dir_all(src);
     Ok(())
 }
@@ -380,5 +394,27 @@ mod tests {
         persist_workspace(&copy, &kept).unwrap();
         assert!(kept.join(".lcg/db/liminis.db").exists());
         assert!(!copy.exists());
+    }
+
+    #[test]
+    fn a_failed_move_names_where_the_workspace_still_is() {
+        let d = tempfile::tempdir().unwrap();
+        let src = d.path().join("ingested");
+        std::fs::create_dir_all(src.join(".lcg/db")).unwrap();
+        std::fs::write(src.join(".lcg/db/liminis.db"), b"db").unwrap();
+        // Something filled `dest` after the parse-time check, so it cannot be replaced.
+        let dest = d.path().join("kept");
+        std::fs::create_dir(&dest).unwrap();
+        std::fs::write(dest.join("other"), b"x").unwrap();
+        let e = persist_workspace(&src, &dest).unwrap_err();
+        assert!(e.contains(&src.display().to_string()), "{e}");
+        assert!(
+            src.join(".lcg/db/liminis.db").exists(),
+            "the workspace is left in place"
+        );
+        assert!(
+            dest.join("other").exists(),
+            "what was at dest is not touched"
+        );
     }
 }
