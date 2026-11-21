@@ -410,18 +410,22 @@ fn sample_ontology() -> Arc<Ontology> {
             RelationTypeDef {
                 name: "REPORTS_TO".into(),
                 description: Some("X reports to Y".into()),
-                source_type: Some("Employee".into()),
-                target_type: Some("Person".into()),
+                source_types: vec!["Employee".into()],
+                target_types: vec!["Person".into()],
                 aliases: vec!["MANAGED_BY".into()],
+                inverse_aliases: vec!["MANAGES".into()],
+                symmetric: true,
                 keywords: vec!["report".into()],
                 extract: true,
             },
             RelationTypeDef {
                 name: "ASSERTED_REL".into(),
                 description: None,
-                source_type: None,
-                target_type: None,
+                source_types: vec![],
+                target_types: vec![],
                 aliases: vec![],
+                inverse_aliases: vec![],
+                symmetric: false,
                 keywords: vec![],
                 extract: false,
             },
@@ -450,8 +454,8 @@ async fn get_ontology_round_trips_fields_and_honours_include_asserted() {
     assert_eq!(rts[0]["source_type"], json!(["Employee"]));
     assert_eq!(rts[0]["target_type"], json!(["Person"]));
     assert_eq!(rts[0]["aliases"], json!(["MANAGED_BY"]));
-    assert!(rts[0].get("inverse_aliases").is_some());
-    assert!(rts[0].get("symmetric").is_some());
+    assert_eq!(rts[0]["inverse_aliases"], json!(["MANAGES"]));
+    assert_eq!(rts[0]["symmetric"], true);
 
     let v = call(
         &state,

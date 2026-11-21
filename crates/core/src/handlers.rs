@@ -2670,10 +2670,8 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
 // ── knowledge_get_ontology / knowledge_walk (issue #820, ADR-0820) ────────────
 
 /// Builds the `knowledge_get_ontology` view of an effective ontology. This is the one place that
-/// maps the in-memory `Ontology` to the wire shape, so the ontology-shape work in #816
-/// (`source_types`/`target_types` lists, `inverse_aliases`, `symmetric`) changes only this
-/// function. Until it lands, signatures are single-element lists and `inverse_aliases` /
-/// `symmetric` take their defaults (`[]` / `false`).
+/// maps the in-memory `Ontology` to the wire shape. Signatures are the declared
+/// `source_types`/`target_types` lists, alongside `inverse_aliases` and `symmetric` (#816).
 ///
 /// `extract: false` (assert-only) types are omitted unless `include_asserted`.
 fn ontology_view(onto: Option<&crate::ontology::Ontology>, include_asserted: bool) -> Value {
@@ -2709,10 +2707,10 @@ fn ontology_view(onto: Option<&crate::ontology::Ontology>, include_asserted: boo
             json!({
                 "name": r.name,
                 "description": r.description,
-                "source_type": r.source_type.iter().collect::<Vec<_>>(),
-                "target_type": r.target_type.iter().collect::<Vec<_>>(),
-                "inverse_aliases": Vec::<String>::new(),
-                "symmetric": false,
+                "source_type": r.source_types,
+                "target_type": r.target_types,
+                "inverse_aliases": r.inverse_aliases,
+                "symmetric": r.symmetric,
                 "aliases": r.aliases,
                 "keywords": r.keywords,
                 "extract": r.extract,

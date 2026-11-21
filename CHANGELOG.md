@@ -47,7 +47,6 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   read-scope, read-only (no WAL writes) and exposed as MCP tools (56 tools; the read scope
   has 21). LCG makes no LLM call: the agent using LCG is the planner. E13 measured this walk at
   0.91 against 0.37 for the best passage search on the v2 graph questions.
-  `inverse_aliases`/`symmetric` in the ontology view are placeholders (`[]`/`false`) until #816 lands.
 - **`LCG_SEARCH_MIN_SCORE`: configurable default `min_score` for `knowledge_search_passages`
   (#812, ADR-0812).** The default floor used when a request omits `min_score` was a hard-coded 0.5,
   which can let unrelated passages through for some embedders (#811). Operators can now set it per

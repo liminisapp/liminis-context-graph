@@ -1337,8 +1337,8 @@ none, as for extraction):
 
 Types with `extract: false` (assert-only) are omitted unless `include_asserted: true`. A group with
 no ontology returns `has_ontology: false`, `mode: "free-form"` and empty lists — not an error.
-`inverse_aliases` and `symmetric` are always present; they carry the declared values once the
-direction work in #816 is on the branch you run, and are `[]` / `false` until then.
+`source_type`/`target_type`, `inverse_aliases` and `symmetric` are always present and carry the
+declared values (#816).
 
 #### `knowledge_walk`
 

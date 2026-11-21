@@ -52,7 +52,6 @@ per hop, relation types, a direction and an answer type. Something has to make t
 - Any MCP or IPC client with an LLM can use the walk. Plan quality depends on the caller.
 - Parity with the probe (at least 95% identical edges, reader score within 0.02 of 0.91) is
   verified by the maintainer against E13's recorded plans; no automated gate ships with this change.
-- `knowledge_get_ontology` builds its view in one function; the `source_type`/`target_type` lists,
-  `inverse_aliases` and `symmetric` take their declared values once #816's ontology shape lands.
-  Until then signatures are single-element lists and the other two are `[]` / `false`.
+- `knowledge_get_ontology` builds its view in one function and emits the declared `source_type`/`target_type`
+  lists, `inverse_aliases` and `symmetric` (#816).
 - Hub entities cost proportionally per hop (every incident edge's fact embedding is read).

@@ -267,12 +267,15 @@ fn has_type(labels: &[String], ty: &str) -> bool {
     labels.iter().any(|l| l == ty)
 }
 
-/// Declared `(source_types, target_types)` of a relation type. Isolated so the #816 list shape
-/// (`source_types`/`target_types`) is a one-function change.
-fn declared_signature(def: &crate::ontology::RelationTypeDef) -> (Vec<&str>, Vec<&str>) {
+/// Declared `(source_types, target_types)` of a relation type (#816 list shape). Undeclared
+/// entity types are ignored, so a side with none left accepts any type.
+fn declared_signature<'a>(
+    onto: &Ontology,
+    def: &'a crate::ontology::RelationTypeDef,
+) -> (Vec<&'a str>, Vec<&'a str>) {
     (
-        def.source_type.iter().map(String::as_str).collect(),
-        def.target_type.iter().map(String::as_str).collect(),
+        onto.effective_source_types(def),
+        onto.effective_target_types(def),
     )
 }
 
@@ -297,7 +300,7 @@ fn signature_mismatch(
     let Some(def) = onto.relation_types.iter().find(|r| r.name == rel) else {
         return false;
     };
-    let (src_decl, tgt_decl) = declared_signature(def);
+    let (src_decl, tgt_decl) = declared_signature(onto, def);
     let violates = |decl: &[&str], labels: &[String]| {
         !decl.is_empty()
             && !primary_type(labels).is_empty()
@@ -1182,13 +1185,18 @@ mod tests {
             relation_types: vec![RelationTypeDef {
                 name: "OWNS".into(),
                 description: None,
-                source_type: Some("Person".into()),
-                target_type: Some("Project".into()),
+                source_types: vec!["Person".into()],
+                target_types: vec!["Project".into()],
                 aliases: vec![],
+                inverse_aliases: vec![],
+                symmetric: false,
                 keywords: vec![],
                 extract: true,
             }],
-            ancestor_map: HashMap::new(),
+            ancestor_map: HashMap::from([
+                ("Person".to_string(), vec!["Person".to_string()]),
+                ("Project".to_string(), vec!["Project".to_string()]),
+            ]),
         };
         let mut g = MemGraph::default();
         g.ent("a", "Person").ent("b", "Project").ent("c", "Company");
@@ -1231,13 +1239,18 @@ mod tests {
             relation_types: vec![RelationTypeDef {
                 name: "OWNS".into(),
                 description: None,
-                source_type: Some("Person".into()),
-                target_type: Some("Project".into()),
+                source_types: vec!["Person".into()],
+                target_types: vec!["Project".into()],
                 aliases: vec![],
+                inverse_aliases: vec![],
+                symmetric: false,
                 keywords: vec![],
                 extract: true,
             }],
-            ancestor_map: HashMap::new(),
+            ancestor_map: HashMap::from([
+                ("Person".to_string(), vec!["Person".to_string()]),
+                ("Project".to_string(), vec!["Project".to_string()]),
+            ]),
         };
         let mut g = MemGraph::default();
         g.ent("a", "Company").ent("b", "Project");
