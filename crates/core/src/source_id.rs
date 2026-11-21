@@ -10,8 +10,17 @@
 //! identifiers that name the episode being extracted ([`own_source_ids`]) and tests an entity name
 //! against it ([`matches_source_id`]). `episode.rs` calls it after extraction and drops matches.
 //!
-//! The rule is **own-ID only**: an entity named after some *other* note's ID is never matched
-//! here (FR-007).
+//! Two things name an entity as a note-ID junk node:
+//!
+//! 1. the episode's **own** source ID ([`own_source_ids`]), and
+//! 2. a **citation target**: the ID-shaped target of a `[[wikilink]]` in the episode body
+//!    ([`citation_targets`]). Wiki pages and answer notes end with `Sources: [[project-quill-core-1]]`
+//!    or `(from [[project-quill-core-1]])`, and the model extracts the cited note's ID as an entity.
+//!    On the v2 corpus this — not the own ID — is the origin of every observed note-ID node.
+//!
+//! An entity that merely shares a name with some other note's ID, without being cited as a link in
+//! this episode's body, is never matched. Non-ID-shaped link targets (`[[Quill Core]]`) name real
+//! entities and are never matched either.
 
 use std::collections::BTreeSet;
 
@@ -124,6 +133,33 @@ fn is_id_shaped(s: &str) -> bool {
         && s.chars().any(char::is_alphabetic)
         && s.chars()
             .any(|c| c == '-' || c == '_' || c.is_ascii_digit())
+}
+
+/// The normalised, ID-shaped targets of `[[wikilink]]`s in `body` (citation targets).
+///
+/// Handles `[[target]]`, `[[target|alias]]`, `[[target#heading]]` and `[[folder/target.md]]`. A
+/// target that is not ID-shaped (see [`is_id_shaped`]) — `[[Quill Core]]`, `[[Alice]]` — names a
+/// real entity and is not returned.
+pub fn citation_targets(body: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("[[") {
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("]]") else {
+            break;
+        };
+        let inner = &after[..end];
+        // A link never spans lines; an unclosed `[[` followed by a later `]]` is not a link.
+        if !inner.contains('\n') {
+            let target = inner.split('|').next().unwrap_or("");
+            let norm = normalize_source_id(target);
+            if is_id_shaped(&norm) {
+                out.insert(norm);
+            }
+        }
+        rest = &after[end + 2..];
+    }
+    out
 }
 
 /// Whether `entity_name` normalises to one of the episode's own source IDs.
@@ -260,6 +296,39 @@ mod tests {
         let got = ids("alice#0", "alice:alice#0", Some("note-9"), true);
         assert_eq!(got.len(), 1);
         assert!(got.contains("note-9"));
+    }
+
+    #[test]
+    fn citation_targets_from_v2_excerpts() {
+        let wiki = "Supplier: the supplier relationship is with Quill Supply. Sources: [[project-quill-core-1]], [[project-quill-core-2]]";
+        let got = citation_targets(wiki);
+        assert_eq!(got.len(), 2);
+        assert!(got.contains("project-quill-core-1") && got.contains("project-quill-core-2"));
+        let answer =
+            "Ownership of Quill Core sits with Callum Brennan. (from [[project-quill-core-1]])";
+        assert!(citation_targets(answer).contains("project-quill-core-1"));
+        let region =
+            "Current cloud region for Tern Core: us-east. Sources: [[decision-region-tern-core-4]]";
+        assert!(citation_targets(region).contains("decision-region-tern-core-4"));
+    }
+
+    #[test]
+    fn citation_targets_skip_non_id_shaped_and_handle_variants() {
+        let got = citation_targets(
+            "See [[Quill Core]] and [[Alice]]; also [[Note-7|the note]], [[notes/doc-3.md#intro]] and [[2024-01-15]].",
+        );
+        assert!(!got.contains("quill core") && !got.contains("alice"));
+        assert!(!got.contains("2024-01-15"));
+        assert!(got.contains("note-7"), "{got:?}");
+        assert!(got.contains("doc-3"), "{got:?}");
+        assert_eq!(got.len(), 2);
+    }
+
+    #[test]
+    fn citation_targets_ignore_unclosed_and_multiline_brackets() {
+        assert!(citation_targets("an [[unclosed-id-1 link").is_empty());
+        assert!(citation_targets("[[note-1\nnote-2]]").is_empty());
+        assert!(citation_targets("").is_empty());
     }
 
     #[test]

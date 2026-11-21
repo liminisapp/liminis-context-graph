@@ -1,4 +1,4 @@
-# ADR-0824: Drop Extracted Entities Named After the Episode's Own Source ID
+# ADR-0824: Drop Extracted Entities Named After the Episode's Own Source ID or a Cited Note ID
 
 **Status**: Accepted
 **Date**: 2026-11-21
@@ -15,15 +15,30 @@ model extracts.
 
 Research found that the extractor prompt never contains the episode's `name`, `source_description`
 or `doc_id` (`chunk_key` is telemetry only), and that in the v2 fixtures a note's own body never
-contains its own ID. The note-ID names there most plausibly come from *other* notes' IDs cited as
-`[[wikilinks]]` in derived, wiki and answer notes.
+contains its own ID. The maintainer then traced all 13 v2 note-ID nodes (maintainer review of
+PR #827): **none is named after the note it was extracted from.** Each is a `[[wikilink]]` to
+*another* note that a wiki page or answer note cites as its source, e.g. `wiki-quill-core`:
+"… Sources: [[project-quill-core-1]], [[project-quill-core-2]]", an answer note's
+"(from [[project-quill-core-1]])", and `wiki-region-tern-core`'s "Sources:
+[[decision-region-tern-core-4]]"; the vendor and decision nodes are the same. **The cause is
+citation links, not the note's own ID.** The issue text's original diagnosis (the model naming the
+note from its own header) was wrong, and FR-007 was amended to cover citation targets.
 
 ## Decision
 
 A deterministic post-extraction filter in `add_episode_with_opts` (`crates/core/src/episode.rs`),
 backed by the pure module `crates/core/src/source_id.rs`, drops any extracted entity whose
-normalised name equals one of the episode's **own** source IDs, and discards any edge with such an
-endpoint.
+normalised name equals one of the episode's **own** source IDs *or* the target of an ID-shaped
+`[[wikilink]]` in the episode body (a **citation target**), and discards any edge with such an
+endpoint. Both rules feed one set and one counter.
+
+- **Citation targets** (the rule that covers v2): `citation_targets(body)` collects the targets of
+  `[[target]]`, `[[target|alias]]`, `[[target#heading]]` and `[[folder/target.md]]` links in the
+  episode body, normalises them as below, and keeps only ID-shaped ones. An entity whose
+  normalised name equals one is dropped. It applies on every path (the body is always available).
+  A link to a real entity — `[[Quill Core]]`, `[[Alice]]` — is not ID-shaped, so the entity
+  survives; an ID-shaped name that is *not* linked in this episode's body is also kept (FR-007).
+  The own-ID rule is retained because it is cheap and covers other corpora.
 
 - **Own IDs**: `opts.doc_id` on every path; on the chunk path only (`guard_chunk_collision`, i.e.
   `knowledge_process_chunk`) also the chunk id with its `#<n>` suffix removed and the `source_file`
@@ -65,11 +80,14 @@ deterministic name predicate in `episode.rs`.
 - An entity that legitimately shares a name with the episode's own *ID-shaped* ID is dropped (strict
   normalised equality, not fuzzy). Accepted by the spec. Subject-named notes (`Alice.md`) are
   exempt by the ID-shape gate above.
-- **Known risk: SC-001 may not reach 0 on v2.** The #819 junk metric counts a node named after *any*
-  note ID. If the cited-ID path dominates, the own-ID filter is correct per FR-001/FR-007 but leaves
-  most of the 13 in place. The `entities_dropped_source_id` counter makes the post-merge run
-  measurable. The follow-up is a separate issue for a citation-target rule (drop an entity whose name
-  appears only inside a `[[...]]`/"Sources:" citation), which needs a spec change to FR-007.
+- An entity that legitimately shares a name with an ID-shaped `[[wikilink]]` target in the same
+  episode body is dropped (e.g. a project literally named `project-quill-core-1` that the body
+  also links as a source). Accepted: an ID-shaped citation target is overwhelmingly a note ID, and
+  the real entity is still reachable from other episodes that do not link it.
+- **SC-001 is a prediction until measured.** The citation-target rule is aimed at the traced
+  origin of all 13 v2 nodes, but the 13 → 0 figure depends on the extractor naming the node
+  exactly as the link target. The `entities_dropped_source_id` counter makes the post-merge run
+  measurable; the maintainer measures it with one re-extraction.
 - The 13 → 0 and link-recall / typing figures require ontology v3.1 and an extractor run, neither of
   which is in this repository; they are a maintainer-run #819 evaluation after merge.
 - Existing graphs are not modified; `knowledge_merge_entities` still covers hand clean-up.
@@ -78,5 +96,9 @@ deterministic name predicate in `episode.rs`.
 
 - **Drop any entity named after any known note ID in the group.** Violates FR-007 and risks real
   entities.
-- **Drop citation-only names (`[[...]]`).** Also conflicts with FR-007; deferred as a follow-up.
-- **Prompt guidance only.** Not robust (FR-003), invalidates the cassette, drifts the metrics.
+- **Drop only names that appear *solely* inside a citation.** More precise, but needs the model's
+  entity span, which the filter does not have; link-target equality plus the ID-shape guard is
+  the deterministic approximation.
+- **Prompt guidance only.** Not robust (FR-003), invalidates the cassette, drifts the metrics. The
+  optional one-line prompt addition ("source citations such as `[[note-id]]` are not entities") was
+  not made, so the cassette stays valid; the filter is the guarantee.

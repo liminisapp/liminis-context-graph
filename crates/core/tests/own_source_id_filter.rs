@@ -200,6 +200,22 @@ async fn process_chunk(state: &Arc<AppState>, note_id: &str) -> Value {
         .clone()
 }
 
+/// Like [`process_chunk`] but with explicit chunk text (the note body).
+async fn process_chunk_text(state: &Arc<AppState>, note_id: &str, text: &str) -> Value {
+    call(
+        state,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": text,
+            "chunk_id": format!("{note_id}#0"),
+            "source_file": note_id,
+            "group_id": G,
+        }),
+    )
+    .await["result"]
+        .clone()
+}
+
 fn extraction_with_note_entity(note_entity_name: &str) -> ExtractionResult {
     ExtractionResult {
         entities: vec![
@@ -277,6 +293,85 @@ async fn other_notes_id_is_kept() {
         entity_names(&db),
         vec!["Ada", "Quill Core", "project-quill-core-2"]
     );
+}
+
+// Maintainer follow-up on #824: on v2 the junk nodes are *other* notes' IDs cited as `[[wikilinks]]`
+// in wiki / answer notes, not the episode's own ID. An ID-shaped citation target is dropped (with its
+// edges) even though it is not the episode's own ID; the real entities survive.
+#[tokio::test]
+async fn citation_targets_are_dropped_and_rest_survives() {
+    for (note_id, text, junk) in [
+        (
+            "wiki-quill-core",
+            "Supplier: the supplier relationship is with Quill Supply. Sources: [[project-quill-core-1]], [[project-quill-core-2]]",
+            vec!["project-quill-core-1", "project-quill-core-2"],
+        ),
+        (
+            "answer-19-quill-core-owner",
+            "Ownership of Quill Core sits with Callum Brennan. (from [[project-quill-core-1]])",
+            vec!["project-quill-core-1"],
+        ),
+        (
+            "wiki-region-tern-core",
+            "Current cloud region for Tern Core: us-east. Sources: [[decision-region-tern-core-4]]",
+            vec!["decision-region-tern-core-4"],
+        ),
+    ] {
+        for mode in [OntologyMode::Open, OntologyMode::Strict] {
+            let mut entities = vec![ent("Ada", "Person"), ent("Quill Core", "Document")];
+            let mut edges = vec![edge("Ada", "Quill Core", "KNOWS")];
+            for j in &junk {
+                entities.push(ent(j, "Document"));
+                edges.push(edge("Quill Core", j, "CITES"));
+            }
+            let (db, _d) = make_db();
+            let state = make_state(
+                Arc::clone(&db),
+                Some(ontology(mode.clone())),
+                vec![ExtractionResult { entities, edges }],
+            );
+            let r = process_chunk_text(&state, note_id, text).await;
+            assert_eq!(r["success"], json!(true), "{note_id} {mode}: {r}");
+            assert_eq!(
+                r["entities_dropped_source_id"],
+                json!(junk.len()),
+                "{note_id} {mode}: {r}"
+            );
+            assert_eq!(entity_names(&db), vec!["Ada", "Quill Core"], "{note_id} {mode}");
+            assert_eq!(edge_facts(&db), vec!["Ada KNOWS Quill Core"], "{note_id} {mode}");
+        }
+    }
+}
+
+// The ID-shape guard: a link to a real entity (`[[Quill Core]]`) is not a citation target and the
+// entity must survive, as must an ID-shaped name that is *not* linked in this episode's body.
+#[tokio::test]
+async fn non_id_shaped_link_targets_and_unlinked_ids_are_kept() {
+    let (db, _d) = make_db();
+    let state = make_state(
+        Arc::clone(&db),
+        Some(ontology(OntologyMode::Open)),
+        vec![ExtractionResult {
+            entities: vec![
+                ent("Quill Core", "Document"),
+                ent("Ada", "Person"),
+                ent("project-quill-core-2", "Document"),
+            ],
+            edges: vec![edge("Ada", "Quill Core", "KNOWS")],
+        }],
+    );
+    let r = process_chunk_text(
+        &state,
+        "wiki-quill-core",
+        "Ada owns [[Quill Core]]. Sources: [[project-quill-core-1]]",
+    )
+    .await;
+    assert_eq!(r["entities_dropped_source_id"], json!(0), "{r}");
+    assert_eq!(
+        entity_names(&db),
+        vec!["Ada", "Quill Core", "project-quill-core-2"]
+    );
+    assert_eq!(edge_facts(&db), vec!["Ada KNOWS Quill Core"]);
 }
 
 // A note filed under its subject's name (`people/Alice.md`) has no slug-shaped ID: the real `Alice`

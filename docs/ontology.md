@@ -461,19 +461,22 @@ declared.
 
 See [`docs/examples/ontology.example.yaml`](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/examples/ontology.example.yaml) for a fully annotated scientific-paper-domain example.
 
-### Extracted entities named after their own source note
+### Extracted entities named after a source note ID
 
-**An extracted entity named after its own source note is dropped.** Declaring a `Document` type
-can invite the model to extract the note it is reading as an entity named after the note's ID
-(e.g. `project-quill-core-1`), which then absorbs edges that belong to the real entities. Extraction
-deterministically drops an entity whose name equals the episode's *own* source ID (the chunk's
+**An extracted entity named after a note ID is dropped.** Declaring a `Document` type can invite
+the model to extract a note ID as an entity (e.g. `project-quill-core-1`), which then absorbs edges
+that belong to the real entities. In practice the ID is usually a *citation*: wiki and answer notes
+end with `Sources: [[project-quill-core-1]]`, and the model extracts the cited note. Extraction
+deterministically drops an entity whose name equals an ID-shaped `[[wikilink]]` target in the
+episode body (a link to a real entity such as `[[Quill Core]]` is kept), or the episode's *own*
+source ID (the chunk's
 `source_file`, `doc_id`, or `chunk_id` prefix, compared case-insensitively and ignoring path
 prefix, wikilink brackets and a `.md`-style extension, and only when that ID is slug-shaped — a note
 filed under its subject's name such as `Alice.md` has no ID to match, so the real entity is kept),
 plus any edge touching it
 ([ADR-0824](adr/0824-own-source-id-entity-filter.md)). The asserted `Document`/`Source` entity your
-host supplies is the supported way to represent the note. An entity named after a *different*
-note's ID is kept. The drop is reported as `entities_dropped_source_id` on `knowledge_process_chunk`.
+host supplies is the supported way to represent the note. An ID-shaped name that is neither the
+episode's own ID nor linked in its body is kept. The drop is reported as `entities_dropped_source_id` on `knowledge_process_chunk`.
 
 ## Modes
 

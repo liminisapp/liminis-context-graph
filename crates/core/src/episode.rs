@@ -687,12 +687,18 @@ pub async fn add_episode_with_opts(
     // or Phase C could resolve the name against a pre-existing persisted junk node (FR-005). These
     // are an intentional discard, like the self-reference filter, and are not counted in
     // `edges_dropped_unresolvable` (ADR-0051: Phase C is the sole authority for that counter).
-    let own_source_ids = crate::source_id::own_source_ids(
+    //
+    // The same drop also covers *citation targets* (issue #824 maintainer follow-up): the ID-shaped
+    // target of a `[[wikilink]]` in the episode body (`Sources: [[project-quill-core-1]]`). On v2
+    // that — another note's ID cited as a source — is the observed origin of the junk nodes, not the
+    // episode's own ID. A non-ID-shaped link (`[[Quill Core]]`) names a real entity and survives.
+    let mut own_source_ids = crate::source_id::own_source_ids(
         name,
         source_description,
         opts.doc_id.as_deref(),
         opts.guard_chunk_collision,
     );
+    own_source_ids.extend(crate::source_id::citation_targets(body));
     let mut entities_dropped_source_id = 0usize;
     if !own_source_ids.is_empty() {
         let before = extraction.entities.len();
@@ -700,7 +706,7 @@ pub async fn add_episode_with_opts(
             let hit = crate::source_id::matches_source_id(&e.name, &own_source_ids);
             if hit {
                 eprintln!(
-                    "liminis-context-graph: dropping extracted entity '{}' named after the episode's own source ID",
+                    "liminis-context-graph: dropping extracted entity '{}' named after the episode's own source ID or a cited note ID",
                     e.name
                 );
             }

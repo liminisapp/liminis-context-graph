@@ -219,12 +219,13 @@ evidence that its default model is a good extraction choice.
 
 Under an ontology with a `Document` type the model sometimes extracts a *junk* entity named after a
 note ID (`project-quill-core-1`); the graph-integrity report (#819) counts these as "Nodes named
-like note IDs". Extraction now drops an entity named after the episode's **own** source ID
-(ADR-0824) and reports the count as `entities_dropped_source_id`. The filter is own-ID only: a
-node named after a *different* note's ID — for example one cited as a `[[wikilink]]` in a derived
-note — is not matched, and the #819 metric counts those too. The 13 → 0 figure on the v2 corpus
-therefore needs a maintainer-run #819 evaluation; if cited-ID nodes remain, the follow-up is a
-citation-target rule (a separate issue).
+like note IDs". The v2 junk was traced to **citation links**: wiki and answer notes end with
+`Sources: [[project-quill-core-1]]` or `(from [[project-quill-core-1]])`, and the model extracts the
+*cited* note's ID as an entity — none of the 13 is named after the note it came from. Extraction
+now drops an entity named after the episode's **own** source ID *or* an ID-shaped `[[wikilink]]`
+target in the episode body (ADR-0824) and reports the count as `entities_dropped_source_id`. A link
+to a real entity (`[[Quill Core]]`) is not ID-shaped and survives, and an ID-shaped name not linked
+in the body is kept. The 13 → 0 figure on the v2 corpus needs a maintainer-run #819 evaluation.
 
 ## Guidance
 
