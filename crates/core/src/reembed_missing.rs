@@ -398,7 +398,12 @@ pub async fn reembed_missing_with_ddl(
         report.cancelled = true;
         return Ok(report.to_json());
     };
-    remove_stale(&state, &db, &group_id, stale).await?;
+    // Best-effort: stale-entry cleanup is bookkeeping unrelated to the repair, and failing the
+    // call here would discard every vector just embedded (the costly step). The entries stay
+    // recorded and the next run removes them.
+    if let Err(e) = remove_stale(&state, &db, &group_id, stale).await {
+        eprintln!("liminis-context-graph: reembed_missing: stale-entry cleanup failed: {e}");
+    }
     for (kind, n) in &embed_failed {
         report.kinds.entry(*kind).or_default().failed += n;
     }

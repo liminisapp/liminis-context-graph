@@ -104,11 +104,15 @@ struct RecordingDdl {
 
 impl IndexDdl for RecordingDdl {
     fn drop_index(&self, kind: IndexKind) -> Result<(), Error> {
+        // Logged *after* the real drop: callers wait on this event to start a racing search, and a
+        // query that overlaps the DDL itself can fail inside lbug (`bad_optional_access`) rather
+        // than with the missing-index error the auto-heal path recognises.
+        let r = self.real.drop_index(kind);
         self.events
             .lock()
             .unwrap()
             .push(format!("drop:{}", kind.as_str()));
-        self.real.drop_index(kind)
+        r
     }
     fn create_index(&self, kind: IndexKind) -> Result<(), Error> {
         self.events
