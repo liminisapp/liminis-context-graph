@@ -542,6 +542,21 @@ async fn resolve_phase_b(
     .await?
 }
 
+/// One summary unit for `body` (issue #850): the summarize call, then the summary embedded with
+/// the passage embedder as a `Document`. `Ok(None)` is never returned for a successful call; the
+/// caller decides what a failure means (see `add_episode_with_opts`).
+async fn summarize_episode(
+    state: &AppState,
+    body: &str,
+    chunk_key: &str,
+) -> Result<Option<(String, Vec<f32>)>, Error> {
+    let raw = state.extractor.summarize(body, Some(chunk_key)).await?;
+    let summary = crate::summary_units::clean_summary(&raw)
+        .ok_or_else(|| Error::Ipc("summarize reply held no summary text".to_string()))?;
+    let embedding = state.embedder.embed(&summary, EmbedRole::Document).await?;
+    Ok(Some((summary, embedding)))
+}
+
 /// Runs the full add_episode pipeline in three async phases (AD-4).
 ///
 /// Phase A: concurrent HTTP (no lock) — embed body, extract entities/edges, embed names/facts.
@@ -678,16 +693,56 @@ pub async fn add_episode_with_opts(
         chunk_key: Some(name),
         document_context: document_context.as_deref(),
     };
-    let (content_embedding, extraction_outcome): (Vec<f32>, ExtractionOutcome) = tokio::select! {
+    // Summary unit (issue #850, ADR-0850): opt-in via `LCG_SUMMARY_UNITS`, so with the switch
+    // off this future resolves immediately and no summarize call is made. It runs beside the
+    // embed + extract pair but outside their `try_join!`, so its failure cannot fail the ingest.
+    let summary_wanted = crate::summary_units::summary_units_enabled_from_env()
+        && crate::summary_units::body_is_summarizable(body);
+    let summary_fut = async {
+        if summary_wanted {
+            summarize_episode(&state, body, name).await
+        } else {
+            Ok(None)
+        }
+    };
+    let (content_embedding, extraction_outcome, summary_outcome): (
+        Vec<f32>,
+        ExtractionOutcome,
+        Result<Option<(String, Vec<f32>)>, Error>,
+    ) = tokio::select! {
         result = async {
-            tokio::try_join!(
-                state.embedder.embed(body, EmbedRole::Document),
-                state.extractor.extract(extract_opts)
+            tokio::join!(
+                async {
+                    tokio::try_join!(
+                        state.embedder.embed(body, EmbedRole::Document),
+                        state.extractor.extract(extract_opts)
+                    )
+                },
+                summary_fut
             )
-        } => result?,
+        } => {
+            let (main, summary) = result;
+            let (embedding, outcome) = main?;
+            (embedding, outcome, summary)
+        },
         _ = state.cancel_token.cancelled() => {
             state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Cancelled);
+        }
+    };
+    // A failed summarize call leaves the episode without a summary unit (FR-008); the provider
+    // has already emitted its `ExtractionFailure` telemetry. A cassette miss is the exception: it
+    // is a harness misconfiguration, and swallowing it would let a replay run silently measure
+    // the no-summaries baseline under a summaries configuration.
+    let summary_unit: Option<(String, Vec<f32>)> = match summary_outcome {
+        Ok(unit) => unit,
+        Err(e @ Error::CassetteMiss(_)) => return Err(e),
+        Err(e) => {
+            eprintln!(
+                "liminis-context-graph: summary unit for chunk {name:?} (group {group_id:?}) \
+                 not created: {e}"
+            );
+            None
         }
     };
     let mut extraction = extraction_outcome.result;
@@ -1999,6 +2054,19 @@ pub async fn add_episode_with_opts(
             chunk_id: chunk_id_stamp,
             ..Default::default()
         })?;
+
+        // Its summary unit (issue #850), right after the episode so both land in the same WAL
+        // flush. Absent unless `LCG_SUMMARY_UNITS` is on and the summarize call succeeded.
+        if let Some((summary_text, summary_embedding)) = summary_unit {
+            conn.insert_summary_unit(&crate::summary_units::SummaryUnitRow {
+                uuid: uuid::Uuid::new_v4().to_string(),
+                group_id: gid_owned.clone(),
+                episode_uuid: ep_uuid.clone(),
+                content: summary_text,
+                content_embedding: summary_embedding,
+                created_at: ref_time_owned.clone(),
+            })?;
+        }
 
         // Insert MENTIONS edges
         for entity_uuid in &entity_uuids {
