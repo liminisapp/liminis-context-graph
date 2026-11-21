@@ -14,11 +14,11 @@
     "links": "node scripts/check-links.mjs"
   },
   "dependencies": {
-    "@astrojs/markdown-remark": "^7.3.5",
-    "@astrojs/react": "^7.1.2",
-    "@astrojs/starlight": "^0.42.8",
+    "@astrojs/markdown-remark": "^7.3.9",
+    "@astrojs/react": "^7.1.9",
+    "@astrojs/starlight": "^0.43.1",
     "@liminis/diagrams": "^0.2.2",
-    "astro": "^7.4.5",
+    "astro": "^7.4.12",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },
