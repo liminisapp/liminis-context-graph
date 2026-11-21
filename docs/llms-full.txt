@@ -5926,14 +5926,38 @@ The question: does the graph answer what chunk search can't (chains, joins, inve
   - The ontology is the lever. Typing the free-form graph after the fact doesn't help (51, which falls below the untyped walk's 69). Extracting under the ontology does (104).
   - Passages still win change history (12/12 against 9/12), so route by question type.
 - **Caveats:**
-  - The walk's plan is oracle (the CQ path is given), so a question-to-path planner is untested.
-  - "Answer found" is substring presence, not reader accuracy.
+  - Step 1's walk plan is oracle and "answer found" is substring presence. Step 2 addresses both.
   - v2 is nearly one-to-one (each supplier serves one project), which understates aggregation.
   - qmd and rerank were not run on this set, because the reranker model was removed with the disk cleanup.
   - The walk and the `--ontology` hook are local patches, not in the repo.
+- **Step 2: answer accuracy with a planner and a reader**. Haiku 4.5 via the subscription is both the planner and the reader, and both are cached.
+  - The planner sees only the question and the relation-type menu: no families, no gold. It returns a route (graph or passages), a start entity and typed hops.
+  - Every runner's context goes to the same reader.
+  - Scoring: first answer matches for single answers, set F1 for lists and joins, exact in-order match for history.
+
+| runner (mean score) | chain-2 | chain-3 | list | join | history | **all** | vs passages (95% CI) |
+|---|---|---|---|---|---|---|---|
+| `lcg-passages` top 10 | 0.19 | 0.00 | 0.72 | 0.05 | **1.00** | 0.34 | n/a |
+| walk, oracle path (typed graph) | 0.90 | 0.92 | 0.77 | 0.62 | 0.50 | 0.80 | +0.46 [+0.35, +0.57] |
+| walk, planned path (typed graph) | 0.90 | 0.88 | 0.77 | 0.60 | 0.17 | 0.76 | +0.42 [+0.30, +0.54] |
+| **route, planned (typed graph)** | 0.90 | 0.88 | 0.77 | 0.60 | **1.00** | **0.84** | **+0.50 [+0.40, +0.60]** |
+| route, planned (free-form graph) | 0.71 | 0.62 | 0.92 | 0.55 | 0.83 | 0.74 | +0.40 [+0.29, +0.50] |
+
+  - **Planning costs little.** The planned path comes within 0.04 of the oracle path. All 119 graph starts resolved to a node, and the planner sent 10 of 12 history questions to passages.
+  - **The ontology matters for the final answer.** Typed against free-form, route-planned scores +0.10 [+0.02, +0.18] (22 wins, 12 losses); walk-oracle +0.08 [+0.01, +0.15]. The gain is in chains (0.90/0.88 against 0.71/0.62). The free-form graph does better on lists (0.92 against 0.77).
+  - **Misses:**
+    - Some chain-2 questions return nothing on either path. These are gaps in extraction or data, not in planning.
+    - Supplier-contact joins stop at the vendor instead of following on to the project.
+    - Owner-city joins pull in non-project entities through `OWNS`, because the walk doesn't check the type of the entity it lands on.
+    - A history walk returns partial lists, so passages are the right route for history.
+  - **Caveats:**
+    - The planner's route rule (attribute or history → passages) was written after the step-1 finding, so the route row is not a blind test.
+    - The reader is Haiku.
+    - qmd and passages-rerank haven't been run on this set yet.
+    - The data is synthetic and nearly one-to-one.
 - **Next:**
-  - An LLM path planner (oracle against planned).
-  - A reader for answer accuracy.
+  - Planner fixes: vendor→project joins, and checking the type of the entity a hop lands on.
+  - Entity splitting (769 → 1,202 nodes).
   - qmd and passages-rerank on the same set.
   - `lcg-eval --ontology`.
   - A second corpus with fan-out and the CQs v2 can't instantiate (P3, S2, meetings, provenance).
