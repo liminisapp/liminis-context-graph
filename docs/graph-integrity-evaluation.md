@@ -121,8 +121,10 @@ Each rule is defined once, in `crates/eval/src/graph_integrity/rules.rs`.
   normalisation against the mapping's `name`s.
 - **Value text.** The normalised value must occur in the normalised edge `fact` at alphanumeric word
   boundaries (so `6` does not match inside `96`). This is an exact-string rule: a fact restated
-  as `4200` for `$4,200` is "not stated". **"Not stated" is therefore a lower bound of the true
-  misses, not an exact count.**
+  as `4200` for `$4,200` is "not stated" although the value is present. **"Not stated" therefore
+  over-counts the true misses (it is an upper bound on them) and "stated" under-counts, so "stated"
+  is a lower bound.** The word-boundary containment can push the other way only in rare cases (a short
+  value such as `9` found in an unrelated mention on an incident edge), so neither figure is exact.
 
 ## Metrics
 

@@ -314,7 +314,7 @@ impl Report {
         );
         let _ = writeln!(
             s,
-            "\n\"Stated\" is an exact-string match, so facts not stated is a lower bound of true misses."
+            "\n\"Stated\" is an exact-string match, so restated values count as not stated: the not-stated count is an upper bound on true misses and the stated count a lower bound."
         );
         let _ = writeln!(s, "\n## Junk\n");
         let _ = writeln!(s, "Nodes named like note IDs: **{}**", self.junk.nodes);

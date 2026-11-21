@@ -304,7 +304,7 @@ mod tests {
         assert!(md.contains("29/428"));
         assert!(md.contains("marks are absent"));
         assert!(md.contains("not applicable"));
-        assert!(md.contains("lower bound"));
+        assert!(md.contains("upper bound on true misses"));
     }
 
     #[test]
