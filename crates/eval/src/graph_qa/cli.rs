@@ -81,7 +81,8 @@ OPTIONS:
     --service-bin <PATH>       liminis-context-graph binary (default: alongside lcg-eval, else PATH).
     --embedder-http <URL>      The embedder the workspace was ingested with (required unless
     --embedder-uds <SOCKET>    LCG_EMBEDDING_URL is set; checked against the workspace manifest).
-    --embedding-profile <P>    LCG_EMBEDDING_PROFILE for the service (as at ingest).
+    --embedding-profile <P>    LCG_EMBEDDING_PROFILE for the service (default: the ingest profile
+                               recorded in the workspace manifest; a different one is refused).
     --reranker-http <URL>      Reranker for passages-belief-rerank.
     --reranker-uds <SOCKET>
     --qmd-bin <PATH>           qmd executable (default: qmd).

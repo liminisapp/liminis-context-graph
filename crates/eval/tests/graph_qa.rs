@@ -629,6 +629,29 @@ fn cli_exit_codes_for_usage_and_unusable_workspaces() {
     ]);
     assert_eq!(out.status.code(), Some(3));
     assert!(String::from_utf8_lossy(&out.stderr).contains("http://ingest-embedder"));
+    // The right embedder but a different embedding profile than the ingest's.
+    std::fs::write(
+        ws.path().join("lcg-eval-workspace.json"),
+        json!({"format": 1, "group_id": "retrieval-eval", "corpus_version": "x", "corpus_hash": "h",
+               "ontology_hash": "none", "ontology_mode": null, "embedder": "http://ingest-embedder",
+               "embedding_profile": "bge-v1.5", "extractor": "e", "cassette": null, "lcg_build": "b"})
+        .to_string(),
+    )
+    .unwrap();
+    let out = cli(&[
+        "--workspace",
+        ws.path().to_str().unwrap(),
+        "--embedder-http",
+        "http://ingest-embedder",
+        "--embedding-profile",
+        "none",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{stderr}");
+    assert!(
+        stderr.contains("--embedding-profile bge-v1.5"),
+        "the refusal names the ingest profile: {stderr}"
+    );
 }
 
 #[test]

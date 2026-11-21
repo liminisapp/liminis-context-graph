@@ -777,7 +777,7 @@ workspace itself, including its WAL, is never modified.
 | `--plans-only` | off | Never call the planner. A question with no recorded plan fails the run before any reader call (exit 4). |
 | `--planner-model`, `--reader-model` | `claude-haiku-4-5-20251001` | Through the provider configuration above. |
 | `--llm-cache <FILE>` | `graph-qa-llm-cache.jsonl` | The response cache. |
-| `--embedder-*`, `--embedding-profile`, `--reranker-*`, `--service-bin` | | As for `retrieval`; the embedder must be the ingest embedder. |
+| `--embedder-*`, `--embedding-profile`, `--reranker-*`, `--service-bin` | | As for `retrieval`; the embedder must be the ingest embedder (exit 3 otherwise). `--embedding-profile` defaults to the one recorded in the workspace manifest, and a different one is refused (exit 3). |
 | `--qmd-bin`, `--qmd-index` | `qmd`, `lcg-eval-<corpus>-<hash8>` | For the `qmd` runner. |
 | `--k`, `--concurrency` | 10, 6 | Passages per question; parallel model calls. |
 | `--bootstrap-seed`, `--bootstrap-resamples` | 788, 10000 | Paired bootstrap, as in `retrieval` (ADR-0788). |

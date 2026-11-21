@@ -96,6 +96,31 @@ pub fn inspect_workspace(ws: &Path, embedder: &str) -> Result<WorkspaceInfo, Fai
     })
 }
 
+/// The embedding profile to run the service with. The query and hop-phrase vectors must be made with
+/// the same instruction prefixes as the stored ones, so a profile recorded in the manifest is used
+/// when none is given, and a different one given explicitly is refused (exit 3).
+pub fn resolve_embedding_profile(
+    ws: &Path,
+    manifest: Option<&workspace::WorkspaceManifest>,
+    requested: Option<&str>,
+) -> Result<Option<String>, Failure> {
+    let recorded = manifest.and_then(|m| m.embedding_profile.as_deref());
+    match (recorded, requested) {
+        (Some(r), Some(q)) if r != q => Err(fail(
+            EXIT_WORKSPACE,
+            format!(
+                "workspace {} was ingested with --embedding-profile {r} but this run asks for {q}; \
+                 its stored vectors were embedded with that profile's prefixes. Pass \
+                 --embedding-profile {r}, or omit it.",
+                ws.display()
+            ),
+        )),
+        (_, Some(q)) => Ok(Some(q.to_string())),
+        (Some(r), None) => Ok(Some(r.to_string())),
+        (None, None) => Ok(None),
+    }
+}
+
 pub fn load_questions(path: &Path) -> Result<Vec<GraphQuestion>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("graph questions {}: {e}", path.display()))?;
@@ -128,6 +153,11 @@ pub async fn run_on_workspace(
         .or_else(|| std::env::var("LCG_EMBEDDING_URL").ok())
         .unwrap_or_default();
     let info = inspect_workspace(&a.workspace, &embedder)?;
+    let embedding_profile = resolve_embedding_profile(
+        &a.workspace,
+        info.manifest.as_ref(),
+        a.embedding_profile.as_deref(),
+    )?;
     if info.manifest.is_none() {
         eprintln!(
             "lcg-eval graph-qa: WARNING {} has no {}; its provenance (corpus, embedder) is unknown",
@@ -162,7 +192,7 @@ pub async fn run_on_workspace(
         embedder_uds: a.embedder_uds.clone(),
         reranker_http: a.reranker_http.clone(),
         reranker_uds: a.reranker_uds.clone(),
-        embedding_profile: a.embedding_profile.clone(),
+        embedding_profile,
         seed_workspace: Some(a.workspace.clone()),
         ..Default::default()
     };
@@ -339,4 +369,36 @@ pub async fn run_cli(args: &[String]) -> i32 {
 /// The default questions path for a corpus.
 pub fn default_questions(corpus: &Path) -> PathBuf {
     corpus.join(graph_questions::FILE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ingest_embedding_profile_is_inherited_and_a_different_one_refused() {
+        let ws = Path::new("/w");
+        let m = workspace::WorkspaceManifest {
+            embedding_profile: Some("bge-v1.5".into()),
+            ..Default::default()
+        };
+        let r = |m: Option<&workspace::WorkspaceManifest>, q: Option<&str>| {
+            resolve_embedding_profile(ws, m, q)
+        };
+        assert_eq!(r(Some(&m), None).unwrap().as_deref(), Some("bge-v1.5"));
+        assert_eq!(
+            r(Some(&m), Some("bge-v1.5")).unwrap().as_deref(),
+            Some("bge-v1.5")
+        );
+        let e = r(Some(&m), Some("none")).unwrap_err();
+        assert_eq!(e.code, EXIT_WORKSPACE);
+        assert!(e.message.contains("bge-v1.5"), "{}", e.message);
+        // No recorded profile (or no manifest): whatever the run asks for.
+        let free = workspace::WorkspaceManifest::default();
+        assert_eq!(
+            r(Some(&free), Some("none")).unwrap().as_deref(),
+            Some("none")
+        );
+        assert_eq!(r(None, None).unwrap(), None);
+    }
 }
