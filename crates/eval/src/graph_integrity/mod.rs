@@ -324,6 +324,34 @@ mod tests {
         );
     }
 
+    /// The relation types the v2 ontology (v3.1) declares for the five skeleton link attributes.
+    /// A mapping that lists only free-form names for an attribute scores that attribute 0/N and
+    /// hides its direction defects (it did for Account manager and Exception approver), so every
+    /// attribute must name at least one of these. Keep in step with the ontology the v2 graphs are
+    /// built with.
+    #[test]
+    fn shipped_v2_mapping_covers_the_ontology_relation_types() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/retrieval-v2");
+        let m = mapping::Mapping::load(&dir.join("graph-mapping.json")).unwrap();
+        use mapping::Direction::{ObjectToSubject, SubjectToObject};
+        // (attribute, ontology relation type, direction relative to the fact's subject)
+        let ontology_relations = [
+            ("Owner", "OWNS", ObjectToSubject),
+            ("Supplier", "SUPPLIED_BY", SubjectToObject),
+            ("Account manager", "CONTACT_FOR", ObjectToSubject),
+            ("Reports to", "REPORTS_TO", SubjectToObject),
+            ("Exception approver", "APPROVES", ObjectToSubject),
+        ];
+        for (attr, rel, dir) in ontology_relations {
+            let got = m.links[attr]
+                .relation_types
+                .iter()
+                .find(|r| rules::normalize(&r.name) == rules::normalize(rel))
+                .unwrap_or_else(|| panic!("{attr}: ontology relation {rel} is not in the mapping"));
+            assert_eq!(got.direction, dir, "{attr}: direction of {rel}");
+        }
+    }
+
     #[test]
     fn shipped_v2_mapping_validates_against_shipped_skeleton() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/retrieval-v2");

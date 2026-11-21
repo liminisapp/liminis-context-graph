@@ -25,7 +25,8 @@
       "relation_types": [
         { "name": "HAS_ACCOUNT_MANAGER", "direction": "subject_to_object" },
         { "name": "MANAGES", "direction": "object_to_subject" },
-        { "name": "MANAGER_OF", "direction": "object_to_subject" }
+        { "name": "MANAGER_OF", "direction": "object_to_subject" },
+        { "name": "CONTACT_FOR", "direction": "object_to_subject" }
       ]
     },
     "Reports to": {
@@ -36,7 +37,8 @@
     "Exception approver": {
       "relation_types": [
         { "name": "HAS_EXCEPTION_APPROVER", "direction": "subject_to_object" },
-        { "name": "APPROVES_EXCEPTIONS_FOR", "direction": "object_to_subject" }
+        { "name": "APPROVES_EXCEPTIONS_FOR", "direction": "object_to_subject" },
+        { "name": "APPROVES", "direction": "object_to_subject" }
       ]
     }
   },

@@ -209,14 +209,40 @@ The same workspace, skeleton, mapping and ontology give identical JSON. The only
 
 ## Reconciliation with the E13 baseline
 
-The numbers in the E13 table of #819 were produced by a one-off script outside LCG. That script and
-the three graph dumps are not in this repository, so the reproduction could not be verified here. The
-known difference: the script's denominators are 72 true links and 428 value facts, while this
-command, applying the rules above to `skeleton.json`, finds **60** distinct true links (five
-attributes × 12 pairs) and **440** distinct literal value facts. The two sum to the same 500, so the
-script appears to class 12 facts as links that this command counts as value facts. If those are
-identified they are a mapping change (one more link attribute), not a code change. Other residuals
-to expect, all from the string rules above: the junk count depends on the note-ID rule (here an
+The E13 table in #819 came from a one-off script outside LCG that is not in this repository. The
+command was run by the maintainer on the three kept v2 workspaces (free-form, ontology v3.1, v3.1
+after the #816 repair); the workspaces were byte-identical afterwards and a run takes about 0.14 s.
+
+**Denominators.** The command finds **60** true links (five attributes × 12 pairs) and **440**
+literal value facts; E13 used 72 and 428 (the same sum of 500). The difference is the 12 `Location`
+links: E13 scored them as links because the value resolves to a graph node, while here a skeleton
+fact is a link only when its value is a skeleton entity, so `Location` counts as a value fact. Excluding
+`Location` from E13's figures gives this command's link rows:
+
+| | expected relation type | direction correct |
+|---|---|---|
+| ontology v3.1 | 59/60 | **44/59** (Account manager 6/12, Exception approver 5/12) |
+| v3.1 after #816 repair | 59/60 | **59/59** |
+| free-form | 53/60 | 53/53 |
+
+These equal E13's 56/71 → 44/59 and 71/71 → 59/59 once its 12 `Location` links are removed. Scoring
+`Location` as a link (`LOCATED_IN`, subject to object, when its value resolves to a graph node, as E13
+did) is a possible later extension of the mapping and the scoring rule.
+
+**Other rows.** Typing is 47/48 on the ontology graphs with all 48 entities found; junk nodes are 13
+on the ontology graphs (the same list as E13); value facts are 293/440 stated with 27 misattached,
+against E13's 290/428 and 29 under its looser matching; all 975 `signature_mismatch` marks written by
+the #816 repair are read on the repaired workspace.
+
+**The mapping must name the ontology's relation types.** A link attribute whose mapping lists only
+free-form names scores 0/12 expected type and 0/0 direction on an ontology graph, which hides the
+defect the report exists to catch. This happened for `Account manager` (`CONTACT_FOR`) and
+`Exception approver` (`APPROVES`) until they were added. The unit test
+`shipped_v2_mapping_covers_the_ontology_relation_types` requires every v2 ontology relation type
+(`OWNS`, `SUPPLIED_BY`, `CONTACT_FOR`, `APPROVES`, `REPORTS_TO`) to be in the mapping with the
+expected direction. A mapping for another corpus needs the same check against its ontology.
+
+Remaining residuals come from the string rules above: the junk count depends on the note-ID rule (an
 exact ID or a prefixed slug with a digit segment), and free-form typing depends on the `node_types`
 list in the mapping, which is the tuning point for a free-form graph's labels.
 
