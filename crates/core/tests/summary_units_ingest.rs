@@ -158,6 +158,61 @@ async fn a_provider_failure_ingests_the_episode_without_a_unit() {
     assert!(units(&f.state).is_empty());
 }
 
+/// Extraction fails at once; summarize never returns. Stands in for a hung or slow provider.
+struct FailingExtractHungSummarize;
+
+impl lcg_core::extractor::Extractor for FailingExtractHungSummarize {
+    fn extract<'a>(
+        &'a self,
+        _opts: lcg_core::extractor::ExtractOptions<'a>,
+    ) -> futures::future::BoxFuture<'a, Result<lcg_core::types::ExtractionOutcome, Error>> {
+        Box::pin(async { Err(Error::Ipc("extract HTTP 500".into())) })
+    }
+
+    fn classify_entities<'a>(
+        &'a self,
+        _entities: &'a [(&'a str, &'a str)],
+        _allowed_types: Option<&'a [String]>,
+    ) -> futures::future::BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn classify_relations<'a>(
+        &'a self,
+        _edges: &'a [(&'a str, &'a str)],
+        _allowed_types: &'a [(String, Option<String>)],
+    ) -> futures::future::BoxFuture<'a, Result<Vec<String>, Error>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    fn summarize<'a>(
+        &'a self,
+        _body: &'a str,
+        _chunk_key: Option<&'a str>,
+    ) -> futures::future::BoxFuture<'a, Result<String, Error>> {
+        Box::pin(futures::future::pending())
+    }
+}
+
+#[tokio::test]
+async fn an_extraction_failure_does_not_wait_for_the_summarize_call() {
+    enable_summary_units();
+    let f = fixture_with_extractor(Arc::new(FailingExtractHungSummarize), Arc::default());
+    let params = json!({
+        "chunk_text": "notes on kiln drying of timber", "chunk_id": "kiln",
+        "source_file": "notes/kiln.md", "group_id": G, "reference_time": T1,
+    });
+    // With the summary awaited beside (not inside) the failing pair, this never returns.
+    let r = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        try_call("knowledge_process_chunk", params, &f.state),
+    )
+    .await
+    .expect("an extraction failure must not wait for an in-flight summarize call");
+    assert!(r.get("error").is_some(), "{r}");
+    assert!(units(&f.state).is_empty());
+}
+
 #[tokio::test]
 async fn a_cassette_miss_fails_the_ingest() {
     enable_summary_units();

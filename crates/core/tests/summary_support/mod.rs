@@ -14,7 +14,7 @@ use lcg_core::{
     app_state::{AppState, OntologyDriftState},
     dedup_adapter::PassthroughDedupAdapter,
     embedder::{EmbedRole, Embedder},
-    extractor::SummarizeFn,
+    extractor::{Extractor, SummarizeFn},
     handlers,
     ipc::IpcRequest,
     telemetry::{NoopSink, TelemetrySink},
@@ -93,6 +93,16 @@ pub fn fixture() -> Fixture {
 }
 
 pub fn fixture_with(summarize: Option<SummarizeFn>, calls: Arc<AtomicUsize>) -> Fixture {
+    let mut extractor = ConfigurableExtractor::new(vec![]);
+    if let Some(f) = summarize {
+        extractor = extractor.with_summarize(f);
+    }
+    fixture_with_extractor(Arc::new(extractor), calls)
+}
+
+/// As [`fixture_with`], for a test that needs its own [`Extractor`] (for example one whose
+/// summarize call never returns).
+pub fn fixture_with_extractor(extractor: Arc<dyn Extractor>, calls: Arc<AtomicUsize>) -> Fixture {
     let db_dir = TempDir::new().unwrap();
     let wal_dir = TempDir::new().unwrap();
     let db = Arc::new(Db::open(db_dir.path().join("t.db").to_str().unwrap()).unwrap());
@@ -102,15 +112,11 @@ pub fn fixture_with(summarize: Option<SummarizeFn>, calls: Arc<AtomicUsize>) -> 
         conn.create_vector_indexes().unwrap();
     }
     let sink: Arc<dyn TelemetrySink> = Arc::new(NoopSink);
-    let mut extractor = ConfigurableExtractor::new(vec![]);
-    if let Some(f) = summarize {
-        extractor = extractor.with_summarize(f);
-    }
     let state = Arc::new(AppState {
         db: ArcSwapOption::from(Some(db)),
         degraded_reason: Arc::new(Mutex::new(None)),
         embedder: Arc::new(KeywordEmbedder),
-        extractor: Arc::new(extractor),
+        extractor,
         dedup: Arc::new(PassthroughDedupAdapter),
         write_lock: Arc::new(tokio::sync::RwLock::new(())),
         sink,

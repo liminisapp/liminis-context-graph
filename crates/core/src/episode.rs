@@ -693,16 +693,19 @@ pub async fn add_episode_with_opts(
         document_context: document_context.as_deref(),
     };
     // Summary unit (issue #850, ADR-0850): opt-in via `LCG_SUMMARY_UNITS`, so with the switch
-    // off this future resolves immediately and no summarize call is made. It runs beside the
-    // embed + extract pair but outside their `try_join!`, so its failure cannot fail the ingest.
+    // off this future resolves immediately and no summarize call is made. It is a third
+    // `try_join!` branch that always yields `Ok` (its own result is carried inside), so a
+    // summarize failure cannot fail the ingest, while an embed or extract failure drops the
+    // in-flight summarize call at once instead of waiting for it and discarding its result.
     let summary_wanted = crate::summary_units::summary_units_enabled_from_env()
         && crate::summary_units::body_is_summarizable(body);
     let summary_fut = async {
-        if summary_wanted {
+        let outcome: SummaryOutcome = if summary_wanted {
             summarize_episode(&state, body, name).await
         } else {
             Ok(None)
-        }
+        };
+        Ok::<SummaryOutcome, Error>(outcome)
     };
     let (content_embedding, extraction_outcome, summary_outcome): (
         Vec<f32>,
@@ -710,20 +713,12 @@ pub async fn add_episode_with_opts(
         SummaryOutcome,
     ) = tokio::select! {
         result = async {
-            tokio::join!(
-                async {
-                    tokio::try_join!(
-                        state.embedder.embed(body, EmbedRole::Document),
-                        state.extractor.extract(extract_opts)
-                    )
-                },
+            tokio::try_join!(
+                state.embedder.embed(body, EmbedRole::Document),
+                state.extractor.extract(extract_opts),
                 summary_fut
             )
-        } => {
-            let (main, summary) = result;
-            let (embedding, outcome) = main?;
-            (embedding, outcome, summary)
-        },
+        } => result?,
         _ = state.cancel_token.cancelled() => {
             state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
             return Err(Error::Cancelled);
