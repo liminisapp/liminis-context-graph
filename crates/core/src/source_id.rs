@@ -114,11 +114,14 @@ pub fn own_source_ids(
 }
 
 /// Whether a normalised identifier looks like a slug/ID rather than a subject name: no whitespace,
-/// and at least one `-`, `_` or ASCII digit (`project-quill-core-1`, `note_7`, `doc3`). Bare words
-/// such as `alice` or `postgres` are not ID-shaped. Empty input is not ID-shaped.
+/// at least one letter, and at least one `-`, `_` or ASCII digit (`project-quill-core-1`, `note_7`,
+/// `doc3`). Bare words such as `alice` or `postgres` are not ID-shaped. Identifiers with no letter at
+/// all (a daily note `2024-01-15.md`, a bare number `42`) are not ID-shaped either: they are what a
+/// real Date or number entity extracted from the note would be named. Empty input is not ID-shaped.
 fn is_id_shaped(s: &str) -> bool {
     !s.is_empty()
         && !s.chars().any(char::is_whitespace)
+        && s.chars().any(char::is_alphabetic)
         && s.chars()
             .any(|c| c == '-' || c == '_' || c.is_ascii_digit())
 }
@@ -228,6 +231,13 @@ mod tests {
                 Some("Quill Core"),
             ),
             ("notes/C#.md#0", "notes/C#.md:notes/C#.md#0", None),
+            // Daily / dated and bare-number notes: a real Date entity must survive.
+            (
+                "notes/2024-01-15.md#0",
+                "notes/2024-01-15.md:notes/2024-01-15.md#0",
+                Some("2024-01-15"),
+            ),
+            ("42#0", "42.md:42#0", Some("42")),
         ] {
             let got = ids(name, sd, doc, true);
             assert!(got.is_empty(), "{name}: {got:?}");
@@ -239,6 +249,13 @@ mod tests {
             true,
         );
         assert!(!matches_source_id("Alice", &own));
+        let dated = ids(
+            "2024-01-15#0",
+            "2024-01-15.md:2024-01-15#0",
+            Some("2024-01-15"),
+            true,
+        );
+        assert!(!matches_source_id("2024-01-15", &dated));
         // Mixed: the slug-shaped candidate is kept, the bare-word one is not.
         let got = ids("alice#0", "alice:alice#0", Some("note-9"), true);
         assert_eq!(got.len(), 1);

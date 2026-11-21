@@ -33,7 +33,10 @@ endpoint.
   least one `-`, `_` or digit (`project-quill-core-1`). A note filed under its subject's name
   (`people/Alice.md`, `Postgres.md`) has no distinguishable ID, so its stem is never an own ID and
   the real `Alice`/`Postgres` entity is kept. This also keeps the `#`/`/` normalisation from making
-  a short name like `C#` or `AC/DC` collide with an ID of `c`/`dc`.
+  a short name like `C#` or `AC/DC` collide with an ID of `c`/`dc`. An identifier with no letter at
+  all (a daily note `2024-01-15.md`, a bare number) is not ID-shaped either, so a real Date entity
+  extracted from a dated note is kept. Versioned subject names that contain a letter and a digit
+  (`GPT-4.md`, `S3.md`) remain indistinguishable from slug IDs and are accepted as a residual.
 - **Normalisation** (both sides): strip control characters, trim, lowercase, wrapping punctuation
   (`[[ ]]`, backticks, quotes, brackets), a `#fragment`, a path prefix and one `.md`/`.markdown`/
   `.mdx`/`.txt` extension. An empty result is never an ID.
