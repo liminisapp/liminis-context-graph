@@ -1676,7 +1676,8 @@ result fields exist for that, both introduced in 0.13.2.
   salvage); inserting that edge would create a self-loop, so Phase C drops it. The count is a
   separate top-level field, always present, and these edges are *not* in `dropped_edges` or
   `edges_dropped_unresolvable`. (Edges whose endpoint *names* are identical are filtered earlier
-  and never counted.) Separately, an off-list edge endpoint that already exists exactly (same
+  and never counted, except under an ontology, where they are stored as literal-object self-loops;
+  see `edges_literal_object` below.) Separately, an off-list edge endpoint that already exists exactly (same
   group, case-insensitive) in the stored graph resolves to that entity and is never salvaged onto
   a similar entity of the current chunk; a name stored under more than one eligible kind is dropped
   as ambiguous rather than salvaged
@@ -1689,6 +1690,19 @@ result fields exist for that, both introduced in 0.13.2.
   in their `attributes` because they fit in neither direction. No edge is dropped by this check.
   Both are `0` for an ontology that declares no signature. Swaps made by an inverse alias
   (strict mode) are not counted here. See [Ontology → Edge direction](ontology.md#edge-direction).
+
+- **`edges_literal_object` and `edges_suspected_misattachment` report literal-valued facts (#823).**
+  Two additive top-level counters, always present. Under an ontology with an extractable relation
+  type, `edges_literal_object` counts edges stored as a **self-loop** on one entity because the
+  model emitted a literal-valued fact about it ("Marlin Core has a monthly budget of $4,200") with
+  the same name on both ends; each such edge carries `"literal_object": true` in its `attributes`.
+  It is always `0` with no ontology, where a self-reference is still dropped.
+  `edges_suspected_misattachment` counts edges between two different entities, in every mode,
+  stored unchanged but marked `"suspected_misattachment": true` because their fact states a literal
+  value (a digit or currency symbol) without naming both endpoints. Neither drops an edge. A
+  self-loop's endpoints have the same UUID in `knowledge_get_edges_by_group` and the other edge
+  reads. See [Ontology → Literal-valued facts](ontology.md#literal-valued-facts) and
+  [ADR-0823](adr/0823-literal-object-edges-as-self-loops.md).
 
 - **`warning` reports oversized input.** A `chunk_text` longer than the advisory threshold
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see
