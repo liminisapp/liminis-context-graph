@@ -5928,7 +5928,6 @@ The question: does the graph answer what chunk search can't (chains, joins, inve
 - **Caveats:**
   - Step 1's walk plan is oracle and "answer found" is substring presence. Step 2 addresses both.
   - v2 is nearly one-to-one (each supplier serves one project), which understates aggregation.
-  - qmd and rerank were not run on this set, because the reranker model was removed with the disk cleanup.
   - The walk and the `--ontology` hook are local patches, not in the repo.
 - **Step 2: answer accuracy with a planner and a reader**. Haiku 4.5 via the subscription is both the planner and the reader, and both are cached.
   - The planner sees only the question and the relation-type menu: no families, no gold. It returns a route (graph or passages), a start entity and typed hops.
@@ -5953,12 +5952,29 @@ The question: does the graph answer what chunk search can't (chains, joins, inve
   - **Caveats:**
     - The planner's route rule (attribute or history → passages) was written after the step-1 finding, so the route row is not a blind test.
     - The reader is Haiku.
-    - qmd and passages-rerank haven't been run on this set yet.
     - The data is synthetic and nearly one-to-one.
+- **Step 3: the qmd and rerank baselines on the same set.** The setup:
+  - Same planner, same reader, same scoring as step 2.
+  - The mxbai-rerank-large-v1 Core ML model was re-staged; its max logit error against PyTorch is 0.006.
+  - qmd runs the way lcg-eval calls it, with and without its own reranker. The reader gets the **whole note** for each qmd hit, which is generous to qmd: about 2.3 KB per hit against about 350 characters per LCG passage.
+
+| runner (mean score) | chain-2 | chain-3 | list | join | history | **all** |
+|---|---|---|---|---|---|---|
+| `qmd` | 0.19 | 0.00 | 0.72 | 0.24 | 0.67 | 0.33 |
+| `qmd-rerank` | 0.17 | 0.00 | 0.89 | 0.15 | 0.08 | 0.30 |
+| `lcg-passages` | 0.19 | 0.00 | 0.72 | 0.05 | **1.00** | 0.34 |
+| `lcg-passages-belief-rerank` | 0.21 | 0.00 | 0.88 | 0.00 | 0.92 | 0.37 |
+| **route, planned (typed graph + `lcg-passages`)** | 0.90 | 0.88 | 0.77 | 0.60 | **1.00** | **0.84** |
+| route, planned (typed graph + belief-rerank) | 0.90 | 0.88 | 0.77 | 0.60 | 0.92 | 0.83 |
+
+  - **The best chunk search scores 0.30–0.37 on graph-shaped questions.** None of the four passage or qmd configs answers a 3-hop question (0/24).
+  - **Routed LCG beats qmd by a wide margin:** +0.51 [+0.41, +0.61] against `qmd` and +0.53 [+0.43, +0.63] against `qmd-rerank`.
+  - **qmd's reranker hurts history** (0.08), because it ignores time. LCG's belief ranking keeps history at 0.92–1.00.
+  - **Lists favour the rerankers** (0.88–0.89 against the walk's 0.77), so lists are the next place to look for a planner or walk gain.
 - **Next:**
   - Planner fixes: vendor→project joins, and checking the type of the entity a hop lands on.
   - Entity splitting (769 → 1,202 nodes).
-  - qmd and passages-rerank on the same set.
+  - Lists: close the gap to the rerankers (0.77 against 0.88).
   - `lcg-eval --ontology`.
   - A second corpus with fan-out and the CQs v2 can't instantiate (P3, S2, meetings, provenance).
 
