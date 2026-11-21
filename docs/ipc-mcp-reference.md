@@ -1362,7 +1362,15 @@ completion hop runs, from the start entities. Anything else with empty `hops`, a
 Algorithm (E13's v5, generic — no relation names are hard-coded). Per hop:
 
 1. **Candidates** are edges incident to the frontier (either direction) whose far end has not been
-   visited (cycles and self-loops never revisit). Live edges only, except in `history` mode.
+   visited (cycles never revisit). Live edges only, except in `history` mode. On the **last** hop,
+   when `answer_type` is `"value"` or absent, the frontier entities' own **self-loops** are
+   candidates too. These are the literal-valued facts (a budget, a price, a date) an ontology
+   extraction stores on the entity they describe
+   ([ADR-0823](adr/0823-literal-object-edges-as-self-loops.md)). A self-loop is filtered and ranked
+   like any other edge. It matches either direction, so `direction_matched` is `null`, but it gets
+   the soft bonus and survives the hard filter. It never becomes frontier. Self-loops are never
+   candidates on an earlier hop, where they would take beam slots meant for moving on, nor in the
+   completion hop.
 2. **Relation filter**: keep edges whose `relation_type` is in `relation_types`; if none match,
    keep all and record a fallback.
 3. **Answer-type filter** (last hop only, `answer_type` an entity type, mode not `history`): keep
@@ -1378,7 +1386,9 @@ If the hops end on no entity of an entity-type `answer_type` and `query` is give
 `history`), one **completion hop** runs: edges from the final frontier to entities of that type,
 ranked by cosine(`query`, fact embedding), no direction logic. It is an *edge* hop (not a node
 ranking), appears as an extra entry with `completion: true`, and sets `completion_hop_ran`. A hop
-with no candidates ends the walk early (`dead_end_at`).
+with no candidates ends the walk early (`dead_end_at`). A self-loop is not a move: a last hop whose
+only candidates are self-loops is also reported as `dead_end_at`, and that hop is still returned
+with their facts. In `facts_text` a self-loop renders once, as `(X [Type] -> X [Type])`.
 
 Response:
 

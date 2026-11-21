@@ -46,8 +46,10 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   created. Self-loops skip the direction check and survive merges, rebinds and the canonicalize
   repair. In every mode, an edge whose fact states a value but does not name both endpoints is
   stored with `suspected_misattachment` (`edges_suspected_misattachment`), never dropped. The
-  free-form edge prompt is byte-identical. Existing graphs are not repaired. See
-  `docs/ontology.md#literal-valued-facts`.
+  free-form edge prompt is byte-identical. Existing graphs are not repaired. `knowledge_walk`
+  returns these self-loops on the last hop of a value walk (`answer_type` `"value"` or absent), so
+  value questions stay answerable by a walk. A self-loop never extends the frontier and is not a
+  candidate on earlier hops (ADR-0820 amended). See `docs/ontology.md#literal-valued-facts`.
 
 - **Ontology edge direction: define, validate and repair (#816, ADR-0816).** With an ontology, 34%
   of typed edges on known-true links on the v2 corpus pointed the wrong way (the extractor made the
