@@ -92,7 +92,9 @@ self-loop, invalidate one a rewrite *creates*.
 - The canonicalize direction repair (`canonicalize::plan_direction`) skips self-loops.
 - `Conn::get_full_edges_for_entity` returns a self-loop once (as outgoing), not once per hop, so a
   merge does not copy it twice.
-- `knowledge_walk` already tolerates self-loops: they produce no frontier (`walk.rs`).
+- `knowledge_walk` tolerates self-loops but does not return them: `walk.rs` `candidates()` keeps
+  only edges whose far end is unvisited, and a self-loop's far end is the frontier entity itself.
+  This is a real retrieval cost, not a neutral property; see Consequences.
 
 **The FR-007 heuristic and its limits.** "States a literal value" means the fact contains an ASCII
 digit or a currency symbol (`$ € £ ¥`). Month names alone are excluded: "March" can be a product,
@@ -128,6 +130,18 @@ rather than drops. A value-free role fact ("Lena is the project lead") is not fl
 - Under an ontology, value facts stay on the entity they describe, and `lcg-eval graph-integrity`
   scores a self-loop as stated and not misattached (`score.rs`: the other end is the subject). No
   node is added, so typing, links and direction are untouched.
+- **A literal-object fact is not returned by `knowledge_walk`** (the walk consumer of #815/#820).
+  A walk never yields a self-loop, so a walk ending on Marlin Core does not surface its budget.
+  Before this change the misattached copy `Marlin Core HAS_MEASURE Tomas Kowalski` could, but
+  only as a candidate edge to an *unvisited* wrong entity, and the same walk delivered Tomas a
+  fact that is not about him. The decision accepts losing that accidental walk recall in exchange
+  for not corrupting the wrong entity's neighbourhood. The fact stays reachable through edge
+  search (`knowledge_find_relationships`) and an entity's edge list, and `graph-integrity`'s
+  "stated" metric, which reads edge facts directly, does not show the loss. Letting a walk return
+  a frontier entity's own self-loops as facts, without expanding the frontier, would recover it.
+  That is deferred to a follow-up, because it changes the walk algorithm: self-loops would compete
+  with links for beam slots, and the E13 v5 parity would shift. It should be measured with a
+  walk-based retrieval metric alongside `graph-integrity`.
 - Self-loops now exist in stored graphs. Readers that assumed `source ≠ target` must tolerate them;
   the in-repo ones are covered above. A Python consumer reading `knowledge_get_edges_by_group` sees
   the same edge shape with equal endpoint UUIDs.

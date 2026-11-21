@@ -343,7 +343,13 @@ counted in `edges_literal_object`. So "Marlin Core has a monthly budget of $4,20
   picks up `signature_mismatch`, at ingest or in `knowledge_canonicalize_relations`;
 - survives an entity merge and a cross-group rebind (both ends move to the surviving entity), and
   several value facts about one entity are all kept;
-- is never a step in `knowledge_walk`: a walk does not traverse an entity's own self-loops.
+- is **not returned by `knowledge_walk`**. A walk's candidates are edges whose far end is
+  unvisited, and a self-loop's far end is the frontier entity itself, so its fact never appears
+  in a hop. A walk from Marlin Core therefore does not surface Marlin Core's budget. Before this
+  change, the misattached `Marlin Core HAS_MEASURE Tomas Kowalski` could surface it, but only by
+  reaching the wrong entity. The fact is still found by edge search (`knowledge_find_relationships`)
+  and by reading the entity's edges. This is a retrieval trade-off this change accepts: see
+  [ADR-0823](adr/0823-literal-object-edges-as-self-loops.md#consequences).
 
 Two cases are still dropped exactly as before: differently named endpoints that resolve to one
 entity (`edges_dropped_self_loop`), and endpoints made equal by salvage. With no ontology, a
@@ -354,7 +360,7 @@ a value, because role and title facts ("HAS_ROLE: the fact text names the role")
 So `literal_object` means "the model emitted this as a single-entity fact", not "the fact contains
 a literal". A single-entity fact that is not a value (`Alice ALSO_KNOWN_AS Alice`) is also stored
 as a marked self-loop and counted in `edges_literal_object`, which is therefore an upper bound on
-genuine literal-valued facts. Such an edge is harmless to a walk, which never traverses it.
+genuine literal-valued facts. Like every self-loop, such an edge is not returned by a walk.
 
 **Suspected misattachments are marked, in every mode.** An edge between two *different* entities
 whose fact states a literal value (it contains a digit or one of `$ € £ ¥`) but does not name both
