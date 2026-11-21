@@ -3473,6 +3473,18 @@ that does not use them is unaffected), so it shows up as drift until the group i
 
 ### Entity type hierarchy
 
+**An extracted entity named after its own source note is dropped.** Declaring a `Document` type
+can invite the model to extract the note it is reading as an entity named after the note's ID
+(e.g. `project-quill-core-1`), which then absorbs edges that belong to the real entities. Extraction
+deterministically drops an entity whose name equals the episode's *own* source ID (the chunk's
+`source_file`, `doc_id`, or `chunk_id` prefix, compared case-insensitively and ignoring path
+prefix, wikilink brackets and a `.md`-style extension, and only when that ID is slug-shaped — a note
+filed under its subject's name such as `Alice.md` has no ID to match, so the real entity is kept),
+plus any edge touching it
+([ADR-0824](adr/0824-own-source-id-entity-filter.md)). The asserted `Document`/`Source` entity your
+host supplies is the supported way to represent the note. An entity named after a *different*
+note's ID is kept. The drop is reported as `entities_dropped_source_id` on `knowledge_process_chunk`.
+
 The optional `parent: <TypeName>` field on an entity type declares a single-parent (tree) subtype relationship. A node typed `Rfc` will carry labels `["Entity", "Document", "Rfc"]` — enabling both specific queries (`WHERE 'Rfc' IN e.labels`) and rollup queries (`WHERE 'Document' IN e.labels`).
 
 - **Additive**: the specific type is never replaced by its parent; ancestor labels are added alongside it.
@@ -5462,6 +5474,17 @@ deliberately does **not** include a default-socket auto-detection tier for extra
 embedder, which does auto-detect the same sidecar): a live sidecar being present is not, by itself,
 evidence that its default model is a good extraction choice.
 
+## Note-ID entities and the own-source-ID filter
+
+Under an ontology with a `Document` type the model sometimes extracts a *junk* entity named after a
+note ID (`project-quill-core-1`); the graph-integrity report (#819) counts these as "Nodes named
+like note IDs". Extraction now drops an entity named after the episode's **own** source ID
+(ADR-0824) and reports the count as `entities_dropped_source_id`. The filter is own-ID only: a
+node named after a *different* note's ID — for example one cited as a `[[wikilink]]` in a derived
+note — is not matched, and the #819 metric counts those too. The 13 → 0 figure on the v2 corpus
+therefore needs a maintainer-run #819 evaluation; if cited-ID nodes remain, the follow-up is a
+citation-target rule (a separate issue).
+
 ## Guidance
 
 - **Quality-first, fully local**: `qwen3.6-27b`. The best-scoring local candidate on both corpora,
@@ -6835,6 +6858,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0816](0816-ontology-edge-direction-check-and-repair.md) | Ontology Edge Direction — Define, Validate and Repair | 2026-11-21 |
 | [0819](0819-graph-integrity-eval.md) | `lcg-eval graph-integrity`: Deterministic Graph Scoring Over a Copied DB | 2026-11-21 |
 | [0820](0820-caller-plans-walk-no-lcg-llm.md) | Caller-Planned Typed Walk: LCG Makes No LLM Call | 2026-11-21 |
+| [0824](0824-own-source-id-entity-filter.md) | Drop Extracted Entities Named After the Episode's Own Source ID | 2026-11-21 |
 
 ## Historical numbering
 
