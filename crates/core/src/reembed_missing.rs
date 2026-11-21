@@ -377,7 +377,7 @@ pub async fn reembed_missing_with_ddl(
         .collect();
     let total: usize = selection.values().map(|s| s.candidates.len()).sum();
     if total == 0 {
-        remove_stale(&state, &db, &group_id, stale).await?;
+        remove_stale(&state, &group_id, stale).await?;
         return Ok(report.to_json());
     }
     let embed_state = Arc::clone(&state);
@@ -401,7 +401,7 @@ pub async fn reembed_missing_with_ddl(
     // Best-effort: stale-entry cleanup is bookkeeping unrelated to the repair, and failing the
     // call here would discard every vector just embedded (the costly step). The entries stay
     // recorded and the next run removes them.
-    if let Err(e) = remove_stale(&state, &db, &group_id, stale).await {
+    if let Err(e) = remove_stale(&state, &group_id, stale).await {
         eprintln!("liminis-context-graph: reembed_missing: stale-entry cleanup failed: {e}");
     }
     for (kind, n) in &embed_failed {
@@ -468,10 +468,10 @@ pub async fn reembed_missing_with_ddl(
 }
 
 /// Removes record entries whose row no longer exists (FR-011). Takes the write lock briefly; no
-/// index is touched.
+/// index is touched. Loads the database handle itself, after taking the lock: the database may
+/// have been swapped (recovery) during the long embed phase that precedes this.
 async fn remove_stale(
     state: &Arc<AppState>,
-    db: &Arc<crate::db::Db>,
     group_id: &str,
     stale: Vec<(ZeroKind, String)>,
 ) -> Result<(), Error> {
@@ -479,9 +479,13 @@ async fn remove_stale(
         return Ok(());
     }
     let _w = state.write_lock.write().await;
-    let (db_s, gid_s) = (Arc::clone(db), group_id.to_string());
+    let db = state
+        .db
+        .load_full()
+        .ok_or_else(|| Error::DbUnavailable("DB unavailable".to_string()))?;
+    let gid_s = group_id.to_string();
     tokio::task::spawn_blocking(move || {
-        let conn = db_s.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
+        let conn = db.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
         conn.remove_zero_vector_rows(&gid_s, &stale)
     })
     .await??;
