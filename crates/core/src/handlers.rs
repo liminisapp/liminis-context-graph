@@ -2769,6 +2769,9 @@ impl crate::walk::WalkGraph for DbWalkGraph<'_, '_> {
                     .get_walk_edges(chunk, Some(&gids), include_invalidated)?,
             );
         }
+        // An edge whose endpoints fall in different chunks is returned by both calls; keep one.
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|e| seen.insert(e.uuid.clone()));
         Ok(out)
     }
 
