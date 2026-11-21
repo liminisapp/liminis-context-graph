@@ -97,6 +97,11 @@ pub struct AddEpisodeResult {
     /// missing/`null`/empty-string/whitespace-only `name` all still produce a single observable
     /// outcome (#342 FR-003, FR-007; #347 FR-004).
     pub entities_dropped_malformed: usize,
+    /// Extracted entities dropped because their name was the episode's own source ID (the note
+    /// identifier, e.g. `project-quill-core-1`), together with the edges touching them (issue
+    /// #824, ADR-0824). Counts entities only; the discarded edges are not counted in
+    /// `edges_dropped_unresolvable`. Always `0` for a free-form episode with no `doc_id`.
+    pub entities_dropped_source_id: usize,
     /// Edges dropped for failing required-field validation during extraction-response parsing —
     /// a missing `source_name`/`target_name`/`fact` (#342), or, since #347, a `source_name`,
     /// `target_name`, or `fact` that deserializes fine but is blank or whitespace-only (#347
@@ -669,6 +674,44 @@ pub async fn add_episode_with_opts(
     let before_empty_name_retain = extraction.entities.len();
     extraction.entities.retain(|e| !e.name.trim().is_empty());
     entities_dropped_malformed += before_empty_name_retain - extraction.entities.len();
+
+    // Own-source-ID filter (issue #824, ADR-0824): an extracted entity named after the episode's
+    // own source ID (`project-quill-core-1` for a note of that id) is the model extracting the note
+    // itself — the sanctioned representation of the note is the host-asserted Document/Source
+    // entity, so the extracted one is dropped. Deterministic, so it holds when the model ignores
+    // any prompt guidance (FR-003). Placed here — after the empty-name retain, before the
+    // reclassify tallies and edge validation — so no counter counts an entity that is never stored.
+    //
+    // Edges touching an own-ID endpoint are discarded too, *before* strict-mode relation handling
+    // and name salvage: otherwise salvage could re-point such an edge at a look-alike batch entity,
+    // or Phase C could resolve the name against a pre-existing persisted junk node (FR-005). These
+    // are an intentional discard, like the self-reference filter, and are not counted in
+    // `edges_dropped_unresolvable` (ADR-0051: Phase C is the sole authority for that counter).
+    let own_source_ids = crate::source_id::own_source_ids(
+        name,
+        source_description,
+        opts.doc_id.as_deref(),
+        opts.guard_chunk_collision,
+    );
+    let mut entities_dropped_source_id = 0usize;
+    if !own_source_ids.is_empty() {
+        let before = extraction.entities.len();
+        extraction.entities.retain(|e| {
+            let hit = crate::source_id::matches_source_id(&e.name, &own_source_ids);
+            if hit {
+                eprintln!(
+                    "liminis-context-graph: dropping extracted entity '{}' named after the episode's own source ID",
+                    e.name
+                );
+            }
+            !hit
+        });
+        entities_dropped_source_id = before - extraction.entities.len();
+        extraction.edges.retain(|edge| {
+            !(crate::source_id::matches_source_id(&edge.source_name, &own_source_ids)
+                || crate::source_id::matches_source_id(&edge.target_name, &own_source_ids))
+        });
+    }
 
     // Strict-mode entity filtering (issue #312): an entity is never dropped for its entity_type
     // alone. An entity whose normalized type is empty or the literal "Entity" means "no specific
@@ -1980,6 +2023,7 @@ pub async fn add_episode_with_opts(
         edges_signature_mismatch,
         entities_reclassified_unclassified,
         entities_dropped_malformed,
+        entities_dropped_source_id,
         edges_dropped_malformed,
         dedup_paths,
         superseded_episode_uuids,
