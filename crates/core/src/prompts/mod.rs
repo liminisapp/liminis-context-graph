@@ -65,6 +65,10 @@ fn build_entity_types_section(ontology: Option<&Ontology>) -> String {
 // `open` mode, output is deliberately unchanged from before this issue: Acceptance Scenario 2
 // requires the open-mode rendering stay byte-identical, so the `Open` arm below is a no-op
 // rather than adding both-modes text like the entity-type section does (see ADR-0310).
+// ADR-0816 relaxes that constraint for direction: signatures (including half signatures) and
+// symmetric markers render in both modes, and the `# DIRECTION` block in `extract_edges.txt`
+// applies to every mode. Inverse aliases render in strict mode only (open mode never resolves
+// aliases).
 fn build_fact_types_section(ontology: Option<&Ontology>) -> String {
     let onto = match ontology {
         Some(o) if o.extractable_relation_types().next().is_some() => o,
@@ -75,16 +79,40 @@ fn build_fact_types_section(ontology: Option<&Ontology>) -> String {
         "<FACT_TYPES>\nThe following relation types are defined for this workspace:\n",
     );
     for rt in onto.extractable_relation_types() {
-        let sig = match (&rt.source_type, &rt.target_type) {
-            (Some(s), Some(t)) => format!(" ({} → {})", s, t),
-            _ => String::new(),
-        };
-        if let Some(desc) = &rt.description {
-            section.push_str(&format!("- {}{}: {}\n", rt.name, sig, desc));
+        // #816: a half signature renders too (`(Person → any)`), lists join with `|`, and only
+        // declared entity types are shown. Symmetric relations carry no direction to show.
+        let src = onto.effective_source_types(rt);
+        let tgt = onto.effective_target_types(rt);
+        let sig = if rt.symmetric || (src.is_empty() && tgt.is_empty()) {
+            String::new()
         } else {
-            section.push_str(&format!("- {}{}\n", rt.name, sig));
+            let side = |v: &[&str]| {
+                if v.is_empty() {
+                    "any".to_string()
+                } else {
+                    v.join(" | ")
+                }
+            };
+            format!(" ({} → {})", side(&src), side(&tgt))
+        };
+        let sym = if rt.symmetric { " [symmetric]" } else { "" };
+        if let Some(desc) = &rt.description {
+            section.push_str(&format!("- {}{}{}: {}\n", rt.name, sig, sym, desc));
+        } else {
+            section.push_str(&format!("- {}{}{}\n", rt.name, sig, sym));
+        }
+        if rt.symmetric {
+            section.push_str(
+                "  Symmetric: the order of source_name and target_name does not matter.\n",
+            );
         }
         if onto.mode == OntologyMode::Strict {
+            for ia in &rt.inverse_aliases {
+                section.push_str(&format!(
+                    "  Inverse alias: {} = {} with source and target swapped\n",
+                    ia, rt.name
+                ));
+            }
             if !rt.aliases.is_empty() {
                 section.push_str(&format!("  Aliases: {}\n", rt.aliases.join(", ")));
             }
@@ -351,8 +379,10 @@ mod tests {
                 crate::ontology::RelationTypeDef {
                     name: "LAUNCHED".to_string(),
                     description: Some("One entity launched another".to_string()),
-                    source_type: None,
-                    target_type: None,
+                    source_types: vec![],
+                    target_types: vec![],
+                    inverse_aliases: vec![],
+                    symmetric: false,
                     aliases: vec!["LAUNCHED_BY".to_string(), "LAUNCHED_FROM".to_string()],
                     keywords: vec!["launch".to_string()],
                     extract: true,
@@ -360,8 +390,10 @@ mod tests {
                 crate::ontology::RelationTypeDef {
                     name: "USES".to_string(),
                     description: None,
-                    source_type: None,
-                    target_type: None,
+                    source_types: vec![],
+                    target_types: vec![],
+                    inverse_aliases: vec![],
+                    symmetric: false,
                     aliases: vec![],
                     keywords: vec![],
                     extract: true,
@@ -518,8 +550,10 @@ mod tests {
                 RelationTypeDef {
                     name: "KNOWS".to_string(),
                     description: Some("acquaintance".to_string()),
-                    source_type: None,
-                    target_type: None,
+                    source_types: vec![],
+                    target_types: vec![],
+                    inverse_aliases: vec![],
+                    symmetric: false,
                     aliases: vec![],
                     keywords: vec![],
                     extract: true,
@@ -527,8 +561,10 @@ mod tests {
                 RelationTypeDef {
                     name: "DERIVED_FROM".to_string(),
                     description: Some("provenance link".to_string()),
-                    source_type: None,
-                    target_type: None,
+                    source_types: vec![],
+                    target_types: vec![],
+                    inverse_aliases: vec![],
+                    symmetric: false,
                     aliases: vec!["SOURCED_FROM".to_string()],
                     keywords: vec![],
                     extract: flag,
@@ -585,8 +621,10 @@ mod tests {
             relation_types: vec![RelationTypeDef {
                 name: "DERIVED_FROM".to_string(),
                 description: None,
-                source_type: None,
-                target_type: None,
+                source_types: vec![],
+                target_types: vec![],
+                inverse_aliases: vec![],
+                symmetric: false,
                 aliases: vec![],
                 keywords: vec![],
                 extract: false,
@@ -598,5 +636,114 @@ mod tests {
             DEFAULT_ENTITY_TYPES_SECTION
         );
         assert_eq!(build_fact_types_section(Some(&onto)), "");
+    }
+    // ── #816: direction ──────────────────────────────────────────────────────
+
+    fn rel(
+        name: &str,
+        src: &[&str],
+        tgt: &[&str],
+        inverse: &[&str],
+        symmetric: bool,
+    ) -> crate::ontology::RelationTypeDef {
+        crate::ontology::RelationTypeDef {
+            name: name.to_string(),
+            description: None,
+            source_types: src.iter().map(|s| s.to_string()).collect(),
+            target_types: tgt.iter().map(|s| s.to_string()).collect(),
+            inverse_aliases: inverse.iter().map(|s| s.to_string()).collect(),
+            symmetric,
+            aliases: vec![],
+            keywords: vec![],
+            extract: true,
+        }
+    }
+
+    fn direction_ontology(mode: OntologyMode) -> Ontology {
+        let entity_types: Vec<crate::ontology::EntityTypeDef> =
+            ["Person", "Team", "Project", "System", "Policy"]
+                .iter()
+                .map(|n| crate::ontology::EntityTypeDef {
+                    name: n.to_string(),
+                    description: None,
+                    parent: None,
+                    identity: false,
+                    extract: true,
+                })
+                .collect();
+        let ancestor_map = crate::ontology::compute_ancestor_map(&entity_types);
+        Ontology {
+            mode,
+            entity_types,
+            relation_types: vec![
+                rel("APPROVES", &["Person"], &[], &["APPROVED_BY"], false),
+                rel(
+                    "OWNS",
+                    &["Person", "Team"],
+                    &["Project", "System"],
+                    &[],
+                    false,
+                ),
+                rel("GOVERNS", &[], &["Policy"], &[], false),
+                rel("KNOWS", &[], &[], &[], true),
+                rel("USES", &[], &[], &[], false),
+            ],
+            ancestor_map,
+        }
+    }
+
+    #[test]
+    fn edge_prompt_defines_direction_in_every_mode() {
+        for prompt in [
+            edge_system_prompt(None),
+            edge_system_prompt(Some(&direction_ontology(OntologyMode::Open))),
+            edge_system_prompt(Some(&direction_ontology(OntologyMode::Strict))),
+        ] {
+            assert!(prompt.contains("*as its type name reads*"), "{prompt}");
+            assert!(
+                prompt.contains("Sable Core is owned by Lena Moreau"),
+                "{prompt}"
+            );
+            assert!(prompt.contains("Lena Moreau OWNS Sable Core"), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn signatures_render_half_and_list_forms() {
+        for mode in [OntologyMode::Open, OntologyMode::Strict] {
+            let prompt = edge_system_prompt(Some(&direction_ontology(mode)));
+            assert!(prompt.contains("- APPROVES (Person → any)"), "{prompt}");
+            assert!(
+                prompt.contains("- OWNS (Person | Team → Project | System)"),
+                "{prompt}"
+            );
+            assert!(prompt.contains("- GOVERNS (any → Policy)"), "{prompt}");
+            assert!(
+                prompt.contains("- USES\n"),
+                "no signature, no parens: {prompt}"
+            );
+            assert!(prompt.contains("- KNOWS [symmetric]"), "{prompt}");
+            assert!(prompt.contains("order of source_name and target_name does not matter"));
+        }
+    }
+
+    #[test]
+    fn inverse_aliases_render_in_strict_mode_only() {
+        let strict = edge_system_prompt(Some(&direction_ontology(OntologyMode::Strict)));
+        assert!(
+            strict.contains("APPROVED_BY = APPROVES with source and target swapped"),
+            "{strict}"
+        );
+        let open = edge_system_prompt(Some(&direction_ontology(OntologyMode::Open)));
+        assert!(!open.contains("APPROVED_BY"), "{open}");
+    }
+
+    #[test]
+    fn undeclared_signature_types_are_not_rendered() {
+        let mut onto = direction_ontology(OntologyMode::Open);
+        onto.relation_types = vec![rel("LIKES", &["Ghost"], &["Person"], &[], false)];
+        let prompt = edge_system_prompt(Some(&onto));
+        assert!(prompt.contains("- LIKES (any → Person)"), "{prompt}");
+        assert!(!prompt.contains("Ghost"), "{prompt}");
     }
 }

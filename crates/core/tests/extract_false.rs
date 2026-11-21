@@ -51,8 +51,10 @@ fn rtype(name: &str, extract: bool) -> RelationTypeDef {
     RelationTypeDef {
         name: name.to_string(),
         description: None,
-        source_type: None,
-        target_type: None,
+        source_types: vec![],
+        target_types: vec![],
+        inverse_aliases: vec![],
+        symmetric: false,
         aliases: vec![],
         keywords: vec![],
         extract,
