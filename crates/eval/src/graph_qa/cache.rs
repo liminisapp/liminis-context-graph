@@ -34,6 +34,9 @@ pub struct LlmCache {
     path: PathBuf,
     entries: Mutex<HashMap<String, String>>,
     counts: Mutex<BTreeMap<String, Counts>>,
+    /// The file on disk ends without a newline (a crash cut its last line short): the next append
+    /// starts with one, so it is not glued onto the fragment and lost with it.
+    needs_newline: Mutex<bool>,
 }
 
 /// The cache key of `req` (the schema as it is sent, i.e. closed).
@@ -50,8 +53,10 @@ impl LlmCache {
     /// crash must not lose the rest).
     pub fn load(path: &Path) -> Result<Self, String> {
         let mut entries = HashMap::new();
+        let mut needs_newline = false;
         match std::fs::read_to_string(path) {
             Ok(text) => {
+                needs_newline = !text.is_empty() && !text.ends_with('\n');
                 for line in text.lines() {
                     if let Ok(e) = serde_json::from_str::<Entry>(line) {
                         entries.insert(e.k, e.v);
@@ -65,6 +70,7 @@ impl LlmCache {
             path: path.to_path_buf(),
             entries: Mutex::new(entries),
             counts: Mutex::default(),
+            needs_newline: Mutex::new(needs_newline),
         })
     }
 
@@ -127,14 +133,21 @@ impl LlmCache {
         })
         .expect("serializes");
         {
+            let mut needs_newline = self.needs_newline.lock().expect("cache lock");
+            let record = if *needs_newline {
+                format!("\n{line}\n")
+            } else {
+                format!("{line}\n")
+            };
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&self.path)
                 .map_err(|e| format!("--llm-cache {}: {e}", self.path.display()))?;
-            writeln!(f, "{line}")
+            f.write_all(record.as_bytes())
                 .and_then(|_| f.flush())
                 .map_err(|e| format!("--llm-cache {}: {e}", self.path.display()))?;
+            *needs_newline = false;
         }
         self.entries
             .lock()
@@ -205,5 +218,32 @@ mod tests {
         r.user = "other".into();
         assert!(c2.get_or_call("reader", &bad, &r).await.is_err());
         assert_eq!(c2.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_append_after_a_truncated_last_line_survives_a_reload() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("c.jsonl");
+        let m = ScriptedModel::new(|_| Ok("v".into()));
+        // One good entry, then a line a crash cut short (no trailing newline).
+        let mut other = req();
+        other.user = "other".into();
+        LlmCache::load(&p)
+            .unwrap()
+            .get_or_call("reader", &m, &other)
+            .await
+            .unwrap();
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        f.write_all(br#"{"k":"ab"#).unwrap();
+        drop(f);
+        let c = LlmCache::load(&p).unwrap();
+        assert_eq!(c.len(), 1, "the fragment is skipped, the good entry kept");
+        assert_eq!(c.get_or_call("reader", &m, &req()).await.unwrap(), "v");
+        assert_eq!(m.calls(), 2);
+        // The response paid for after the crash is not lost with the fragment.
+        let c2 = LlmCache::load(&p).unwrap();
+        assert_eq!(c2.len(), 2);
+        assert_eq!(c2.get_or_call("reader", &m, &req()).await.unwrap(), "v");
+        assert_eq!(m.calls(), 2, "a reload after the crash makes no model call");
     }
 }
