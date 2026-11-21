@@ -419,6 +419,10 @@ pub enum Successor {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeliefFacts {
     pub uuid: String,
+    /// The episode this candidate stands for (issue #850): its own uuid for a passage, the source
+    /// episode's for a summary candidate. A revision successor is matched on this, so the
+    /// successor's passage *and* its summary both anchor a stale candidate.
+    pub episode: String,
     pub group_id: String,
     /// Origin is `derived` or `answer` (not corroborating, ADR-0752).
     pub derived: bool,
@@ -503,7 +507,7 @@ pub fn belief_anchor_groups(facts: &[BeliefFacts]) -> HashMap<String, Vec<Vec<St
                 .filter(|q| {
                     q.uuid != p.uuid
                         && match succ {
-                            Successor::Episode(u) => &q.uuid == u,
+                            Successor::Episode(u) => &q.episode == u,
                             Successor::Document(d) => {
                                 q.group_id == p.group_id && q.doc_id.as_deref() == Some(d.as_str())
                             }
@@ -581,7 +585,9 @@ fn belief_facts(
     rows.iter()
         .map(|r| {
             let origin = crate::origin::Origin::from_stored(Some(&r.origin));
-            let sup = supersession.get(&r.uuid);
+            // Keyed on the episode (issue #850): a summary candidate carries its source episode's
+            // belief state; for an ordinary passage this is its own uuid, exactly as before.
+            let sup = supersession.get(r.belief_key());
             let successor = sup.filter(|s| !s.live_at(now_us)).and_then(|s| {
                 let by = s.superseded_by.clone()?;
                 match s.kind.as_deref() {
@@ -592,11 +598,13 @@ fn belief_facts(
             });
             BeliefFacts {
                 uuid: r.uuid.clone(),
+                episode: r.belief_key().to_string(),
                 group_id: r.group_id.clone(),
                 derived: !origin.is_corroborating(),
                 corroborating: origin.is_corroborating(),
                 doc_id: sup.and_then(|s| s.doc_id.clone()),
-                cites: wikilink_targets(&r.content),
+                // A summary candidate cites what its episode's text cites, not its summary's.
+                cites: wikilink_targets(r.cited_text()),
                 successor,
             }
         })
@@ -613,7 +621,9 @@ fn apply_belief_ranking(
     if rows.len() < 2 {
         return Ok(rows);
     }
-    let uuids: Vec<String> = rows.iter().map(|r| r.uuid.clone()).collect();
+    let mut uuids: Vec<String> = rows.iter().map(|r| r.belief_key().to_string()).collect();
+    uuids.sort_unstable();
+    uuids.dedup();
     let supersession = conn.get_episode_supersession(&uuids)?;
     let facts = belief_facts(&rows, &supersession, chrono::Utc::now().timestamp_micros());
     let anchors = belief_anchor_groups(&facts);
@@ -657,6 +667,35 @@ pub async fn search_passages_hybrid(
     origins: Option<Vec<crate::origin::Origin>>,
     belief_aware: bool,
 ) -> Result<Vec<PassageResult>, Error> {
+    search_passages_hybrid_with_summaries(
+        db,
+        embedder,
+        query,
+        group_ids,
+        num_results,
+        min_score,
+        origins,
+        belief_aware,
+        None,
+    )
+    .await
+}
+
+/// [`search_passages_hybrid`] with optional summary candidates (issue #850): `Some(k)` merges the
+/// `k` nearest summary units into the **vector** list by cosine, before RRF and before belief-aware
+/// ranking (summaries are dense only, ADR-0850). `None` is exactly [`search_passages_hybrid`].
+#[allow(clippy::too_many_arguments)]
+pub async fn search_passages_hybrid_with_summaries(
+    db: Arc<Db>,
+    embedder: Arc<dyn Embedder>,
+    query: &str,
+    group_ids: Option<Vec<String>>,
+    num_results: usize,
+    min_score: f64,
+    origins: Option<Vec<crate::origin::Origin>>,
+    belief_aware: bool,
+    summaries: Option<usize>,
+) -> Result<Vec<PassageResult>, Error> {
     let embedding = embedder.embed(query, EmbedRole::Query).await?;
     let candidate_limit = num_results * 3;
     let query_owned = query.to_string();
@@ -675,12 +714,22 @@ pub async fn search_passages_hybrid(
             candidate_limit,
         )?;
 
-        let vector_rows = conn.vector_search_episodic_origins(
+        let mut vector_rows = conn.vector_search_episodic_origins(
             &embedding,
             gid_refs.as_deref(),
             candidate_limit,
             origins.as_deref(),
         )?;
+        if let Some(k) = summaries {
+            let units = summary_candidates(
+                &conn,
+                &embedding,
+                gid_refs.as_deref(),
+                origins.as_deref(),
+                k,
+            )?;
+            vector_rows = merge_by_distance(vector_rows, units);
+        }
         let vector = apply_similarity_floor(
             vector_rows
                 .iter()
@@ -769,6 +818,149 @@ pub async fn search_passages_vector_belief(
     .await?
 }
 
+// ── Summary candidates (issue #850, ADR-0850) ─────────────────────────────────
+
+/// ANN probe oversampling for summary candidates when an `origins` filter (which runs on the
+/// source episode, after the probe) is set. Matches the passage search's factor.
+const SUMMARY_ORIGIN_OVERSAMPLE: usize = 10;
+
+/// The `k` nearest summary units to `embedding` as summary *candidates*: [`PassageResult`]s whose
+/// `uuid` and `content` are the unit's, every other field is the source episode's (group, origin,
+/// times, attributes), `summary_of` names the episode, and `score` is the cosine **distance** —
+/// the shape [`Conn::vector_search_episodic_origins`](crate::db::Conn) returns, so the two lists
+/// merge directly. A unit is dropped when its episode is gone, fails the `origins` filter
+/// (FR-015), or has ended with no successor (a removed chunk: "its summary no longer yields
+/// results"). A superseded or pending episode's unit is kept; belief-aware ranking demotes it
+/// exactly like the episode's passage (FR-011).
+pub(crate) fn summary_candidates(
+    conn: &crate::db::Conn,
+    embedding: &[f32],
+    group_ids: Option<&[&str]>,
+    origins: Option<&[crate::origin::Origin]>,
+    k: usize,
+) -> Result<Vec<PassageResult>, Error> {
+    if k == 0 {
+        return Ok(vec![]);
+    }
+    let probe = if origins.is_some() {
+        k.saturating_mul(SUMMARY_ORIGIN_OVERSAMPLE)
+    } else {
+        k
+    };
+    let hits = conn.vector_search_summary_units(embedding, group_ids, probe, probe)?;
+    if hits.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut episode_uuids: Vec<String> = hits.iter().map(|h| h.episode_uuid.clone()).collect();
+    episode_uuids.sort_unstable();
+    episode_uuids.dedup();
+    let episodes: HashMap<String, PassageResult> = conn
+        .get_passages_by_uuids(&episode_uuids)?
+        .into_iter()
+        .map(|p| (p.uuid.clone(), p))
+        .collect();
+    let supersession = conn.get_episode_supersession(&episode_uuids)?;
+    let now_us = chrono::Utc::now().timestamp_micros();
+    let mut out = Vec::with_capacity(k);
+    for hit in hits {
+        let Some(ep) = episodes.get(&hit.episode_uuid) else {
+            continue;
+        };
+        if let Some(allowed) = origins {
+            if !allowed.iter().any(|o| o.as_str() == ep.origin) {
+                continue;
+            }
+        }
+        let removed = supersession.get(&hit.episode_uuid).is_some_and(|s| {
+            s.superseded_at_us.is_some_and(|t| t <= now_us) && s.superseded_by.is_none()
+        });
+        if removed {
+            continue;
+        }
+        let mut c = ep.clone();
+        c.uuid = hit.uuid;
+        c.content = hit.content;
+        c.score = hit.distance;
+        c.summary_of = Some(crate::summary_units::SummarySource {
+            episode_uuid: ep.uuid.clone(),
+            episode_content: ep.content.clone(),
+        });
+        out.push(c);
+        if out.len() == k {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Merges passage rows and summary candidates (both scored by cosine distance) into one list,
+/// nearest first; on a tie a passage stays ahead of a summary.
+fn merge_by_distance(
+    passages: Vec<PassageResult>,
+    summaries: Vec<PassageResult>,
+) -> Vec<PassageResult> {
+    if summaries.is_empty() {
+        return passages;
+    }
+    let mut all: Vec<PassageResult> = passages.into_iter().chain(summaries).collect();
+    all.sort_by(|a, b| a.score.total_cmp(&b.score));
+    all
+}
+
+/// Vector passage search with summary candidates (issue #850): the `k` nearest summary units are
+/// merged into the cosine-ranked passage list **before** the `min_score` floor and belief-aware
+/// ranking (when `belief_aware`), then the list is truncated to `num_results`. With
+/// `belief_aware: false` summaries join the pool without belief rules, as passages do. `score` is
+/// the cosine similarity (lowered for a demoted candidate), as in [`search_passages_vector_belief`].
+#[allow(clippy::too_many_arguments)]
+pub async fn search_passages_vector_summaries(
+    db: Arc<Db>,
+    embedder: Arc<dyn Embedder>,
+    query: &str,
+    group_ids: Option<Vec<String>>,
+    num_results: usize,
+    min_score: f64,
+    origins: Option<Vec<crate::origin::Origin>>,
+    belief_aware: bool,
+    summaries: usize,
+) -> Result<Vec<PassageResult>, Error> {
+    let embedding = embedder.embed(query, EmbedRole::Query).await?;
+    let overdraw = num_results * 3;
+
+    tokio::task::spawn_blocking(move || -> Result<Vec<PassageResult>, Error> {
+        let conn = db.connect()?;
+        let gid_refs: Option<Vec<&str>> = group_ids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+        let passages = conn.vector_search_episodic_origins(
+            &embedding,
+            gid_refs.as_deref(),
+            overdraw,
+            origins.as_deref(),
+        )?;
+        let units = summary_candidates(
+            &conn,
+            &embedding,
+            gid_refs.as_deref(),
+            origins.as_deref(),
+            summaries,
+        )?;
+        let mut merged = merge_by_distance(passages, units);
+        for p in &mut merged {
+            p.score = 1.0 - p.score;
+        }
+        merged.retain(|p| p.score >= min_score);
+        let mut ranked = if belief_aware {
+            apply_belief_ranking(&conn, merged)?
+        } else {
+            merged
+        };
+        ranked.truncate(num_results);
+        Ok(ranked)
+    })
+    .await?
+}
+
 /// One query's retrieval result inside [`search_passages_variants`].
 struct QueryLeg {
     /// Index into the caller's `[query, ...queries]`.
@@ -792,10 +984,15 @@ fn retrieve_one_query(
     origins: Option<&[crate::origin::Origin]>,
     candidate_limit: usize,
     min_score: f64,
+    summaries: Option<usize>,
 ) -> Result<QueryLeg, Error> {
     let conn = db.connect()?;
-    let vector_rows =
+    let mut vector_rows =
         conn.vector_search_episodic_origins(embedding, group_ids, candidate_limit, origins)?;
+    if let Some(k) = summaries {
+        let units = summary_candidates(&conn, embedding, group_ids, origins, k)?;
+        vector_rows = merge_by_distance(vector_rows, units);
+    }
     let vector = apply_similarity_floor(
         vector_rows
             .iter()
@@ -854,6 +1051,39 @@ pub async fn search_passages_variants(
     mode: PassageSearchMode,
     belief_aware: bool,
 ) -> Result<Vec<PassageResult>, Error> {
+    search_passages_variants_with_summaries(
+        db,
+        embedder,
+        query,
+        variants,
+        group_ids,
+        num_results,
+        min_score,
+        origins,
+        mode,
+        belief_aware,
+        None,
+    )
+    .await
+}
+
+/// [`search_passages_variants`] with optional summary candidates (issue #850): `Some(k)` merges
+/// the `k` nearest summary units into the **primary** query's vector list only (the caller's
+/// variants get none, ADR-0850). `None` is exactly [`search_passages_variants`].
+#[allow(clippy::too_many_arguments)]
+pub async fn search_passages_variants_with_summaries(
+    db: Arc<Db>,
+    embedder: Arc<dyn Embedder>,
+    query: &str,
+    variants: &[crate::query_variants::Variant],
+    group_ids: Option<Vec<String>>,
+    num_results: usize,
+    min_score: f64,
+    origins: Option<Vec<crate::origin::Origin>>,
+    mode: PassageSearchMode,
+    belief_aware: bool,
+    summaries: Option<usize>,
+) -> Result<Vec<PassageResult>, Error> {
     let mut texts: Vec<String> = Vec::with_capacity(variants.len() + 1);
     texts.push(query.to_string());
     texts.extend(variants.iter().map(|v| v.text.clone()));
@@ -897,6 +1127,7 @@ pub async fn search_passages_variants(
                             origins,
                             candidate_limit,
                             min_score,
+                            if index == 0 { summaries } else { None },
                         )
                     })
                 })
@@ -1389,6 +1620,7 @@ mod tests {
     ) -> BeliefFacts {
         BeliefFacts {
             uuid: uuid.to_string(),
+            episode: uuid.to_string(),
             group_id: "g".to_string(),
             derived,
             corroborating: !derived,
@@ -1644,6 +1876,153 @@ mod tests {
             belief_facts(rows, &ended, now)[0].successor,
             Some(Successor::Document("new".into()))
         );
+    }
+
+    fn passage_row(uuid: &str, content: &str, origin: &str) -> PassageResult {
+        PassageResult {
+            uuid: uuid.into(),
+            name: uuid.into(),
+            content: content.into(),
+            source_description: String::new(),
+            group_id: "g".into(),
+            created_at: String::new(),
+            valid_at: None,
+            score: 0.0,
+            attributes: "{}".into(),
+            origin: origin.into(),
+            similarity: None,
+            matched_queries: None,
+            rerank_score: None,
+            belief: None,
+            via: None,
+            summary_of: None,
+        }
+    }
+
+    /// A summary candidate (issue #850) for `episode`, whose episode text is `episode_content`.
+    fn summary_row(
+        uuid: &str,
+        episode: &str,
+        episode_content: &str,
+        origin: &str,
+    ) -> PassageResult {
+        let mut r = passage_row(uuid, "summary text with [[decoy]]", origin);
+        r.summary_of = Some(crate::summary_units::SummarySource {
+            episode_uuid: episode.into(),
+            episode_content: episode_content.into(),
+        });
+        r
+    }
+
+    #[test]
+    fn a_superseded_episodes_summary_is_anchored_below_its_successors_passage_and_summary() {
+        let rows = vec![
+            summary_row("s-old", "old", "old text", "primary"),
+            passage_row("old", "old text", "primary"),
+            passage_row("new", "new text", "primary"),
+            summary_row("s-new", "new", "new text", "primary"),
+        ];
+        let now = 1_000_000;
+        let sup = HashMap::from([
+            (
+                "old".to_string(),
+                crate::belief::EpisodeSupersession {
+                    superseded_at_us: Some(now - 5),
+                    kind: Some("episode".into()),
+                    superseded_by: Some("new".into()),
+                    reason: Some("revision".into()),
+                    group_id: "g".into(),
+                    ..Default::default()
+                },
+            ),
+            ("new".to_string(), Default::default()),
+        ]);
+        let facts = belief_facts(&rows, &sup, now);
+        assert_eq!(facts[0].episode, "old");
+        assert_eq!(facts[0].successor, Some(Successor::Episode("new".into())));
+        let anchors = belief_anchor_groups(&facts);
+        let mut want = vec!["new".to_string(), "s-new".to_string()];
+        want.sort();
+        for stale in ["s-old", "old"] {
+            let mut got = anchors[stale][0].clone();
+            got.sort();
+            assert_eq!(
+                got, want,
+                "{stale} must rank below the successor's passage and summary"
+            );
+        }
+        assert!(!anchors.contains_key("new") && !anchors.contains_key("s-new"));
+
+        // Ranked best-first with the stale summary on top, demotion puts both stale candidates
+        // below the successor's best-ranked member.
+        let mut ranked: Vec<(String, f64)> = rows
+            .iter()
+            .zip([0.9, 0.8, 0.5, 0.4])
+            .map(|(r, s)| (r.uuid.clone(), s))
+            .collect();
+        demote_below_anchors(&mut ranked, &anchors);
+        let order: Vec<&str> = ranked.iter().map(|(u, _)| u.as_str()).collect();
+        assert_eq!(order[0], "new");
+        let pos = |u: &str| order.iter().position(|x| *x == u).unwrap();
+        assert!(pos("s-old") > pos("new") && pos("old") > pos("new"));
+    }
+
+    #[test]
+    fn a_derived_summary_cites_its_episodes_links_and_ranks_below_the_cited_primary() {
+        let rows = vec![
+            summary_row("s-d", "d", "restates [[src]]", "derived"),
+            passage_row("src", "the source note", "primary"),
+        ];
+        let sup = HashMap::from([
+            (
+                "src".to_string(),
+                crate::belief::EpisodeSupersession {
+                    doc_id: Some("src".into()),
+                    group_id: "g".into(),
+                    ..Default::default()
+                },
+            ),
+            (
+                "d".to_string(),
+                crate::belief::EpisodeSupersession {
+                    doc_id: Some("d".into()),
+                    group_id: "g".into(),
+                    ..Default::default()
+                },
+            ),
+        ]);
+        let facts = belief_facts(&rows, &sup, 0);
+        // The episode's `[[src]]`, not the summary text's `[[decoy]]`.
+        assert_eq!(facts[0].cites, vec!["src".to_string()]);
+        assert_eq!(facts[0].doc_id.as_deref(), Some("d"));
+        assert_eq!(
+            belief_anchor_groups(&facts)["s-d"],
+            vec![vec!["src".to_string()]]
+        );
+    }
+
+    #[test]
+    fn rows_without_summary_of_produce_the_same_facts_as_before() {
+        let row = passage_row("p", "see [[x]]", "primary");
+        let facts = belief_facts(std::slice::from_ref(&row), &HashMap::new(), 0);
+        assert_eq!(facts[0].uuid, "p");
+        assert_eq!(facts[0].episode, "p");
+        assert_eq!(facts[0].cites, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn merge_by_distance_orders_nearest_first_and_keeps_passages_ahead_on_ties() {
+        let mut a = passage_row("a", "", "primary");
+        a.score = 0.2;
+        let mut b = passage_row("b", "", "primary");
+        b.score = 0.5;
+        let mut s = summary_row("s", "e", "", "primary");
+        s.score = 0.2;
+        let mut t = summary_row("t", "e2", "", "primary");
+        t.score = 0.1;
+        let merged = merge_by_distance(vec![a, b], vec![s, t]);
+        let ids: Vec<&str> = merged.iter().map(|p| p.uuid.as_str()).collect();
+        assert_eq!(ids, vec!["t", "a", "s", "b"]);
     }
 
     #[test]
