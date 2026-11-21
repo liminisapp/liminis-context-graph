@@ -128,6 +128,13 @@ pub trait Extractor: Send + Sync {
     fn is_configured(&self) -> bool {
         true
     }
+
+    /// `true` only for the built-in deterministic test extractor (`--extractor test`, #851),
+    /// and for wrappers around it. Surfaced as `providers.extractor` in `knowledge_status` and
+    /// `health_check`.
+    fn is_test_provider(&self) -> bool {
+        false
+    }
 }
 
 /// Builds the `extract_edges` tool schema for the Anthropic tool-use call. Constrains
