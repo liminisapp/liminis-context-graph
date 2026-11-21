@@ -109,8 +109,9 @@ pub fn purge_groups(
     let has_doc_revisions = conn.has_doc_revision_table();
     let has_zero_vector_rows = conn.has_zero_vector_table();
     // Summary units (issue #850): probed up front for the same reason, and so a workspace that
-    // never had summaries gets no new WAL line from a purge.
-    let has_summary_units = conn.has_summary_units(Some(group_ids)).unwrap_or(false);
+    // never had summaries gets no new WAL line from a purge. A missing table already reads as
+    // `false`; any other probe error aborts the purge rather than leaving orphaned units behind.
+    let has_summary_units = conn.has_summary_units(Some(group_ids))?;
     conn.exec_transaction_control("BEGIN TRANSACTION")?;
     let mut grouped: GroupedMutations = GroupedMutations::new();
     let mutate_result = (|| -> Result<(), Error> {
