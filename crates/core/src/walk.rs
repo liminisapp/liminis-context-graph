@@ -11,8 +11,9 @@
 //! 1. candidates = edges incident to the frontier whose far end has not been visited; on the
 //!    **last** hop of a value walk (`answer_type` absent or `"value"`), also the frontier
 //!    entities' own self-loops, which carry literal-valued facts (#823, ADR-0823). A self-loop
-//!    matches either direction (`direction_matched` is `null`, but it counts as matching for the
-//!    soft bonus and the hard filter) and never becomes frontier. When a hop's only candidates
+//!    matches either direction (`direction_matched` is `null`; it gets the soft bonus and is
+//!    always kept by the hard filter, whose match-or-fall-back decision is made over moving
+//!    edges only) and never becomes frontier. When a hop's only candidates
 //!    are self-loops the walk could not move, so the hop is still reported as `dead_end_at`,
 //!    with the self-loop facts in it;
 //! 2. relation-type filter (empty list = no filter; no match = fall back to all, recorded);
@@ -656,10 +657,18 @@ pub fn run_with_ontologies<'a, G: WalkGraph>(
             match plan.direction_mode {
                 DirectionMode::Soft => bonus = DIRECTION_BONUS,
                 DirectionMode::Hard => {
-                    if cands.iter().any(Candidate::fits_direction) {
-                        cands.retain(Candidate::fits_direction);
-                    } else {
-                        fallbacks.direction.push(n);
+                    // The match/fallback decision is over *moving* candidates only: a self-loop
+                    // (#823) fits either direction, so letting it count as a match would hide
+                    // the fallback for real edges. Self-loops are kept either way.
+                    if cands.iter().any(|c| !c.self_loop) {
+                        if cands
+                            .iter()
+                            .any(|c| !c.self_loop && c.matched == Some(true))
+                        {
+                            cands.retain(Candidate::fits_direction);
+                        } else {
+                            fallbacks.direction.push(n);
+                        }
                     }
                 }
             }
@@ -1359,13 +1368,45 @@ mod tests {
     #[test]
     fn hard_direction_keeps_self_loops_as_matching() {
         let mut g = MemGraph::default();
+        g.ent("a", "T").ent("b", "T").ent("c", "T");
+        g.edge("e1", "a", "a", "R", [1.0, 0.0])
+            .edge("e2", "b", "a", "R", [1.0, 0.0])
+            .edge("e3", "a", "c", "R", [1.0, 0.0]);
+        let mut p = plan("a", vec![hop(&["R"], Direction::Out)]);
+        p.direction_mode = DirectionMode::Hard;
+        let o = run(&g, None, &p, &emb(1)).unwrap();
+        // A matching move exists: the reversed move is dropped, the self-loop is kept.
+        let mut got = uuids(&o.hops[0]);
+        got.sort();
+        assert_eq!(got, vec!["e1", "e3"]);
+        assert!(o.fallbacks.direction.is_empty());
+    }
+
+    /// A self-loop does not count as a hard-direction match: when no *moving* edge matches, the
+    /// hard filter still falls back (and records it) for the real edges, and the self-loop stays.
+    #[test]
+    fn hard_direction_fallback_is_decided_over_moving_edges_only() {
+        let mut g = MemGraph::default();
         g.ent("a", "T").ent("b", "T");
         g.edge("e1", "a", "a", "R", [1.0, 0.0])
             .edge("e2", "b", "a", "R", [1.0, 0.0]);
         let mut p = plan("a", vec![hop(&["R"], Direction::Out)]);
         p.direction_mode = DirectionMode::Hard;
         let o = run(&g, None, &p, &emb(1)).unwrap();
-        // The reversed move is dropped; the self-loop fits either direction, so no fallback.
+        let mut got = uuids(&o.hops[0]);
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["e1", "e2"],
+            "the incoming edge survives the fallback"
+        );
+        assert_eq!(o.fallbacks.direction, vec![1]);
+
+        // Only self-loops: there is no real edge to relax the constraint for, so no fallback.
+        let mut g2 = MemGraph::default();
+        g2.ent("a", "T");
+        g2.edge("e1", "a", "a", "R", [1.0, 0.0]);
+        let o = run(&g2, None, &p, &emb(1)).unwrap();
         assert_eq!(uuids(&o.hops[0]), vec!["e1"]);
         assert!(o.fallbacks.direction.is_empty());
     }

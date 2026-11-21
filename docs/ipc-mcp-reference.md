@@ -1368,7 +1368,9 @@ Algorithm (E13's v5, generic — no relation names are hard-coded). Per hop:
    extraction stores on the entity they describe
    ([ADR-0823](adr/0823-literal-object-edges-as-self-loops.md)). A self-loop is filtered and ranked
    like any other edge. It matches either direction, so `direction_matched` is `null`, but it gets
-   the soft bonus and survives the hard filter. It never becomes frontier. Self-loops are never
+   the soft bonus and is always kept by the hard filter. The hard filter decides between
+   matching and falling back by looking at moving edges only, so a self-loop never hides that
+   fallback. It never becomes frontier. Self-loops are never
    candidates on an earlier hop, where they would take beam slots meant for moving on, nor in the
    completion hop.
 2. **Relation filter**: keep edges whose `relation_type` is in `relation_types`; if none match,

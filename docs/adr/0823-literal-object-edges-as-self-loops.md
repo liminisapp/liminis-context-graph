@@ -155,8 +155,9 @@ thing to add.
   of #815/#820. Now, on the last hop, when `answer_type` is `"value"` or absent, the frontier
   entities' own self-loops are candidates. They go through the relation filter, with its
   fallback, and are ranked by cosine plus the soft-direction bonus, sharing the beam with the
-  hop's moves. A self-loop matches either direction (`direction_matched` is `null`, kept by the
-  hard filter) and never extends the frontier. A last hop whose only candidates are self-loops is
+  hop's moves. A self-loop matches either direction: `direction_matched` is `null`, and the hard
+  filter always keeps it. That filter's match-or-fall-back decision looks at moving edges only,
+  so a self-loop cannot suppress the fallback for an incoming edge. It never extends the frontier. A last hop whose only candidates are self-loops is
   still reported as `dead_end_at`, since the walk could not move, and is returned with their
   facts. Self-loops are deliberately not offered on earlier hops, where they would take beam slots
   meant for moving to the next entity, nor in the completion hop, which targets entity types.
