@@ -101,7 +101,7 @@ real vector that is still recorded; the next run re-embeds it harmlessly.
 ### 7. Guard rails
 
 Classified `GroupRequired` in `write_policy`, so `--writable-groups` refuses an unlisted group
-before any embedder call, `dry_run` included. Registered in the admin MCP scope (55 tools, admin
+before any embedder call, `dry_run` included. Registered in the admin MCP scope (57 tools, admin
 bucket 17) and listed as streaming. No separate repair mutex: the exclusive write lock held from drop
 through rebuild already serialises it against the backfill, `knowledge_build_indices`, rebuild and
 recover.
