@@ -872,7 +872,29 @@ fn attach_provenance<G: WalkGraph>(graph: &G, hops: &mut [WalkHop]) -> Result<()
     } else {
         graph.mentioning_episodes(&ent_uuids, &groups)?
     };
-    ep_uuids.extend(mentions.values().flatten().cloned());
+    // Episodes mentioning **both** endpoints of an edge — the only mention-derived candidates the
+    // fallback can cite. Looking up just these (not the union over every mentioning episode)
+    // bounds the liveness lookup on hub entities mentioned by thousands of episodes.
+    let both_mentioning = |r: &RecordedProvenance| -> Vec<String> {
+        let of = |ent: &str| -> HashSet<&str> {
+            mentions
+                .get(ent)
+                .map(|v| v.iter().map(String::as_str).collect())
+                .unwrap_or_default()
+        };
+        let (a, b) = (of(&r.source), of(&r.target));
+        let mut both: Vec<String> = a.intersection(&b).map(|u| (*u).to_string()).collect();
+        both.sort_unstable();
+        both
+    };
+    for r in hops
+        .iter()
+        .flat_map(|h| h.edges.iter())
+        .filter_map(|e| e.recorded.as_ref())
+        .filter(|r| needs_mentions(r))
+    {
+        ep_uuids.extend(both_mentioning(r));
+    }
     dedup(&mut ep_uuids);
     let live = if ep_uuids.is_empty() {
         HashMap::new()
@@ -911,19 +933,11 @@ fn attach_provenance<G: WalkGraph>(graph: &G, hops: &mut [WalkHop]) -> Result<()
                     .filter(|d| !d.is_empty()),
             );
         } else if needs_mentions(&r) {
-            let of = |ent: &str| -> HashSet<&str> {
-                mentions
-                    .get(ent)
-                    .map(|v| v.iter().map(String::as_str).collect())
-                    .unwrap_or_default()
-            };
-            let (a, b) = (of(&r.source), of(&r.target));
-            let mut both: Vec<&str> = a.intersection(&b).copied().collect();
-            both.sort_unstable();
+            let both = both_mentioning(&r);
             push_distinct(
                 &mut prov.source_files,
-                both.into_iter()
-                    .filter_map(|u| live.get(u))
+                both.iter()
+                    .filter_map(|u| live.get(u.as_str()))
                     .filter(|s| s.group_id == r.group_id)
                     .filter_map(EpisodeSource::citation),
             );

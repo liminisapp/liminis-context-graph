@@ -2621,6 +2621,9 @@ included) gains three keys, appended after `signature_mismatch` and **always pre
   the edge's group that mention **both** endpoints (at most **20** distinct sources, ordered by
   episode UUID; `episodes_truncated` is `true` when more were dropped). This is a heuristic for legacy
   rows only; those episodes are not reported as producers.
+  The mention query itself is unbounded (every episode mentioning either endpoint is read), so a
+  hub entity mentioned by thousands of episodes costs proportionally even though at most 20 sources
+  are returned; only the liveness lookup is restricted to episodes mentioning both endpoints.
 - Without the flag (absent or `false`) the response is byte-identical to before, `facts_text` is
   unchanged either way, and no extra lookups run. Episodes are looked up in the edge's own group.
   The walk stays read-only. Fetch passages for a citation with the existing episode tools.
