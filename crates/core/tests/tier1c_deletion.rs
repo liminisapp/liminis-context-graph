@@ -128,12 +128,19 @@ fn assert_err(v: &Value, id: i64) {
     assert!(v.get("error").is_some(), "expected error field: {v}");
 }
 
+/// Issue #858: an identical resubmission is a no-op, so each submission gets distinct text; a
+/// repeat of a `chunk_id` here is then a genuine correction, as these tests intend.
+fn next_submission() -> usize {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
 async fn process_chunk(id: i64, chunk_id: &str, source_file: &str, state: Arc<AppState>) -> Value {
     dispatch_val(
         id,
         "knowledge_process_chunk",
         json!({
-            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_text": format!("Alice works at Acme Corp. (submission {})", next_submission()),
             "chunk_id": chunk_id,
             "source_file": source_file,
             "reference_time": "2024-01-01T00:00:00Z",
