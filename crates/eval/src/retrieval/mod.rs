@@ -532,7 +532,7 @@ pub async fn run_cli(args: &[String]) -> i32 {
         }
     };
     match run(a).await {
-        Ok(()) => 0,
+        Ok(code) => code,
         Err(e) => {
             eprintln!("lcg-eval retrieval: {e}");
             1
@@ -540,7 +540,26 @@ pub async fn run_cli(args: &[String]) -> i32 {
     }
 }
 
-async fn run(a: RetrievalArgs) -> Result<(), String> {
+/// Exit code of a `--compare` refusal: incompatible inputs (or an earlier report with no `inputs`).
+pub const EXIT_INCOMPATIBLE: i32 = 2;
+
+/// Reads and validates the `--compare` file: unreadable or not a report is an error (exit 1); a
+/// report with no `inputs` block is `Ok(Err(..))` (exit 2, see [`EXIT_INCOMPATIBLE`]).
+fn load_previous(path: &Path) -> Result<Result<serde_json::Value, compare::CompareError>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read --compare file {}: {e}", path.display()))?;
+    let prev = compare::parse_previous(&text).map_err(|e| {
+        format!(
+            "--compare file {} is not a valid report: {e}",
+            path.display()
+        )
+    })?;
+    Ok(compare::check_has_inputs(&prev).map(|()| prev))
+}
+
+/// Runs the whole retrieval eval. `Ok(code)` is the exit code (0, or [`EXIT_INCOMPATIBLE`] when
+/// `--compare` refused after the report was written); `Err` is a runtime failure (exit 1).
+async fn run(a: RetrievalArgs) -> Result<i32, String> {
     // Refuse before anything is loaded, started or spent.
     if a.private {
         cli::private_guard(&a)?;
@@ -549,8 +568,24 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
     let plan = resolve(&a, &fx);
     if a.dry_run {
         println!("{}", render_plan(&plan));
-        return Ok(());
+        return Ok(0);
     }
+    // `--compare` is read before anything is started or spent: an unreadable or `inputs`-less
+    // earlier report fails fast. Hard-input mismatches are judged only after this run's own
+    // report is written (as graph-integrity does), so a refusal never discards a finished run.
+    let previous = match &a.compare {
+        None => None,
+        Some(p) => match load_previous(p)? {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!(
+                    "lcg-eval retrieval: cannot compare with {}: {e}",
+                    p.display()
+                );
+                return Ok(EXIT_INCOMPATIBLE);
+            }
+        },
+    };
     for w in &plan.warnings {
         eprintln!("lcg-eval retrieval: WARNING {w}");
     }
@@ -1004,11 +1039,40 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
         inputs: Some(input_digests),
     };
 
-    let written = write_report(&report, a.out.as_deref());
+    let mut written = write_report(&report, a.out.as_deref());
+    if let (true, Some(dir)) = (a.record_ranked, a.out.as_deref()) {
+        match ranked::write_ranked(dir, &report.configs) {
+            Ok(p) => eprintln!("lcg-eval retrieval: wrote {}", p.display()),
+            Err(e) => written = written.and(Err(e)),
+        }
+    }
+    let mut code = 0;
+    if let Some(prev) = &previous {
+        match compare::compare(prev, &report.to_json(), a.strict) {
+            Ok(c) => {
+                let md = compare::render_compare_markdown(&c);
+                println!("{md}");
+                if let Some(dir) = a.out.as_deref() {
+                    if let Err(e) = std::fs::write(dir.join("compare.md"), &md) {
+                        written = written.and(Err(format!("cannot write compare.md: {e}")));
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "lcg-eval retrieval: cannot compare with {}: {e}",
+                    a.compare
+                        .as_deref()
+                        .map_or(String::new(), |p| p.display().to_string())
+                );
+                code = EXIT_INCOMPATIBLE;
+            }
+        }
+    }
     write_kept_manifest();
     match keep_error {
         Some(e) => Err(e),
-        None => written,
+        None => written.map(|()| code),
     }
 }
 
