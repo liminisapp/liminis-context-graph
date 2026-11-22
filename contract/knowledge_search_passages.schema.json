@@ -90,7 +90,8 @@
       "type": "integer"
     },
     "expansion": {
-      "description": "Query-expansion report; present only when expansion ran. Free-form."
+      "description": "Query-expansion report; present only when expansion ran. Free-form.",
+      "type": "object"
     },
     "passages": {
       "items": {
@@ -99,7 +100,8 @@
       "type": "array"
     },
     "rerank": {
-      "description": "Rerank stage report; present only when reranking ran. Free-form."
+      "description": "Rerank stage report; present only when reranking ran. Free-form.",
+      "type": "object"
     }
   },
   "required": [

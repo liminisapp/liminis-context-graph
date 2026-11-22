@@ -641,6 +641,16 @@ async fn search_passages_validates() {
     staged["rerank"] = json!({"candidates": 3, "anything": ["goes"]});
     staged["expansion"] = json!({"variants": 2});
     assert_valid("knowledge_search_passages", &staged);
+    // Both are omitted when the stage did not run; the handler never sends `null` for them.
+    let mut m = r.clone();
+    m["rerank"] = Value::Null;
+    assert_invalid("knowledge_search_passages", "rerank: null", &m);
+    let mut m = r.clone();
+    m["expansion"] = Value::Null;
+    assert_invalid("knowledge_search_passages", "expansion: null", &m);
+    let mut m = r.clone();
+    m["rerank"] = json!("not an object");
+    assert_invalid("knowledge_search_passages", "rerank: string", &m);
 
     // Drift.
     let mut m = r.clone();

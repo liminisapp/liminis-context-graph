@@ -4,6 +4,13 @@ use super::Nullable;
 use schemars::JsonSchema;
 use serde_json::Value;
 
+/// A free-form JSON object (`{"type": "object"}`): the stage reports are always objects, but
+/// their members are deliberately left unpinned. Plain `Value` would generate a schema with no
+/// `type` at all, which accepts an explicit `null` and yields an `unknown` consumer type.
+fn free_form_object(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "object" })
+}
+
 /// One passage (episode) hit.
 #[derive(JsonSchema)]
 #[allow(dead_code)]
@@ -47,8 +54,12 @@ pub struct SearchPassagesResult {
     pub count: u64,
     /// Rerank stage report; present only when reranking ran. Free-form.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    #[schemars(schema_with = "free_form_object")]
     pub rerank: Option<Value>,
     /// Query-expansion report; present only when expansion ran. Free-form.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    #[schemars(schema_with = "free_form_object")]
     pub expansion: Option<Value>,
 }
