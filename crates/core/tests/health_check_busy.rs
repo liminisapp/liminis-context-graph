@@ -99,7 +99,11 @@ async fn idle_reports_healthy_unchanged() {
     let state = make_state(Some(db));
     assert_eq!(
         health(&state).await,
-        json!({"ok": true, "healthy": true, "state": "healthy", "ready_for_reads": true, "providers": {"embedder": "real", "extractor": "real"}})
+        json!({
+            "ok": true, "healthy": true, "state": "healthy", "ready_for_reads": true,
+            "providers": {"embedder": "real", "extractor": "real"},
+            "server_version": env!("CARGO_PKG_VERSION"), "protocol_version": 1
+        })
     );
 }
 
@@ -117,6 +121,9 @@ async fn write_held_with_running_job_reports_rebuilding_with_progress() {
     assert_eq!(r["ready_for_reads"], true);
     assert_eq!(r["activity"], "rebuilding");
     assert_eq!(r["job_id"], "job-1");
+    // Issue #854: version fields ride along on the rebuilding shape too.
+    assert_eq!(r["server_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(r["protocol_version"], 1);
     assert_eq!(r["progress"]["mutations_replayed"], 100);
     assert_eq!(r["progress"]["wal_files_processed"], 2);
     assert_eq!(r["progress"]["wal_files_total"], 5);
@@ -161,6 +168,8 @@ async fn write_held_without_job_reports_writing() {
             "ready_for_reads": true,
             "activity": "writing",
             "providers": {"embedder": "real", "extractor": "real"},
+            "server_version": env!("CARGO_PKG_VERSION"),
+            "protocol_version": 1,
         })
     );
 }
@@ -204,6 +213,7 @@ async fn contended_rebuild_jobs_mutex_falls_back_to_writing() {
     assert_eq!(r["state"], "busy");
     assert_eq!(r["activity"], "writing");
     assert!(r.get("progress").is_none());
+    assert_eq!(r["protocol_version"], 1);
 }
 
 #[tokio::test]
@@ -287,6 +297,8 @@ async fn busy_reports_ready_for_reads_true() {
             "ready_for_reads": true,
             "activity": "writing",
             "providers": {"embedder": "real", "extractor": "real"},
+            "server_version": env!("CARGO_PKG_VERSION"),
+            "protocol_version": 1,
         })
     );
 }
@@ -337,6 +349,10 @@ async fn returns_to_healthy_after_writer_releases() {
     }
     assert_eq!(
         health(&state).await,
-        json!({"ok": true, "healthy": true, "state": "healthy", "ready_for_reads": true, "providers": {"embedder": "real", "extractor": "real"}})
+        json!({
+            "ok": true, "healthy": true, "state": "healthy", "ready_for_reads": true,
+            "providers": {"embedder": "real", "extractor": "real"},
+            "server_version": env!("CARGO_PKG_VERSION"), "protocol_version": 1
+        })
     );
 }

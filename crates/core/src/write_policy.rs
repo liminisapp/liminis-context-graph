@@ -160,6 +160,7 @@ pub const CLASSIFICATION: &[(&str, WriteClass)] = &[
     // ── read-only ──
     ("health_check", WriteClass::ReadOnly),
     ("knowledge_status", WriteClass::ReadOnly),
+    ("knowledge_capabilities", WriteClass::ReadOnly),
     ("knowledge_find_entities", WriteClass::ReadOnly),
     ("knowledge_resolve_entity", WriteClass::ReadOnly),
     ("knowledge_find_relationships", WriteClass::ReadOnly),
