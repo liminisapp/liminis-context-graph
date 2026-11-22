@@ -28,8 +28,9 @@ graphiti-style bulk deletes by uuid.
 - **Four templates.** The dump picks per row on (uuid present?) × (`group_id` non-NULL?). Rows with
   a uuid use `MENTIONS_CYPHER` (also `SET r.uuid`); uuid-less rows use `MENTIONS_NO_UUID_CYPHER`,
   which leaves `r.uuid` NULL on the rebuilt edge. Legacy edges whose `group_id` is NULL use the
-  `MENTIONS_NULL_GROUP_*` pair, which `MERGE (ep)-[r:MENTIONS]->(en)` on the endpoints alone and
-  never `SET` `group_id`: `value_as_string` would turn NULL into `""`, which never matches a stored
+  `MENTIONS_NULL_GROUP_*` pair, which `CREATE` the edge only `WHERE NOT EXISTS` a NULL-group
+  MENTIONS edge between the pair and never set `group_id` (an endpoints-only `MERGE` would instead
+  match a *grouped* edge on the same pair and silently skip the NULL-group one): `value_as_string` would turn NULL into `""`, which never matches a stored
   NULL under a `{group_id: $group_id}` key, so replaying onto a graph that still held the NULL-group
   edge would create a second one (breaking idempotent replay). The dump emits no "null uuid —
   skipping" warning any more.

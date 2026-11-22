@@ -1172,6 +1172,52 @@ async fn test_dump_wal_mentions_null_group_replay_idempotent() {
     assert_eq!(db2.connect().unwrap().count_mentions_edges().unwrap(), 2);
 }
 
+/// A NULL-group edge and a grouped edge on the same `(episode, entity)` pair are distinct
+/// identities: replaying a NULL-group edge onto a graph that already holds only the grouped one
+/// must still create the NULL-group edge (and must not touch the grouped edge's uuid).
+#[tokio::test]
+async fn test_dump_wal_mentions_null_group_replay_over_grouped_edge() {
+    let dir = TempDir::new().unwrap();
+    let db1_path = dir.path().join("mixg1.db");
+    let db1 = open_db(&db1_path);
+    seed_episode(&db1, "ep-1", "g");
+    seed_entity(&db1, "en-1", "g");
+    db1.connect()
+        .unwrap()
+        .run_cypher(
+            "MATCH (ep:Episodic {uuid:'ep-1'}), (en:Entity {uuid:'en-1'}) \
+             CREATE (ep)-[:MENTIONS {uuid:'m-null'}]->(en)",
+        )
+        .unwrap();
+    let (dump_dir, _) = dump_to(&db1, &db1_path, dir.path(), "mixg-dump").await;
+
+    // Target graph holds only a grouped edge on the same pair.
+    let db2 = open_db(&dir.path().join("mixg2.db"));
+    seed_episode(&db2, "ep-1", "g");
+    seed_entity(&db2, "en-1", "g");
+    db2.connect()
+        .unwrap()
+        .run_cypher(
+            "MATCH (ep:Episodic {uuid:'ep-1'}), (en:Entity {uuid:'en-1'}) \
+             CREATE (ep)-[:MENTIONS {uuid:'m-grouped', group_id:'g'}]->(en)",
+        )
+        .unwrap();
+    replay_into(&db2, &dump_dir);
+    replay_into(&db2, &dump_dir);
+    let conn = db2.connect().unwrap();
+    assert_eq!(conn.count_mentions_edges().unwrap(), 2);
+    let null_uuid = conn
+        .cypher_query("MATCH ()-[r:MENTIONS]->() WHERE r.group_id IS NULL RETURN r.uuid")
+        .unwrap();
+    assert_eq!(null_uuid.len(), 1, "exactly one NULL-group edge");
+    assert_eq!(null_uuid[0][0], "m-null");
+    let grouped = conn
+        .cypher_query("MATCH ()-[r:MENTIONS {group_id:'g'}]->() RETURN r.uuid")
+        .unwrap();
+    assert_eq!(grouped.len(), 1);
+    assert_eq!(grouped[0][0], "m-grouped", "grouped edge left untouched");
+}
+
 /// More than one page of HAS_EPISODE edges on a single saga: the dump pages order only by the
 /// source uuid unless a tiebreaker is applied, which can drop or repeat edges across pages.
 #[tokio::test]

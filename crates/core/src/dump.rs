@@ -97,7 +97,9 @@ const RELATES_TO_CYPHER: &str = "\
 // uuid-bearing vs uuid-less (the latter leaves `r.uuid` NULL on the rebuilt edge), and
 // non-NULL vs NULL `group_id`. A NULL `group_id` cannot be a `{group_id: $group_id}` MERGE key
 // (the dump would bind `""`, which never matches a stored NULL and would add a second edge on
-// replay), so NULL-group edges MERGE on the endpoints alone and never SET `group_id`.
+// replay), so NULL-group edges are created only when no NULL-group edge already exists between the pair
+// (`WHERE NOT EXISTS … CREATE`), and never SET `group_id`. A plain endpoint-only MERGE would
+// instead match a grouped edge on the same pair and silently skip the NULL-group one.
 const MENTIONS_CYPHER: &str = "\
     MATCH (ep:Episodic {uuid: $ep_uuid}), (en:Entity {uuid: $en_uuid}) \
     MERGE (ep)-[r:MENTIONS {group_id: $group_id}]->(en) \
@@ -111,13 +113,15 @@ const MENTIONS_NO_UUID_CYPHER: &str = "\
 
 const MENTIONS_NULL_GROUP_CYPHER: &str = "\
     MATCH (ep:Episodic {uuid: $ep_uuid}), (en:Entity {uuid: $en_uuid}) \
-    MERGE (ep)-[r:MENTIONS]->(en) \
+    WHERE NOT EXISTS { MATCH (ep)-[x:MENTIONS]->(en) WHERE x.group_id IS NULL } \
+    CREATE (ep)-[r:MENTIONS]->(en) \
     SET r.uuid = $uuid, \
     r.created_at = CASE WHEN $created_at IS NULL THEN NULL ELSE timestamp($created_at) END";
 
 const MENTIONS_NULL_GROUP_NO_UUID_CYPHER: &str = "\
     MATCH (ep:Episodic {uuid: $ep_uuid}), (en:Entity {uuid: $en_uuid}) \
-    MERGE (ep)-[r:MENTIONS]->(en) \
+    WHERE NOT EXISTS { MATCH (ep)-[x:MENTIONS]->(en) WHERE x.group_id IS NULL } \
+    CREATE (ep)-[r:MENTIONS]->(en) \
     SET r.created_at = CASE WHEN $created_at IS NULL THEN NULL ELSE timestamp($created_at) END";
 
 const HAS_EPISODE_CYPHER: &str = "\
