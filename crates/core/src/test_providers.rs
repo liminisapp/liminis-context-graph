@@ -278,6 +278,11 @@ fn parse_line(line: &str) -> Option<FactLine> {
         return None;
     }
     let target = rest[..colon].trim();
+    // `SRC` cannot contain an arrow (the line is split at the first one), but `DST` can: ignore
+    // `A -> B -> C: f` and `A -> B -[X]-> C: f` rather than create an entity named after arrow text.
+    if target.contains("->") || target.contains("-[") {
+        return None;
+    }
     let fact = rest[colon + 1..].trim();
     if source.is_empty() || target.is_empty() || fact.is_empty() || relation.is_empty() {
         return None;
@@ -396,6 +401,17 @@ impl Extractor for TestExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn destination_containing_an_arrow_is_ignored() {
+        assert!(parse_fact_lines("A -> B -> C: f").edges.is_empty());
+        assert!(parse_fact_lines("A -> B -[X]-> C: f").edges.is_empty());
+        assert!(parse_fact_lines("A -[X]-> B -> C: f").edges.is_empty());
+        // An arrow in the fact text is still part of the fact.
+        let p = parse_fact_lines("A -> B: f -> g");
+        assert_eq!(p.edges.len(), 1);
+        assert_eq!(p.edges[0].fact, "f -> g");
+    }
 
     #[test]
     fn dim_resolution_defaults_accepts_and_bounds() {

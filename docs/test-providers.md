@@ -98,7 +98,8 @@ The first form has relation `RELATED_TO`. The second has the named relation.
    `]`, which must be followed immediately by `->`.
 4. `DST` and the fact are separated by the **first `:` after the arrow**. Colons and arrows inside
    the fact text are part of the fact. Names may not contain `:`, `->` or `-[`. A line whose
-   `SRC` contains `:` (such as prose like `Note: Alice -> Acme: ...`) is ignored.
+   `SRC` contains `:` (such as prose like `Note: Alice -> Acme: ...`) is ignored, and so is a line
+   whose `DST` contains `->` or `-[` (such as `A -> B -> C: ...`).
 5. `SRC`, `DST`, the relation and the fact are trimmed.
 6. A line is **ignored** (never an error) if `SRC`, `DST` or the fact is empty, if the relation is
    empty after normalisation, or if the named form is malformed.
@@ -162,6 +163,16 @@ creates a surprising entity:
 
 ```fact-lines
 Note: Alice -> Acme: works at
+```
+
+```expect
+```
+
+A destination containing an arrow is not a fact line either, so a chain such as a diagram never
+creates an entity named after arrow text:
+
+```fact-lines
+Alice -> Acme -> Bob: works at
 ```
 
 ```expect
