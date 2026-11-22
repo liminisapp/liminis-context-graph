@@ -6431,6 +6431,8 @@ fn passage_from_row(row: &[Value], score: f64, origin_idx: usize) -> PassageResu
         belief: None,
         source_file: value_as_optional_string(&row[origin_idx + 1]),
         chunk_id: value_as_optional_string(&row[origin_idx + 2]),
+        legs: None,
+        lexical_score: None,
     }
 }
 

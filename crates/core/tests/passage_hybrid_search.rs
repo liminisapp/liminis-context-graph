@@ -802,3 +802,132 @@ async fn five_agreeing_variants_cannot_outrank_the_primarys_top_hit() {
         assert_eq!(matched_queries(&r[1]), (0..=n as u64).collect::<Vec<_>>());
     }
 }
+
+// ── Per-leg evidence on hybrid hits (issue #871) ──
+
+fn legs_of(ps: &[Value]) -> HashMap<String, String> {
+    ps.iter()
+        .map(|p| {
+            (
+                p["uuid"].as_str().unwrap().to_string(),
+                p["legs"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("no legs on {p}"))
+                    .to_string(),
+            )
+        })
+        .collect()
+}
+
+/// `dense`: semantically on target, no keyword. `lex`: keyword, orthogonal vector (below the
+/// floor). `both`: keyword and on-target vector.
+fn legs_fixture() -> [Ep; 3] {
+    [
+        ep("dense", "alpha text", 0),
+        ep("lex", "needleword content", 3),
+        ep("both", "needleword other", 0),
+    ]
+}
+
+#[tokio::test]
+async fn hybrid_reports_dense_lexical_and_both_legs() {
+    let (state, _db, _d) = make_state(embedder(&[("needleword", one_hot(0))]), &legs_fixture());
+    let mut p = params("needleword", "hybrid");
+    p["min_score"] = json!(0.5);
+    let hybrid = search(&state, p).await;
+    let legs = legs_of(&hybrid);
+    assert_eq!(legs["dense"], "dense");
+    assert_eq!(legs["lex"], "lexical");
+    assert_eq!(legs["both"], "both");
+    for h in &hybrid {
+        // `legs` is dense/both exactly when the vector leg matched (similarity present).
+        let has_sim = h.get("similarity").is_some();
+        assert_eq!(has_sim, h["legs"] != "lexical", "{h}");
+        // lexical_score is present exactly when BM25 matched.
+        let has_lex = h.get("lexical_score").is_some();
+        assert_eq!(has_lex, h["legs"] != "dense", "{h}");
+        if has_lex {
+            assert!(h["lexical_score"].as_f64().unwrap() > 0.0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn hybrid_score_stays_a_rank_only_fusion_value_with_legs_present() {
+    let (state, _db, _d) = make_state(embedder(&[("needleword", one_hot(0))]), &legs_fixture());
+    let mut p = params("needleword", "hybrid");
+    p["min_score"] = json!(0.5);
+    let with = search(&state, p).await;
+    let order: Vec<_> = uuids(&with);
+    assert_eq!(order.len(), 3);
+    let first = with[0]["score"].as_f64().unwrap();
+    assert!(first > 0.0 && first < 0.0234, "rank-only fusion score");
+}
+
+#[tokio::test]
+async fn vector_mode_carries_no_legs_or_lexical_score() {
+    let (state, _db, _d) = make_state(embedder(&[("needleword", one_hot(0))]), &legs_fixture());
+    for belief_on in [false, true] {
+        let vector = search(&state, belief("needleword", "vector", belief_on)).await;
+        assert!(!vector.is_empty());
+        for h in &vector {
+            assert!(h.get("legs").is_none(), "{h}");
+            assert!(h.get("lexical_score").is_none(), "{h}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_fts_index_makes_every_hybrid_hit_dense() {
+    let (state, db, _d) = make_state(embedder(&[("needleword", one_hot(0))]), &legs_fixture());
+    {
+        let conn = db.connect().unwrap();
+        conn.run_cypher("CALL DROP_FTS_INDEX('Episodic', 'episode_content')")
+            .unwrap();
+    }
+    let hybrid = search(&state, params("needleword", "hybrid")).await;
+    assert_eq!(hybrid.len(), 3);
+    assert!(legs_of(&hybrid).values().all(|l| l == "dense"));
+    assert!(hybrid.iter().all(|h| h.get("lexical_score").is_none()));
+}
+
+#[tokio::test]
+async fn legs_survive_belief_aware_ranking() {
+    let (state, _db, _d) = make_state(embedder(&[("needleword", one_hot(0))]), &legs_fixture());
+    let mut p = belief("needleword", "hybrid", true);
+    p["min_score"] = json!(0.5);
+    let legs = legs_of(&search(&state, p).await);
+    assert_eq!(legs["lex"], "lexical");
+    assert_eq!(legs["both"], "both");
+}
+
+#[tokio::test]
+async fn variants_report_the_union_of_legs_and_no_lexical_score() {
+    // `lex` is only reachable through the variant's keyword (lexical, below the primary's floor);
+    // `dense` is on the primary's vector. `mix` is dense via the primary and lexical via the
+    // variant, so the union is `both`.
+    let eps = [
+        ep("dense", "unrelated words", 0),
+        ep("lex", "quokkaplex migration", 3),
+        ep("mix", "quokkaplex notes", 0),
+    ];
+    let (state, _db, _d) = make_state(
+        embedder(&[("primary question", one_hot(0)), ("quokkaplex", one_hot(2))]),
+        &eps,
+    );
+    let mut base = params("primary question", "hybrid");
+    base["min_score"] = json!(0.5);
+    let hybrid = search(&state, with_variants(base.clone(), json!(["quokkaplex"]))).await;
+    let legs = legs_of(&hybrid);
+    assert_eq!(legs["dense"], "dense");
+    assert_eq!(legs["lex"], "lexical");
+    assert_eq!(legs["mix"], "both");
+    assert!(hybrid.iter().all(|h| h.get("lexical_score").is_none()));
+    for h in &hybrid {
+        assert_eq!(h.get("similarity").is_some(), h["legs"] != "lexical", "{h}");
+    }
+    // Vector-mode variants never carry legs.
+    base["mode"] = json!("vector");
+    let vector = search(&state, with_variants(base, json!(["quokkaplex"]))).await;
+    assert!(vector.iter().all(|h| h.get("legs").is_none()));
+}
