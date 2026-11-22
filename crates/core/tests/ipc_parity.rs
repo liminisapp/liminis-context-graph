@@ -4645,6 +4645,62 @@ async fn parity_backfill_summary_embeddings_live_fills_entities() {
     assert_eq!(r["dry_run"], false, "dry_run flag must be reflected: {v}");
 }
 
+// ── #809: knowledge_reembed_missing IPC parity ───────────────────────────────
+
+/// Empty record + dry_run → envelope carries group_id, dry_run and all four kinds with zeroed
+/// counters.
+#[tokio::test]
+async fn parity_reembed_missing_shape() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        94,
+        "knowledge_reembed_missing",
+        json!({ "group_id": "any-group", "dry_run": true }),
+        state,
+    )
+    .await;
+    assert_ok_resp(&v, 94);
+    let r = &v["result"];
+    assert_eq!(r["group_id"], "any-group", "{v}");
+    assert_eq!(r["dry_run"], true, "{v}");
+    for k in ["name", "fact", "summary", "content"] {
+        for field in ["candidates", "reembedded", "failed", "skipped_no_source"] {
+            assert_eq!(r["kinds"][k][field], 0, "{k}.{field}: {v}");
+        }
+    }
+}
+
+/// group_id is required; an invalid `kinds` is rejected with the valid values named.
+#[tokio::test]
+async fn parity_reembed_missing_requires_group_id_and_valid_kinds() {
+    let (db, _dir) = make_db(4);
+    let state = make_state(db);
+    let v = dispatch_val(
+        95,
+        "knowledge_reembed_missing",
+        json!({ "dry_run": true }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_err_resp(&v, 95, -32000);
+    let v = dispatch_val(
+        96,
+        "knowledge_reembed_missing",
+        json!({ "group_id": "g", "kinds": ["bogus"] }),
+        state,
+    )
+    .await;
+    assert_err_resp(&v, 96, -32000);
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("name, fact, summary, content"),
+        "{v}"
+    );
+}
+
 // ── #177: reprocess_entity_types scope / dry_run ──────────────────────────────
 
 /// Backward-compat: calling with no `scope` param must behave identically to pre-#177.
