@@ -79,6 +79,11 @@ and is refused where the ingest would be.
   path (one extra extraction) rather than risk a lost revert; sequential ones return `unchanged`.
   A first-time chunk submitted concurrently takes today's path and ADR-0705's ordering leaves
   exactly one live episode.
+- Other mutators are **not** tracked in `chunk_inflight` (for example `knowledge_delete_chunk_episode`,
+  `knowledge_supersede_document` and a group purge). One of them can land between the snapshot read
+  and the doc-origin guard's read, so a caller can receive `unchanged` naming an episode that was
+  deleted or superseded just afterwards. The result is linearizable as "the no-op happened first",
+  the same staleness any lock-free-after-read response has, and is accepted.
 - Additive: a new `status` value and the `unchanged_noop` feature string in `knowledge_capabilities`
   ([ADR-0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md)); `PROTOCOL_VERSION`
   is not bumped. This qualifies ADR-0705's "resubmitting supersedes" rule without changing its text.
