@@ -1355,14 +1355,56 @@ async fn handle_knowledge_process_chunk(
             ))
         }
     };
+    // Issue #707: never defaulted from `source_file` — omitted means none (FR-001, FR-010).
+    let doc_id = optional_doc_id_param(&p["doc_id"])?;
+
+    // Issue #858 (ADR-0858): a resubmission identical to the chunk's single live episode is a
+    // no-op — no embed, no extract, no write, no WAL record. Runs only after every validation
+    // above (FR-008) and never for a multi-unit revision (FR-007). Fails closed: anything but one
+    // chunk-attributable live episode that matches on every compared field takes the ordinary
+    // supersede path below.
+    if supersede && keep.is_empty() {
+        // Refusals (#616 identity drift) apply to a no-op exactly as to an ingest.
+        state.check_identity(&group_id)?;
+        let explicit_reference_time_us = p["reference_time"].as_str().and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|t| t.timestamp_micros())
+        });
+        let db = load_db(&state)?;
+        let (gid, cid) = (group_id.clone(), chunk_id.clone());
+        let live = tokio::task::spawn_blocking(move || {
+            let conn = db.connect()?;
+            conn.live_chunk_snapshot_for_chunk(&cid, &gid, &chrono::Utc::now().to_rfc3339())
+        })
+        .await??;
+        let view = crate::chunk_unchanged::ChunkRequestView {
+            chunk_text: &chunk_text,
+            chunk_id: &chunk_id,
+            attributes: &attributes,
+            origin: origin.unwrap_or(crate::origin::Origin::Primary),
+            source_file: &source_file,
+            doc_id: doc_id.as_deref(),
+            explicit_reference_time_us,
+        };
+        if let Some(existing) = crate::chunk_unchanged::unchanged_episode_uuid(&live, &view) {
+            return Ok(json!({
+                "success": true,
+                "status": "unchanged",
+                "chunk_id": chunk_id,
+                "source_file": source_file,
+                "episode_uuid": existing,
+                "duration_seconds": start.elapsed().as_secs_f64(),
+            }));
+        }
+    }
     let opts = episode::EpisodeOpts {
         supersede: if supersede {
             episode::SupersedePolicy::ReviseChunk { keep }
         } else {
             episode::SupersedePolicy::None
         },
-        // Issue #707: never defaulted from `source_file` — omitted means none (FR-001, FR-010).
-        doc_id: optional_doc_id_param(&p["doc_id"])?,
+        doc_id,
         origin,
         // `chunk_id` is a chunk identity here: a derived/answer unit may not revise a primary one.
         guard_chunk_collision: true,

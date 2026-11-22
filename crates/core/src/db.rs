@@ -139,6 +139,25 @@ pub struct ChunkLineage {
     pub left_alone: Vec<(String, String)>,
 }
 
+/// One live same-named episode as read by [`Conn::live_chunk_snapshot_for_chunk`] (issue #858,
+/// ADR-0858): just the columns `knowledge_process_chunk` compares against a resubmission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkLiveSnapshot {
+    pub uuid: String,
+    pub content: String,
+    pub attributes: String,
+    /// Stored `origin`; `None` on a legacy row (read as `primary`).
+    pub origin: Option<String>,
+    pub source_file: Option<String>,
+    pub source_description: String,
+    /// `valid_at` as microseconds since the Unix epoch.
+    pub valid_at_us: i64,
+    pub doc_id: Option<String>,
+    pub write_path: Option<String>,
+    /// Document-mode content hash; always `None` on a chunk-mode row.
+    pub chunk_hash: Option<String>,
+}
+
 /// Outcome of a name-aware extraction-time dedup candidate selection (issue #650, ADR-0650).
 /// `vetoed` counts the above-threshold candidates discarded by the identifier-mismatch veto
 /// that ranked ahead of `candidate` (all of them when `candidate` is `None`).
@@ -1780,6 +1799,41 @@ impl<'db> Conn<'db> {
             }
         }
         Ok(lineage)
+    }
+
+    /// Every live episode of `group_id` named `chunk_id`, with the columns a resubmission is
+    /// compared against (issue #858, ADR-0858). Same liveness predicate as
+    /// [`Self::live_chunk_lineage_for_chunk`]; group-scoped by construction.
+    pub fn live_chunk_snapshot_for_chunk(
+        &self,
+        chunk_id: &str,
+        group_id: &str,
+        as_of: &str,
+    ) -> Result<Vec<ChunkLiveSnapshot>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) \
+             WHERE ep.name = $name AND ep.group_id = $gid \
+             AND (ep.superseded_at IS NULL \
+                  OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+             RETURN ep.uuid, ep.content, ep.attributes, ep.origin, ep.source_file, \
+             ep.source_description, ep.valid_at, ep.doc_id, ep.write_path, ep.chunk_hash",
+            serde_json::json!({ "name": chunk_id, "gid": group_id, "live_at": as_of }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ChunkLiveSnapshot {
+                uuid: value_as_string(&r[0]),
+                content: value_as_string(&r[1]),
+                attributes: value_as_string(&r[2]),
+                origin: value_as_optional_string(&r[3]),
+                source_file: value_as_optional_string(&r[4]),
+                source_description: value_as_string(&r[5]),
+                valid_at_us: value_as_timestamp_micros(&r[6]),
+                doc_id: value_as_optional_string(&r[7]),
+                write_path: value_as_optional_string(&r[8]),
+                chunk_hash: value_as_optional_string(&r[9]),
+            })
+            .collect())
     }
 
     /// Marks the given episodes superseded. uuid-keyed, fixed-valued and guarded, so WAL tail

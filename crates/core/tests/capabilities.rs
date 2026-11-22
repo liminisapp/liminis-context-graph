@@ -100,6 +100,7 @@ async fn reports_version_protocol_and_seeded_features() {
         "hybrid_passage_search",
         "entity_provenance",
         "status_episode_breakdown",
+        "unchanged_noop",
     ] {
         assert!(features.iter().any(|x| x == f), "missing feature {f}");
     }
