@@ -103,6 +103,9 @@ embedded with the passage embedder:
     omitted, `null` or `false` leave every response byte-identical. A requested summaries stage adds
     `summaries: {applied, candidates, results?, reason?}`; `no_units`, `disabled`
     (`max_summary_slots: 0`) and `no_candidates` return the ordinary results, never an error.
+    `candidates` counts the summary candidates that survived the first stage's cut (the ones
+    rerank and resolution see), not the units the probe returned, so `no_candidates` means none
+    survived it.
 
 ## Consequences
 

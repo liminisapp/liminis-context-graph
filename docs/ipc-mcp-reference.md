@@ -589,11 +589,14 @@ How it works:
   two positions (`via` only when the summary placed it) and the next candidate fills the freed slot.
   Results that did not come in through a summary have no `via` key.
 - **A response block**, present whenever `summaries: true` was sent:
-  `summaries: {applied, candidates, results?, reason?}` — `candidates` is how many summary units
-  entered the pool, `results` how many returned results came in via one. When summaries cannot
-  apply the call never fails: it returns the ordinary results with `applied: false` and a `reason`:
-  `no_units` (no summary units in the searched groups), `disabled` (`max_summary_slots: 0`) or
-  `no_candidates` (units exist but none entered the pool).
+  `summaries: {applied, candidates, results?, reason?}` — `candidates` is how many summary
+  candidates survived the first stage: the probed units are merged with the passages by cosine,
+  belief-ranked and cut to the first stage's candidate count, and only those still in the list are
+  counted (they are the ones rerank and resolution see). `results` is how many returned results
+  came in via one. When summaries cannot apply the call never fails: it returns the ordinary
+  results with `applied: false` and a `reason`: `no_units` (no summary units in the searched
+  groups), `disabled` (`max_summary_slots: 0`) or `no_candidates` (units exist, but none survived
+  the first-stage cut, either because none passed the filters or because every one ranked below it).
 - **No LLM call at query time** (ADR-0820): summaries are found by the query embedding alone.
 
 ```json

@@ -320,7 +320,10 @@ pub async fn search_passages_staged(
         }
     }
 
-    // ── Summaries (issue #850): report how many summary candidates entered the pool ───────────
+    // ── Summaries (issue #850): report how many summary candidates survived the first stage ───
+    // Counted after the first stage's cosine merge, belief ranking and cut to `fetch`, so a probed
+    // unit that ranked below the cut is not counted: only these candidates reach rerank and
+    // resolution. `no_candidates` therefore means "none survived the cut", not "none probed".
     let summaries_report = req.summaries.map(|_| {
         let n = candidates.iter().filter(|p| p.summary_of.is_some()).count();
         if n == 0 {

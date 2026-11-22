@@ -899,7 +899,8 @@ impl LcgPassagesStaged {
         // Summaries (issue #850): with no units (a replay cassette without `summarize` records
         // fails ingest instead, but a live run whose summarize calls all failed would get here)
         // the service answers with the ordinary results, which must not be scored as the
-        // summaries configuration. `no_candidates` is a genuine answer: units exist, none matched.
+        // summaries configuration. `no_candidates` is a genuine per-query answer: units exist, but
+        // none survived the first-stage cut, so summaries simply did not help this query.
         if self.summaries {
             let block = &resp["summaries"];
             let reason = block["reason"].as_str();
