@@ -25,6 +25,15 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   - `knowledge_capabilities` lists the new feature `entity_provenance`. The reference docs and MCP
     tool descriptions now say when the provenance fields are empty and when they are filled.
 
+- **`knowledge_walk` `include_provenance`: producing episodes and source files on each edge
+  (#860, implements #839).** An opt-in `include_provenance: true` makes every returned edge carry
+  `episodes` (UUIDs of its **live** producing episodes only, at most 20), `episodes_truncated`
+  (true when more than 20 live producers exist) and `source_files` (each live producer's
+  `source_file`, or for a legacy episode its stored `source_description` unsplit; an edge with no
+  recorded producers falls back to its legacy sources), so a walk result can be turned into
+  citations. Superseded or deleted episodes are never cited. Without the flag the response is
+  byte-identical to before. `knowledge_capabilities` advertises the `walk_provenance` feature.
+  The MCP tool schema, the IPC/MCP reference, `docs/llms-full.txt` and the README are updated.
 - **Graph question answering eval: `lcg-eval graph-qa`, ontology ingest and kept workspaces
   (#821, ADR-0821).** E13's graph question-answering eval (#815) ran only as scratch Python, so
   none of its numbers could be reproduced and `knowledge_walk` (#820) had no regression check.
