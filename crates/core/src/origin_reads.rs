@@ -325,11 +325,22 @@ mod tests {
                 doc_id: None,
                 superseded_at_us: superseded,
                 group_id: "g".to_string(),
+                revision_id_present: false,
+                revision_committed_at_us: None,
             },
             source_description: format!("desc-{ep}"),
             source_file: file.map(str::to_string),
             created_at_us: created,
         }
+    }
+
+    /// A row of a document-mode episode: `committed` is the revision's commit instant, `None`
+    /// while the revision is pending.
+    fn revision_row(entity: &str, ep: &str, created: i64, committed: Option<i64>) -> MentionRow {
+        let mut r = row(entity, ep, created, None, None);
+        r.info.revision_id_present = true;
+        r.info.revision_committed_at_us = committed;
+        r
     }
 
     fn uuids(v: &[&str]) -> Vec<String> {
@@ -414,5 +425,51 @@ mod tests {
             assert_eq!(v["episode_uuids"], json!([]));
             assert!(v.get("episodes_truncated").is_none());
         }
+    }
+    #[test]
+    fn pending_revision_is_excluded_from_support_and_episode_list() {
+        let rows = vec![
+            row("e", "live", 10, None, None),
+            revision_row("e", "pending", 20, None),
+            revision_row("e", "committed", 30, Some(50)),
+            revision_row("e", "future-commit", 40, Some(500)),
+        ];
+        let out = support_from_mention_rows(&rows, &uuids(&["e"]), None, 100, true);
+        let mut v = json!({});
+        out["e"].annotate_provenance(&mut v);
+        assert_eq!(v["episode_uuids"], json!(["committed", "live"]));
+        // Three distinct live episodes would be `3`; only two are live at t=100.
+        assert_eq!(out["e"].support["primary"], json!(2));
+    }
+
+    #[test]
+    fn entity_with_only_pending_episodes_is_empty_until_commit() {
+        let pending = vec![revision_row("e", "p", 10, None)];
+        let out = support_from_mention_rows(&pending, &uuids(&["e"]), None, 100, true);
+        let mut v = json!({});
+        out["e"].annotate_provenance(&mut v);
+        assert_eq!(v["episode_uuids"], json!([]));
+        assert_eq!(out["e"].support["primary"], json!(0));
+
+        let committed = vec![revision_row("e", "p", 10, Some(60))];
+        let out = support_from_mention_rows(&committed, &uuids(&["e"]), None, 100, true);
+        let mut v = json!({});
+        out["e"].annotate_provenance(&mut v);
+        assert_eq!(v["episode_uuids"], json!(["p"]));
+        assert_eq!(out["e"].support["primary"], json!(1));
+    }
+
+    #[test]
+    fn pending_rows_do_not_consume_cap_slots() {
+        // The newest episodes are all pending: the cap must apply to the live remainder.
+        let mut rows: Vec<MentionRow> = (0..ENTITY_EPISODE_CAP)
+            .map(|i| row("e", &format!("live{i:03}"), i as i64, None, None))
+            .collect();
+        rows.extend((0..10).map(|i| revision_row("e", &format!("pend{i}"), 1_000 + i, None)));
+        let out = support_from_mention_rows(&rows, &uuids(&["e"]), None, 100, true);
+        let p = out["e"].episodes.as_ref().unwrap();
+        assert_eq!(p.episodes.len(), ENTITY_EPISODE_CAP);
+        assert!(!p.truncated);
+        assert!(p.episodes.iter().all(|e| e.uuid.starts_with("live")));
     }
 }

@@ -57,13 +57,29 @@ impl EpisodeSupersession {
     /// Whether the episode counts as evidence at `t_us` at all: always for a non-document
     /// episode, and from its revision's commit instant for a document-mode one.
     pub fn visible_at(&self, t_us: i64) -> bool {
-        !self.revision_id_present || self.revision_committed_at_us.is_some_and(|c| c <= t_us)
+        revision_visible_at(
+            self.revision_id_present,
+            self.revision_committed_at_us,
+            t_us,
+        )
     }
 
     /// Visible at `t_us` and not yet superseded then: the "live producer" predicate of [`evaluate`].
     pub fn live_at(&self, t_us: i64) -> bool {
         self.visible_at(t_us) && self.superseded_at_us.is_none_or(|s| s > t_us)
     }
+}
+
+/// Whether an episode counts as evidence at `t_us` given its revision stamps: always for a
+/// non-document episode, and from its revision's commit instant for a document-mode one
+/// (ADR-0785). The single source of truth shared by [`EpisodeSupersession::visible_at`] and the
+/// entity-provenance read (`EpisodeOriginInfo::is_live`, issue #883).
+pub fn revision_visible_at(
+    revision_id_present: bool,
+    revision_committed_at_us: Option<i64>,
+    t_us: i64,
+) -> bool {
+    !revision_id_present || revision_committed_at_us.is_some_and(|c| c <= t_us)
 }
 
 /// One durable `DocSupersession` record (issue #707): document `superseding_doc_id` replaced
