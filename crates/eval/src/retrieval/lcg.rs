@@ -402,6 +402,14 @@ fn apply_embedding_profile_env(cmd: &mut tokio::process::Command, profile: Optio
     }
 }
 
+/// Points the child at the eval workspace for ontology discovery (#881). The service finds its
+/// ontology (and corrections store) only through `LIMINIS_WORKSPACE_ROOT`, read once at startup:
+/// unset it starts free-form even with `.lcg/ontology.yaml` staged, and an inherited value would
+/// load an unrelated workspace's ontology. So it is always set, overriding the operator's.
+fn apply_workspace_root_env(cmd: &mut tokio::process::Command, ws: &Path) {
+    cmd.env("LIMINIS_WORKSPACE_ROOT", ws);
+}
+
 pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     validate_embedder(o, std::env::var("LCG_EMBEDDING_URL").ok().as_deref())?;
     let ws = tempfile::tempdir().map_err(|e| format!("cannot create workspace: {e}"))?;
@@ -423,10 +431,6 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     let mut cmd = tokio::process::Command::new(&o.bin);
     cmd.args(service_args(o))
         .current_dir(ws.path())
-        // The service finds its ontology (and corrections store) only through this variable, read
-        // once at startup (#881). Always the eval workspace — an inherited value would point the
-        // service at an unrelated workspace's ontology, and an unset one at none at all.
-        .env("LIMINIS_WORKSPACE_ROOT", ws.path())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(stderr_file)
@@ -438,6 +442,7 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
         cmd.env("LCG_RECORD_LLM", p);
     }
     apply_embedding_profile_env(&mut cmd, o.embedding_profile.as_deref());
+    apply_workspace_root_env(&mut cmd, ws.path());
     // `lcg-passages` measures the shipped default (#806): an operator's passage-search overrides
     // must not leak into the child and silently change what it measures.
     cmd.env_remove("LCG_PASSAGE_SEARCH_MODE")
@@ -1237,6 +1242,20 @@ mod tests {
         assert!(verify_embedding_profile(Some("none"), &json!({}))
             .unwrap_err()
             .contains("no profile"));
+    }
+
+    #[test]
+    fn child_workspace_root_is_always_the_eval_workspace() {
+        let mut cmd = tokio::process::Command::new("true");
+        // An inherited value is overridden, not left in place.
+        cmd.env("LIMINIS_WORKSPACE_ROOT", "/somewhere/else");
+        apply_workspace_root_env(&mut cmd, Path::new("/eval/ws"));
+        let v = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "LIMINIS_WORKSPACE_ROOT")
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(v.as_deref(), Some("/eval/ws"));
     }
 
     fn onto_view(hash: &str) -> Value {
