@@ -8,6 +8,7 @@
 //! LCG / index in qmd → warm up → score every configuration at the same k → report.
 
 pub mod cli;
+pub mod compare;
 pub mod evidence_judge;
 pub mod fixture;
 pub mod generator;
