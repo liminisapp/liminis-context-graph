@@ -182,10 +182,7 @@
       "items": {
         "type": "string"
       },
-      "type": [
-        "array",
-        "null"
-      ]
+      "type": "array"
     },
     "nodes_extracted": {
       "minimum": 0,
@@ -204,14 +201,7 @@
       "type": "array"
     },
     "warning": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/ChunkWarning"
-        },
-        {
-          "type": "null"
-        }
-      ],
+      "$ref": "#/definitions/ChunkWarning",
       "description": "Present only when `chunk_text` is oversized."
     }
   },

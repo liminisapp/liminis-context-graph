@@ -1045,3 +1045,64 @@ async fn additional_properties_are_tolerated() {
     s["wal"]["a_future_field"] = json!(1);
     assert_valid("knowledge_status", &s);
 }
+
+// ── omitted-only fields are not nullable ────────────────────────────────────────────────────
+
+/// The handlers *omit* optional keys when absent; they never send `null`. A handler change that
+/// starts emitting an explicit `null` for one is a shape change and must fail validation, rather
+/// than slip through because `Option<T>` was rendered as nullable.
+#[tokio::test]
+async fn omitted_only_fields_reject_explicit_null() {
+    let (state, _db, _d, _wal) = seeded().await;
+
+    let with = call(
+        "knowledge_find_entities",
+        json!({"query": "Postgres", "group_ids": [G], "include_episodes": true}),
+        &state,
+    )
+    .await;
+    let mut m = with.clone();
+    m["nodes"][0]["episodes_truncated"] = json!(true);
+    assert_valid("knowledge_find_entities", &m);
+    m["nodes"][0]["episodes_truncated"] = Value::Null;
+    assert_invalid("knowledge_find_entities", "episodes_truncated: null", &m);
+    let mut m = with.clone();
+    set(&mut m, "/nodes/0/source_files", Value::Null);
+    assert_invalid("knowledge_find_entities", "source_files: null", &m);
+
+    let believed = call(
+        "knowledge_find_relationships",
+        json!({"query": "Postgres", "group_ids": [G], "believed_only": true}),
+        &state,
+    )
+    .await;
+    let mut m = believed.clone();
+    set(&mut m, "/edges/0/belief", Value::Null);
+    assert_invalid("knowledge_find_relationships", "belief: null", &m);
+
+    let (chunk_state, _cdb, _cd) = state_with(vec![fact("Alpha", "Beta", "Alpha uses Beta")], None);
+    let chunk = call(
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alpha uses Beta", "chunk_id": "c1", "source_file": "notes/a.md",
+            "group_id": G, "reference_time": "2026-08-04T00:00:00Z",
+        }),
+        &chunk_state,
+    )
+    .await;
+    let mut m = chunk.clone();
+    m["warning"] = Value::Null;
+    assert_invalid("knowledge_process_chunk", "warning: null", &m);
+    let mut m = chunk.clone();
+    m["left_alone_episode_uuids"] = Value::Null;
+    assert_invalid(
+        "knowledge_process_chunk",
+        "left_alone_episode_uuids: null",
+        &m,
+    );
+
+    let status = call("knowledge_status", json!({}), &state).await;
+    let mut m = status.clone();
+    set(&mut m, "/wal/scope", Value::Null);
+    assert_invalid("knowledge_status", "wal.scope: null", &m);
+}

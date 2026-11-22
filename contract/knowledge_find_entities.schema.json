@@ -24,10 +24,7 @@
         },
         "episodes_truncated": {
           "description": "Present (`true`) only when `include_episodes` was capped.",
-          "type": [
-            "boolean",
-            "null"
-          ]
+          "type": "boolean"
         },
         "group_id": {
           "type": "string"
@@ -61,10 +58,7 @@
           "items": {
             "type": "string"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "summary": {
           "type": "string"

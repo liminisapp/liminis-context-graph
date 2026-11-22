@@ -87,7 +87,68 @@ fn schema_of<T: JsonSchema>(method: &str, description: &str) -> Value {
         obj.insert("description".into(), Value::String(description.into()));
     }
     strip_numeric_formats(&mut v);
+    strip_null_from_omitted(&mut v);
     sort_keys(v)
+}
+
+/// schemars renders `Option<T>` as nullable (`["boolean", "null"]`), but every optional field in
+/// the contract types is *omitted* by the handlers when absent (`skip_serializing_if`), never sent
+/// as `null`. Fields that are present-but-null use [`Nullable`] and are `required`. So for every
+/// property that is not `required`, drop the `null` alternative: an explicit `null` on an
+/// omitted-only field then fails validation, and generated consumer types are `T | undefined`
+/// rather than `T | null | undefined`.
+fn strip_null_from_omitted(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            let required: Vec<String> = m
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|r| r.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if let Some(Value::Object(props)) = m.get_mut("properties") {
+                for (name, prop) in props.iter_mut() {
+                    if !required.contains(name) {
+                        drop_null_alternative(prop);
+                    }
+                }
+            }
+            m.values_mut().for_each(strip_null_from_omitted);
+        }
+        Value::Array(a) => a.iter_mut().for_each(strip_null_from_omitted),
+        _ => {}
+    }
+}
+
+/// Remove `null` from one property schema: `type: [T, "null"]` becomes `type: T`, and
+/// `anyOf: [X, {type: null}]` collapses to `X` (merged into the property so its description and
+/// other annotations are kept).
+fn drop_null_alternative(prop: &mut Value) {
+    let Some(obj) = prop.as_object_mut() else {
+        return;
+    };
+    if let Some(Value::Array(types)) = obj.get_mut("type") {
+        types.retain(|t| t != "null");
+        if types.len() == 1 {
+            let only = types.remove(0);
+            obj.insert("type".into(), only);
+        }
+    }
+    if let Some(Value::Array(alts)) = obj.get_mut("anyOf") {
+        alts.retain(|a| a.get("type") != Some(&Value::String("null".into())));
+        if alts.len() == 1 {
+            let only = alts.remove(0);
+            obj.remove("anyOf");
+            if let Value::Object(inner) = only {
+                for (k, val) in inner {
+                    obj.insert(k, val);
+                }
+            }
+        }
+    }
 }
 
 /// schemars annotates integers with `format: uint64` etc., which no consumer tool needs and some

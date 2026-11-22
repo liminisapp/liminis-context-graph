@@ -10,17 +10,11 @@
         },
         "belief": {
           "description": "`current` or `superseded`; only on a reranked passage.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "chunk_id": {
           "description": "Omitted for a legacy episode.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "content": {
           "type": "string"
@@ -37,10 +31,7 @@
             "minimum": 0,
             "type": "integer"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "name": {
           "type": "string"
@@ -51,30 +42,21 @@
         },
         "rerank_score": {
           "description": "Cross-encoder relevance logit; only on a reranked passage.",
-          "type": [
-            "number",
-            "null"
-          ]
+          "type": "number"
         },
         "score": {
           "type": "number"
         },
         "similarity": {
           "description": "Cosine similarity of a vector hit (hybrid mode only).",
-          "type": [
-            "number",
-            "null"
-          ]
+          "type": "number"
         },
         "source_description": {
           "type": "string"
         },
         "source_file": {
           "description": "Omitted for a legacy episode without stored source identity.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "uuid": {
           "type": "string"

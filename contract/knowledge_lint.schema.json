@@ -10,26 +10,17 @@
         },
         "reason": {
           "description": "Why the category is unavailable.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "skipped_blocks": {
           "description": "`near_duplicate_entity` only, when it ran.",
           "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "skipped_subjects": {
           "description": "`contradiction` only, when it ran.",
           "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
+          "type": "integer"
         },
         "status": {
           "description": "`ok` or `unavailable`.",

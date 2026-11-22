@@ -24,26 +24,13 @@
           "type": "string"
         },
         "supersession": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Supersession"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/definitions/Supersession"
         },
         "valid_at_source": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "warrant": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         }
       },
       "required": [
@@ -91,14 +78,7 @@
           "type": "string"
         },
         "belief": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Belief"
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "$ref": "#/definitions/Belief"
         },
         "corroboration": {
           "minimum": 0,
@@ -118,10 +98,7 @@
           "items": {
             "type": "string"
           },
-          "type": [
-            "array",
-            "null"
-          ]
+          "type": "array"
         },
         "fact": {
           "type": "string"
@@ -176,17 +153,11 @@
         },
         "valid_at_source": {
           "description": "`text` or `reference_time`; omitted when not applicable.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "warrant": {
           "description": "`assertion` or `cross_group`; omitted for extracted edges.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         }
       },
       "required": [
@@ -218,25 +189,16 @@
           "type": "string"
         },
         "in_force_until": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "recorded_at": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "superseded_at": {
           "type": "string"
         },
         "superseded_by_document": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         }
       },
       "required": [

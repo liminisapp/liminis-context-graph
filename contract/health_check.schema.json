@@ -141,23 +141,13 @@
         },
         "job_id": {
           "description": "Present with `activity: \"rebuilding\"`.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "ok": {
           "type": "boolean"
         },
         "progress": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/RebuildProgress"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "$ref": "#/definitions/RebuildProgress",
           "description": "Present with `activity: \"rebuilding\"`."
         },
         "protocol_version": {

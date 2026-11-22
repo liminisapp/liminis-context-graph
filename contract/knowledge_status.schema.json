@@ -527,10 +527,7 @@
         },
         "index_created_at": {
           "description": "Absent on an empty graph.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "indices_built": {
           "type": "boolean"
@@ -630,10 +627,7 @@
         },
         "default_group": {
           "description": "Present only when a WAL root is configured.",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "embedding_dim": {
           "type": [
@@ -687,17 +681,11 @@
         },
         "scope": {
           "description": "Present only when a WAL root is configured (`default_group`).",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         },
         "see": {
           "description": "Present only when a WAL root is configured (`wal_groups`).",
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": "string"
         }
       },
       "required": [
