@@ -50,7 +50,7 @@ pub struct InputDigests {
     pub extractor: String,
     pub service_binary: String,
     pub service_env: String,
-    /// Sorted names (never values) of the `LCG_*` variables in the digest, so a `service_env`
+    /// Sorted names (never values) of the `LCG_*` / `GRAPHITI_*` variables in the digest, so a `service_env`
     /// mismatch is explainable.
     pub service_env_names: Vec<String>,
 }
@@ -219,12 +219,18 @@ fn is_secret_name(name: &str) -> bool {
         || name.contains("ENDPOINT")
 }
 
+/// Variables the service reads: the `LCG_*` names and the legacy `GRAPHITI_*` spellings it still
+/// accepts as fallbacks (`lcg_core::env::lcg_env_var`), which change its behaviour just the same.
+fn is_service_var(name: &str) -> bool {
+    name.starts_with("LCG_") || name.starts_with("GRAPHITI_")
+}
+
 /// Variables the `cassette` digest owns; excluded here so a changed cassette path changes one entry.
 fn is_cassette_var(name: &str) -> bool {
     name == "LCG_REPLAY_LLM" || name == "LCG_RECORD_LLM"
 }
 
-/// Effective-environment digest over the `LCG_*` variables in each child's environment (as
+/// Effective-environment digest over the `LCG_*` and legacy `GRAPHITI_*` variables in each child's environment (as
 /// computed by `lcg::effective_service_env`, never from `std::env` directly). Each run yields the
 /// sorted `KEY=value` lines, with secret-bearing names contributing `KEY=<redacted>` so that no
 /// low-entropy secret is hashed into a shared report. Returns the digest and the sorted union of
@@ -238,7 +244,7 @@ pub fn service_env_digest(envs: &[BTreeMap<String, String>]) -> (String, Vec<Str
     for env in envs {
         let lines: Vec<String> = env
             .iter()
-            .filter(|(k, _)| k.starts_with("LCG_") && !is_cassette_var(k))
+            .filter(|(k, _)| is_service_var(k) && !is_cassette_var(k))
             .map(|(k, v)| {
                 names.insert(k.clone());
                 if is_secret_name(k) {
@@ -421,6 +427,25 @@ mod tests {
         assert!(names.contains(&"LCG_EMBEDDING_API_KEY".to_string()));
         assert!(!names.contains(&"HOME".to_string()));
         assert!(!names.iter().any(|n| n.contains("sk-")));
+    }
+
+    #[test]
+    fn legacy_graphiti_variables_are_digested_and_their_secrets_redacted() {
+        let a = env(&[
+            ("GRAPHITI_EXTRACTION_LLM", "model-a"),
+            ("GRAPHITI_EMBEDDING_API_KEY", "sk-aaa"),
+        ]);
+        let (da, names) = service_env_digest(std::slice::from_ref(&a));
+        // A behaviour-changing legacy variable changes the digest.
+        let mut b = a.clone();
+        b.insert("GRAPHITI_EXTRACTION_LLM".into(), "model-b".into());
+        assert_ne!(da, service_env_digest(&[b]).0);
+        // A legacy credential is recorded by name only.
+        let mut c = a;
+        c.insert("GRAPHITI_EMBEDDING_API_KEY".into(), "sk-bbb".into());
+        assert_eq!(da, service_env_digest(&[c]).0);
+        assert!(names.contains(&"GRAPHITI_EXTRACTION_LLM".to_string()));
+        assert!(names.contains(&"GRAPHITI_EMBEDDING_API_KEY".to_string()));
     }
 
     #[test]
