@@ -11,6 +11,7 @@ pub mod cli;
 pub mod evidence_judge;
 pub mod fixture;
 pub mod generator;
+pub mod inputs;
 pub mod lcg;
 pub mod mapping;
 pub mod metrics;
