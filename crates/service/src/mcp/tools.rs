@@ -984,8 +984,8 @@ pub fn registry() -> Vec<ToolSpec> {
                            of, the facts extracted from the chunk's prose (reachable from the \
                            episode via a MENTIONS hop). Returned by `knowledge_get_episodes` and \
                            `knowledge_search_passages`. \
-                           Resubmitting a `chunk_id` is a correction (issue #705): once the new \
-                           ingest has fully succeeded, the chunk's earlier live episodes in this \
+                           Resubmitting a changed `chunk_id` is a correction (issue #705): once \
+                           the new ingest has fully succeeded, the chunk's earlier live episodes in this \
                            group are superseded, so the graph stops believing the facts they \
                            asserted. Nothing is deleted and `valid_at`/`invalid_at` are never \
                            written — read the old facts with `as_of`, or hide them with \
@@ -999,7 +999,15 @@ pub fn registry() -> Vec<ToolSpec> {
                            `supersede: false` on every unit but the last, and pass the earlier \
                            units' `episode_uuid`s as `same_revision_episode_uuids` on the last. \
                            Commit your own record of a chunk as ingested only after this call \
-                           succeeds. `origin` (issue #752) declares what kind of content the \
+                           succeeds. A resubmission identical to the chunk's single live episode \
+                           (text, attributes, origin, `source_file`, `doc_id` and any explicit \
+                           `reference_time`) is a no-op (issue #858): nothing is embedded, \
+                           extracted or written, and the result is `{status: \"unchanged\", \
+                           episode_uuid}` with no ingest counters, so clients need no content-hash \
+                           ledger. Any difference re-extracts and supersedes; the no-op never \
+                           applies with `supersede: false`, `same_revision_episode_uuids`, more \
+                           than one live episode, a live episode from another write path, or no \
+                           live episode. `origin` (issue #752) declares what kind of content the \
                            chunk is; a `derived` or `answer` chunk is cited for provenance but \
                            never counted as corroboration, may not rewrite or merge into an \
                            entity with primary/external support, and is refused (error message \

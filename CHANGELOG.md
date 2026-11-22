@@ -57,6 +57,12 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   result can be turned into citations. Superseded or deleted episodes are never cited. Without the flag the response is
   byte-identical to before. `knowledge_capabilities` advertises the `walk_provenance` feature.
   The MCP tool schema, the IPC/MCP reference, `docs/llms-full.txt` and the README are updated.
+- **`knowledge_process_chunk` no-ops on an identical resubmission (#858, ADR-0858).** When a
+  resubmitted chunk matches the chunk's single live episode (text, attributes, origin,
+  `source_file`, `doc_id` and any explicit `reference_time`), the call returns
+  `{"status": "unchanged", "episode_uuid": ...}` with no embedder or extractor call and no WAL
+  record, instead of re-extracting and superseding. Any difference takes the supersede path as
+  before. `knowledge_capabilities` `features` gains `unchanged_noop`.
 - **Graph question answering eval: `lcg-eval graph-qa`, ontology ingest and kept workspaces
   (#821, ADR-0821).** E13's graph question-answering eval (#815) ran only as scratch Python, so
   none of its numbers could be reproduced and `knowledge_walk` (#820) had no regression check.
