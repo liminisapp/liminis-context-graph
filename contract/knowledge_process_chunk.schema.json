@@ -1,0 +1,240 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ChunkWarning": {
+      "description": "Advisory attached when `chunk_text` exceeds the recommended size.",
+      "properties": {
+        "chunk_text_chars": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "recommended_max_chars": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "type": {
+          "description": "`chunk_text_oversized`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "chunk_text_chars",
+        "recommended_max_chars",
+        "message"
+      ],
+      "type": "object"
+    },
+    "DedupPaths": {
+      "description": "Entity-resolution outcomes by path for this chunk.",
+      "properties": {
+        "adapter_rejected": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "embedding_merge": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exact_name": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "llm_confirmed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "llm_rejected": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "llm_unavailable": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "salvage_vetoed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vetoed": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "exact_name",
+        "embedding_merge",
+        "vetoed",
+        "adapter_rejected",
+        "llm_confirmed",
+        "llm_rejected",
+        "llm_unavailable",
+        "salvage_vetoed"
+      ],
+      "type": "object"
+    },
+    "DroppedEdge": {
+      "description": "An extracted edge dropped because an endpoint never resolved to an entity.",
+      "properties": {
+        "fact": {
+          "type": "string"
+        },
+        "relation_type": {
+          "type": "string"
+        },
+        "source_name": {
+          "type": "string"
+        },
+        "target_name": {
+          "type": "string"
+        },
+        "unresolved_endpoint": {
+          "description": "`source`, `target` or `both`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_name",
+        "target_name",
+        "relation_type",
+        "fact",
+        "unresolved_endpoint"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Result of knowledge_process_chunk.",
+  "properties": {
+    "chunk_id": {
+      "type": "string"
+    },
+    "dedup_paths": {
+      "$ref": "#/definitions/DedupPaths"
+    },
+    "dropped_edges": {
+      "items": {
+        "$ref": "#/definitions/DroppedEdge"
+      },
+      "type": "array"
+    },
+    "duration_seconds": {
+      "type": "number"
+    },
+    "edges_dropped_malformed": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "edges_dropped_self_loop": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "edges_dropped_unresolvable": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "edges_extracted": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "edges_literal_object": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "edges_reclassified_unclassified": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "edges_signature_mismatch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "edges_suspected_misattachment": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "edges_swapped": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "entities_dropped_malformed": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "entities_dropped_source_id": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "entities_reclassified_unclassified": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "episode_uuid": {
+      "type": "string"
+    },
+    "left_alone_episode_uuids": {
+      "description": "Present only when same-named episodes written by another path were left alone (#292).",
+      "items": {
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "nodes_extracted": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "source_file": {
+      "type": "string"
+    },
+    "success": {
+      "type": "boolean"
+    },
+    "superseded_episode_uuids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "warning": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ChunkWarning"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Present only when `chunk_text` is oversized."
+    }
+  },
+  "required": [
+    "success",
+    "chunk_id",
+    "superseded_episode_uuids",
+    "source_file",
+    "episode_uuid",
+    "nodes_extracted",
+    "edges_extracted",
+    "edges_dropped_unresolvable",
+    "edges_dropped_self_loop",
+    "dropped_edges",
+    "edges_reclassified_unclassified",
+    "edges_swapped",
+    "edges_signature_mismatch",
+    "edges_literal_object",
+    "edges_suspected_misattachment",
+    "entities_reclassified_unclassified",
+    "entities_dropped_malformed",
+    "entities_dropped_source_id",
+    "edges_dropped_malformed",
+    "dedup_paths",
+    "duration_seconds"
+  ],
+  "title": "knowledge_process_chunk result",
+  "type": "object"
+}

@@ -1,0 +1,195 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Providers": {
+      "description": "Which providers the process runs: `test` (deterministic built-in), `real`, or `none`.",
+      "properties": {
+        "embedder": {
+          "description": "`test` or `real`.",
+          "type": "string"
+        },
+        "extractor": {
+          "description": "`test`, `real` or `none`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "embedder",
+        "extractor"
+      ],
+      "type": "object"
+    },
+    "RebuildProgress": {
+      "description": "Progress of a running rebuild job (only on a `busy` result with `activity: \"rebuilding\"`).",
+      "properties": {
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "mutations_replayed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wal_files_processed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wal_files_total": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mutations_replayed",
+        "wal_files_processed",
+        "wal_files_total",
+        "elapsed_seconds"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Result of the health_check method: healthy, degraded or busy.",
+  "oneOf": [
+    {
+      "description": "Idle and ready for writes.",
+      "properties": {
+        "healthy": {
+          "type": "boolean"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "protocol_version": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providers": {
+          "$ref": "#/definitions/Providers"
+        },
+        "ready_for_reads": {
+          "type": "boolean"
+        },
+        "server_version": {
+          "type": "string"
+        },
+        "state": {
+          "const": "healthy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "ok",
+        "healthy",
+        "ready_for_reads",
+        "server_version",
+        "protocol_version",
+        "providers"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "The database is not loaded.",
+      "properties": {
+        "healthy": {
+          "type": "boolean"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "protocol_version": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providers": {
+          "$ref": "#/definitions/Providers"
+        },
+        "ready_for_reads": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "server_version": {
+          "type": "string"
+        },
+        "state": {
+          "const": "degraded",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "ok",
+        "healthy",
+        "ready_for_reads",
+        "reason",
+        "server_version",
+        "protocol_version",
+        "providers"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "Alive and serving reads, but a write or rebuild holds the write lock.",
+      "properties": {
+        "activity": {
+          "description": "`rebuilding` or `writing`.",
+          "type": "string"
+        },
+        "healthy": {
+          "type": "boolean"
+        },
+        "job_id": {
+          "description": "Present with `activity: \"rebuilding\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "progress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RebuildProgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Present with `activity: \"rebuilding\"`."
+        },
+        "protocol_version": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providers": {
+          "$ref": "#/definitions/Providers"
+        },
+        "ready_for_reads": {
+          "type": "boolean"
+        },
+        "server_version": {
+          "type": "string"
+        },
+        "state": {
+          "const": "busy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "ok",
+        "healthy",
+        "ready_for_reads",
+        "activity",
+        "server_version",
+        "protocol_version",
+        "providers"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "health_check result"
+}

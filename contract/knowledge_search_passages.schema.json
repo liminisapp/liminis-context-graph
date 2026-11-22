@@ -1,0 +1,126 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Passage": {
+      "description": "One passage (episode) hit.",
+      "properties": {
+        "attributes": {
+          "description": "Episode metadata: a JSON object serialized as a string.",
+          "type": "string"
+        },
+        "belief": {
+          "description": "`current` or `superseded`; only on a reranked passage.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "chunk_id": {
+          "description": "Omitted for a legacy episode.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "group_id": {
+          "type": "string"
+        },
+        "matched_queries": {
+          "description": "Indices into `[query, ...queries]` that retrieved this passage; only with `queries`.",
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "origin": {
+          "description": "`primary`, `external`, `derived` or `answer`.",
+          "type": "string"
+        },
+        "rerank_score": {
+          "description": "Cross-encoder relevance logit; only on a reranked passage.",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "score": {
+          "type": "number"
+        },
+        "similarity": {
+          "description": "Cosine similarity of a vector hit (hybrid mode only).",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "source_description": {
+          "type": "string"
+        },
+        "source_file": {
+          "description": "Omitted for a legacy episode without stored source identity.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "valid_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uuid",
+        "name",
+        "content",
+        "source_description",
+        "group_id",
+        "created_at",
+        "valid_at",
+        "score",
+        "attributes",
+        "origin"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Result of knowledge_search_passages.",
+  "properties": {
+    "count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "expansion": {
+      "description": "Query-expansion report; present only when expansion ran. Free-form."
+    },
+    "passages": {
+      "items": {
+        "$ref": "#/definitions/Passage"
+      },
+      "type": "array"
+    },
+    "rerank": {
+      "description": "Rerank stage report; present only when reranking ran. Free-form."
+    }
+  },
+  "required": [
+    "passages",
+    "count"
+  ],
+  "title": "knowledge_search_passages result",
+  "type": "object"
+}

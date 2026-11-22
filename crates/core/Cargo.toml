@@ -24,6 +24,7 @@ serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 tokio-util = { workspace = true }
 regex = { workspace = true }
+schemars = { workspace = true }
 
 # Windows (#581): SetDllDirectoryW, so lbug's extension DLLs can resolve the OpenSSL DLLs bundled
 # beside them (see lbug_extension_home::expose_extension_dependencies). Same major as tokio's own
@@ -36,6 +37,7 @@ tempfile = { workspace = true }
 criterion = { workspace = true }
 tokio = { workspace = true }
 lbug = { workspace = true }
+jsonschema = { workspace = true }
 
 [[bench]]
 name = "concurrent_rw"

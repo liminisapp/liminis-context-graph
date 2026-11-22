@@ -1,0 +1,278 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Belief": {
+      "description": "Belief annotation, present only when `believed_only` or `as_of` was passed.",
+      "properties": {
+        "believed": {
+          "type": "boolean"
+        },
+        "in_force": {
+          "type": "boolean"
+        },
+        "producing_episode_uuids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "state": {
+          "description": "`believed`, `superseded`, `legacy`, `support_deleted` or `not_yet_ingested`.",
+          "type": "string"
+        },
+        "supersession": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Supersession"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "valid_at_source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warrant": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "believed",
+        "producing_episode_uuids",
+        "in_force"
+      ],
+      "type": "object"
+    },
+    "EdgeSearchEvidence": {
+      "description": "Why a fact was returned.",
+      "properties": {
+        "bm25_score": {
+          "type": "number"
+        },
+        "fact_similarity": {
+          "type": "number"
+        },
+        "rrf_score": {
+          "type": "number"
+        },
+        "text_match": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "rrf_score",
+        "text_match",
+        "bm25_score",
+        "fact_similarity"
+      ],
+      "type": "object"
+    },
+    "RelationshipEdge": {
+      "description": "One fact in `edges`.",
+      "properties": {
+        "attributes": {
+          "type": "string"
+        },
+        "belief": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Belief"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "corroboration": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "episode_uuids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "episodes": {
+          "description": "Producing episode(s); omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "fact": {
+          "type": "string"
+        },
+        "group_id": {
+          "type": "string"
+        },
+        "ingested_at": {
+          "type": "string"
+        },
+        "invalid_at": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "relation_type": {
+          "type": "string"
+        },
+        "search": {
+          "$ref": "#/definitions/EdgeSearchEvidence"
+        },
+        "source_descriptions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source_node_uuid": {
+          "type": "string"
+        },
+        "support": {
+          "$ref": "#/definitions/Support"
+        },
+        "target_node_uuid": {
+          "type": "string"
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "valid_at": {
+          "type": "string"
+        },
+        "valid_at_source": {
+          "description": "`text` or `reference_time`; omitted when not applicable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warrant": {
+          "description": "`assertion` or `cross_group`; omitted for extracted edges.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "uuid",
+        "name",
+        "source_node_uuid",
+        "target_node_uuid",
+        "group_id",
+        "fact",
+        "created_at",
+        "ingested_at",
+        "valid_at",
+        "invalid_at",
+        "attributes",
+        "relation_type",
+        "episode_uuids",
+        "source_descriptions",
+        "search",
+        "support",
+        "corroboration"
+      ],
+      "type": "object"
+    },
+    "Supersession": {
+      "description": "Supersession state of a fact (only when it has been superseded).",
+      "properties": {
+        "cause": {
+          "description": "`corrected` or `document_superseded`.",
+          "type": "string"
+        },
+        "in_force_until": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recorded_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "superseded_at": {
+          "type": "string"
+        },
+        "superseded_by_document": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cause",
+        "superseded_at"
+      ],
+      "type": "object"
+    },
+    "Support": {
+      "description": "`support` annotation: distinct supporting documents per origin.",
+      "properties": {
+        "answer": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "derived": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "external": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "primary": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "primary",
+        "external",
+        "derived",
+        "answer"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Result of knowledge_find_relationships.",
+  "properties": {
+    "count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "edges": {
+      "items": {
+        "$ref": "#/definitions/RelationshipEdge"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "edges",
+    "count"
+  ],
+  "title": "knowledge_find_relationships result",
+  "type": "object"
+}

@@ -1,0 +1,173 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "EntityNode": {
+      "description": "One entity in `nodes`.",
+      "properties": {
+        "attributes": {
+          "description": "JSON object serialized as a string.",
+          "type": "string"
+        },
+        "corroboration": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "episode_uuids": {
+          "description": "Mentioning episodes. With `include_episodes` (#857) these are the live episodes, newest\nfirst, capped; `episode_uuids` and `source_descriptions` are then index-aligned.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "episodes_truncated": {
+          "description": "Present (`true`) only when `include_episodes` was capped.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "group_id": {
+          "type": "string"
+        },
+        "ingested_at": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "labels": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "search": {
+          "$ref": "#/definitions/EntitySearchEvidence"
+        },
+        "source_descriptions": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "source_files": {
+          "description": "Present only with `include_episodes` (#857): de-duplicated source files, not index-aligned.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "support": {
+          "$ref": "#/definitions/Support"
+        },
+        "uuid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uuid",
+        "name",
+        "group_id",
+        "labels",
+        "kind",
+        "created_at",
+        "ingested_at",
+        "summary",
+        "attributes",
+        "episode_uuids",
+        "source_descriptions",
+        "search",
+        "support",
+        "corroboration"
+      ],
+      "type": "object"
+    },
+    "EntitySearchEvidence": {
+      "description": "Why an entity was returned: the fused score plus each retrieval path's raw evidence.",
+      "properties": {
+        "bm25_score": {
+          "type": "number"
+        },
+        "name_similarity": {
+          "type": "number"
+        },
+        "rrf_score": {
+          "type": "number"
+        },
+        "summary_similarity": {
+          "type": "number"
+        },
+        "text_match": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "rrf_score",
+        "text_match",
+        "bm25_score",
+        "name_similarity",
+        "summary_similarity"
+      ],
+      "type": "object"
+    },
+    "Support": {
+      "description": "`support` annotation: distinct supporting documents per origin.",
+      "properties": {
+        "answer": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "derived": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "external": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "primary": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "primary",
+        "external",
+        "derived",
+        "answer"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Result of knowledge_find_entities.",
+  "properties": {
+    "count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/definitions/EntityNode"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "nodes",
+    "count"
+  ],
+  "title": "knowledge_find_entities result",
+  "type": "object"
+}
