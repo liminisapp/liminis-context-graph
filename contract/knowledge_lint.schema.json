@@ -384,6 +384,7 @@
           "type": "object"
         },
         {
+          "description": "`reason: unlinked_mention`; paired with `UnlinkedMentionDetails`.",
           "properties": {
             "category": {
               "const": "unlinked_mention",
@@ -393,7 +394,7 @@
               "$ref": "#/definitions/Citations"
             },
             "details": {
-              "$ref": "#/definitions/UnlinkedDetails"
+              "$ref": "#/definitions/UnlinkedMentionDetails"
             },
             "group_id": {
               "type": "string"
@@ -402,7 +403,40 @@
               "type": "string"
             },
             "reason": {
-              "$ref": "#/definitions/UnlinkedReason"
+              "$ref": "#/definitions/UnlinkedMentionReason"
+            }
+          },
+          "required": [
+            "category",
+            "id",
+            "group_id",
+            "reason",
+            "details",
+            "citations"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Same `category`, `reason: missing_page`; paired with `MissingPageDetails`.\nThe `reason` constant is what keeps the two detail shapes from being\ninterchangeable.",
+          "properties": {
+            "category": {
+              "const": "unlinked_mention",
+              "type": "string"
+            },
+            "citations": {
+              "$ref": "#/definitions/Citations"
+            },
+            "details": {
+              "$ref": "#/definitions/MissingPageDetails"
+            },
+            "group_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/definitions/MissingPageReason"
             }
           },
           "required": [
@@ -460,6 +494,12 @@
         "min_mentions"
       ],
       "type": "object"
+    },
+    "MissingPageReason": {
+      "enum": [
+        "missing_page"
+      ],
+      "type": "string"
     },
     "NearDuplicateDetails": {
       "description": "`near_duplicate_entity` details.",
@@ -618,16 +658,6 @@
       ],
       "type": "object"
     },
-    "UnlinkedDetails": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/UnlinkedMentionDetails"
-        },
-        {
-          "$ref": "#/definitions/MissingPageDetails"
-        }
-      ]
-    },
     "UnlinkedMentionDetails": {
       "description": "`unlinked_mention` details when `reason` is `unlinked_mention`.",
       "properties": {
@@ -644,10 +674,9 @@
       ],
       "type": "object"
     },
-    "UnlinkedReason": {
+    "UnlinkedMentionReason": {
       "enum": [
-        "unlinked_mention",
-        "missing_page"
+        "unlinked_mention"
       ],
       "type": "string"
     },

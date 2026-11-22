@@ -134,14 +134,6 @@ pub struct MissingPageDetails {
 }
 
 #[derive(JsonSchema)]
-#[serde(untagged)]
-#[allow(dead_code)]
-pub enum UnlinkedDetails {
-    UnlinkedMention(UnlinkedMentionDetails),
-    MissingPage(MissingPageDetails),
-}
-
-#[derive(JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum StaleReason {
@@ -181,8 +173,14 @@ pub enum NearDuplicateReason {
 #[derive(JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
-pub enum UnlinkedReason {
+pub enum UnlinkedMentionReason {
     UnlinkedMention,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum MissingPageReason {
     MissingPage,
 }
 
@@ -226,11 +224,23 @@ pub enum Finding {
         details: NearDuplicateDetails,
         citations: Citations,
     },
+    /// `reason: unlinked_mention`; paired with `UnlinkedMentionDetails`.
     UnlinkedMention {
         id: String,
         group_id: String,
-        reason: UnlinkedReason,
-        details: UnlinkedDetails,
+        reason: UnlinkedMentionReason,
+        details: UnlinkedMentionDetails,
+        citations: Citations,
+    },
+    /// Same `category`, `reason: missing_page`; paired with `MissingPageDetails`.
+    /// The `reason` constant is what keeps the two detail shapes from being
+    /// interchangeable.
+    #[serde(rename = "unlinked_mention")]
+    MissingPage {
+        id: String,
+        group_id: String,
+        reason: MissingPageReason,
+        details: MissingPageDetails,
         citations: Citations,
     },
 }

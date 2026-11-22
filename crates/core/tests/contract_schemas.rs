@@ -1006,6 +1006,29 @@ async fn lint_unlinked_mention_and_missing_page_validate() {
         json!("not_a_reason"),
     );
     assert_invalid("knowledge_lint", "unknown unlinked_mention reason", &m);
+    // `reason` is coupled to the `details` shape: a mismatched pair must fail.
+    let mut m = r.clone();
+    set(
+        &mut m,
+        &format!("/findings/{mp}/reason"),
+        json!("unlinked_mention"),
+    );
+    assert_invalid(
+        "knowledge_lint",
+        "missing_page details under reason unlinked_mention",
+        &m,
+    );
+    let mut m = r.clone();
+    set(
+        &mut m,
+        &format!("/findings/{u}/reason"),
+        json!("missing_page"),
+    );
+    assert_invalid(
+        "knowledge_lint",
+        "unlinked_mention details under reason missing_page",
+        &m,
+    );
 }
 
 #[tokio::test]

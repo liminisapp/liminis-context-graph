@@ -36,7 +36,7 @@ truth was the code, so consumers guessed key names, and one guess shipped a bug 
   Free-form members (`attributes`, `rerank`, `expansion`, the `causes` keys) stay loose so they can grow.
 - **Alternatives.** `health_check` is `oneOf` by `state`; `knowledge_status` is `anyOf` degraded / queryable /
   not-queryable (told apart by required keys and types); `knowledge_lint` findings are `oneOf` by `category`,
-  and `unlinked_mention`'s two detail shapes are an `anyOf` (the schema does not couple `reason` to the shape).
+  and `unlinked_mention`'s two detail shapes are two `oneOf` branches keyed by `reason` (`unlinked_mention` pairs with `{document, page}`, `missing_page` with `{mention_documents, min_mentions}`), so a mismatched pair fails validation.
 - **Version-free committed files; version in a release manifest.** Stamping the version into committed files
   would churn them on every bump and collide with the drift check. `scripts/stage-contract-assets.sh <tag>
   <dest>` copies the schemas and writes `contract-manifest.json` (`lcg_version`, `tag`, `draft`, sha256 per
