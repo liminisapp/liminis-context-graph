@@ -154,7 +154,7 @@ async fn put(
 ) {
     let mut params = json!({
         "chunk_text": format!("text of {chunk_id}"), "chunk_id": chunk_id,
-        "source_file": "notes/a.md", "group_id": G,
+        "source_file": "notes/source-note.md", "group_id": G,
         "reference_time": "2026-08-04T00:00:00Z", "attributes": attributes,
     });
     if let Some(o) = origin {

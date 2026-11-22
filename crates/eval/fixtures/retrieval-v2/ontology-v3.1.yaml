@@ -1,0 +1,169 @@
+# Ontology v3.1: Liminis workspace (team operations notebook). Derived from the purpose and
+# competency questions in ontology-v3.md (+ v3.1 changes), not from the corpus or the eval questions.
+# Types carry structure; fact text carries specifics (one HAS_TERM, one HAS_MEASURE).
+mode: strict
+
+entity_types:
+  - name: Person
+    description: A human individual, not a role or title.
+  - name: Team
+    description: A group, team or department inside our own organisation.
+  - name: Organization
+    description: An outside party such as a supplier, vendor, customer, partner or regulator.
+  - name: Project
+    description: An initiative, programme or product effort that has an owner and goals.
+  - name: System
+    description: Software, a service, tool, dataset or piece of infrastructure we run or use.
+  - name: Policy
+    description: A rule, standard, procedure or requirement that governs how work is done.
+  - name: Decision
+    description: A choice that was made or agreed, such as a design decision or a resolution.
+  - name: Agreement
+    description: A contract, service-level agreement or other commitment with an outside party.
+  - name: Meeting
+    description: A meeting, review, incident retrospective or other dated occasion where people met.
+  - name: Document
+    description: A note, page, report, article or other written source.
+  - name: Topic
+    description: A subject, practice, metric or idea that is none of the other types.
+  - name: Location
+    description: A place, office, site or cloud region.
+
+relation_types:
+  # Responsibility (R1-R5)
+  - name: OWNS
+    description: A person or team is the accountable owner of a project, system, policy or agreement.
+    aliases: [OWNER_OF, IS_OWNER_OF, ACCOUNTABLE_FOR, BUDGET_OWNER]
+    keywords: [owner, owns, accountable]
+  - name: REPORTS_TO
+    description: A person reports to another person in the line-management structure.
+    source_type: Person
+    target_type: Person
+    aliases: [REPORTS_INTO, MANAGED_BY]
+    keywords: [reports to]
+  - name: MEMBER_OF
+    description: A person belongs to a team or is staffed on a project.
+    source_type: Person
+    aliases: [PART_OF_TEAM, STAFFED_ON, BELONGS_TO, ON_TEAM]
+    keywords: [member, staffed, joined]
+  - name: WORKS_ON
+    description: A person or team contributes work to a project, system, document or task.
+    aliases: [CONTRIBUTES_TO, INVOLVED_IN, MAINTAINS, PARTICIPATES_IN]
+    keywords: [works on, maintain, contribut]
+  - name: LEADS
+    description: A person leads or manages a team, project or other person.
+    source_type: Person
+    aliases: [MANAGES, HEADS, RUNS]
+    keywords: [lead, manag, head of]
+  - name: HAS_ROLE
+    description: A person holds a stated role, title or job, such as CEO, account lead or field technician; the fact text names the role.
+    source_type: Person
+    aliases: [SERVES_AS, IS_ROLE, HOLDS_TITLE, HAS_TITLE, ROLE_OF]
+    keywords: [is ceo, is cto, serves as, role, title, job]
+  - name: CONTACT_FOR
+    description: A person is the named point of contact for an organisation, agreement or system, such as an account manager, escalation contact or first person to ask; prefer this over OWNS when the fact is about who to contact.
+    source_type: Person
+    aliases: [ACCOUNT_MANAGER_FOR, ACCOUNT_MANAGER_AT, IS_ACCOUNT_MANAGER_FOR, POINT_OF_CONTACT_FOR, ESCALATION_CONTACT_FOR]
+    keywords: [account manager, point of contact, contact for, escalat]
+  # Decisions (D1-D3)
+  - name: DECIDED
+    description: A person, team or meeting made, approved or agreed a decision.
+    target_type: Decision
+    aliases: [MADE_DECISION, AGREED, RESOLVED, APPROVED_DECISION]
+    keywords: [decided, agreed, resolved]
+  - name: DECISION_ON
+    description: A decision is about, or changes, a project, system, policy or other subject.
+    source_type: Decision
+    aliases: [DECIDES, CONCERNS, DECISION_ABOUT]
+    keywords: [decision]
+  - name: SUPERSEDES
+    description: One thing explicitly replaces another, such as a decision, document or version, or a supplier, system or person taking over an earlier one's role.
+    aliases: [REPLACES, REPLACED, SUPERCEDES, OVERRIDES, REVISES, TAKES_OVER_FROM, SWITCHED_FROM]
+    keywords: [supersede, replace, revise]
+  - name: PROPOSED
+    description: A person, team or document puts forward an option still under consideration, or states a preference among options, before any decision.
+    aliases: [PROPOSES, SUGGESTED, PREFERS, RECOMMENDS, CONSIDERING]
+    keywords: [propos, prefer, suggest, recommend, consider]
+  # Outside parties (A1-A5)
+  - name: SUPPLIED_BY
+    description: A project, team or system obtains goods or services from an outside party.
+    target_type: Organization
+    aliases: [HAS_SUPPLIER, USES_SUPPLIER, HAS_VENDOR, USES_VENDOR, SUPPLIER_RELATIONSHIP_WITH, PROCURES_FROM, BUYS_FROM, USES_HOSTING_PROVIDER]
+    keywords: [supplier, vendor, provider, procure]
+  - name: PARTY_TO
+    description: An organisation or team is a party to an agreement or contract.
+    target_type: Agreement
+    aliases: [SIGNED, HAS_CONTRACT, CONTRACTED_UNDER]
+    keywords: [contract, agreement, signed]
+  - name: HAS_TERM
+    description: An agreement or outside party has a stated commercial or service term, such as a price, rate, uptime commitment, notice period or renewal date.
+    aliases: [CHARGES, HAS_PRICE, PRICED_AT, OFFERS_SLA, HAS_SLA, GUARANTEES, RENEWAL_DATE, RENEWAL_DATE_FOR, RENEWS_ON, SPECIFIES_UPTIME_FOR]
+    keywords: [price, per unit, rate, uptime, sla, service level, renew, notice period, terms]
+  # Rules (P1-P3)
+  - name: APPLIES_TO
+    description: A policy or rule applies to a project, team, process or kind of work.
+    source_type: Policy
+    aliases: [GOVERNS, COVERS, REQUIRED_FOR]
+    keywords: [applies, governs]
+  - name: APPROVES
+    description: A person has authority to approve something, such as an exception to a policy, a budget or a change.
+    source_type: Person
+    aliases: [EXCEPTION_APPROVER_FOR, HAS_EXCEPTION_APPROVER, SIGNS_OFF, APPROVER_OF, CAN_APPROVE]
+    keywords: [approv, sign-off, sign off, exception, waiver]
+  # Systems and dependencies (S1-S2)
+  - name: DEPENDS_ON
+    description: A project or system depends on another project, system or service.
+    aliases: [RELIES_ON, REQUIRES, DEPENDS_ON_DATA_FROM, BLOCKED_BY]
+    keywords: [depend, relies]
+  - name: USES
+    description: A project, team or system uses a system, tool, dataset or channel.
+    aliases: [USES_AS_PRIMARY_DATABASE, USES_AS_ALERTING_CHANNEL, RUNS_ON, USES_TOOL]
+    keywords: [uses, runs on]
+  # Plans (T1-T2)
+  - name: SCHEDULED_FOR
+    description: A planned task, launch, event or delivery is set for a date, time or place, or is sequenced before or after another; the fact text gives the date.
+    aliases: [SCHEDULED_AT, PLANNED_FOR, DUE_ON, BOOKED, SHIPS_BEFORE, DEADLINE]
+    keywords: [schedul, planned, due, deadline, booked, launch]
+  # Measures (Q1-Q2)
+  - name: HAS_MEASURE
+    description: An entity has a stated quantity, such as a budget, headcount, incident count or target.
+    aliases: [HAS_BUDGET, CAPPED_BUDGET_FOR, HAS_HEADCOUNT, LOGGED_INCIDENTS_IN, HAS_TARGET]
+    keywords: [budget, headcount, engineers, incidents, target]
+  # Meetings (M1-M2)
+  - name: ATTENDED
+    description: A person attended or took part in a meeting.
+    source_type: Person
+    target_type: Meeting
+    aliases: [ATTENDED_MEETING, PARTICIPATED_IN_MEETING, PRESENT_AT]
+    keywords: [attended, present at]
+  - name: DISCUSSED
+    description: A meeting, person or document discussed or presented a subject.
+    aliases: [PRESENTED, RAISED, REVIEWED, DISCUSSED_IN]
+    keywords: [discuss, present, raised, review]
+  - name: WORKS_WITH
+    description: Two people, teams or organisations worked together, met or coordinated.
+    aliases: [COLLABORATED_WITH, COORDINATED_WITH, ATTENDED_MEETING_WITH, COLLABORATED_IN_MEETING_WITH, SCHEDULED_WITH, AGREED_WITH, MET_WITH]
+    keywords: [collaborat, coordinat, met with, worked with]
+  # Provenance (V1-V2)
+  - name: DERIVED_FROM
+    description: A page or document restates, summarises or is derived from another document.
+    source_type: Document
+    target_type: Document
+    aliases: [SUMMARISES, SUMMARIZES, RESTATES, BASED_ON]
+    keywords: [summar, derived, restat]
+  - name: CITES
+    description: A document cites, quotes or references a source.
+    source_type: Document
+    aliases: [REFERENCES, QUOTES, CITED_IN, DOCUMENTED_IN]
+    keywords: [cite, referenc, quote, documented]
+  - name: MENTIONS
+    description: A document or note refers to an entity without a stronger relation.
+    source_type: Document
+    aliases: [REPORTED_ON, REFERS_TO, NOTES]
+    keywords: [mention]
+  # Place (L1, S2)
+  - name: LOCATED_IN
+    description: An entity is based in, hosted in or located at a place or region.
+    target_type: Location
+    aliases: [BASED_IN, HOSTED_IN, USES_CLOUD_REGION, TAKES_PLACE_IN]
+    keywords: [located, based in, hosted, region]

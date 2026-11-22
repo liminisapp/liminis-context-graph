@@ -575,6 +575,21 @@ mod tests {
         }
     }
 
+    // Issue #824: the text extraction prompt tells the model that wikilink citations name other
+    // notes and are not entities (the primary fix for note-ID junk nodes; the post-extraction
+    // filter is the backstop). Deliberate snapshot of the instruction.
+    #[test]
+    fn text_prompt_says_citations_are_not_entities() {
+        let p = entity_system_prompt(SourceType::Text, None);
+        assert!(p.contains("[[note-id]]"));
+        assert!(p.contains("(from [[project-quill-core-1]])"));
+        assert!(p.contains("NEVER extract"));
+        assert!(p.contains("not an entity"));
+        // The Message and Json prompts are unchanged by #824.
+        assert!(!entity_system_prompt(SourceType::Message, None).contains("[[note-id]]"));
+        assert!(!entity_system_prompt(SourceType::Json, None).contains("[[note-id]]"));
+    }
+
     #[test]
     fn extract_false_types_absent_from_prompts() {
         for mode in [OntologyMode::Open, OntologyMode::Strict] {

@@ -1589,6 +1589,10 @@ async fn test_knowledge_process_chunk_ok() {
         "expected numeric entities_dropped_malformed (issue #342 FR-003): {v}"
     );
     assert!(
+        r["entities_dropped_source_id"].as_u64().is_some(),
+        "expected numeric entities_dropped_source_id (issue #824): {v}"
+    );
+    assert!(
         r["edges_dropped_malformed"].as_u64().is_some(),
         "expected numeric edges_dropped_malformed (issue #342 FR-003): {v}"
     );

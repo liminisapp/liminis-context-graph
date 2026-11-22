@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use super::stats::{DEFAULT_RESAMPLES, DEFAULT_SEED};
 
-use crate::cli::DEFAULT_JUDGE_MODEL;
+use crate::cli::{DEFAULT_JUDGE_MODEL, DEFAULT_ONTOLOGY_MODE};
+use lcg_core::anthropic_config::AnthropicCliArgs;
+use lcg_core::OntologyMode;
 
 pub const DEFAULT_K: usize = 10;
 pub const DEFAULT_FIXTURE_DIR: &str = "crates/eval/fixtures/retrieval";
@@ -100,6 +102,14 @@ pub struct RetrievalArgs {
     pub bootstrap_resamples: usize,
     /// Private-notebook run: results only, outputs must live outside any git tree.
     pub private: bool,
+    /// `--ontology <file>` (#821 FR-001): ingest with every extraction call constrained by it.
+    pub ontology: Option<PathBuf>,
+    /// `--ontology-mode`; `Some` exactly when `ontology` is (default strict, as the extraction eval).
+    pub ontology_mode: Option<OntologyMode>,
+    /// `--keep-workspace <dir>` (FR-006): leave the ingested workspace there after the run.
+    pub keep_workspace: Option<PathBuf>,
+    /// `--anthropic-base-url` / `--anthropic-endpoint` for the judge (FR-019).
+    pub anthropic: AnthropicCliArgs,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -170,6 +180,21 @@ OPTIONS:
                                only (failed-query detail withheld). Requires --out, and
                                --judge-cache unless --no-grounded, and refuses any output path
                                inside a git working tree so nothing private can be committed.
+    --ontology <FILE>          Ingest under this ontology: every extraction call is constrained by
+                               it (written to the workspace as .lcg/ontology.yaml). The report
+                               records its hash and mode. A replayed cassette whose sidecar
+                               (<cassette>.meta.json) records a different ontology hash fails
+                               before ingest; a cassette with no sidecar is replayed with a warning.
+    --ontology-mode <open|strict>
+                               Mode applied to --ontology (default strict). Requires --ontology.
+    --keep-workspace <DIR>     Keep the ingested workspace (DB, WAL, ontology) at DIR after the run,
+                               for `graph-integrity --workspace` and `graph-qa --workspace`. DIR must
+                               not exist or be empty. One --embedding-profile at most, and at least
+                               one lcg-* config in --configs.
+    --anthropic-base-url <URL> Anthropic-compatible base URL for the judge (also ANTHROPIC_BASE_URL;
+    --anthropic-endpoint <URL> the endpoint form is used verbatim, also LCG_ANTHROPIC_ENDPOINT). With
+                               either set, or ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN, the judge
+                               runs; e.g. the local subscription bridge needs no key.
     --dry-run                  Print the resolved plan (configs, k, hashes, corpus shape) and exit.
     -h, --help                 Print this help.
 "
@@ -202,6 +227,10 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
         bootstrap_seed: DEFAULT_SEED,
         bootstrap_resamples: DEFAULT_RESAMPLES,
         private: false,
+        ontology: None,
+        ontology_mode: None,
+        keep_workspace: None,
+        anthropic: AnthropicCliArgs::default(),
     };
     let mut judge_cache_explicit = false;
     let mut i = 0;
@@ -304,6 +333,13 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
                 judge_cache_explicit = true;
             }
             "--out" => a.out = Some(PathBuf::from(val("--out")?)),
+            "--ontology" => a.ontology = Some(PathBuf::from(val("--ontology")?)),
+            "--ontology-mode" => {
+                a.ontology_mode = Some(crate::cli::parse_ontology_mode(&val("--ontology-mode")?)?)
+            }
+            "--keep-workspace" => a.keep_workspace = Some(PathBuf::from(val("--keep-workspace")?)),
+            "--anthropic-base-url" => a.anthropic.base_url = Some(val("--anthropic-base-url")?),
+            "--anthropic-endpoint" => a.anthropic.endpoint = Some(val("--anthropic-endpoint")?),
             other => return Err(format!("unknown argument '{other}'")),
         }
         i += 1;
@@ -323,6 +359,33 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
     if a.expander_http.is_some() && a.expander_uds.is_some() {
         return Err("--expander-http and --expander-uds are mutually exclusive".into());
     }
+    if a.ontology.is_none() && a.ontology_mode.is_some() {
+        return Err(
+            "--ontology-mode requires --ontology; there is no ontology to apply the mode to".into(),
+        );
+    }
+    if a.ontology.is_some() && a.ontology_mode.is_none() {
+        a.ontology_mode = Some(DEFAULT_ONTOLOGY_MODE);
+    }
+    if let Some(d) = &a.keep_workspace {
+        check_keep_dir(d)?;
+        if a.embedding_profiles.len() > 1 {
+            return Err(
+                "--keep-workspace keeps one workspace; it cannot be combined with more than one \
+                 --embedding-profile"
+                    .into(),
+            );
+        }
+        // The kept workspace is the LCG service's; a run with no `lcg-*` config never starts one,
+        // so it would otherwise exit 0 with nothing at the keep directory.
+        if !a.configs.iter().any(|c| c.starts_with("lcg-")) {
+            return Err(
+                "--keep-workspace needs at least one lcg-* config in --configs; a qmd-only run \
+                 ingests nothing into LCG, so there is no workspace to keep"
+                    .into(),
+            );
+        }
+    }
     if a.private {
         if a.out.is_none() {
             return Err("--private requires an explicit --out (outside any git tree)".into());
@@ -332,6 +395,30 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
         }
     }
     Ok(RetrievalMode::Run(Box::new(a)))
+}
+
+/// `--keep-workspace` refuses a directory that exists and is not empty (FR-007): a kept workspace is
+/// never written over another one, or over anything else.
+pub fn check_keep_dir(d: &Path) -> Result<(), String> {
+    if d.exists() {
+        if !d.is_dir() {
+            return Err(format!(
+                "--keep-workspace {}: exists and is not a directory",
+                d.display()
+            ));
+        }
+        let non_empty = std::fs::read_dir(d)
+            .map_err(|e| format!("--keep-workspace {}: {e}", d.display()))?
+            .next()
+            .is_some();
+        if non_empty {
+            return Err(format!(
+                "--keep-workspace {}: directory exists and is not empty; refusing to overwrite it",
+                d.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// True when `path` or any of its ancestors contains `.git` (a working tree or worktree). Works
@@ -369,6 +456,10 @@ pub fn private_guard(a: &RetrievalArgs) -> Result<(), String> {
     let record = a.record_cassette.as_deref().map(Path::new);
     if let Some(r) = record {
         paths.push(("--record-cassette", r));
+    }
+    // A kept workspace holds the whole ingested private corpus (DB, WAL, episodes).
+    if let Some(k) = &a.keep_workspace {
+        paths.push(("--keep-workspace", k));
     }
     for (flag, p) in paths {
         if inside_git_tree(p) {
@@ -570,6 +661,33 @@ mod tests {
     }
 
     #[test]
+    fn private_guard_refuses_a_workspace_kept_inside_a_git_tree() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tree.path().join(".git")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let args = |kept: &Path| {
+            let RetrievalMode::Run(a) = p(&[
+                "--private",
+                "--out",
+                outside.path().join("out").to_str().unwrap(),
+                "--no-grounded",
+                "--keep-workspace",
+                kept.to_str().unwrap(),
+            ])
+            .unwrap() else {
+                panic!()
+            };
+            *a
+        };
+        let e = private_guard(&args(&tree.path().join("ws"))).unwrap_err();
+        assert!(
+            e.contains("--keep-workspace") && e.contains("git working tree"),
+            "{e}"
+        );
+        assert!(private_guard(&args(&outside.path().join("ws"))).is_ok());
+    }
+
+    #[test]
     fn private_guard_refuses_outputs_inside_a_git_tree() {
         let tree = tempfile::tempdir().unwrap();
         std::fs::create_dir(tree.path().join(".git")).unwrap();
@@ -616,6 +734,85 @@ mod tests {
             false
         ))
         .is_ok());
+    }
+
+    #[test]
+    fn ontology_flags_follow_the_extraction_eval() {
+        let RetrievalMode::Run(a) = p(&[]).unwrap() else {
+            panic!()
+        };
+        assert!(a.ontology.is_none() && a.ontology_mode.is_none());
+        let RetrievalMode::Run(a) = p(&["--ontology", "o.yaml"]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(a.ontology.as_deref(), Some(Path::new("o.yaml")));
+        assert_eq!(a.ontology_mode, Some(OntologyMode::Strict));
+        let RetrievalMode::Run(a) =
+            p(&["--ontology", "o.yaml", "--ontology-mode", "open"]).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(a.ontology_mode, Some(OntologyMode::Open));
+        let e = p(&["--ontology-mode", "open"]).unwrap_err();
+        assert!(e.contains("requires --ontology"), "{e}");
+        assert!(p(&["--ontology", "o", "--ontology-mode", "loose"]).is_err());
+    }
+
+    #[test]
+    fn keep_workspace_refuses_a_non_empty_dir_and_several_profiles() {
+        let d = tempfile::tempdir().unwrap();
+        let empty = d.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        let fresh = d.path().join("fresh");
+        for ok in [&empty, &fresh] {
+            let RetrievalMode::Run(a) = p(&["--keep-workspace", ok.to_str().unwrap()]).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(a.keep_workspace.as_deref(), Some(ok.as_path()));
+        }
+        std::fs::write(d.path().join("x"), "x").unwrap();
+        let e = p(&["--keep-workspace", d.path().to_str().unwrap()]).unwrap_err();
+        assert!(e.contains("not empty"), "{e}");
+        let e = p(&[
+            "--keep-workspace",
+            fresh.to_str().unwrap(),
+            "--embedding-profile",
+            "none,bge-v1.5",
+        ])
+        .unwrap_err();
+        assert!(e.contains("--embedding-profile"), "{e}");
+        // A qmd-only run ingests nothing into LCG, so there is no workspace to keep.
+        let e = p(&[
+            "--keep-workspace",
+            fresh.to_str().unwrap(),
+            "--configs",
+            "qmd",
+        ])
+        .unwrap_err();
+        assert!(e.contains("lcg-"), "{e}");
+    }
+
+    #[test]
+    fn anthropic_endpoint_flags_parse() {
+        let RetrievalMode::Run(a) = p(&[
+            "--anthropic-base-url",
+            "http://127.0.0.1:8787",
+            "--anthropic-endpoint",
+            "http://h/v1/messages",
+        ])
+        .unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            a.anthropic.base_url.as_deref(),
+            Some("http://127.0.0.1:8787")
+        );
+        assert_eq!(
+            a.anthropic.endpoint.as_deref(),
+            Some("http://h/v1/messages")
+        );
+        assert!(usage().contains("--keep-workspace") && usage().contains("--ontology-mode"));
     }
 
     #[test]

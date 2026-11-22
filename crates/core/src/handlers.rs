@@ -1298,6 +1298,7 @@ async fn handle_knowledge_process_chunk(
         "edges_signature_mismatch": result.edges_signature_mismatch,
         "entities_reclassified_unclassified": result.entities_reclassified_unclassified,
         "entities_dropped_malformed": result.entities_dropped_malformed,
+        "entities_dropped_source_id": result.entities_dropped_source_id,
         "edges_dropped_malformed": result.edges_dropped_malformed,
         "dedup_paths": result.dedup_paths,
         "duration_seconds": start.elapsed().as_secs_f64(),
@@ -2826,102 +2827,17 @@ fn resolve_walk_start(
     Ok(out)
 }
 
-/// Parses `hops` (absent ⇒ empty). Each hop: `{relation_types?, phrase, direction?}`;
-/// `direction` defaults to `any`.
-fn parse_walk_hops(v: &Value) -> Result<Vec<crate::walk::Hop>, Error> {
-    let arr = match v {
-        Value::Null => return Ok(vec![]),
-        Value::Array(a) => a,
-        _ => return Err(Error::Ipc("hops must be an array".to_string())),
-    };
-    arr.iter()
-        .enumerate()
-        .map(|(i, h)| {
-            let n = i + 1;
-            let obj = h
-                .as_object()
-                .ok_or_else(|| Error::Ipc(format!("hops[{n}] must be an object")))?;
-            let relation_types = match obj.get("relation_types") {
-                None | Some(Value::Null) => vec![],
-                Some(Value::Array(a)) => a
-                    .iter()
-                    .map(|r| {
-                        r.as_str().map(str::to_string).ok_or_else(|| {
-                            Error::Ipc(format!(
-                                "hops[{n}].relation_types must be an array of strings"
-                            ))
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-                Some(_) => {
-                    return Err(Error::Ipc(format!(
-                        "hops[{n}].relation_types must be an array of strings"
-                    )))
-                }
-            };
-            let phrase = obj
-                .get("phrase")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| Error::Ipc(format!("hops[{n}].phrase is required")))?
-                .to_string();
-            let direction = match obj.get("direction") {
-                None | Some(Value::Null) => crate::walk::Direction::Any,
-                Some(Value::String(s)) => crate::walk::Direction::parse(s)?,
-                Some(_) => return Err(Error::Ipc(format!("hops[{n}].direction must be a string"))),
-            };
-            Ok(crate::walk::Hop {
-                relation_types,
-                phrase,
-                direction,
-            })
-        })
-        .collect()
-}
-
-fn walk_str_param<'a>(v: &'a Value, name: &str) -> Result<Option<&'a str>, Error> {
-    match v {
-        Value::Null => Ok(None),
-        Value::String(s) => Ok(Some(s.as_str())),
-        _ => Err(Error::Ipc(format!("{name} must be a string"))),
-    }
-}
-
 /// `knowledge_walk`: executes a caller-planned typed walk (see [`crate::walk`]). Read-only; makes
 /// no LLM call (it only embeds the hop phrases and `query`).
 async fn handle_walk(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     use crate::walk;
     let p = &req.params;
-    let start = p["start"]
-        .as_str()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| Error::Ipc("start is required".to_string()))?
-        .to_string();
     let group_ids = extract_optional_group_ids(&p["group_ids"])
         .unwrap_or_else(|| vec![DEFAULT_GROUP_ID.to_string()]);
-    let mode = walk::WalkMode::parse(walk_str_param(&p["mode"], "mode")?.unwrap_or("single"))?;
-    let direction_mode = walk::DirectionMode::parse(
-        walk_str_param(&p["direction_mode"], "direction_mode")?.unwrap_or("soft"),
-    )?;
-    let hops = parse_walk_hops(&p["hops"])?;
-    let answer_type = walk::parse_answer_type(walk_str_param(&p["answer_type"], "answer_type")?);
-    let query = walk_str_param(&p["query"], "query")?
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    // Validate the plan shape up front (start entities are filled in after resolution).
-    let mut plan = walk::WalkPlan {
-        start: vec![String::new()],
-        hops,
-        answer_type,
-        query,
-        mode,
-        direction_mode,
-    };
-    plan.validate()?;
+    // Pure param parsing and shape validation live in `walk::parse_request`, so a caller that
+    // builds walk requests (lcg-eval graph-qa, #821) can check them with the same code.
+    let walk::ParsedWalkRequest { start, mut plan } = walk::parse_request(p)?;
+    let (mode, direction_mode) = (plan.mode, plan.direction_mode);
 
     // Embed the hop phrases and the query (query-side instruction). An embedder failure is an
     // explicit error, never a walk over zero vectors.

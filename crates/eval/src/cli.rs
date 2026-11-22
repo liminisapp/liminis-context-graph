@@ -15,7 +15,7 @@ pub const DEFAULT_JUDGE_MODEL: &str = "claude-sonnet-4-6";
 /// FR-002: when `--ontology` is given without `--ontology-mode`, the mode defaults to strict.
 pub const DEFAULT_ONTOLOGY_MODE: OntologyMode = OntologyMode::Strict;
 
-fn parse_ontology_mode(v: &str) -> Result<OntologyMode, String> {
+pub fn parse_ontology_mode(v: &str) -> Result<OntologyMode, String> {
     match v {
         "open" => Ok(OntologyMode::Open),
         "strict" => Ok(OntologyMode::Strict),

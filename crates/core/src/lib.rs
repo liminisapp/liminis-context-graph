@@ -57,6 +57,7 @@ pub mod search_config;
 pub mod search_stages;
 pub mod sha256_hex;
 pub mod sidecar_client;
+pub mod source_id;
 pub mod staged_search;
 pub mod summary_merge;
 pub mod telemetry;
