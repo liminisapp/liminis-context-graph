@@ -514,8 +514,15 @@ pub fn registry() -> Vec<ToolSpec> {
                            default unless the service sets LCG_PASSAGE_SEARCH_MODE) or `hybrid` \
                            (BM25 over episode text fused with the vector ranking by weighted \
                            Reciprocal Rank Fusion, the lexical list weighing less, issue #789); \
-                           in hybrid mode `score` is the fused rank score, not a cosine, and \
-                           `similarity` carries the cosine where the vector retriever matched. \
+                           in hybrid mode `score` is a rank-only fusion value (at most about \
+                           0.0233), not a relevance and not comparable across queries; \
+                           `similarity` carries the cosine where the vector retriever matched \
+                           and is the relevance signal. `min_score` floors the vector leg's \
+                           cosine only, so lexical (BM25) hits still appear below it. Each \
+                           hybrid result carries `legs` (`dense`, `lexical` or `both`: which \
+                           retrievers found it; `lexical` means no `similarity`) and, in \
+                           single-query hybrid, `lexical_score` (the raw BM25 value when the \
+                           lexical leg matched); both are omitted in `vector` mode. \
                            `belief_aware` (default on in both modes; send `false` to opt out, or \
                            set LCG_PASSAGE_BELIEF_AWARE=off on the service to restore the old \
                            default) ranks a derived page below the primary note it cites and a \

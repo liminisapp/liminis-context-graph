@@ -43,3 +43,25 @@ operator who chose the embedder can.
 - `min_similarity` on entity/relationship search (ADR-0629) deliberately has no default and is
   untouched. The eval harness removes the variable from the spawned service's environment and
   sends an explicit `min_score: 0.0`, so it is unaffected.
+
+## Addendum (issue #871): hybrid `score` is rank-only; `legs` names the evidence
+
+Experiment E15 (`docs/research/webbrain-retrieval-suggestions.md`, section #848) showed that the
+0.5 floor is safe in hybrid mode (it keeps 99.3% of answerable top-1 hits) but does not make hybrid
+abstain on off-topic queries: hybrid returned hits for 25 of 34 off-topic queries against 13 in
+`vector` mode, because the floor binds the vector leg only and unfloored BM25 refills the list.
+
+This addendum changes no behaviour (no default, fusion, ranking or membership) and records the
+semantics the tool description, `docs/ipc-mcp-reference.md` and this ADR now share:
+
+- In `hybrid` mode `score` is a **rank-only** weighted-RRF value (at most about 0.0233). It is not a
+  relevance and not comparable across queries.
+- `min_score` floors the **vector leg's cosine only**. It does not stop lexical (BM25) hits.
+- `similarity` (the cosine, where the vector leg matched) is the **relevance signal**.
+- Each hybrid passage gains an additive `legs` field, `dense`, `lexical` or `both`, derived from the
+  per-list evidence of the fusion; `dense`/`both` hold exactly when `similarity` is present.
+  Single-query hybrid also reports `lexical_score`, the raw BM25 value. With variants `legs` is the
+  union over queries (vector side measured above the floor) and `lexical_score` is omitted. Both
+  fields are omitted in `vector` mode, so that response is byte-identical to before.
+
+An abstention threshold or gating of lexical-only hits is deliberately left to the E16 probe (#843).
