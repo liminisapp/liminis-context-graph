@@ -63,6 +63,7 @@ pub mod source_identity;
 pub mod staged_search;
 pub mod summary_merge;
 pub mod telemetry;
+pub mod test_providers;
 pub mod token_budget;
 pub mod types;
 pub mod wal;
@@ -106,6 +107,10 @@ pub use replay::{
 };
 pub use schema::init as init_schema;
 pub use telemetry::{CaptureSink, NoopSink, TeeSink, TelemetryEvent, TelemetrySink};
+pub use test_providers::{
+    parse_fact_lines, resolve_test_embedding_dim, FactEntity, FactLine, ParsedFacts, TestEmbedder,
+    TestExtractor, TEST_EMBEDDER_MODEL, TEST_EMBEDDING_DEFAULT_DIM, TEST_EMBEDDING_MAX_DIM,
+};
 pub use types::{
     EntityRow, EpisodicRow, ExtractedEdge, ExtractedEntity, ExtractionOutcome, ExtractionResult,
     MentionsEdge, RelatesToEdge, SourceType,

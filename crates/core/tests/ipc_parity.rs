@@ -955,6 +955,9 @@ async fn test_health_check_ok() {
     assert_ok_resp(&v, 20);
     assert_eq!(v["result"]["ok"], true, "expected ok:true: {v}");
     assert_eq!(v["result"]["healthy"], true, "expected healthy:true: {v}");
+    // #851: additive `providers` field; this harness uses real (non-test) providers.
+    assert_eq!(v["result"]["providers"]["embedder"], "real", "{v}");
+    assert_eq!(v["result"]["providers"]["extractor"], "real", "{v}");
 }
 
 // ── Tier 1a: knowledge_status ─────────────────────────────────────────────────

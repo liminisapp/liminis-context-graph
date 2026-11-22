@@ -51,6 +51,19 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   value questions stay answerable by a walk. A self-loop never extends the frontier and is not a
   candidate on earlier hops (ADR-0820 amended). See `docs/ontology.md#literal-valued-facts`.
 
+- **Test-providers mode: built-in deterministic embedder and fact-line extractor (#851,
+  ADR-0851).** Consumers that run lcg in their own tests no longer need to fake its embedder and
+  extractor (the fakes matched lcg's prompts, and one embedder fake returned one vector for every
+  text, merging unrelated entities). `--embedder test` selects a deterministic, offline hashed
+  bag-of-words embedder (unit length, `LCG_EMBEDDING_DIM` or 768, model `lcg-test-bow`, bit-identical
+  across platforms); `--extractor test` extracts entities and edges only from fact lines,
+  `SRC -> DST: fact` (`RELATED_TO`) and `SRC -[REL_NAME]-> DST: fact`, and never touches a prompt.
+  Explicit flags only, never inferred from the environment; rejected with the matching real-provider
+  flags, with `--connect` and (for the extractor) with the cassette variables. `knowledge_status`
+  and `health_check` gain an additive `providers` object, and startup logs a `TEST PROVIDERS ACTIVE`
+  line. The fact-line grammar and embedder guarantees are published in `docs/test-providers.md`, and
+  every example there is executed by lcg's tests.
+
 - **Ontology edge direction: define, validate and repair (#816, ADR-0816).** With an ontology, 34%
   of typed edges on known-true links on the v2 corpus pointed the wrong way (the extractor made the
   sentence's subject the source). Relation types now accept `source_type`/`target_type` as a name or

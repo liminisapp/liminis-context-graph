@@ -86,6 +86,9 @@ pub fn sidecar_endpoint(
     match embedder {
         Some(EmbedderFlag::Uds(p)) => Some(Endpoint::Uds(p.clone())),
         Some(EmbedderFlag::Http(u)) => local_http(u.clone()),
+        // `--embedder test` (#851) has no sidecar, and must never fall through to one found in
+        // the environment: the reranker and expander stay unconfigured.
+        Some(EmbedderFlag::Test) => None,
         None if default_socket_exists => Some(Endpoint::Uds(DEFAULT_SIDECAR_UDS.to_string())),
         None => embedding_url.and_then(local_http),
     }
@@ -267,6 +270,19 @@ mod tests {
     }
     fn http(u: &str) -> Endpoint {
         Endpoint::Http(u.into())
+    }
+
+    #[test]
+    fn test_embedder_has_no_sidecar_even_when_the_environment_offers_one() {
+        // #851: `--embedder test` must never fall through to a default socket or env URL.
+        assert_eq!(
+            sidecar_endpoint(
+                Some(&EmbedderFlag::Test),
+                true,
+                Some("http://localhost:8080/v1".into())
+            ),
+            None
+        );
     }
 
     #[test]

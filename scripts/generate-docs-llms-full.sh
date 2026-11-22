@@ -78,6 +78,7 @@ ORDERED=(
   "ontology.md:${SITE_URL}/ontology"
   "operations.md:${SITE_URL}/operations"
   "testing-and-evaluation.md:${SITE_URL}/testing-and-evaluation"
+  "test-providers.md:${SITE_URL}/test-providers"
   "eval-full-corpus-runbook.md:${SITE_URL}/eval-full-corpus-runbook"
   "extraction-quality-evaluation.md:${SITE_URL}/extraction-quality-evaluation"
   "retrieval-quality-evaluation.md:${SITE_URL}/retrieval-quality-evaluation"
