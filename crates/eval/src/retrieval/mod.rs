@@ -41,6 +41,26 @@ use self::report::{
 /// Minimum questions per category before a plan warns that per-category figures are thin (SC-003).
 pub const MIN_QUESTIONS_PER_CATEGORY: usize = 5;
 
+/// Hybrid-passage evidence tally (issue #871): how many returned hits only the BM25 leg found
+/// (`legs == "lexical"`) out of all hits returned. Sums across questions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LegsTally {
+    pub lexical_only: u64,
+    pub total: u64,
+}
+
+impl LegsTally {
+    pub fn add(&mut self, other: LegsTally) {
+        self.lexical_only += other.lexical_only;
+        self.total += other.total;
+    }
+
+    /// Lexical-only share of returned hits; `None` when no hit was returned.
+    pub fn share(&self) -> Option<f64> {
+        (self.total > 0).then(|| self.lexical_only as f64 / self.total as f64)
+    }
+}
+
 /// What one system returned for one question.
 #[derive(Debug, Clone)]
 pub struct RankedResult {
@@ -55,6 +75,9 @@ pub struct RankedResult {
     /// Returned hits that carried no evidence text (qmd hits without a snippet). They stay in the
     /// ranking as empty evidence, are judged unsupported, and are counted so the report can say so.
     pub evidence_gaps: u64,
+    /// Lexical-only tally for a hybrid-mode passage config (issue #871); `None` for every other
+    /// retriever, so a vector row never reports a share.
+    pub legs_tally: Option<LegsTally>,
     pub latency: Duration,
 }
 
@@ -306,6 +329,7 @@ pub async fn score_config(
     let mut calls: Vec<Option<u64>> = Vec::new();
     let mut lookup_calls = 0;
     let mut evidence_gaps = 0;
+    let mut legs_tally: Option<LegsTally> = None;
     let mut errors = Vec::new();
     let mut judge_failure: Option<String> = None;
 
@@ -321,6 +345,9 @@ pub async fn score_config(
         calls.push(res.model_calls);
         lookup_calls += res.lookup_calls;
         evidence_gaps += res.evidence_gaps;
+        if let Some(t) = res.legs_tally {
+            legs_tally.get_or_insert_with(LegsTally::default).add(t);
+        }
 
         let mut ranks: Option<Vec<Option<usize>>> = None;
         if !q.evidence.is_empty() {
@@ -383,6 +410,7 @@ pub async fn score_config(
         model_calls_per_query,
         lookup_calls,
         evidence_gaps,
+        legs_tally,
         query_errors: errors,
         grounded,
         origin: None,
@@ -985,6 +1013,7 @@ mod tests {
                     model_calls: None,
                     lookup_calls: 0,
                     evidence_gaps: 0,
+                    legs_tally: None,
                     latency: Duration::from_millis(1),
                 })
             })
@@ -1102,6 +1131,7 @@ mod tests {
                     model_calls: Some(1),
                     lookup_calls: 0,
                     evidence_gaps: 0,
+                    legs_tally: None,
                     latency: Duration::from_millis(5),
                 })
             };

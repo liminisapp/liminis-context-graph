@@ -39,6 +39,18 @@ pub fn map_passages(passages: &[Value]) -> (Vec<String>, Vec<String>) {
     (notes, evidence)
 }
 
+/// Lexical-only tally over a hybrid passage response (issue #871): hits whose `legs` is `lexical`
+/// against all hits returned. A zero-hit response is a zero tally, so the question still counts.
+pub fn tally_legs(passages: &[Value]) -> super::LegsTally {
+    super::LegsTally {
+        lexical_only: passages
+            .iter()
+            .filter(|p| p["legs"].as_str() == Some("lexical"))
+            .count() as u64,
+        total: passages.len() as u64,
+    }
+}
+
 /// Entities (`knowledge_find_entities` → `nodes`).
 pub fn map_entities(
     nodes: &[Value],
@@ -210,6 +222,25 @@ fn hard_split(s: &str, max_chars: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tally_legs_counts_lexical_only_hits_and_keeps_empty_responses_in_the_denominator() {
+        use serde_json::json;
+        let ps = vec![
+            json!({"uuid": "a", "legs": "lexical"}),
+            json!({"uuid": "b", "legs": "dense"}),
+            json!({"uuid": "c", "legs": "both"}),
+            json!({"uuid": "d", "legs": "lexical"}),
+        ];
+        let t = tally_legs(&ps);
+        assert_eq!((t.lexical_only, t.total), (2, 4));
+        assert_eq!(t.share(), Some(0.5));
+        let empty = tally_legs(&[]);
+        assert_eq!((empty.lexical_only, empty.total), (0, 0));
+        assert_eq!(empty.share(), None);
+        // A response without `legs` (older service) reads as no lexical-only hits.
+        assert_eq!(tally_legs(&[json!({"uuid": "x"})]).lexical_only, 0);
+    }
+
     use super::*;
     use serde_json::json;
 

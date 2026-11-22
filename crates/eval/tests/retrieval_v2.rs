@@ -1164,6 +1164,7 @@ impl Retriever for NoteLexical {
             model_calls: None,
             lookup_calls: 0,
             evidence_gaps: 0,
+            legs_tally: None,
             latency: Duration::from_millis(1),
         };
         Box::pin(async move { Ok(res) })
