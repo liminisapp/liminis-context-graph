@@ -348,6 +348,30 @@ async fn cross_group_edge_checks_only_the_edges_own_group() {
 
 // ── group-required / group-array methods ──────────────────────────────────────────────────────
 
+/// Issue #809, FR-021: `knowledge_reembed_missing` refuses an unlisted group before any embedder
+/// call or change, `dry_run` included (classification is by method, not by params).
+#[tokio::test]
+async fn reembed_missing_refuses_unlisted_group_including_dry_run() {
+    let f = fixture();
+    let p = policy("a");
+    for params in [
+        json!({"group_id": "b"}),
+        json!({"group_id": "b", "dry_run": true}),
+        json!({"group_id": "b", "kinds": ["name"]}),
+    ] {
+        let v = call(&f, Some(&p), "knowledge_reembed_missing", params).await;
+        assert_refused(&v, "group_not_writable");
+    }
+    let v = call(
+        &f,
+        Some(&p),
+        "knowledge_reembed_missing",
+        json!({"group_id": "a", "dry_run": true}),
+    )
+    .await;
+    assert_not_refused(&v);
+}
+
 #[tokio::test]
 async fn required_group_methods_are_checked() {
     let f = fixture();
@@ -357,6 +381,7 @@ async fn required_group_methods_are_checked() {
         "knowledge_canonicalize_relations",
         "knowledge_backfill_relation_types",
         "knowledge_backfill_summary_embeddings",
+        "knowledge_reembed_missing",
         "knowledge_reload_ontology",
     ] {
         let v = call(&f, Some(&p), method, json!({"group_id": "b"})).await;

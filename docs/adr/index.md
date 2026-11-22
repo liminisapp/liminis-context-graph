@@ -169,6 +169,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0802](0802-caller-supplied-query-variants-weighted-rrf.md) | Caller-Supplied Query Variants, Fused with Weighted RRF | 2026-11-18 |
 | [0806](0806-belief-aware-passage-ranking-default.md) | Belief-Aware Passage Ranking Is the Default | 2026-11-19 |
 | [0808](0808-replay-embed-retry-and-zero-vector-record.md) | Replay Embedding Recompute — Bounded Retry, Window Splitting and a Durable Zero-Vector Record | 2026-11-19 |
+| [0809](0809-reembed-missing-zero-vectors.md) | `knowledge_reembed_missing` — Repair Zero-Vector Embeddings Across All Kinds | 2026-11-21 |
 | [0812](0812-search-min-score-env-default.md) | Operator-Configurable Default `min_score` for Passage Search | 2026-11-19 |
 | [0816](0816-ontology-edge-direction-check-and-repair.md) | Ontology Edge Direction — Define, Validate and Repair | 2026-11-21 |
 | [0819](0819-graph-integrity-eval.md) | `lcg-eval graph-integrity`: Deterministic Graph Scoring Over a Copied DB | 2026-11-21 |

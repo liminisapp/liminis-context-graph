@@ -1255,20 +1255,9 @@ impl<'db> Conn<'db> {
     /// any other error (missing table, malformed column, ...) propagates so callers can observe a
     /// genuine index-build failure instead of silently treating it as success.
     pub fn create_vector_indexes(&self) -> Result<(), Error> {
-        for sql in [
-            "CALL CREATE_VECTOR_INDEX('Entity', 'entity_name_embedding_idx', \
-             'name_embedding', metric := 'cosine')",
-            "CALL CREATE_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx', \
-             'content_embedding', metric := 'cosine')",
-            "CALL CREATE_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx', \
-             'fact_embedding', metric := 'cosine')",
-        ] {
-            if let Err(e) = self.raw_query(sql) {
-                if !crate::error::is_already_exists_error(&e) {
-                    return Err(e);
-                }
-            }
-        }
+        self.create_entity_name_embedding_index()?;
+        self.create_episodic_content_embedding_index()?;
+        self.create_edge_fact_embedding_index()?;
         self.create_entity_summary_embedding_index()
     }
 
@@ -1278,12 +1267,63 @@ impl<'db> Conn<'db> {
     /// pre-rebuild HNSW index in place after `CREATE_VECTOR_INDEX` stops treating every error
     /// as "already exists, move on."
     pub fn drop_vector_indexes(&self) {
+        self.drop_entity_name_embedding_index();
+        self.drop_episodic_content_embedding_index();
+        self.drop_edge_fact_embedding_index();
+        self.drop_entity_summary_embedding_index();
+    }
+
+    /// Runs one idempotent `CREATE_VECTOR_INDEX`, swallowing "already exists".
+    fn create_vector_index(&self, sql: &str) -> Result<(), Error> {
+        if let Err(e) = self.raw_query(sql) {
+            if !crate::error::is_already_exists_error(&e) {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Creates just the `Entity.name_embedding` HNSW index. Idempotent. Broken out so
+    /// `knowledge_reembed_missing` can drop/rebuild only the indexes of the kinds it writes
+    /// (issue #809).
+    pub fn create_entity_name_embedding_index(&self) -> Result<(), Error> {
+        self.create_vector_index(
+            "CALL CREATE_VECTOR_INDEX('Entity', 'entity_name_embedding_idx', \
+             'name_embedding', metric := 'cosine')",
+        )
+    }
+
+    /// Drops just the `Entity.name_embedding` HNSW index. Idempotent — errors are suppressed.
+    pub fn drop_entity_name_embedding_index(&self) {
         let _ = self.raw_query("CALL DROP_VECTOR_INDEX('Entity', 'entity_name_embedding_idx')");
+    }
+
+    /// Creates just the `Episodic.content_embedding` HNSW index. Idempotent.
+    pub fn create_episodic_content_embedding_index(&self) -> Result<(), Error> {
+        self.create_vector_index(
+            "CALL CREATE_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx', \
+             'content_embedding', metric := 'cosine')",
+        )
+    }
+
+    /// Drops just the `Episodic.content_embedding` HNSW index. Idempotent — errors suppressed.
+    pub fn drop_episodic_content_embedding_index(&self) {
         let _ =
             self.raw_query("CALL DROP_VECTOR_INDEX('Episodic', 'episodic_content_embedding_idx')");
+    }
+
+    /// Creates just the `RelatesToNode_.fact_embedding` HNSW index. Idempotent.
+    pub fn create_edge_fact_embedding_index(&self) -> Result<(), Error> {
+        self.create_vector_index(
+            "CALL CREATE_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx', \
+             'fact_embedding', metric := 'cosine')",
+        )
+    }
+
+    /// Drops just the `RelatesToNode_.fact_embedding` HNSW index. Idempotent — errors suppressed.
+    pub fn drop_edge_fact_embedding_index(&self) {
         let _ =
             self.raw_query("CALL DROP_VECTOR_INDEX('RelatesToNode_', 'edge_fact_embedding_idx')");
-        self.drop_entity_summary_embedding_index();
     }
 
     /// Creates just the `Entity.summary_embedding` HNSW index. Idempotent, following the same
@@ -1292,15 +1332,10 @@ impl<'db> Conn<'db> {
     /// can drop/rebuild this single index around its write phase without touching the other 3
     /// (issue #470).
     pub fn create_entity_summary_embedding_index(&self) -> Result<(), Error> {
-        if let Err(e) = self.raw_query(
+        self.create_vector_index(
             "CALL CREATE_VECTOR_INDEX('Entity', 'entity_summary_embedding_idx', \
              'summary_embedding', metric := 'cosine')",
-        ) {
-            if !crate::error::is_already_exists_error(&e) {
-                return Err(e);
-            }
-        }
-        Ok(())
+        )
     }
 
     /// Drops just the `Entity.summary_embedding` HNSW index. Idempotent — errors are suppressed.

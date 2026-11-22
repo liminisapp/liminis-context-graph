@@ -73,6 +73,7 @@ every group in the database — treat the process boundary as the trust boundary
 - **[Retrieval-Quality Evaluation](retrieval-quality-evaluation.md)** — `lcg-eval retrieval`: LCG vs qmd on two notebook corpora (smoke and realistic), bootstrap confidence intervals, the question/judgement format, and how to run it, including on a private notebook.
 - **[Graph-Integrity Evaluation](graph-integrity-evaluation.md)** — `lcg-eval graph-integrity`: a deterministic report on an extracted graph (typing, links, direction, value-fact attachment, junk, signature marks) scored against a fixture skeleton, with `--compare` for before/after.
 - **[Retrieval Experiments](retrieval-experiments.md)** — master record of every retrieval experiment: what was tried, the v2/v1 scores, and what was decided.
+- **[WebBrain retrieval suggestions (research)](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/research/webbrain-retrieval-suggestions.md)** — findings and recommendations on the OR lexical leg, score semantics and #812's floor, merge-by-similarity, and `lcg-eval` report hygiene (#843, #847, #848, #849).
 - **[Full-Corpus Extraction Benchmark Runbook](eval-full-corpus-runbook.md)** — maintainer procedure for full-corpus model comparison.
 - **[Release Process](release-process.md)** — maintainer procedure for verifying CI status before cutting a release.
 - **[ADR Index](adr/index.md)** — architecture decision records (historical, not current-state, documentation — see the index for framing).

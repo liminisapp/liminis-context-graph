@@ -208,6 +208,7 @@ pub const CLASSIFICATION: &[(&str, WriteClass)] = &[
         "knowledge_backfill_summary_embeddings",
         WriteClass::GroupRequired,
     ),
+    ("knowledge_reembed_missing", WriteClass::GroupRequired),
     ("knowledge_reload_ontology", WriteClass::GroupRequired),
     // ── required group array ──
     ("knowledge_delete_by_source", WriteClass::GroupsRequired),

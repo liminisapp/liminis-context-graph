@@ -70,6 +70,20 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   read-scope, read-only (no WAL writes) and exposed as MCP tools (56 tools; the read scope
   has 21). LCG makes no LLM call: the agent using LCG is the planner. E13 measured this walk at
   0.91 against 0.37 for the best passage search on the v2 graph questions.
+- **`knowledge_reembed_missing`: repair zero-vector embeddings across all kinds (#809, ADR-0809).**
+  An admin tool, `knowledge_reembed_missing(group_id, kinds?, dry_run?)`, re-embeds exactly the rows
+  the zero-vector record (#808, `knowledge_status` `zero_vector_rows`) lists for a group — entity
+  `name`, entity `summary`, relationship `fact` and episode `content`, default all — from their
+  stored source text, with replay's retry/backoff policy and the document-role embedder. It returns
+  per-kind `candidates`, `reembedded`, `failed` and `skipped_no_source`; a repaired row leaves the
+  record (so the status count drops) and a failed one stays for a later retry. `dry_run` only counts.
+  All embedding finishes before any vector index is dropped, and only the indexes of kinds with
+  something to write are dropped and rebuilt; those indexes span every group, so writes are blocked
+  and vector search waits while one is down. A failed rebuild is reported in `index_rebuild_errors`
+  and the next search rebuilds automatically. Admin scope, group-scoped under `--writable-groups`
+  (MCP tools: 56 → 57). The index drop/write/rebuild lifecycle is now shared with
+  `knowledge_backfill_summary_embeddings`, which now restores the prior `indices_built` value
+  instead of forcing it `true` and attempts its rebuild even after a failed write.
 - **`LCG_SEARCH_MIN_SCORE`: configurable default `min_score` for `knowledge_search_passages`
   (#812, ADR-0812).** The default floor used when a request omits `min_score` was a hard-coded 0.5,
   which can let unrelated passages through for some embedders (#811). Operators can now set it per
