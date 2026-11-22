@@ -1954,6 +1954,9 @@ async fn test_knowledge_process_chunk_duplicate_chunk_id() {
         "source_file": "test.txt",
         "reference_time": "2024-06-01T12:00:00Z",
     });
+    // Issue #858: byte-identical resubmission is a no-op, so the duplicate carries revised text.
+    let mut params2 = params.clone();
+    params2["chunk_text"] = json!("Alice works at Acme Corp. She joined in 2020.");
     let v1 = dispatch_val(
         31,
         "knowledge_process_chunk",
@@ -1961,7 +1964,7 @@ async fn test_knowledge_process_chunk_duplicate_chunk_id() {
         Arc::clone(&state),
     )
     .await;
-    let v2 = dispatch_val(32, "knowledge_process_chunk", params, Arc::clone(&state)).await;
+    let v2 = dispatch_val(32, "knowledge_process_chunk", params2, Arc::clone(&state)).await;
     assert_ok_resp(&v1, 31);
     assert_ok_resp(&v2, 32);
     let uuid1 = v1["result"]["episode_uuid"].as_str().unwrap();
@@ -2076,13 +2079,16 @@ async fn test_knowledge_process_chunk_advisory_threshold_behavior() {
         other => panic!("unexpected telemetry event: {other:?}"),
     }
 
-    // Repeated calls with the same oversized chunk_text (resubmission) fire the warning and
-    // telemetry on every call, not just the first (Edge Cases).
+    // Repeated calls with a revised oversized chunk_text (resubmission) fire the warning and
+    // telemetry on every call, not just the first (Edge Cases). The text must differ: an
+    // identical resubmission is a no-op that produces neither (issue #858; see
+    // chunk_unchanged_noop.rs).
+    let revised_oversized_text = "b".repeat(8_001);
     let v = dispatch_val(
         62,
         "knowledge_process_chunk",
         json!({
-            "chunk_text": oversized_text,
+            "chunk_text": revised_oversized_text,
             "chunk_id": "above-threshold",
             "source_file": "test.txt",
             "reference_time": "2024-06-01T12:00:00Z",
