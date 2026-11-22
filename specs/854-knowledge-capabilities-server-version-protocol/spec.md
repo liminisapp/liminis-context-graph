@@ -32,7 +32,7 @@ This issue implements #835. It gives the socket a self-description: a version, a
 
 **Naming note.** The issue text says `knowledge_health_check`, but the existing socket method is `health_check` (the one dispatcher method not prefixed `knowledge_*`; it is not exposed over MCP). This spec treats the issue's "health check" as the existing `health_check` method and does not introduce a new `knowledge_health_check`. The `knowledge_status` method is unchanged.
 
-**Current surface (from docs).** The IPC reference states 57 dispatcher methods (56 `knowledge_*` plus `health_check`) and 56 MCP tools. Adding `knowledge_capabilities` makes these 58 and 57 respectively; the reference and the tool-count assertions must move with it.
+**Current surface (from docs).** The IPC reference states 58 dispatcher methods (57 `knowledge_*` plus `health_check`) and 57 MCP tools (after #809 added an admin tool). Adding `knowledge_capabilities` makes these 59 and 58 respectively; the reference and the tool-count assertions must move with it.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -138,7 +138,7 @@ A contributor changing a default scope or the semantics of a response field find
 - **FR-008**: `knowledge_capabilities` MUST NOT take the write lock and MUST NOT query the database, so it answers during rebuilds and writes and in degraded mode.
 - **FR-009**: `health_check` MUST additionally report `server_version` and `protocol_version` in all its states (healthy, busy, degraded), with the same values as `knowledge_capabilities`. No existing field of `health_check` may change name, type or meaning.
 - **FR-010**: `knowledge_capabilities` MUST be exposed as an MCP tool in the `read` scope, with a description and input schema, returning the same content as the IPC method.
-- **FR-011**: The MCP tool-registry count and per-scope bucket assertions MUST be updated for one additional `read` tool, and every documented count (IPC methods 57→58, MCP tools 56→57, and any README or reference mention) MUST be updated to match.
+- **FR-011**: The MCP tool-registry count and per-scope bucket assertions MUST be updated for one additional `read` tool, and every documented count (IPC methods 58→59, MCP tools 57→58, and any README or reference mention) MUST be updated to match.
 - **FR-012**: The IPC/MCP reference MUST document `knowledge_capabilities` (fields, sort order, how clients should use `protocol_version` and `features`, the unknown-method fallback for old servers) and the two new `health_check` fields.
 - **FR-013**: The contributing guide or release runbook MUST include a CHANGELOG rule that changes to default scope or response semantics are flagged as breaking for raw-socket clients, and that a breaking socket-protocol change bumps `protocol_version`.
 - **FR-014**: An ADR MUST record the decision, named per the repository's issue-number convention (`docs/adr/0854-<slug>.md`), added to the ADR index, covering the protocol-version policy and the rule that later issues add their own feature string.

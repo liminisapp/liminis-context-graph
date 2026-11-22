@@ -60,7 +60,7 @@ found: …`). Clients treat it as "predates capabilities".
 
 - Adding a dispatcher method now touches: the `match` arm, `CLASSIFICATION` (which feeds `methods`),
   the degraded exemption if applicable, and the MCP `ToolSpec` — the first two are test-enforced.
-- IPC surface 57 → 58 methods; MCP registry 56 → 57 tools.
+- IPC surface 58 → 59 methods; MCP registry 57 → 58 tools.
 - No Python client or Electron change is part of this issue.
 
 ## References
