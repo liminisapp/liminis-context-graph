@@ -297,6 +297,8 @@ async fn busy_reports_ready_for_reads_true() {
             "ready_for_reads": true,
             "activity": "writing",
             "providers": {"embedder": "real", "extractor": "real"},
+            "server_version": env!("CARGO_PKG_VERSION"),
+            "protocol_version": 1,
         })
     );
 }
