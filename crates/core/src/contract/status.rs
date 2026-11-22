@@ -1,5 +1,6 @@
 //! `knowledge_status` result (handlers.rs `handle_knowledge_status`).
 
+use super::Nullable;
 use schemars::JsonSchema;
 use std::collections::BTreeMap;
 
@@ -30,22 +31,16 @@ pub struct Wal {
     pub file_count: u64,
     pub byte_size: u64,
     /// `null` = unknown, `0` = nothing applied.
-    #[schemars(required)]
-    pub applied_seq: Option<u64>,
-    #[schemars(required)]
-    pub max_seq: Option<u64>,
-    #[schemars(required)]
-    pub generation: Option<String>,
+    pub applied_seq: Nullable<u64>,
+    pub max_seq: Nullable<u64>,
+    pub generation: Nullable<String>,
     /// `known`, `unknown` or `not_applicable`.
     pub generation_status: String,
     /// `hydrated`, `wal_ahead` or `not_applicable`.
     pub hydration_status: String,
-    #[schemars(required)]
-    pub embedding_model: Option<String>,
-    #[schemars(required)]
-    pub embedding_dim: Option<i64>,
-    #[schemars(required)]
-    pub embedding_doc_prefix: Option<String>,
+    pub embedding_model: Nullable<String>,
+    pub embedding_dim: Nullable<i64>,
+    pub embedding_doc_prefix: Nullable<String>,
     /// `match`, `mismatch`, `unknown` or `not_applicable`.
     pub embedding_model_status: String,
     /// Present only when a WAL root is configured (`default_group`).
@@ -63,20 +58,14 @@ pub struct Wal {
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct WalGroup {
-    #[schemars(required)]
-    pub applied_seq: Option<u64>,
-    #[schemars(required)]
-    pub max_seq: Option<u64>,
-    #[schemars(required)]
-    pub generation: Option<String>,
+    pub applied_seq: Nullable<u64>,
+    pub max_seq: Nullable<u64>,
+    pub generation: Nullable<String>,
     pub generation_status: String,
     pub hydration_status: String,
-    #[schemars(required)]
-    pub embedding_model: Option<String>,
-    #[schemars(required)]
-    pub embedding_dim: Option<i64>,
-    #[schemars(required)]
-    pub embedding_doc_prefix: Option<String>,
+    pub embedding_model: Nullable<String>,
+    pub embedding_dim: Nullable<i64>,
+    pub embedding_doc_prefix: Nullable<String>,
     pub embedding_model_status: String,
     pub zero_vector_rows: ZeroVectorRows,
 }
@@ -97,13 +86,11 @@ pub struct EmbeddingInstructions {
 pub struct OntologySummary {
     pub present: bool,
     pub loaded: bool,
-    #[schemars(required)]
-    pub mode: Option<String>,
+    pub mode: Nullable<String>,
     pub entity_type_count: u64,
     pub relation_type_count: u64,
     pub drifted: bool,
-    #[schemars(required)]
-    pub drift_summary: Option<String>,
+    pub drift_summary: Nullable<String>,
 }
 
 #[derive(JsonSchema)]
@@ -111,8 +98,7 @@ pub struct OntologySummary {
 pub struct GroupOntologyDrift {
     pub group_id: String,
     pub drifted: bool,
-    #[schemars(required)]
-    pub drift_summary: Option<String>,
+    pub drift_summary: Nullable<String>,
 }
 
 #[derive(JsonSchema)]
@@ -134,12 +120,9 @@ pub struct CrossGroupPointers {
 #[derive(JsonSchema)]
 #[allow(dead_code)]
 pub struct CrossGroupPointersNullable {
-    #[schemars(required)]
-    pub bound: Option<u64>,
-    #[schemars(required)]
-    pub unbound: Option<u64>,
-    #[schemars(required)]
-    pub ambiguous: Option<u64>,
+    pub bound: Nullable<u64>,
+    pub unbound: Nullable<u64>,
+    pub ambiguous: Nullable<u64>,
 }
 
 /// Database not open (ADR-0009): counts and WAL blocks are absent.
@@ -161,17 +144,12 @@ pub struct StatusDegraded {
     pub group_identity_refusals: Vec<GroupIdentityRefusal>,
     pub indices_built: bool,
     /// Always `null` in this shape.
-    #[schemars(required)]
-    pub name_index_trusted: Option<bool>,
-    #[schemars(required)]
-    pub name_index_fallback_scans: Option<u64>,
-    #[schemars(required)]
-    pub fts_repair_count: Option<u64>,
-    #[schemars(required)]
-    pub fts_last_repair_unix_ms: Option<u64>,
+    pub name_index_trusted: Nullable<bool>,
+    pub name_index_fallback_scans: Nullable<u64>,
+    pub fts_repair_count: Nullable<u64>,
+    pub fts_last_repair_unix_ms: Nullable<u64>,
     /// Always `null` in this shape.
-    #[schemars(required)]
-    pub cross_group_pointers: Option<CrossGroupPointers>,
+    pub cross_group_pointers: Nullable<CrossGroupPointers>,
     pub providers: Providers,
     pub search_min_score_default: f64,
 }
@@ -188,8 +166,7 @@ pub struct StatusQueryable {
     pub relationship_count: u64,
     pub legacy_edge_count: u64,
     pub episode_count: u64,
-    #[schemars(required)]
-    pub last_index_time: Option<String>,
+    pub last_index_time: Nullable<String>,
     /// Absent on an empty graph.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub index_created_at: Option<String>,
@@ -204,8 +181,7 @@ pub struct StatusQueryable {
     pub name_index_trusted: bool,
     pub name_index_fallback_scans: u64,
     pub fts_repair_count: u64,
-    #[schemars(required)]
-    pub fts_last_repair_unix_ms: Option<u64>,
+    pub fts_last_repair_unix_ms: Nullable<u64>,
     pub cross_group_pointers: CrossGroupPointers,
     pub ontology: OntologySummary,
     pub group_ontology_drift: Vec<GroupOntologyDrift>,
@@ -223,16 +199,11 @@ pub struct StatusNotQueryable {
     pub embedding_model: String,
     pub embedding_dim: u64,
     pub embedding_instructions: EmbeddingInstructions,
-    #[schemars(required)]
-    pub entity_count: Option<u64>,
-    #[schemars(required)]
-    pub relationship_count: Option<u64>,
-    #[schemars(required)]
-    pub episode_count: Option<u64>,
-    #[schemars(required)]
-    pub last_index_time: Option<String>,
-    #[schemars(required)]
-    pub index_created_at: Option<String>,
+    pub entity_count: Nullable<u64>,
+    pub relationship_count: Nullable<u64>,
+    pub episode_count: Nullable<u64>,
+    pub last_index_time: Nullable<String>,
+    pub index_created_at: Nullable<String>,
     pub context_graph_initialized: bool,
     pub connected: bool,
     pub queryable: bool,
@@ -245,8 +216,7 @@ pub struct StatusNotQueryable {
     pub name_index_trusted: bool,
     pub name_index_fallback_scans: u64,
     pub fts_repair_count: u64,
-    #[schemars(required)]
-    pub fts_last_repair_unix_ms: Option<u64>,
+    pub fts_last_repair_unix_ms: Nullable<u64>,
     pub cross_group_pointers: CrossGroupPointersNullable,
     pub ontology: OntologySummary,
     pub group_ontology_drift: Vec<GroupOntologyDrift>,

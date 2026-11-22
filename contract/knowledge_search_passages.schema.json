@@ -80,7 +80,10 @@
           "type": "string"
         },
         "valid_at": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

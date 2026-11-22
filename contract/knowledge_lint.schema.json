@@ -432,7 +432,10 @@
           "type": "string"
         },
         "document": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "episode": {
           "type": "string"
@@ -472,7 +475,10 @@
       "properties": {
         "embedding_cosine": {
           "description": "Cosine of the stored name embeddings; `null` when unavailable.",
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "kind": {
           "type": "string"
@@ -542,7 +548,10 @@
         },
         "derived_document": {
           "description": "The derived page's document id; `null` when it has none.",
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "formerly_supporting": {
           "items": {
@@ -693,7 +702,10 @@
     },
     "next_cursor": {
       "description": "Opaque cursor for the next page; `null` on the last page.",
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "summary": {
       "$ref": "#/definitions/Summary"

@@ -1,5 +1,6 @@
 //! `knowledge_find_entities` and `knowledge_find_relationships` results.
 
+use super::Nullable;
 use schemars::JsonSchema;
 
 /// `support` annotation: distinct supporting documents per origin.
@@ -18,12 +19,9 @@ pub struct Support {
 pub struct EntitySearchEvidence {
     pub rrf_score: f64,
     pub text_match: bool,
-    #[schemars(required)]
-    pub bm25_score: Option<f64>,
-    #[schemars(required)]
-    pub name_similarity: Option<f64>,
-    #[schemars(required)]
-    pub summary_similarity: Option<f64>,
+    pub bm25_score: Nullable<f64>,
+    pub name_similarity: Nullable<f64>,
+    pub summary_similarity: Nullable<f64>,
 }
 
 /// One entity in `nodes`.
@@ -68,10 +66,8 @@ pub struct FindEntitiesResult {
 pub struct EdgeSearchEvidence {
     pub rrf_score: f64,
     pub text_match: bool,
-    #[schemars(required)]
-    pub bm25_score: Option<f64>,
-    #[schemars(required)]
-    pub fact_similarity: Option<f64>,
+    pub bm25_score: Nullable<f64>,
+    pub fact_similarity: Nullable<f64>,
 }
 
 /// Supersession state of a fact (only when it has been superseded).
@@ -101,8 +97,7 @@ pub struct Belief {
     pub warrant: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub valid_at_source: Option<String>,
-    #[schemars(required)]
-    pub in_force: Option<bool>,
+    pub in_force: Nullable<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supersession: Option<Supersession>,
 }
@@ -119,13 +114,10 @@ pub struct RelationshipEdge {
     pub fact: String,
     pub created_at: String,
     pub ingested_at: String,
-    #[schemars(required)]
-    pub valid_at: Option<String>,
-    #[schemars(required)]
-    pub invalid_at: Option<String>,
+    pub valid_at: Nullable<String>,
+    pub invalid_at: Nullable<String>,
     pub attributes: String,
-    #[schemars(required)]
-    pub relation_type: Option<String>,
+    pub relation_type: Nullable<String>,
     pub episode_uuids: Vec<String>,
     pub source_descriptions: Vec<String>,
     /// Producing episode(s); omitted when empty.

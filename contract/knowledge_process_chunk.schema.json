@@ -83,7 +83,10 @@
           "type": "string"
         },
         "relation_type": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "source_name": {
           "type": "string"

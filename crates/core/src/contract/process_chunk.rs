@@ -1,5 +1,6 @@
 //! `knowledge_process_chunk` result.
 
+use super::Nullable;
 use schemars::JsonSchema;
 
 /// An extracted edge dropped because an endpoint never resolved to an entity.
@@ -8,8 +9,7 @@ use schemars::JsonSchema;
 pub struct DroppedEdge {
     pub source_name: String,
     pub target_name: String,
-    #[schemars(required)]
-    pub relation_type: Option<String>,
+    pub relation_type: Nullable<String>,
     pub fact: String,
     /// `source`, `target` or `both`.
     pub unresolved_endpoint: String,

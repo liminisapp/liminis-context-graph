@@ -1,5 +1,6 @@
 //! `knowledge_search_passages` result.
 
+use super::Nullable;
 use schemars::JsonSchema;
 use serde_json::Value;
 
@@ -13,8 +14,7 @@ pub struct Passage {
     pub source_description: String,
     pub group_id: String,
     pub created_at: String,
-    #[schemars(required)]
-    pub valid_at: Option<String>,
+    pub valid_at: Nullable<String>,
     pub score: f64,
     /// Episode metadata: a JSON object serialized as a string.
     pub attributes: String,

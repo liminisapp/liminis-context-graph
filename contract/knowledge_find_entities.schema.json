@@ -98,16 +98,25 @@
       "description": "Why an entity was returned: the fused score plus each retrieval path's raw evidence.",
       "properties": {
         "bm25_score": {
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "name_similarity": {
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "rrf_score": {
           "type": "number"
         },
         "summary_similarity": {
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "text_match": {
           "type": "boolean"

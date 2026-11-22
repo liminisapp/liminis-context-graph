@@ -31,6 +31,34 @@ use schemars::generate::SchemaSettings;
 use schemars::JsonSchema;
 use serde_json::{Map, Value};
 
+/// A field that is always emitted and may be `null` (`required` and nullable). `Option<T>` alone
+/// would make the field optional, which is not what the handlers do.
+pub(crate) struct Nullable<T>(std::marker::PhantomData<T>);
+
+impl<T: JsonSchema> JsonSchema for Nullable<T> {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        format!("Nullable_{}", T::schema_name()).into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let inner = serde_json::to_value(generator.subschema_for::<T>()).expect("schema");
+        // `{"type": "string"}` becomes `{"type": ["string", "null"]}`, which every consumer tool
+        // understands; anything else (a `$ref`) becomes `anyOf: [inner, null]`.
+        if let Some(obj) = inner.as_object() {
+            if let Some(Value::String(ty)) = obj.get("type") {
+                let mut out = obj.clone();
+                out.insert("type".into(), serde_json::json!([ty, "null"]));
+                return schemars::Schema::try_from(Value::Object(out)).expect("schema");
+            }
+        }
+        schemars::json_schema!({"anyOf": [inner, {"type": "null"}]})
+    }
+}
+
 /// The JSON Schema draft every published schema uses.
 pub const DRAFT: &str = "draft-07";
 

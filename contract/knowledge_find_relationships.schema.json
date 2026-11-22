@@ -8,7 +8,10 @@
           "type": "boolean"
         },
         "in_force": {
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "producing_episode_uuids": {
           "items": {
@@ -55,10 +58,16 @@
       "description": "Why a fact was returned.",
       "properties": {
         "bm25_score": {
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "fact_similarity": {
-          "type": "number"
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "rrf_score": {
           "type": "number"
@@ -124,13 +133,19 @@
           "type": "string"
         },
         "invalid_at": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
           "type": "string"
         },
         "relation_type": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "search": {
           "$ref": "#/definitions/EdgeSearchEvidence"
@@ -154,7 +169,10 @@
           "type": "string"
         },
         "valid_at": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "valid_at_source": {
           "description": "`text` or `reference_time`; omitted when not applicable.",

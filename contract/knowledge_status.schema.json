@@ -39,15 +39,24 @@
       "properties": {
         "ambiguous": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "bound": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "unbound": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -99,7 +108,10 @@
     "GroupOntologyDrift": {
       "properties": {
         "drift_summary": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "drifted": {
           "type": "boolean"
@@ -119,7 +131,10 @@
       "description": "Workspace-wide ontology state.",
       "properties": {
         "drift_summary": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "drifted": {
           "type": "boolean"
@@ -132,7 +147,10 @@
           "type": "boolean"
         },
         "mode": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "present": {
           "type": "boolean"
@@ -181,27 +199,15 @@
           "type": "boolean"
         },
         "cross_group_pointers": {
-          "description": "Always `null` in this shape.",
-          "properties": {
-            "ambiguous": {
-              "minimum": 0,
-              "type": "integer"
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CrossGroupPointers"
             },
-            "bound": {
-              "minimum": 0,
-              "type": "integer"
-            },
-            "unbound": {
-              "minimum": 0,
-              "type": "integer"
+            {
+              "type": "null"
             }
-          },
-          "required": [
-            "bound",
-            "unbound",
-            "ambiguous"
           ],
-          "type": "object"
+          "description": "Always `null` in this shape."
         },
         "dedup_mode": {
           "type": "string"
@@ -211,11 +217,17 @@
         },
         "fts_last_repair_unix_ms": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "fts_repair_count": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "group_identity_refusals": {
           "items": {
@@ -237,11 +249,17 @@
         },
         "name_index_fallback_scans": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "name_index_trusted": {
           "description": "Always `null` in this shape.",
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "ontology": {
           "$ref": "#/definitions/OntologySummary"
@@ -323,15 +341,24 @@
         },
         "entity_count": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "episode_count": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "fts_last_repair_unix_ms": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "fts_repair_count": {
           "minimum": 0,
@@ -350,7 +377,10 @@
           "type": "array"
         },
         "index_created_at": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "indices_built": {
           "type": "boolean"
@@ -359,7 +389,10 @@
           "type": "boolean"
         },
         "last_index_time": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name_index_fallback_scans": {
           "minimum": 0,
@@ -383,7 +416,10 @@
         },
         "relationship_count": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "search_min_score_default": {
           "type": "number"
@@ -468,7 +504,10 @@
         },
         "fts_last_repair_unix_ms": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "fts_repair_count": {
           "minimum": 0,
@@ -500,7 +539,10 @@
           "type": "boolean"
         },
         "last_index_time": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "legacy_edge_count": {
           "minimum": 0,
@@ -577,7 +619,10 @@
         "applied_seq": {
           "description": "`null` = unknown, `0` = nothing applied.",
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "byte_size": {
           "minimum": 0,
@@ -591,13 +636,22 @@
           ]
         },
         "embedding_dim": {
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "embedding_doc_prefix": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "embedding_model": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "embedding_model_status": {
           "description": "`match`, `mismatch`, `unknown` or `not_applicable`.",
@@ -611,7 +665,10 @@
           "type": "integer"
         },
         "generation": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "generation_status": {
           "description": "`known`, `unknown` or `not_applicable`.",
@@ -623,7 +680,10 @@
         },
         "max_seq": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "scope": {
           "description": "Present only when a WAL root is configured (`default_group`).",
@@ -661,22 +721,37 @@
       "properties": {
         "applied_seq": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "embedding_dim": {
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "embedding_doc_prefix": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "embedding_model": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "embedding_model_status": {
           "type": "string"
         },
         "generation": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "generation_status": {
           "type": "string"
@@ -686,7 +761,10 @@
         },
         "max_seq": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "zero_vector_rows": {
           "$ref": "#/definitions/ZeroVectorRows"

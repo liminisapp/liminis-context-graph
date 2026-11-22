@@ -5,6 +5,7 @@
 //! `details.derived_document` and a `causes` map; weak-support findings carry the kind in
 //! `finding.reason` and a `support` tally in `details`.
 
+use super::Nullable;
 use schemars::JsonSchema;
 use std::collections::BTreeMap;
 
@@ -53,8 +54,7 @@ pub struct Support {
 #[allow(dead_code)]
 pub struct FormerlySupporting {
     pub episode: String,
-    #[schemars(required)]
-    pub document: Option<String>,
+    pub document: Nullable<String>,
     pub origin: String,
     pub cause: String,
 }
@@ -64,8 +64,7 @@ pub struct FormerlySupporting {
 #[allow(dead_code)]
 pub struct StaleDetails {
     /// The derived page's document id; `null` when it has none.
-    #[schemars(required)]
-    pub derived_document: Option<String>,
+    pub derived_document: Nullable<String>,
     pub affected_facts: u64,
     pub total_facts: u64,
     /// Count of formerly-supporting episodes per cause, keyed by cause.
@@ -115,8 +114,7 @@ pub struct NearDuplicateDetails {
     pub kind: String,
     pub names: Vec<String>,
     /// Cosine of the stored name embeddings; `null` when unavailable.
-    #[schemars(required)]
-    pub embedding_cosine: Option<f64>,
+    pub embedding_cosine: Nullable<f64>,
 }
 
 /// `unlinked_mention` details when `reason` is `unlinked_mention`.
@@ -280,8 +278,7 @@ pub struct LintResult {
     pub findings: Vec<Finding>,
     pub count: u64,
     /// Opaque cursor for the next page; `null` on the last page.
-    #[schemars(required)]
-    pub next_cursor: Option<String>,
+    pub next_cursor: Nullable<String>,
     pub summary: Summary,
     pub effective: Effective,
 }
