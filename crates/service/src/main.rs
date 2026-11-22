@@ -477,9 +477,7 @@ async fn bootstrap_app_state(
                 ignored.join(", ")
             );
         }
-        let dim = embedding_dim_override
-            .filter(|d| *d > 0)
-            .unwrap_or(lcg_core::TEST_EMBEDDING_DEFAULT_DIM);
+        let dim = lcg_core::resolve_test_embedding_dim(embedding_dim_override)?;
         let emb = lcg_core::TestEmbedder::new(dim);
         let dim = lcg_core::Embedder::dim(&emb);
         eprintln!(

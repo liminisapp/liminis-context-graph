@@ -31,6 +31,25 @@ pub const TEST_EMBEDDER_MODEL: &str = "lcg-test-bow";
 /// database, so changing this would orphan existing test databases.
 pub const TEST_EMBEDDING_DEFAULT_DIM: usize = 768;
 
+/// Largest dimension accepted from `LCG_EMBEDDING_DIM` in test mode. Real embedders top out well
+/// below this; the bound exists so a typo cannot make every embed allocate gigabytes.
+pub const TEST_EMBEDDING_MAX_DIM: usize = 16_384;
+
+/// Resolves the test embedder's dimension from the optional `LCG_EMBEDDING_DIM` override.
+///
+/// `None` or `0` (unset / unparseable / zero) gives [`TEST_EMBEDDING_DEFAULT_DIM`]; a value above
+/// [`TEST_EMBEDDING_MAX_DIM`] is an error naming the limit. Values below 8 are accepted here and
+/// raised to 8 by [`TestEmbedder::new`].
+pub fn resolve_test_embedding_dim(override_dim: Option<usize>) -> Result<usize, String> {
+    match override_dim.filter(|d| *d > 0) {
+        None => Ok(TEST_EMBEDDING_DEFAULT_DIM),
+        Some(d) if d > TEST_EMBEDDING_MAX_DIM => Err(format!(
+            "LCG_EMBEDDING_DIM={d} exceeds the maximum of {TEST_EMBEDDING_MAX_DIM} for --embedder test"
+        )),
+        Some(d) => Ok(d),
+    }
+}
+
 /// Entity type given to every extracted entity (the engine's "no specific type" value, which
 /// passes through strict ontology mode unchanged).
 pub const TEST_ENTITY_TYPE: &str = "Entity";
@@ -377,6 +396,21 @@ impl Extractor for TestExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dim_resolution_defaults_accepts_and_bounds() {
+        assert_eq!(resolve_test_embedding_dim(None), Ok(768));
+        assert_eq!(resolve_test_embedding_dim(Some(0)), Ok(768));
+        assert_eq!(resolve_test_embedding_dim(Some(3)), Ok(3));
+        assert_eq!(resolve_test_embedding_dim(Some(384)), Ok(384));
+        assert_eq!(
+            resolve_test_embedding_dim(Some(TEST_EMBEDDING_MAX_DIM)),
+            Ok(TEST_EMBEDDING_MAX_DIM)
+        );
+        let err = resolve_test_embedding_dim(Some(TEST_EMBEDDING_MAX_DIM + 1)).unwrap_err();
+        assert!(err.contains("16384"), "{err}");
+        assert!(resolve_test_embedding_dim(Some(100_000_000_000)).is_err());
+    }
 
     fn cos(a: &[f32], b: &[f32]) -> f64 {
         a.iter()

@@ -47,7 +47,7 @@ A hashed bag of words over whole words and character trigrams, L2-normalised.
 
 | Guarantee | Value |
 |-----------|-------|
-| Dimension | `LCG_EMBEDDING_DIM` if set to a positive integer of at least **8**, else **768**. A value below 8 is raised to 8; `0` or an unparseable value is ignored and 768 is used (silently, with no warning). The effective dimension is printed in the startup log line. |
+| Dimension | `LCG_EMBEDDING_DIM` if set to a positive integer of at least **8**, else **768**. A value below 8 is raised to 8; `0` or an unparseable value is ignored and 768 is used (silently, with no warning); a value above **16384** is a startup error. The effective dimension is printed in the startup log line. |
 | Model identity | `lcg-test-bow` (so a database shared with a real embedder reports `embedding_model_status: "mismatch"`) |
 | Length | Every vector is unit length (L2 norm 1) |
 | Determinism | Bit-for-bit identical for the same text, across runs, processes and platforms |

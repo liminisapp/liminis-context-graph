@@ -9,7 +9,7 @@ title: Configuration
 
 | Flag | Description |
 |------|-------------|
-| `--embedder test` | **Tests only.** Use the built-in deterministic, offline embedder (a hashed bag of words): no sidecar, network or credentials. Dimension is `LCG_EMBEDDING_DIM` (a positive integer, raised to at least 8; `0` or an unparseable value is ignored), else 768. Never inferred from the environment. Mutually exclusive with `--embedder-uds`/`--embedder-http`; not valid with `--connect`. See [Test Providers](test-providers.md). |
+| `--embedder test` | **Tests only.** Use the built-in deterministic, offline embedder (a hashed bag of words): no sidecar, network or credentials. Dimension is `LCG_EMBEDDING_DIM` (a positive integer, raised to at least 8; `0` or an unparseable value is ignored; above 16384 is a startup error), else 768. Never inferred from the environment. Mutually exclusive with `--embedder-uds`/`--embedder-http`; not valid with `--connect`. See [Test Providers](test-providers.md). |
 | `--extractor test` | **Tests only.** Use the built-in deterministic, offline extractor, which extracts only from fact lines (`SRC -> DST: fact`, `SRC -[REL]-> DST: fact`): no LLM, network or credentials. Never inferred from the environment. Mutually exclusive with `--extractor-uds`/`--extractor-http`; not valid with `--connect` or with `LCG_RECORD_LLM`/`LCG_REPLAY_LLM`. See [Test Providers](test-providers.md). |
 | `--embedder-uds <path>` | Unix domain socket for the embedder sidecar (default on macOS: `/tmp/liminis-inference.sock`, auto-detected). |
 | `--embedder-http <url>` | HTTP URL for an OpenAI-compatible embedding endpoint. Mutually exclusive with `--embedder-uds`. |

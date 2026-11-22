@@ -108,8 +108,8 @@ pub use replay::{
 pub use schema::init as init_schema;
 pub use telemetry::{CaptureSink, NoopSink, TeeSink, TelemetryEvent, TelemetrySink};
 pub use test_providers::{
-    parse_fact_lines, FactEntity, FactLine, ParsedFacts, TestEmbedder, TestExtractor,
-    TEST_EMBEDDER_MODEL, TEST_EMBEDDING_DEFAULT_DIM,
+    parse_fact_lines, resolve_test_embedding_dim, FactEntity, FactLine, ParsedFacts, TestEmbedder,
+    TestExtractor, TEST_EMBEDDER_MODEL, TEST_EMBEDDING_DEFAULT_DIM, TEST_EMBEDDING_MAX_DIM,
 };
 pub use types::{
     EntityRow, EpisodicRow, ExtractedEdge, ExtractedEntity, ExtractionOutcome, ExtractionResult,
