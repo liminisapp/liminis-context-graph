@@ -45,6 +45,23 @@ pub struct Passage {
     /// Omitted for a legacy episode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_id: Option<String>,
+    /// Which hybrid retrieval legs found the passage (#871): `dense`, `lexical` or `both`.
+    /// Only on hybrid passage search.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legs: Option<PassageLegs>,
+    /// Raw BM25 value of the lexical leg (#871); only on single-query hybrid search where the
+    /// lexical leg matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lexical_score: Option<f64>,
+}
+
+#[derive(JsonSchema)]
+#[serde(rename_all = "lowercase")]
+#[allow(dead_code)]
+pub enum PassageLegs {
+    Dense,
+    Lexical,
+    Both,
 }
 
 #[derive(JsonSchema)]

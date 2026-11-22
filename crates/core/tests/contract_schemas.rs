@@ -635,6 +635,28 @@ async fn search_passages_validates() {
     assert_eq!(none["count"], 0);
     assert_valid("knowledge_search_passages", &none);
 
+    // Hybrid mode adds per-leg evidence (#871); drive it for real and check the shape.
+    let hybrid = call(
+        "knowledge_search_passages",
+        json!({"query": "text of pg", "group_ids": [G], "min_score": 0.0, "mode": "hybrid"}),
+        &state,
+    )
+    .await;
+    assert_valid("knowledge_search_passages", &hybrid);
+    let legs: Vec<&str> = hybrid["passages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["legs"].as_str())
+        .collect();
+    assert!(!legs.is_empty(), "hybrid passages carry `legs`: {hybrid}");
+    let mut m = hybrid.clone();
+    set(&mut m, "/passages/0/legs", json!("sideways"));
+    assert_invalid("knowledge_search_passages", "unknown legs value", &m);
+    let mut m = hybrid.clone();
+    set(&mut m, "/passages/0/lexical_score", json!("high"));
+    assert_invalid("knowledge_search_passages", "lexical_score: string", &m);
+
     // The rerank / expansion reports are free-form and appear only on staged paths that need a
     // configured model; the schema's optional-object slots are checked with a sample.
     let mut staged = r.clone();
