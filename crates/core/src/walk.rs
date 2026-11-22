@@ -8,7 +8,14 @@
 //! The algorithm is E13's v5, kept generic (no relation names, entity names or paths are
 //! hard-coded). Per hop:
 //!
-//! 1. candidates = edges incident to the frontier whose far end has not been visited;
+//! 1. candidates = edges incident to the frontier whose far end has not been visited; on the
+//!    **last** hop of a value walk (`answer_type` absent or `"value"`), also the frontier
+//!    entities' own self-loops, which carry literal-valued facts (#823, ADR-0823). A self-loop
+//!    matches either direction (`direction_matched` is `null`; it gets the soft bonus and is
+//!    always kept by the hard filter, whose match-or-fall-back decision is made over moving
+//!    edges only) and never becomes frontier. When a hop's only candidates
+//!    are self-loops the walk could not move, so the hop is still reported as `dead_end_at`,
+//!    with the self-loop facts in it;
 //! 2. relation-type filter (empty list = no filter; no match = fall back to all, recorded);
 //! 3. on the last hop, when `answer_type` is an entity type and the mode is not `history`:
 //!    keep far ends of that type (none = fall back to all, recorded);
@@ -246,7 +253,9 @@ pub struct WalkOutcome {
     pub hops: Vec<WalkHop>,
     pub fallbacks: WalkFallbacks,
     pub completion_hop_ran: bool,
-    /// 1-based hop at which the frontier was empty (no candidates), ending the walk early.
+    /// 1-based hop at which the walk could not move: no candidates (ending the walk early), or,
+    /// on the last hop of a value walk, only the frontier's own self-loops (a self-loop is not a
+    /// move; that hop is still returned with their facts).
     pub dead_end_at: Option<usize>,
     pub facts_text: String,
 }
@@ -317,9 +326,20 @@ fn relation_name(edge: &RelatesToEdge) -> &str {
 struct Candidate {
     edge: RelatesToEdge,
     far: String,
-    /// `Some` for `out`/`in` hops.
+    /// `Some` for `out`/`in` hops; always `None` for a self-loop.
     matched: Option<bool>,
+    /// A frontier entity's own self-loop (a literal-object fact, ADR-0823). Only offered on the
+    /// last hop of a value walk; it matches either direction and never extends the frontier.
+    self_loop: bool,
     score: f32,
+}
+
+impl Candidate {
+    /// Whether the candidate fits the hop's direction: a direction-matching edge, or a self-loop
+    /// (which matches either direction).
+    fn fits_direction(&self) -> bool {
+        self.self_loop || self.matched == Some(true)
+    }
 }
 
 fn date_part(ts: &str) -> &str {
@@ -435,18 +455,36 @@ impl<'a, G: WalkGraph> Walker<'a, G> {
         }
     }
 
-    /// Candidates at a frontier: incident edges whose far end is unvisited (this also drops
-    /// self-loops, since a frontier entity is always visited), oriented against `direction`.
+    /// Candidates at a frontier: incident edges whose far end is unvisited, oriented against
+    /// `direction`. A frontier entity is always visited, so this excludes self-loops, unless
+    /// `include_self_loops` is set (the last hop of a value walk, #823 / ADR-0823). Then a
+    /// frontier entity's own self-loops (its literal-valued facts) are candidates too, marked
+    /// [`Candidate::self_loop`]: they match either direction (`matched` is `None`) and never
+    /// extend the frontier.
     fn candidates(
         &self,
         frontier: &[String],
         visited: &HashSet<String>,
         include_invalidated: bool,
         direction: Direction,
+        include_self_loops: bool,
     ) -> Result<Vec<Candidate>, Error> {
         let fset: HashSet<&str> = frontier.iter().map(String::as_str).collect();
         let mut out = Vec::new();
         for edge in self.graph.incident_edges(frontier, include_invalidated)? {
+            if edge.source_node_uuid == edge.target_node_uuid {
+                if include_self_loops && fset.contains(edge.source_node_uuid.as_str()) {
+                    let far = edge.source_node_uuid.clone();
+                    out.push(Candidate {
+                        edge,
+                        far,
+                        matched: None,
+                        self_loop: true,
+                        score: 0.0,
+                    });
+                }
+                continue;
+            }
             let src_in = fset.contains(edge.source_node_uuid.as_str());
             let tgt_in = fset.contains(edge.target_node_uuid.as_str());
             let far = if src_in {
@@ -468,6 +506,7 @@ impl<'a, G: WalkGraph> Walker<'a, G> {
                 edge,
                 far,
                 matched,
+                self_loop: false,
                 score: 0.0,
             });
         }
@@ -495,7 +534,7 @@ fn rank(cands: &mut Vec<Candidate>, target: &[f32], bonus: f32, beam: usize) {
     for c in cands.iter_mut() {
         c.score = if usable.contains(&c.edge.uuid) {
             cosine_similarity(target, &c.edge.fact_embedding)
-                + if c.matched == Some(true) { bonus } else { 0.0 }
+                + if c.fits_direction() { bonus } else { 0.0 }
         } else {
             0.0
         };
@@ -553,11 +592,28 @@ pub fn run_with_ontologies<'a, G: WalkGraph>(
 
     for (i, hop) in plan.hops.iter().enumerate() {
         let n = i + 1;
-        let mut cands = w.candidates(&frontier, &visited, include_invalidated, hop.direction)?;
+        // #823 / ADR-0823: a literal-valued fact is stored as a self-loop on its entity. On the
+        // last hop of a value walk (`answer_type` absent or "value"), the frontier's own
+        // self-loops are candidates too, so the walk can return the entity's values. Never on
+        // an earlier hop: they would take beam slots meant for moving to the next entity.
+        let include_self_loops = i == last && plan.answer_type.is_none();
+        let mut cands = w.candidates(
+            &frontier,
+            &visited,
+            include_invalidated,
+            hop.direction,
+            include_self_loops,
+        )?;
         let candidate_count = cands.len();
         if cands.is_empty() {
             dead_end_at = Some(n);
             break;
+        }
+        // A self-loop is not a move: when it is the only kind of candidate, the walk still could
+        // not move here, so the hop is a dead end. Its facts are returned all the same. This
+        // can only happen on the last hop, so nothing after it is skipped.
+        if cands.iter().all(|c| c.self_loop) {
+            dead_end_at = Some(n);
         }
 
         // Relation-type filter.
@@ -601,10 +657,18 @@ pub fn run_with_ontologies<'a, G: WalkGraph>(
             match plan.direction_mode {
                 DirectionMode::Soft => bonus = DIRECTION_BONUS,
                 DirectionMode::Hard => {
-                    if cands.iter().any(|c| c.matched == Some(true)) {
-                        cands.retain(|c| c.matched == Some(true));
-                    } else {
-                        fallbacks.direction.push(n);
+                    // The match/fallback decision is over *moving* candidates only: a self-loop
+                    // (#823) fits either direction, so letting it count as a match would hide
+                    // the fallback for real edges. Self-loops are kept either way.
+                    if cands.iter().any(|c| !c.self_loop) {
+                        if cands
+                            .iter()
+                            .any(|c| !c.self_loop && c.matched == Some(true))
+                        {
+                            cands.retain(Candidate::fits_direction);
+                        } else {
+                            fallbacks.direction.push(n);
+                        }
                     }
                 }
             }
@@ -636,7 +700,8 @@ pub fn run_with_ontologies<'a, G: WalkGraph>(
                 let reached = frontier.iter().any(|u| has_type(w.labels(u), at));
                 if !reached {
                     let n = plan.hops.len() + 1;
-                    let mut cands = w.candidates(&frontier, &visited, false, Direction::Any)?;
+                    let mut cands =
+                        w.candidates(&frontier, &visited, false, Direction::Any, false)?;
                     let candidate_count = cands.len();
                     w.ensure_entities(cands.iter().map(|c| c.far.clone()))?;
                     cands.retain(|c| has_type(w.labels(&c.far), at));
@@ -671,11 +736,13 @@ pub fn run_with_ontologies<'a, G: WalkGraph>(
     })
 }
 
+/// The next frontier: the distinct far ends of the kept candidates. A self-loop never extends
+/// the frontier (its far end is the entity it sits on, already visited).
 fn unique_far_ends(cands: &[Candidate]) -> Vec<String> {
     let mut seen = HashSet::new();
     cands
         .iter()
-        .filter(|c| seen.insert(c.far.clone()))
+        .filter(|c| !c.self_loop && seen.insert(c.far.clone()))
         .map(|c| c.far.clone())
         .collect()
 }
@@ -1184,6 +1251,16 @@ mod tests {
         let mut g = MemGraph::default();
         g.ent("a", "T");
         g.edge("e1", "a", "a", "R", [1.0, 0.0]);
+
+        // Entity-typed answer: self-loops are never candidates, so the walk dead-ends empty.
+        let mut p = plan("a", vec![hop(&["R"], Direction::Any)]);
+        p.answer_type = Some("T".into());
+        let o = run(&g, None, &p, &emb(1)).unwrap();
+        assert!(o.hops.is_empty());
+        assert_eq!(o.dead_end_at, Some(1));
+
+        // Value walk (#823): the self-loop's fact is returned on the last hop, but it is not a
+        // move, so the hop is still the dead end.
         let o = run(
             &g,
             None,
@@ -1191,8 +1268,147 @@ mod tests {
             &emb(1),
         )
         .unwrap();
-        assert!(o.hops.is_empty());
+        assert_eq!(o.hops.len(), 1);
+        assert_eq!(uuids(&o.hops[0]), vec!["e1"]);
+        assert_eq!(o.hops[0].candidate_count, 1);
         assert_eq!(o.dead_end_at, Some(1));
+    }
+
+    /// #823 / ADR-0823: a literal-valued fact is a self-loop on its entity. A 2-hop value walk
+    /// returns the second entity's self-loop on the last hop, ranked with the other candidates.
+    #[test]
+    fn value_walk_returns_last_entitys_self_loop_fact() {
+        let mut g = MemGraph::default();
+        g.ent("a", "Person").ent("b", "Project").ent("c", "Company");
+        g.edge("e1", "a", "b", "OWNS", [1.0, 0.0])
+            .edge("e2", "b", "b", "HAS_MEASURE", [1.0, 0.0])
+            .edge("e3", "b", "c", "SUPPLIED_BY", [0.5, 1.0]);
+        let p = plan(
+            "a",
+            vec![
+                hop(&["OWNS"], Direction::Out),
+                hop(&["HAS_MEASURE"], Direction::Out),
+            ],
+        );
+        let o = run(&g, None, &p, &emb(2)).unwrap();
+        assert_eq!(uuids(&o.hops[0]), vec!["e1"]);
+        // The relation filter keeps the self-loop and drops the SUPPLIED_BY move.
+        assert_eq!(uuids(&o.hops[1]), vec!["e2"]);
+        let e = &o.hops[1].edges[0];
+        assert_eq!(
+            e.direction_matched, None,
+            "a self-loop matches either direction"
+        );
+        assert!(
+            (e.score - 1.0 - DIRECTION_BONUS).abs() < 1e-6,
+            "a self-loop gets the soft-direction bonus: {}",
+            e.score
+        );
+        assert!(o.fallbacks.relation_type.is_empty());
+        assert_eq!(
+            o.facts_text,
+            "- a OWNS b (A [Person] -> B [Project])\n- b HAS_MEASURE b (B [Project] -> B [Project])"
+        );
+        assert_eq!(
+            o.facts_text.matches("(B [Project] -> B [Project])").count(),
+            1,
+            "the self-loop renders once"
+        );
+        // Only self-loops survived the filter, but a move existed, so no dead end.
+        assert_eq!(o.dead_end_at, None);
+    }
+
+    #[test]
+    fn self_loop_is_not_a_candidate_on_a_non_final_hop() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T").ent("b", "T").ent("c", "T");
+        // a's self-loop would outrank a→b if it were a candidate on hop 1.
+        g.edge("e0", "a", "a", "R", [1.0, 0.0])
+            .edge("e1", "a", "b", "R", [0.5, 1.0])
+            .edge("e2", "b", "c", "R", [1.0, 0.0]);
+        let o = run(
+            &g,
+            None,
+            &plan(
+                "a",
+                vec![hop(&["R"], Direction::Any), hop(&["R"], Direction::Any)],
+            ),
+            &emb(2),
+        )
+        .unwrap();
+        assert_eq!(uuids(&o.hops[0]), vec!["e1"]);
+        assert_eq!(o.hops[0].candidate_count, 1);
+        // Hop 2 runs from b, not from a: a's self-loop is not on b's frontier.
+        assert_eq!(uuids(&o.hops[1]), vec!["e2"]);
+    }
+
+    #[test]
+    fn self_loop_never_becomes_frontier() {
+        let mut g = MemGraph::default();
+        g.ent("b", "T").ent("c", "T");
+        g.edge("e1", "b", "b", "R", [1.0, 0.0])
+            .edge("e2", "b", "c", "R", [0.5, 1.0]);
+        let w = Walker {
+            graph: &g,
+            ontologies: &|_| None,
+            entities: HashMap::new(),
+        };
+        let visited: HashSet<String> = ["b".to_string()].into_iter().collect();
+        let cands = w
+            .candidates(&["b".into()], &visited, false, Direction::Any, true)
+            .unwrap();
+        assert_eq!(cands.len(), 2);
+        assert!(cands.iter().any(|c| c.self_loop && c.edge.uuid == "e1"));
+        assert_eq!(unique_far_ends(&cands), vec!["c".to_string()]);
+        // Self-loops only: no frontier at all.
+        let only: Vec<Candidate> = cands.into_iter().filter(|c| c.self_loop).collect();
+        assert!(unique_far_ends(&only).is_empty());
+    }
+
+    #[test]
+    fn hard_direction_keeps_self_loops_as_matching() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T").ent("b", "T").ent("c", "T");
+        g.edge("e1", "a", "a", "R", [1.0, 0.0])
+            .edge("e2", "b", "a", "R", [1.0, 0.0])
+            .edge("e3", "a", "c", "R", [1.0, 0.0]);
+        let mut p = plan("a", vec![hop(&["R"], Direction::Out)]);
+        p.direction_mode = DirectionMode::Hard;
+        let o = run(&g, None, &p, &emb(1)).unwrap();
+        // A matching move exists: the reversed move is dropped, the self-loop is kept.
+        let mut got = uuids(&o.hops[0]);
+        got.sort();
+        assert_eq!(got, vec!["e1", "e3"]);
+        assert!(o.fallbacks.direction.is_empty());
+    }
+
+    /// A self-loop does not count as a hard-direction match: when no *moving* edge matches, the
+    /// hard filter still falls back (and records it) for the real edges, and the self-loop stays.
+    #[test]
+    fn hard_direction_fallback_is_decided_over_moving_edges_only() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T").ent("b", "T");
+        g.edge("e1", "a", "a", "R", [1.0, 0.0])
+            .edge("e2", "b", "a", "R", [1.0, 0.0]);
+        let mut p = plan("a", vec![hop(&["R"], Direction::Out)]);
+        p.direction_mode = DirectionMode::Hard;
+        let o = run(&g, None, &p, &emb(1)).unwrap();
+        let mut got = uuids(&o.hops[0]);
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["e1", "e2"],
+            "the incoming edge survives the fallback"
+        );
+        assert_eq!(o.fallbacks.direction, vec![1]);
+
+        // Only self-loops: there is no real edge to relax the constraint for, so no fallback.
+        let mut g2 = MemGraph::default();
+        g2.ent("a", "T");
+        g2.edge("e1", "a", "a", "R", [1.0, 0.0]);
+        let o = run(&g2, None, &p, &emb(1)).unwrap();
+        assert_eq!(uuids(&o.hops[0]), vec!["e1"]);
+        assert!(o.fallbacks.direction.is_empty());
     }
 
     #[test]

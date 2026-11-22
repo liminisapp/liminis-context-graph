@@ -487,16 +487,26 @@ fn rebind_pointers_impl(
             .iter()
             .any(|r| r.new_uuid != r.existing.resolved_uuid);
         let both_resolved = !prospective_src.is_empty() && !prospective_dst.is_empty();
-        if any_changed && both_resolved && prospective_src == prospective_dst {
+        // An edge that is *already* a self-loop (#823's literal-object edge, a literal-valued
+        // fact about one entity) is not a collapse: it stays a self-loop on the re-resolved
+        // entity, and its duplicate check is keyed on fact and relation type rather than
+        // `(src, dst, name)`, since distinct value facts share `(A, A, relation)` (ADR-0823).
+        // Only a rebind that *creates* a self-loop is invalidated as a collapse.
+        let was_self_loop = !actual_src.is_empty() && actual_src == actual_dst;
+        if any_changed && both_resolved && prospective_src == prospective_dst && !was_self_loop {
             conn.invalidate_edge(&rn_uuid, ts)?;
             counts.invalidated_self_loop += 1;
             conn.drain_mutations_into(&mut grouped, &rn_group_id);
             continue;
         }
-        if any_changed
+        let duplicate = any_changed
             && both_resolved
-            && conn.has_directed_edge(&prospective_src, &prospective_dst, &rn_name, &rn_group_id)?
-        {
+            && if was_self_loop {
+                conn.has_duplicate_self_loop(&prospective_src, &rn_group_id, &rn_uuid)?
+            } else {
+                conn.has_directed_edge(&prospective_src, &prospective_dst, &rn_name, &rn_group_id)?
+            };
+        if duplicate {
             conn.invalidate_edge(&rn_uuid, ts)?;
             counts.invalidated_duplicate += 1;
             conn.drain_mutations_into(&mut grouped, &rn_group_id);

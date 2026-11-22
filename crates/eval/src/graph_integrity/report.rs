@@ -76,6 +76,24 @@ pub struct ValueFacts {
     pub misattached: Ratio,
 }
 
+/// Opt-in (`--unstated-breakdown`, #823): every not-stated value fact classified by where its value
+/// does appear, in this precedence. Diagnostic only: never part of `--compare`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UnstatedBreakdown {
+    /// Value facts not stated on any edge of their entity (`value_facts.stated.den - num`).
+    pub not_stated: usize,
+    /// The value appears (exactly) in a summary of one of the entity's own nodes.
+    pub entity_summary_only: usize,
+    /// The value appears (exactly) on an edge not incident to the entity, or in another node's
+    /// name or summary.
+    pub other_entity: usize,
+    /// The value appears on an incident edge or the entity's own summary in another surface form
+    /// (`rules::states_in_other_form`: `$4,200` ≈ `4200 USD`, `March 2027` ≈ `2027-03`).
+    pub other_form: usize,
+    /// None of the above.
+    pub absent: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Junk {
     pub nodes: usize,
@@ -127,6 +145,10 @@ pub struct Report {
     pub value_facts: ValueFacts,
     pub junk: Junk,
     pub signature: Signature,
+    /// Present only with `--unstated-breakdown` (#823); a report without it is byte-identical to
+    /// one from before the flag existed. Not part of `--compare`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unstated_breakdown: Option<UnstatedBreakdown>,
     /// Excluded from `--compare` and from the determinism guarantee.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_meta: Option<RunMeta>,
@@ -316,6 +338,27 @@ impl Report {
             s,
             "\n\"Stated\" is an exact-string match, so restated values count as not stated: the not-stated count is an upper bound on true misses and the stated count a lower bound."
         );
+        if let Some(b) = &self.unstated_breakdown {
+            let _ = writeln!(s, "\n### Not-stated value facts by cause\n");
+            let _ = writeln!(s, "| Cause | Facts |\n|---|---|");
+            let _ = writeln!(
+                s,
+                "| Only in the entity's node summary | {} |",
+                b.entity_summary_only
+            );
+            let _ = writeln!(
+                s,
+                "| On another entity (non-incident edge, or another node's name or summary) | {} |",
+                b.other_entity
+            );
+            let _ = writeln!(s, "| Present in another surface form | {} |", b.other_form);
+            let _ = writeln!(s, "| Absent | {} |", b.absent);
+            let _ = writeln!(s, "| **not stated** | {} |", b.not_stated);
+            let _ = writeln!(
+                s,
+                "\nEach fact counts once, in the order above. \"Another surface form\" is loose (number tokens, date spellings), so it is an upper bound."
+            );
+        }
         let _ = writeln!(s, "\n## Junk\n");
         let _ = writeln!(s, "Nodes named like note IDs: **{}**", self.junk.nodes);
         if !self.junk.names.is_empty() {

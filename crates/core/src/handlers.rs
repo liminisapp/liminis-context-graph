@@ -1298,6 +1298,8 @@ async fn handle_knowledge_process_chunk(
         "edges_reclassified_unclassified": result.edges_reclassified_unclassified,
         "edges_swapped": result.edges_swapped,
         "edges_signature_mismatch": result.edges_signature_mismatch,
+        "edges_literal_object": result.edges_literal_object,
+        "edges_suspected_misattachment": result.edges_suspected_misattachment,
         "entities_reclassified_unclassified": result.entities_reclassified_unclassified,
         "entities_dropped_malformed": result.entities_dropped_malformed,
         "entities_dropped_source_id": result.entities_dropped_source_id,

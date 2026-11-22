@@ -789,10 +789,10 @@ pub fn registry() -> Vec<ToolSpec> {
                                 "required": ["phrase"]
                             }
                         },
-                        "answer_type": {"type": "string", "description": "An entity type name, or \"value\". On the last hop (not in history mode) far ends of this type are preferred; if the hops end short of it a completion hop runs."},
+                        "answer_type": {"type": "string", "description": "An entity type name, or \"value\". On the last hop (not in history mode) far ends of this type are preferred; if the hops end short of it a completion hop runs. With \"value\" (or when absent), the last hop also offers the frontier entities' own literal-valued facts (self-loops such as a budget or price) as candidates."},
                         "query": {"type": "string", "description": "The question text; ranks the completion hop (which does not run without it)."},
                         "mode": {"type": "string", "enum": ["single", "list", "history"], "default": "single", "description": "single: top 3 per hop; list: top 10; history: top 10 and includes invalidated edges."},
-                        "direction_mode": {"type": "string", "enum": ["soft", "hard"], "default": "soft", "description": "soft: matching edges get a +0.05 ranking bonus; hard: only matching edges are kept (falls back if none)."}
+                        "direction_mode": {"type": "string", "enum": ["soft", "hard"], "default": "soft", "description": "soft: matching edges get a +0.05 ranking bonus; hard: only matching edges are kept (falls back to all if no moving edge matches). A frontier entity's own self-loop (a value fact, offered on the last hop of a value walk) matches either direction: it gets the soft bonus, is always kept in hard mode, and never decides the fallback."}
                     },
                     "required": ["start"]
                 })
@@ -881,6 +881,11 @@ pub fn registry() -> Vec<ToolSpec> {
                            `edges_dropped_self_loop` counts edges dropped because both \
                            endpoints resolved to the same entity (they would have been \
                            self-loops); these are not in `dropped_edges`. \
+                           Under an ontology, `edges_literal_object` counts literal-valued facts \
+                           (a budget, date, price) stored as a self-loop on the one entity they \
+                           describe; `edges_suspected_misattachment` counts edges marked \
+                           `suspected_misattachment` because their fact states a value but does \
+                           not name both endpoints (never dropped). \
                            Recommended maximum `chunk_text` size is 8,000 characters (default, \
                            overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`) — extraction \
                            quality degrades well before any context-window limit is reached. \

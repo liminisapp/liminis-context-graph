@@ -146,10 +146,63 @@ pub fn entity_system_prompt(source_type: SourceType, ontology: Option<&Ontology>
     template.replace("{{ENTITY_TYPES_SECTION}}", &section)
 }
 
+/// Issue #823 (ADR-0823): whether literal-object edges are enabled — true iff the ontology
+/// offers at least one extractable relation type (the same predicate `build_fact_types_section`
+/// uses, so an ontology whose relation types are all `extract: false` counts as no ontology).
+///
+/// This single predicate gates both the edge prompt's endpoint rules and the ingest-side
+/// admission of name-level self-loops (`episode.rs`), so the two can never disagree. Under it a
+/// fact stating a literal value (a budget, date, price, role) about one entity is emitted with
+/// `source_name == target_name` and stored as a self-loop on that entity, instead of being pinned
+/// to an unrelated nearby entity. Applies to strict and open modes alike.
+pub fn literal_object_edges_enabled(ontology: Option<&Ontology>) -> bool {
+    ontology.is_some_and(|o| o.extractable_relation_types().next().is_some())
+}
+
+/// The TASK bullet rendered when literal-object edges are off (no ontology) — today's text,
+/// byte-for-byte, so the free-form prompt (and its cassette keys) is unchanged (FR-006).
+const TASK_ENDPOINT_CLAUSE_DEFAULT: &str =
+    "- involve two DISTINCT ENTITIES from the ENTITIES list,";
+
+/// Extraction rules 2–3 rendered when literal-object edges are off (no ontology) — today's text.
+const SINGLE_ENTITY_RULES_DEFAULT: &str = "\
+2. Each fact must involve two distinct entities — source_name and target_name NEVER refer to the same entity.
+3. NEVER extract facts that describe only a single entity's state, feeling, or attribute. Instead, identify the second entity that the state or feeling relates to and form a proper triple.
+   - BAD: \"Alice feels happy\" (single-entity state — what is Alice happy about?)
+   - GOOD: \"Alice feels happy about Bob's promotion\" → Alice FEELS_HAPPY_ABOUT Bob's promotion
+   - GOOD: \"Alice congratulated Bob\" (relationship between two entities), \"Alice lives in Paris\" (relationship between entity and place)";
+
+/// The TASK bullet rendered under an ontology (#823).
+const TASK_ENDPOINT_CLAUSE_LITERAL: &str = "\
+- involve two DISTINCT ENTITIES from the ENTITIES list, or state a literal value about a single entity from the list (see rule 3),";
+
+/// Extraction rules 2–3 rendered under an ontology (#823): a literal-valued fact about one entity
+/// is a self-referencing edge on that entity, never pinned to a nearby entity it does not involve.
+const SINGLE_ENTITY_RULES_LITERAL: &str = "\
+2. When a fact relates two entities, source_name and target_name are two distinct entities from the ENTITIES list.
+3. **Literal values**: when a fact states a literal value — an amount, price, budget, cost, date, deadline, duration, percentage, count, score, version, role or title — about ONE entity, and no other listed entity takes part in that fact, set BOTH source_name and target_name to that entity. The value stays in the fact text.
+   - \"Marlin Core has a monthly budget of $4,200\" → source_name: Marlin Core, target_name: Marlin Core
+   - \"Orbit Supply charges $43 per unit\" → source_name: Orbit Supply, target_name: Orbit Supply
+   - NEVER attach such a fact to another listed entity just because that entity appears nearby in the message. If the fact does not name the other entity, the other entity is not part of it.
+   - If another listed entity genuinely takes part in the fact, extract the edge between the two as usual: \"Tomas Kowalski set Marlin Core's monthly budget at $4,200\" → Tomas Kowalski and Marlin Core.
+   - A role or title held *in* another listed entity is a relation between the two, not a literal: \"Lena Moreau is the project lead of Marlin Core\" → Lena Moreau and Marlin Core. Only a role with no other listed entity (\"Lena Moreau is a senior engineer\") is a single-entity fact.
+   - Do not extract a single entity's mood or feeling as a literal value; for a state or feeling, identify the second entity it relates to (\"Alice feels happy about Bob's promotion\") or skip it.";
+
 /// Returns the edge extraction system prompt with optional ontology injection.
+///
+/// With no ontology (or one offering no extractable relation type) the rendering is
+/// byte-identical to the pre-#823 prompt — pinned by `testdata/extract_edges_no_ontology.golden.txt`.
 pub fn edge_system_prompt(ontology: Option<&Ontology>) -> String {
     let section = build_fact_types_section(ontology);
-    EXTRACT_EDGES.replace("{{FACT_TYPES_SECTION}}", &section)
+    let (task, rules) = if literal_object_edges_enabled(ontology) {
+        (TASK_ENDPOINT_CLAUSE_LITERAL, SINGLE_ENTITY_RULES_LITERAL)
+    } else {
+        (TASK_ENDPOINT_CLAUSE_DEFAULT, SINGLE_ENTITY_RULES_DEFAULT)
+    };
+    EXTRACT_EDGES
+        .replace("{{TASK_ENDPOINT_CLAUSE}}", task)
+        .replace("{{SINGLE_ENTITY_RULES}}", rules)
+        .replace("{{FACT_TYPES_SECTION}}", &section)
 }
 
 /// Returns the entity classification system prompt.
@@ -752,6 +805,48 @@ mod tests {
         );
         let open = edge_system_prompt(Some(&direction_ontology(OntologyMode::Open)));
         assert!(!open.contains("APPROVED_BY"), "{open}");
+    }
+
+    // ── #823: literal-object edges ───────────────────────────────────────────
+
+    const NO_ONTOLOGY_GOLDEN: &str = include_str!("testdata/extract_edges_no_ontology.golden.txt");
+
+    // FR-006: the free-form edge prompt is byte-identical to the pre-#823 rendering, and so is
+    // the rendering for an ontology that offers no extractable relation type.
+    #[test]
+    fn no_ontology_edge_prompt_matches_golden() {
+        assert_eq!(edge_system_prompt(None), NO_ONTOLOGY_GOLDEN);
+        assert!(!literal_object_edges_enabled(None));
+        let mut onto = assert_only_ontology(OntologyMode::Strict, true);
+        for rt in &mut onto.relation_types {
+            rt.extract = false;
+        }
+        assert!(!literal_object_edges_enabled(Some(&onto)));
+        assert_eq!(edge_system_prompt(Some(&onto)), NO_ONTOLOGY_GOLDEN);
+    }
+
+    #[test]
+    fn ontology_edge_prompt_carries_literal_object_rule_in_both_modes() {
+        for mode in [OntologyMode::Open, OntologyMode::Strict] {
+            let onto = direction_ontology(mode);
+            assert!(literal_object_edges_enabled(Some(&onto)));
+            let prompt = edge_system_prompt(Some(&onto));
+            assert!(prompt.contains("set BOTH source_name and target_name to that entity"));
+            assert!(prompt.contains("source_name: Marlin Core, target_name: Marlin Core"));
+            assert!(prompt.contains("NEVER attach such a fact to another listed entity"));
+            assert!(prompt.contains("Tomas Kowalski and Marlin Core"));
+            assert!(prompt.contains("or state a literal value about a single entity"));
+            // The contradictory free-form rules must not survive alongside the new rule.
+            assert!(
+                !prompt.contains("NEVER refer to the same entity"),
+                "{prompt}"
+            );
+            assert!(!prompt.contains("NEVER extract facts that describe only a single entity"));
+            assert!(
+                !prompt.contains("{{"),
+                "no unrendered placeholder: {prompt}"
+            );
+        }
     }
 
     #[test]

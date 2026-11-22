@@ -1415,7 +1415,17 @@ completion hop runs, from the start entities. Anything else with empty `hops`, a
 Algorithm (E13's v5, generic — no relation names are hard-coded). Per hop:
 
 1. **Candidates** are edges incident to the frontier (either direction) whose far end has not been
-   visited (cycles and self-loops never revisit). Live edges only, except in `history` mode.
+   visited (cycles never revisit). Live edges only, except in `history` mode. On the **last** hop,
+   when `answer_type` is `"value"` or absent, the frontier entities' own **self-loops** are
+   candidates too. These are the literal-valued facts (a budget, a price, a date) an ontology
+   extraction stores on the entity they describe
+   ([ADR-0823](adr/0823-literal-object-edges-as-self-loops.md)). A self-loop is filtered and ranked
+   like any other edge. It matches either direction, so `direction_matched` is `null`, but it gets
+   the soft bonus and is always kept by the hard filter. The hard filter decides between
+   matching and falling back by looking at moving edges only, so a self-loop never hides that
+   fallback. It never becomes frontier. Self-loops are never
+   candidates on an earlier hop, where they would take beam slots meant for moving on, nor in the
+   completion hop.
 2. **Relation filter**: keep edges whose `relation_type` is in `relation_types`; if none match,
    keep all and record a fallback.
 3. **Answer-type filter** (last hop only, `answer_type` an entity type, mode not `history`): keep
@@ -1431,7 +1441,9 @@ If the hops end on no entity of an entity-type `answer_type` and `query` is give
 `history`), one **completion hop** runs: edges from the final frontier to entities of that type,
 ranked by cosine(`query`, fact embedding), no direction logic. It is an *edge* hop (not a node
 ranking), appears as an extra entry with `completion: true`, and sets `completion_hop_ran`. A hop
-with no candidates ends the walk early (`dead_end_at`).
+with no candidates ends the walk early (`dead_end_at`). A self-loop is not a move: a last hop whose
+only candidates are self-loops is also reported as `dead_end_at`, and that hop is still returned
+with their facts. In `facts_text` a self-loop renders once, as `(X [Type] -> X [Type])`.
 
 Response:
 
@@ -1803,7 +1815,8 @@ result fields exist for that, both introduced in 0.13.2.
   salvage); inserting that edge would create a self-loop, so Phase C drops it. The count is a
   separate top-level field, always present, and these edges are *not* in `dropped_edges` or
   `edges_dropped_unresolvable`. (Edges whose endpoint *names* are identical are filtered earlier
-  and never counted.) Separately, an off-list edge endpoint that already exists exactly (same
+  and never counted, except under an ontology, where they are stored as literal-object self-loops;
+  see `edges_literal_object` below.) Separately, an off-list edge endpoint that already exists exactly (same
   group, case-insensitive) in the stored graph resolves to that entity and is never salvaged onto
   a similar entity of the current chunk; a name stored under more than one eligible kind is dropped
   as ambiguous rather than salvaged
@@ -1816,6 +1829,21 @@ result fields exist for that, both introduced in 0.13.2.
   in their `attributes` because they fit in neither direction. No edge is dropped by this check.
   Both are `0` for an ontology that declares no signature. Swaps made by an inverse alias
   (strict mode) are not counted here. See [Ontology → Edge direction](ontology.md#edge-direction).
+
+- **`edges_literal_object` and `edges_suspected_misattachment` report literal-valued facts (#823).**
+  Two additive top-level counters, always present. Under an ontology with an extractable relation
+  type, `edges_literal_object` counts edges stored as a **self-loop** on one entity because the
+  model emitted a literal-valued fact about it ("Marlin Core has a monthly budget of $4,200") with
+  the same name on both ends; each such edge carries `"literal_object": true` in its `attributes`.
+  Admission is by name equality alone (the fact is not checked for a value), so this is an upper
+  bound on genuine literal-valued facts. It is always `0` with no ontology, where a self-reference
+  is still dropped.
+  `edges_suspected_misattachment` counts edges between two different entities, in every mode,
+  stored unchanged but marked `"suspected_misattachment": true` because their fact states a literal
+  value (a digit or currency symbol) without naming both endpoints. Neither drops an edge. A
+  self-loop's endpoints have the same UUID in `knowledge_get_edges_by_group` and the other edge
+  reads. See [Ontology → Literal-valued facts](ontology.md#literal-valued-facts) and
+  [ADR-0823](adr/0823-literal-object-edges-as-self-loops.md).
 
 - **`warning` reports oversized input.** A `chunk_text` longer than the advisory threshold
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see

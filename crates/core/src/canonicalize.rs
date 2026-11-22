@@ -364,6 +364,11 @@ pub fn plan_direction(
     rn_uuid: &str,
     info: &EndpointInfo,
 ) -> (Option<DirectionWrite>, Option<DirectionCounts>) {
+    // A self-loop (#823's literal-object edge) has no direction: swapping it is meaningless and
+    // marking it would add a spurious `signature_mismatch` (ADR-0823). Skipped like ingest does.
+    if !info.src_uuid.is_empty() && info.src_uuid == info.dst_uuid {
+        return (None, None);
+    }
     // `extract: false` (assert-only) relations are host-asserted and never retyped or
     // reoriented by this pass (#637), so only extractable types are looked up.
     let Some(rt_def) = onto
@@ -1168,6 +1173,25 @@ mod tests {
             None,
             "non-ingest-form names are left alone"
         );
+    }
+
+    // #823: a literal-object self-loop is never swapped or marked, even when its entity fits the
+    // relation's signature in neither direction (ingest skips it the same way).
+    #[test]
+    fn plan_direction_skips_self_loops() {
+        let o = signature_ontology(); // AUTHORED: Person → any
+        let mut self_loop = info(&["Entity", "Project"], &["Entity", "Project"], "x", "{}");
+        self_loop.dst_uuid = self_loop.src_uuid.clone();
+        self_loop.dst_name = self_loop.src_name.clone();
+        assert!(matches!(
+            plan_direction(&o, "AUTHORED", false, "rn", &self_loop),
+            (None, None)
+        ));
+        // Even an inverse-forced retype does not swap a self-loop.
+        assert!(matches!(
+            plan_direction(&o, "AUTHORED", true, "rn", &self_loop),
+            (None, None)
+        ));
     }
 
     #[test]
