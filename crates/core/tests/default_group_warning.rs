@@ -363,3 +363,66 @@ async fn non_defaulting_methods_never_gain_a_warnings_key() {
         assert!(v["result"].get("warnings").is_none(), "{method}: {v}");
     }
 }
+
+// ── docs table vs dispatch classification (SC-003, FR-013) ────────────────────────────────────
+
+const REFERENCE: &str = include_str!("../../../docs/ipc-mcp-reference.md");
+const CLASSES: &[&str] = &[
+    "default group + warning",
+    "default group",
+    "every group",
+    "refused",
+    "not applicable",
+];
+
+/// Rows of the "Omitted-group behaviour per method" table: `(method, class)`.
+fn documented_rows() -> Vec<(String, String)> {
+    let start = REFERENCE
+        .find("### Omitted-group behaviour per method")
+        .expect("omitted-group section missing from docs/ipc-mcp-reference.md");
+    let section = &REFERENCE[start..];
+    let end = section[4..].find("\n### ").map_or(section.len(), |i| i + 4);
+    section[..end]
+        .lines()
+        .filter_map(|l| {
+            let cells: Vec<&str> = l.split('|').map(str::trim).collect();
+            let method = cells.get(1)?.strip_prefix('`')?.strip_suffix('`')?;
+            Some((method.to_string(), cells.get(2)?.to_string()))
+        })
+        .collect()
+}
+
+#[test]
+fn docs_table_covers_every_dispatched_method_exactly_once() {
+    let rows = documented_rows();
+    let mut documented: Vec<&str> = rows.iter().map(|(m, _)| m.as_str()).collect();
+    documented.sort_unstable();
+    let mut dup = documented.clone();
+    dup.dedup();
+    assert_eq!(dup.len(), documented.len(), "a method is documented twice");
+    let mut classified: Vec<&str> = write_policy::CLASSIFICATION
+        .iter()
+        .map(|(m, _)| *m)
+        .collect();
+    classified.sort_unstable();
+    assert_eq!(
+        documented, classified,
+        "docs/ipc-mcp-reference.md omitted-group table must list every classified method, no more"
+    );
+    for (m, c) in &rows {
+        assert!(CLASSES.contains(&c.as_str()), "{m}: unknown class {c:?}");
+    }
+}
+
+#[test]
+fn docs_warns_rows_equal_the_defaulting_writers() {
+    let mut warns: Vec<String> = documented_rows()
+        .into_iter()
+        .filter(|(_, c)| c == "default group + warning")
+        .map(|(m, _)| m)
+        .collect();
+    warns.sort_unstable();
+    let mut expected: Vec<String> = DEFAULTING_WRITERS.iter().map(|m| m.to_string()).collect();
+    expected.sort_unstable();
+    assert_eq!(warns, expected);
+}
