@@ -1235,3 +1235,350 @@ fn test_explicit_merge_ignores_identifier_veto() {
     assert!(result.success, "errors: {:?}", result.errors);
     assert_eq!(result.merged_count, 1);
 }
+
+// ── #823: literal-object self-loops survive a merge ──────────────────────────
+
+/// ADR-0823: an alias's pre-existing self-loops (literal-valued facts about the alias itself,
+/// e.g. a budget and a headcount) both move to the canonical — they are not merge-created
+/// self-loops, and the `(src, dst, name)` dedup does not collapse them into one.
+#[test]
+fn test_pre_existing_self_loops_move_to_canonical() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical = "mc-canon";
+    let alias = "mc-alias";
+    conn.insert_entity(&make_entity(
+        canonical,
+        "Marlin Core",
+        "2026-01-01 00:00:00",
+    ))
+    .unwrap();
+    conn.insert_entity(&make_entity(alias, "Marlin Core", "2026-01-01 00:01:00"))
+        .unwrap();
+    for fact in [
+        "Marlin Core has a monthly budget of $4,200",
+        "Marlin Core has a headcount of 12",
+    ] {
+        let mut e = make_edge(alias, alias, "Marlin Core → Marlin Core", TS);
+        e.fact = fact.to_string();
+        e.relation_type = Some("HAS_MEASURE".to_string());
+        e.attributes = "{\"literal_object\":true}".to_string();
+        conn.insert_relates_to_edge(&e).unwrap();
+    }
+    // Each self-loop is returned once, not once per incident hop.
+    assert_eq!(conn.get_full_edges_for_entity(alias).unwrap().len(), 2);
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some(canonical.to_string()),
+        alias_uuids: vec![alias.to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+    assert!(result.success, "{:?}", result.errors);
+    assert_eq!(result.edges_deduplicated, 0);
+
+    let active: Vec<_> = conn
+        .get_full_edges_for_entity(canonical)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.invalid_at.is_none())
+        .collect();
+    assert_eq!(active.len(), 2, "{active:?}");
+    for e in &active {
+        assert_eq!(e.source_node_uuid, canonical);
+        assert_eq!(e.target_node_uuid, canonical);
+        assert!(e.attributes.contains("literal_object"));
+    }
+    let mut facts: Vec<_> = active.iter().map(|e| e.fact.as_str()).collect();
+    facts.sort();
+    assert_eq!(
+        facts,
+        vec![
+            "Marlin Core has a headcount of 12",
+            "Marlin Core has a monthly budget of $4,200"
+        ]
+    );
+    assert!(conn
+        .get_full_edges_for_entity(alias)
+        .unwrap()
+        .iter()
+        .all(|e| e.invalid_at.is_some()));
+}
+
+/// ADR-0823: self-loops are deduplicated on fact and relation type, not `(src, dst, name)`. When
+/// alias and canonical each carry a copy of the same value fact (dedup-merged duplicates from
+/// different episodes), the alias's copy is invalidated rather than stacking a second active
+/// copy on the canonical. A distinct value fact still moves across.
+#[test]
+fn test_identical_self_loop_copy_is_deduplicated() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical = "mc-canon";
+    let alias = "mc-alias";
+    conn.insert_entity(&make_entity(
+        canonical,
+        "Marlin Core",
+        "2026-01-01 00:00:00",
+    ))
+    .unwrap();
+    conn.insert_entity(&make_entity(
+        alias,
+        "Marlin Core Project",
+        "2026-01-01 00:01:00",
+    ))
+    .unwrap();
+    let self_loop = |ent: &str, name: &str, fact: &str, rel: &str| {
+        let mut e = make_edge(ent, ent, name, TS);
+        e.fact = fact.to_string();
+        e.relation_type = Some(rel.to_string());
+        e.attributes = "{\"literal_object\":true}".to_string();
+        e
+    };
+    let budget = "Marlin Core has a monthly budget of $4,200";
+    conn.insert_relates_to_edge(&self_loop(
+        canonical,
+        "Marlin Core → Marlin Core",
+        budget,
+        "HAS_MEASURE",
+    ))
+    .unwrap();
+    // Same fact and relation type, under the alias's own edge name: a duplicate.
+    conn.insert_relates_to_edge(&self_loop(
+        alias,
+        "Marlin Core Project → Marlin Core Project",
+        budget,
+        "HAS_MEASURE",
+    ))
+    .unwrap();
+    // A different value fact on the alias: not a duplicate.
+    conn.insert_relates_to_edge(&self_loop(
+        alias,
+        "Marlin Core Project → Marlin Core Project",
+        "Marlin Core has a headcount of 12",
+        "HAS_MEASURE",
+    ))
+    .unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some(canonical.to_string()),
+        alias_uuids: vec![alias.to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+    assert!(result.success, "{:?}", result.errors);
+    assert_eq!(result.edges_deduplicated, 1);
+
+    let mut facts: Vec<_> = conn
+        .get_full_edges_for_entity(canonical)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.invalid_at.is_none())
+        .map(|e| e.fact)
+        .collect();
+    facts.sort();
+    assert_eq!(
+        facts,
+        vec![
+            "Marlin Core has a headcount of 12".to_string(),
+            budget.to_string()
+        ],
+        "the budget appears once"
+    );
+}
+
+/// FR-010 unchanged by ADR-0823: an edge that only *becomes* a self-loop through the merge
+/// (alias → canonical) is still invalidated.
+#[test]
+fn test_merge_created_self_loop_still_invalidated() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    conn.insert_entity(&make_entity("c-1", "X", "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity("a-1", "X", "2026-01-01 00:01:00"))
+        .unwrap();
+    conn.insert_relates_to_edge(&make_edge("a-1", "c-1", "rel", TS))
+        .unwrap();
+
+    let params = MergeEntitiesParams {
+        canonical_uuid: Some("c-1".to_string()),
+        alias_uuids: vec!["a-1".to_string()],
+        group_id: "liminis".to_string(),
+        ..Default::default()
+    };
+    let result = merge_entities(&conn, &params, TS);
+    assert!(result.success, "{:?}", result.errors);
+    assert!(conn
+        .get_full_edges_for_entity("c-1")
+        .unwrap()
+        .iter()
+        .all(|e| e.invalid_at.is_some()));
+}
+
+/// ADR-0823 on the corrections path: `apply_same_as` moves an alias's pre-existing self-loops
+/// (two distinct literal-valued facts sharing `(alias, alias, HAS_MEASURE)`) to the canonical
+/// without the `(src, dst, name)` dedup collapsing them into one.
+#[test]
+fn test_same_as_correction_moves_pre_existing_self_loops() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical = "sa-canon";
+    let alias = "sa-alias";
+    conn.insert_entity(&make_entity(
+        canonical,
+        "Marlin Core",
+        "2026-01-01 00:00:00",
+    ))
+    .unwrap();
+    conn.insert_entity(&make_entity(alias, "Marlin", "2026-01-01 00:01:00"))
+        .unwrap();
+    for fact in [
+        "Marlin has a monthly budget of $4,200",
+        "Marlin has a headcount of 12",
+    ] {
+        let mut e = make_edge(alias, alias, "HAS_MEASURE", TS);
+        e.fact = fact.to_string();
+        e.attributes = "{\"literal_object\":true}".to_string();
+        conn.insert_relates_to_edge(&e).unwrap();
+    }
+
+    let liminis_dir = dir.path().join(".liminis");
+    std::fs::create_dir_all(&liminis_dir).unwrap();
+    std::fs::write(
+        liminis_dir.join("knowledge-corrections.yaml"),
+        format!(
+            "corrections:\n  - id: \"c1\"\n    type: \"same_as\"\n    canonical_uuid: \"{canonical}\"\n    aliases: [\"Marlin\"]\n"
+        ),
+    )
+    .unwrap();
+    let result = apply_corrections_file(&conn, dir.path(), false);
+    assert!(result.success, "{:?}", result.errors);
+    assert_eq!(result.applied, 1);
+
+    let active: Vec<_> = conn
+        .get_full_edges_for_entity(canonical)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.invalid_at.is_none())
+        .collect();
+    assert_eq!(active.len(), 2, "{active:?}");
+    assert!(active
+        .iter()
+        .all(|e| e.source_node_uuid == canonical && e.target_node_uuid == canonical));
+}
+
+/// ADR-0823 on the corrections path: `apply_same_as` deduplicates a self-loop on fact and
+/// relation type, so the canonical's copy of the alias's budget fact is not doubled.
+#[test]
+fn test_same_as_correction_deduplicates_identical_self_loop() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical = "sa3-canon";
+    let alias = "sa3-alias";
+    conn.insert_entity(&make_entity(
+        canonical,
+        "Marlin Core",
+        "2026-01-01 00:00:00",
+    ))
+    .unwrap();
+    conn.insert_entity(&make_entity(alias, "Marlin", "2026-01-01 00:01:00"))
+        .unwrap();
+    let budget = "Marlin Core has a monthly budget of $4,200";
+    for (ent, fact) in [
+        (canonical, budget),
+        (alias, budget),
+        (alias, "Marlin Core has a headcount of 12"),
+    ] {
+        let mut e = make_edge(ent, ent, "HAS_MEASURE", TS);
+        e.fact = fact.to_string();
+        e.relation_type = Some("HAS_MEASURE".to_string());
+        e.attributes = "{\"literal_object\":true}".to_string();
+        conn.insert_relates_to_edge(&e).unwrap();
+    }
+
+    let liminis_dir = dir.path().join(".liminis");
+    std::fs::create_dir_all(&liminis_dir).unwrap();
+    std::fs::write(
+        liminis_dir.join("knowledge-corrections.yaml"),
+        format!(
+            "corrections:\n  - id: \"c1\"\n    type: \"same_as\"\n    canonical_uuid: \"{canonical}\"\n    aliases: [\"Marlin\"]\n"
+        ),
+    )
+    .unwrap();
+    let result = apply_corrections_file(&conn, dir.path(), false);
+    assert!(result.success, "{:?}", result.errors);
+
+    let mut facts: Vec<_> = conn
+        .get_full_edges_for_entity(canonical)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.invalid_at.is_none())
+        .map(|e| e.fact)
+        .collect();
+    facts.sort();
+    assert_eq!(
+        facts,
+        vec![
+            "Marlin Core has a headcount of 12".to_string(),
+            budget.to_string()
+        ]
+    );
+}
+
+/// FR-010 on the corrections path (ADR-0823): an alias ↔ canonical edge that only *becomes* a
+/// self-loop through a `same_as` correction is invalidated, as `merge_entities` does — never left
+/// as an unmarked self-loop.
+#[test]
+fn test_same_as_correction_invalidates_merge_created_self_loop() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let canonical = "sa2-canon";
+    let alias = "sa2-alias";
+    conn.insert_entity(&make_entity(canonical, "Robert", "2026-01-01 00:00:00"))
+        .unwrap();
+    conn.insert_entity(&make_entity(alias, "Bob", "2026-01-01 00:01:00"))
+        .unwrap();
+    let e = make_edge(alias, canonical, "KNOWS", TS);
+    let edge_uuid = e.uuid.clone();
+    conn.insert_relates_to_edge(&e).unwrap();
+
+    let liminis_dir = dir.path().join(".liminis");
+    std::fs::create_dir_all(&liminis_dir).unwrap();
+    std::fs::write(
+        liminis_dir.join("knowledge-corrections.yaml"),
+        format!(
+            "corrections:\n  - id: \"c1\"\n    type: \"same_as\"\n    canonical_uuid: \"{canonical}\"\n    aliases: [\"Bob\"]\n"
+        ),
+    )
+    .unwrap();
+    let result = apply_corrections_file(&conn, dir.path(), false);
+    assert!(result.success, "{:?}", result.errors);
+
+    let edges = conn.get_full_edges_for_entity(canonical).unwrap();
+    assert!(
+        edges
+            .iter()
+            .filter(|e| e.invalid_at.is_none())
+            .all(|e| e.source_node_uuid != e.target_node_uuid),
+        "no active self-loop on the canonical: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.uuid == edge_uuid && e.invalid_at.is_some()),
+        "the original alias → canonical edge is invalidated: {edges:?}"
+    );
+}

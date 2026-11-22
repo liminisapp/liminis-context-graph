@@ -572,8 +572,25 @@ fn apply_same_as(
                 };
 
                 // De-duplicate: skip if canonical already has an edge with the same name to the
-                // same endpoint, in the same group as this edge (see issue #368).
-                if conn.has_directed_edge(&new_src, &new_dst, &old_edge.name, &old_edge.group_id)? {
+                // same endpoint, in the same group as this edge (see issue #368). A pre-existing
+                // self-loop (#823's literal-object edge) is keyed on its fact and relation type
+                // instead: distinct value facts about one entity (a budget, a headcount)
+                // legitimately share `(A, A, relation)` and all move to the canonical, while a
+                // second copy of the *same* value fact is invalidated (ADR-0823).
+                let was_self_loop = old_edge.source_node_uuid == old_edge.target_node_uuid;
+                // An edge that only *becomes* a self-loop through the merge (alias ↔ canonical)
+                // is invalidated, as `merge_entities_inner` does (FR-010): it carries no
+                // `literal_object` mark and is not a fact about one entity (ADR-0823).
+                if new_src == new_dst && !was_self_loop {
+                    conn.invalidate_edge(&old_edge.uuid, ts)?;
+                    continue;
+                }
+                let duplicate = if was_self_loop {
+                    conn.has_duplicate_self_loop(&new_src, &old_edge.group_id, &old_edge.uuid)?
+                } else {
+                    conn.has_directed_edge(&new_src, &new_dst, &old_edge.name, &old_edge.group_id)?
+                };
+                if duplicate {
                     conn.invalidate_edge(&old_edge.uuid, ts)?;
                     continue;
                 }
@@ -940,8 +957,13 @@ fn merge_entities_inner(
             old_edge.target_node_uuid.clone()
         };
 
-        // Drop self-loop edges that would arise from merging two ends of an existing edge (FR-010)
-        if new_src == new_dst {
+        // Drop self-loop edges that would arise from merging two ends of an existing edge (FR-010).
+        // An edge that was *already* a self-loop — #823's literal-object edge, a literal-valued
+        // fact about the alias itself — is not one: both its ends move to the canonical, and the
+        // dedup below keys it on fact and relation type, since distinct value facts share
+        // `(A, A, relation)` (ADR-0823).
+        let was_self_loop = old_edge.source_node_uuid == old_edge.target_node_uuid;
+        if new_src == new_dst && !was_self_loop {
             if !dry_run {
                 conn.invalidate_edge(&old_edge.uuid, ts)?;
             }
@@ -951,7 +973,12 @@ fn merge_entities_inner(
         // Dedup: skip if canonical already has this directed edge in the same group as this
         // edge (FR-009, scoped per FR-002/issue #368 — always the edge's own group, which is
         // now always `merging_group_id` since foreign edges never reach this point).
-        if conn.has_directed_edge(&new_src, &new_dst, &old_edge.name, &old_edge.group_id)? {
+        let duplicate = if was_self_loop {
+            conn.has_duplicate_self_loop(&new_src, &old_edge.group_id, &old_edge.uuid)?
+        } else {
+            conn.has_directed_edge(&new_src, &new_dst, &old_edge.name, &old_edge.group_id)?
+        };
+        if duplicate {
             if !dry_run {
                 conn.invalidate_edge(&old_edge.uuid, ts)?;
             }

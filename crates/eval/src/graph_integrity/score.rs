@@ -8,7 +8,9 @@ use lcg_core::types::{EntityRow, RelatesToEdge};
 
 use super::mapping::{Direction, Mapping};
 use super::report::*;
-use super::rules::{contains_bounded, effective_edge_type, normalize, type_matches, JunkRule};
+use super::rules::{
+    contains_bounded, effective_edge_type, normalize, states_in_other_form, type_matches, JunkRule,
+};
 use super::skeleton::Skeleton;
 
 /// The edge-attributes JSON key under which #816 stores a signature mismatch mark (`true`). Graphs
@@ -34,6 +36,8 @@ pub struct ScoreInput<'a> {
     pub signatures: Option<&'a [RelSig]>,
     pub group: &'a str,
     pub ontology_source: &'a str,
+    /// Classify the not-stated value facts by cause (`--unstated-breakdown`, #823).
+    pub unstated_breakdown: bool,
 }
 
 fn has_label(labels: &[String], t: &str) -> bool {
@@ -153,6 +157,8 @@ pub fn score(inp: ScoreInput<'_>) -> Report {
     let mut stated = 0;
     let mut misattached = 0;
     let mut value_total = 0;
+    // (subject entity, normalised value, raw value) of each not-stated value fact (#823).
+    let mut unstated: Vec<(usize, String, &str)> = Vec::new();
 
     for f in &sk.facts {
         let Some(&subj) = ent_idx.get(&normalize(&f.entity)) else {
@@ -255,6 +261,9 @@ pub fn score(inp: ScoreInput<'_>) -> Report {
             }
             stated += usize::from(is_stated);
             misattached += usize::from(is_mis);
+            if !is_stated {
+                unstated.push((subj, nval, f.value.as_str()));
+            }
         }
     }
     let links = Links {
@@ -266,6 +275,16 @@ pub fn score(inp: ScoreInput<'_>) -> Report {
         stated: Ratio::new(stated, value_total),
         misattached: Ratio::new(misattached, value_total),
     };
+    let unstated_breakdown = inp.unstated_breakdown.then(|| {
+        classify_unstated(
+            &unstated,
+            &ent_uuids,
+            &ent_nodes,
+            inp.nodes,
+            &edge_facts,
+            &incident,
+        )
+    });
 
     // ── junk ──
     let rule = JunkRule::new(
@@ -329,8 +348,72 @@ pub fn score(inp: ScoreInput<'_>) -> Report {
         value_facts,
         junk,
         signature,
+        unstated_breakdown,
         run_meta: None,
     }
+}
+
+/// Classifies each not-stated value fact (#823, FR-010) into the first matching cause:
+/// 1. the value is in a summary of one of the entity's own nodes;
+/// 2. it is on an edge not incident to the entity, or in another node's name or summary;
+/// 3. it is on an incident edge or the entity's own summary in another surface form;
+/// 4. absent.
+///
+/// Causes 1–2 use the same exact bounded match as "stated"; only cause 3 is loose.
+fn classify_unstated(
+    unstated: &[(usize, String, &str)],
+    ent_uuids: &[HashSet<&str>],
+    ent_nodes: &[Vec<&EntityRow>],
+    nodes: &[EntityRow],
+    edge_facts: &[String],
+    incident: &HashMap<&str, Vec<usize>>,
+) -> UnstatedBreakdown {
+    let summaries: Vec<String> = nodes.iter().map(|n| normalize(&n.summary)).collect();
+    let names: Vec<String> = nodes.iter().map(|n| normalize(&n.name)).collect();
+    let mut b = UnstatedBreakdown {
+        not_stated: unstated.len(),
+        ..Default::default()
+    };
+    for (subj, nval, raw) in unstated {
+        let own = &ent_uuids[*subj];
+        let own_summaries: Vec<String> = ent_nodes[*subj]
+            .iter()
+            .map(|n| normalize(&n.summary))
+            .collect();
+        if own_summaries.iter().any(|s| contains_bounded(s, nval)) {
+            b.entity_summary_only += 1;
+            continue;
+        }
+        let incident_edges: BTreeSet<usize> = own
+            .iter()
+            .filter_map(|u| incident.get(u))
+            .flatten()
+            .copied()
+            .collect();
+        let on_other_edge = edge_facts
+            .iter()
+            .enumerate()
+            .any(|(i, f)| !incident_edges.contains(&i) && contains_bounded(f, nval));
+        let on_other_node = nodes.iter().enumerate().any(|(i, n)| {
+            !own.contains(n.uuid.as_str())
+                && (contains_bounded(&names[i], nval) || contains_bounded(&summaries[i], nval))
+        });
+        if on_other_edge || on_other_node {
+            b.other_entity += 1;
+            continue;
+        }
+        let other_form = incident_edges
+            .iter()
+            .map(|&i| edge_facts[i].as_str())
+            .chain(own_summaries.iter().map(String::as_str))
+            .any(|h| states_in_other_form(h, raw));
+        if other_form {
+            b.other_form += 1;
+        } else {
+            b.absent += 1;
+        }
+    }
+    b
 }
 
 fn fit_section(
@@ -531,6 +614,7 @@ mod tests {
             signatures: sg,
             group: "g",
             ontology_source: "explicit",
+            unstated_breakdown: false,
         })
     }
 
@@ -732,6 +816,153 @@ mod tests {
             .unwrap()
             .by_type["OWNS"];
         assert_eq!((c.fit, c.reversed, c.neither), (2, 1, 1));
+    }
+
+    // ── #823: --unstated-breakdown ──
+
+    fn summarised(uuid: &str, name: &str, label: &str, summary: &str) -> EntityRow {
+        EntityRow {
+            summary: summary.into(),
+            ..node(uuid, name, label)
+        }
+    }
+
+    #[test]
+    fn unstated_breakdown_classifies_each_cause_once() {
+        let facts = [
+            // stated on an incident edge: not in the breakdown
+            fact("Cedar Core", "Budget", "$5,250"),
+            // only in Marlin Core's own summary
+            fact("Marlin Core", "Budget", "$4,200"),
+            // on a non-incident edge (an "offsite" node's edge)
+            fact("Orbit Core", "Location", "Aarhus"),
+            // in another node's summary
+            fact("Lena Moreau", "Team size", "12"),
+            // on an incident edge in another form
+            fact("Helix Core", "Launch", "March 2027"),
+            // nowhere
+            fact("Aiko Osei", "Office", "Foundry Row"),
+        ]
+        .join(",");
+        let s = skeleton(&facts);
+        let m = mapping();
+        let n = vec![
+            node("cedar", "Cedar Core", "Project"),
+            summarised(
+                "marlin",
+                "Marlin Core",
+                "Project",
+                "Marlin Core has a budget of $4,200.",
+            ),
+            node("orbit", "Orbit Core", "Project"),
+            node("lena", "Lena Moreau", "Person"),
+            summarised("team", "Platform team", "Team", "A team of 12 people"),
+            node("helix", "Helix Core", "Project"),
+            node("aiko", "Aiko Osei", "Person"),
+            node("offsite", "offsite", "Event"),
+            node("aarhus", "Aarhus venue", "Location"),
+        ];
+        let e = vec![
+            edge(
+                "1",
+                "HAS_MEASURE",
+                "cedar",
+                "lena",
+                "Cedar Core budget is $5,250",
+            ),
+            edge(
+                "2",
+                "LOCATED_IN",
+                "offsite",
+                "aarhus",
+                "The offsite will take place in Aarhus",
+            ),
+            edge(
+                "3",
+                "SCHEDULED_FOR",
+                "helix",
+                "helix",
+                "Helix Core launches on 2027-03-15",
+            ),
+        ];
+        let r = score(ScoreInput {
+            skeleton: &s,
+            mapping: &m,
+            nodes: &n,
+            edges: &e,
+            signatures: None,
+            group: "g",
+            ontology_source: "none",
+            unstated_breakdown: true,
+        });
+        assert_eq!(r.value_facts.stated, Ratio::new(1, 6));
+        let b = r.unstated_breakdown.as_ref().unwrap();
+        assert_eq!(
+            *b,
+            UnstatedBreakdown {
+                not_stated: 5,
+                entity_summary_only: 1,
+                other_entity: 2,
+                other_form: 1,
+                absent: 1,
+            }
+        );
+        let md = r.render_markdown();
+        assert!(md.contains("Not-stated value facts by cause"));
+        assert!(md.contains("| Only in the entity's node summary | 1 |"));
+        assert_eq!(r.to_json()["unstated_breakdown"]["absent"], 1);
+    }
+
+    #[test]
+    fn report_without_the_flag_is_unchanged() {
+        let (s, m, n, e) = hand_built();
+        let sg = sigs();
+        let off = run(&s, &m, &n, &e, Some(&sg));
+        assert!(off.unstated_breakdown.is_none());
+        let json = serde_json::to_string(&off).unwrap();
+        assert!(!json.contains("unstated_breakdown"), "{json}");
+        assert!(!off.render_markdown().contains("by cause"));
+        // the flag adds the breakdown and changes nothing else
+        let on = score(ScoreInput {
+            skeleton: &s,
+            mapping: &m,
+            nodes: &n,
+            edges: &e,
+            signatures: Some(&sg),
+            group: "g",
+            ontology_source: "explicit",
+            unstated_breakdown: true,
+        });
+        assert_eq!(on.unstated_breakdown.as_ref().unwrap().not_stated, 1);
+        assert_eq!(
+            Report {
+                unstated_breakdown: None,
+                ..on.clone()
+            },
+            off
+        );
+        assert_eq!(on.metrics(), off.metrics(), "--compare metrics unchanged");
+    }
+
+    // A self-loop (#823's literal-object edge) states the value and is never misattached.
+    #[test]
+    fn self_loop_states_the_value_and_is_not_misattached() {
+        let s = skeleton(&fact("Marlin Core", "Budget", "$4,200"));
+        let m = mapping();
+        let n = vec![
+            node("marlin", "Marlin Core", "Project"),
+            node("tomas", "Tomas Kowalski", "Person"),
+        ];
+        let e = vec![edge(
+            "1",
+            "HAS_MEASURE",
+            "marlin",
+            "marlin",
+            "Marlin Core has a monthly budget of $4,200",
+        )];
+        let r = run(&s, &m, &n, &e, None);
+        assert_eq!(r.value_facts.stated, Ratio::new(1, 1));
+        assert_eq!(r.value_facts.misattached, Ratio::new(0, 1));
     }
 
     #[test]

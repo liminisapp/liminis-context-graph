@@ -1,5 +1,7 @@
 # ADR-0820: Caller-Planned Typed Walk: LCG Makes No LLM Call
 
+> **Amended by [ADR-0823](0823-literal-object-edges-as-self-loops.md) (issue #823):** on the last hop of a value walk (`answer_type` `"value"` or absent), the frontier's own self-loops — literal-valued facts — are also candidates; they match either direction, never extend the frontier, and are never offered on an earlier hop or in the completion hop.
+
 **Status**: Accepted
 **Date**: 2026-11-21
 **Issue**: #820 (E13 probe: #815; edge direction: #816)

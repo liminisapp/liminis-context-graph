@@ -1,5 +1,7 @@
 # ADR-0051: Edge Endpoint Salvage and Deferred Drop Decision
 
+> **Amended by [ADR-0823](0823-literal-object-edges-as-self-loops.md) (issue #823):** under an ontology with an extractable relation type, a name-level self-reference is no longer "always wrong" — it is the sanctioned literal-object form (a literal-valued fact about one entity) and is kept and stored as a self-loop marked `literal_object`. With no ontology, §1 stands unchanged; endpoints made equal by salvage are still dropped in every mode.
+
 **Status**: Accepted
 **Date**: 2026-07-29
 **Issue**: #281

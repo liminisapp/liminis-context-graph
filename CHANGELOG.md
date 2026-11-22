@@ -34,6 +34,23 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   - The judge, planner and reader share one Anthropic-compatible provider configuration:
     `--anthropic-base-url` / `--anthropic-endpoint`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`.
     The subscription bridge therefore works without an API key.
+
+- **Ontology extraction keeps literal-valued facts on the entity they describe (#823, ADR-0823).**
+  Under an ontology, a fact whose object is a value ("Marlin Core has a monthly budget of $4,200")
+  was often stored on an edge to an unrelated nearby entity (`Marlin Core HAS_MEASURE Tomas
+  Kowalski`): 27 of 440 value facts on the v2 corpus under ontology v3.1, against 2 free-form. The
+  cause was the edge contract: a value can never be an endpoint, and the prompt told the model to
+  find a second entity for every fact. Under an ontology with an extractable relation type (strict
+  and open), the edge prompt now asks for such a fact with both endpoints set to the one entity, and
+  ingest stores it as a self-loop marked `literal_object` (`edges_literal_object`); no value node is
+  created. Self-loops skip the direction check and survive merges, rebinds and the canonicalize
+  repair. In every mode, an edge whose fact states a value but does not name both endpoints is
+  stored with `suspected_misattachment` (`edges_suspected_misattachment`), never dropped. The
+  free-form edge prompt is byte-identical. Existing graphs are not repaired. `knowledge_walk`
+  returns these self-loops on the last hop of a value walk (`answer_type` `"value"` or absent), so
+  value questions stay answerable by a walk. A self-loop never extends the frontier and is not a
+  candidate on earlier hops (ADR-0820 amended). See `docs/ontology.md#literal-valued-facts`.
+
 - **Ontology edge direction: define, validate and repair (#816, ADR-0816).** With an ontology, 34%
   of typed edges on known-true links on the v2 corpus pointed the wrong way (the extractor made the
   sentence's subject the source). Relation types now accept `source_type`/`target_type` as a name or
