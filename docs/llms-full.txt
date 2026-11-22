@@ -1519,10 +1519,11 @@ entity is typically mentioned by far more episodes than an edge has producers, s
 would change shipped behaviour for one of them. Neither cap is request-tunable.
 
 `support` and `corroboration` are unchanged by the flag and always count **every** live document
-(live in the same sense as above, so a pending revision does not count), not just the capped list; because `support` counts distinct documents and the list counts
-episodes, the two need not agree. `get_entity_neighbors` and `get_entities_by_source` do not
-filter superseded episodes (unchanged), so a `find_entities` hit's `episode_uuids` equals the
-**live subset** of what `get_entity_neighbors` reports for the same entity.
+(live in the same sense as above, so a pending revision does not count), not just the capped
+list; because `support` counts distinct documents and the list counts episodes, the two need not
+agree. `get_entity_neighbors` and `get_entities_by_source` do not filter superseded episodes
+(unchanged), so a `find_entities` hit's `episode_uuids` equals the **live subset** of what
+`get_entity_neighbors` reports for the same entity.
 
 To turn the UUIDs into episodes, call `knowledge_get_episodes` with `uuids` (see the paging
 table below) — two calls from a free-text query to every mentioning episode.
@@ -2012,10 +2013,11 @@ recorded).
 `support` counts **distinct source documents** per origin: a `doc_id` is one document, however many
 chunks it was split into, and an episode with no `doc_id` counts as its own document. `corroboration`
 is `primary + external`; a `derived` or `answer` episode is a *citation* (it stays linked for
-provenance) and never adds to it. Counts are over episodes that are live now (the belief/search predicate: not
-superseded and not part of an uncommitted document revision), so a corrected episode stops
-contributing and a pending document revision does not count until it commits. On `knowledge_find_relationships`, when a belief query (`as_of`) is given, liveness
-(for both `support` and the `origins` filter) is evaluated at that `as_of` instant instead, so it agrees
+provenance) and never adds to it. Counts are over episodes that are live now (the belief/search
+predicate: not superseded and not part of an uncommitted document revision), so a corrected
+episode stops contributing and a pending document revision does not count until it commits. On
+`knowledge_find_relationships`, when a belief query (`as_of`) is given, liveness (for both
+`support` and the `origins` filter) is evaluated at that `as_of` instant instead, so it agrees
 with the `belief` block. For a relationship, `support` is derived from the edge's producing `episodes` and
 those of its **same-fact siblings** — edges with the same endpoints and relation name. (Ingest does
 not deduplicate edges, [ADR-0705](adr/0705-belief-time-separate-from-validity.md), so a page that
