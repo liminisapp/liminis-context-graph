@@ -5,7 +5,9 @@
 
 # Paths that mean "this PR touches code": the full suite must run.
 # See docs/adr/0322-ci-docs-only-fast-path.md for the entry-by-entry rationale.
-CODE_PATTERN='(\.rs$|Cargo\.(toml|lock)$|^\.cargo/|^\.github/workflows/|^\.github/actions/|^scripts/|^crates/eval/scripts/)'
+# `^contract/` (#852, ADR-0852): the published response schemas are verified by `cargo test`
+# (drift and real-response validation), so a schema-only edit must not take the docs fast path.
+CODE_PATTERN='(\.rs$|Cargo\.(toml|lock)$|^\.cargo/|^\.github/workflows/|^\.github/actions/|^scripts/|^crates/eval/scripts/|^contract/)'
 
 # Paths that match CODE_PATTERN but feed only the documentation site, and are
 # therefore removed from the candidate list before it is applied.
