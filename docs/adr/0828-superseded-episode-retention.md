@@ -22,7 +22,8 @@ what shape a policy should take. This ADR answers those with measurements. It ch
 
 1. The cost of superseded history is real but it is **linear and predictable**: each retained
    superseded episode costs about 22 KB of database, 9 KB of WAL and 46 ms of rebuild time in the
-   measured configuration (§Results). It does not touch query latency in any way that matters.
+   measured configuration (§Results). Query latency rises in ratio terms under heavy rewriting but stays
+   in low double-digit milliseconds (§Results, "Query latency"), so it is not the cost that drives the decision.
 2. In the regime that lcg's own measurements say is typical (a revision rewrites about 10% of a note's
    chunks) the cost at 5–10 revisions per note is a **1.2–1.4× database, ~1.4–2.4× WAL and
    ~1.4–2.2× rebuild** multiple of a live-only graph. That is tolerable.
@@ -169,13 +170,16 @@ replay (ADR-0440/0486/0526), not stored in the WAL (ADR-0577). WAL size is text-
 compaction (ADR-0028) removes only what is absent from the database at dump time; it shrank the WAL by
 24–43% (part of that is the `MENTIONS` rows the dump drops, F1), and does not reduce history (superseded rows are dumped).
 
-**Query latency.** No effect that matters. At every point p50 and p95 stay in single or low double
-digit milliseconds. Up to N=10 low-change the movement is inside host-load noise (the matrix
-N=1 row, 4.0 ms, is *slower* than N=5–25). The only systematic movement is full-rewrite N=25
-(24 superseded per live episode): search_passages 2.1 → 5.9 ms and find_relationships 11 → 25 ms,
-that is ≈ 2.2–2.8× for a 24× increase in retained history (sub-linear). `believed_only` costs roughly
-10–20% more than the plain read and that overhead does not visibly grow with history (individual
-rows are noisier).
+**Query latency.** Small in absolute terms, but not flat. Every p50 and p95 stays in single or low
+double-digit milliseconds (worst case 30 ms). In ratio terms the full-rewrite regime does cross the
+pre-declared ~20% p95 threshold, and by more than the ±30% noise band: p95 against the N=1 row is
+search_passages 2.3 → 3.6 ms (+57%) at N=5 and 4.1 ms (+78%) at N=10, and find_relationships 12.0 →
+16.8 ms (+40%) at N=5 and 18.6 ms (+55%) at N=10. At N=25 (24 superseded per live episode) it is
+search_passages 2.1 → 5.9 ms and find_relationships 11 → 25 ms, ≈ 2.2–2.8× for a 24× increase in
+retained history (sub-linear). In the low-change regime the movement up to N=10 is mostly inside host-load
+noise (the matrix N=1 row, 4.0 ms, is *slower* than N=5–25), though some rows (find_entities p95 7.1 →
+11.1 ms at N=10) also exceed the ratio. `believed_only` costs roughly 10–20% more than the plain read and
+that overhead does not visibly grow with history (individual rows are noisier).
 (Readers should treat ≤ ±30% differences as noise here.)
 
 **Material?** The threshold set before measuring was: superseded-only data costing more than about 2×
@@ -186,7 +190,7 @@ p95 latency regression above ~20% that is not noise. Against it:
 |---|---|---|---|
 | Low-change (≈ the 13.3% re-extracted chunks ADR-0785 measured over this repo's own git history) | DB 1.15×, WAL 1.65×, rebuild 1.4× | DB 1.28–1.40×, WAL 2.4×, rebuild 2.1–2.2× | **Not material.** DB is well under 2×; rebuild reaches 2× only at ~10 revisions per note. |
 | Full-rewrite (upper bound) | DB 1.9×, WAL 4.9×, rebuild 4.4× | DB 2.7×, WAL 9.3×, rebuild 6.1× | **Material** for WAL and rebuild from ~2–3 full revisions. |
-| Latency | — | — | **Not material.** |
+| Latency | Low-change: mostly within noise. Full-rewrite: p95 +40–57% | Low-change: up to +56% (find_entities), most rows within noise. Full-rewrite: p95 +55–78% | **Ratio threshold exceeded in the full-rewrite regime; judged not material on absolute grounds** (≤ ~30 ms everywhere, no consumer has a latency budget in this range). The ratio threshold was a poor proxy for a metric this small; if latency becomes a concern, restate the trigger as an absolute p95 budget. |
 
 Whether a real workspace sits in the first or second row is not knowable from here: the demo notebook is
 **not in this repository (spec 754) and was not measured**; the realistic retrieval-v2 stand-in is
@@ -226,7 +230,7 @@ rule depends on:
 
 #### Rebuild invariant (FR-008)
 
-Three graphs from one history (3 notes × 6 sections, 4 low-change revisions): **A** the history as
+Three graphs from one history (3 notes × 6 sections, 4 versions per note: the initial ingest plus 3 revisions, each rewriting 2 of the 6 sections, so 3 × 3 × 2 = 18 superseded and 18 live episodes; this is a slightly heavier edit than the matrix's 10% low-change rule): **A** the history as
 ingested; **B** the *current* files only, ingested fresh (what a rebuild from the markdown sources
 produces); **C** A after a scratch prune using the rule below (superseded episodes, the edges they
 produced, entities left without any `MENTIONS` or edge endpoint). Then **R** = a rebuild from C's
@@ -361,7 +365,9 @@ Reopen the question — and file the follow-ups below — if **any** of the foll
 workspace (these use the cost model above; at r ≈ 2 a group is ≈ 1.4× DB, ≈ 3× WAL, ≈ 2–3× rebuild):
 
 1. **Superseded : live episodes exceeds 2 : 1 in any group** (full-rewrite N ≈ 3; the point where the
-   measured WAL is ≥ 3× and rebuild ≥ 2.5× a live-only graph).
+   WAL is about 3× and rebuild about 2.5× a live-only graph; these are interpolated from the rule of
+   thumb above, since nothing was measured at r = 2 — the nearest measured rows are r = 1 at 2.1× / 1.8×
+   and r = 4 at 4.9× / 4.4×).
 2. **Rebuild from WAL takes more than ~2× what the same group would take live-only**, or exceeds an
    operator's tolerated recovery time (the number to watch with the *real* embedder, which makes each
    retained row far more expensive than the 46 ms measured with the test embedder).
@@ -400,6 +406,10 @@ superseded (`episode_count` is a total), which is follow-up 2.
 * **The demo notebook was not measured** (not in this repository, spec 754). `retrieval-v2` is the
   realistic stand-in, but it is passage-only here (no cassette replay) and encodes decision revision as
   new notes plus document supersession, not re-ingest history.
+  Consequently FR-001 and SC-001 of `specs/828-research-retention-policy-for-superseded-episodes/spec.md`
+  are only partly met: the spec's Assumptions say the demo notebook is available, which it was not, so
+  the counts for it are replaced by the `retrieval-v2` row and the synthetic matrix. The spec is the
+  engine-generated Specify artifact and is left as written.
 * **Timing noise** (shared host, ±30%); sizes and counts are exact. The 2× threshold was fixed before
   measuring and is a judgment, not a standard.
 * **No implementation.** No production code, schema, API or belief/correction read change is part of
