@@ -26,7 +26,9 @@ what shape a policy should take. This ADR answers those with measurements. It ch
    in low double-digit milliseconds (§Results, "Query latency"), so it is not the cost that drives the decision.
 2. In the regime that lcg's own measurements say is typical (a revision rewrites about 10% of a note's
    chunks) the cost at 5–10 revisions per note is a **1.2–1.4× database, ~1.4–2.4× WAL and
-   ~1.4–2.2× rebuild** multiple of a live-only graph. That is tolerable.
+   ~1.4–2.2× rebuild** multiple of a live-only graph. Database size stays under the 2× threshold; rebuild
+   time meets it at the upper end (2.2× at N=10, 2.06× in the scale check). We judge that tolerable
+   because a rebuild is a rare recovery operation, not because the threshold was missed.
 3. The cost becomes large only for workloads that rewrite whole notes repeatedly. At a
    superseded : live episode ratio of 4 : 1 the WAL is ~5× and rebuild ~4× a live-only graph.
 4. The history is a **documented contract** (`get_episodes` returns superseded rows by default, `as_of`
@@ -188,7 +190,7 @@ p95 latency regression above ~20% that is not noise. Against it:
 
 | Regime | N = 5 | N = 10 | Verdict |
 |---|---|---|---|
-| Low-change (≈ the 13.3% re-extracted chunks ADR-0785 measured over this repo's own git history) | DB 1.15×, WAL 1.65×, rebuild 1.4× | DB 1.28–1.40×, WAL 2.4×, rebuild 2.1–2.2× | **Not material.** DB is well under 2×; rebuild reaches 2× only at ~10 revisions per note. |
+| Low-change (≈ the 13.3% re-extracted chunks ADR-0785 measured over this repo's own git history) | DB 1.15×, WAL 1.65×, rebuild 1.4× | DB 1.28–1.40×, WAL 2.4×, rebuild 2.1–2.2× | **Threshold met for rebuild time at N=10** (2.21× at 200 live episodes, 2.06× in the P=100 scale check); not met for DB size (well under 2×) or at N=5 (rebuild 1.4×). **Judged tolerable, not immaterial:** the excess is small, it needs ~10 revisions per note on a workload that is already the lower-cost regime, rebuild is a rare recovery operation, and the test embedder understates real rebuild cost, which is why reopening trigger 2 watches rebuild time with the real embedder. |
 | Full-rewrite (upper bound) | DB 1.9×, WAL 4.9×, rebuild 4.4× | DB 2.7×, WAL 9.3×, rebuild 6.1× | **Material** for WAL and rebuild from ~2–3 full revisions. |
 | Latency | Low-change: mostly within noise. Full-rewrite: p95 +40–57% | Low-change: up to +56% (find_entities), most rows within noise. Full-rewrite: p95 +55–78% | **Ratio threshold exceeded in the full-rewrite regime; judged not material on absolute grounds** (≤ ~30 ms everywhere, no consumer has a latency budget in this range). The ratio threshold was a poor proxy for a metric this small; if latency becomes a concern, restate the trigger as an absolute p95 budget. |
 
@@ -410,8 +412,10 @@ superseded (`episode_count` is a total), which is follow-up 2.
   are only partly met: the spec's Assumptions say the demo notebook is available, which it was not, so
   the counts for it are replaced by the `retrieval-v2` row and the synthetic matrix. The spec is the
   engine-generated Specify artifact and is left as written.
-* **Timing noise** (shared host, ±30%); sizes and counts are exact. The 2× threshold was fixed before
-  measuring and is a judgment, not a standard.
+* **Timing noise** (shared host, ±30%); sizes and counts are exact. The 2× threshold was chosen by the
+  researcher in the Plan stage, before any measurement, as the spec's Assumptions require a stated
+  reasoning rather than a pre-fixed numeric threshold; it is a judgment, not a standard, and the
+  maintainer is expected to review it.
 * **No implementation.** No production code, schema, API or belief/correction read change is part of
   this ADR. The scratch scripts and raw results live outside the repository and are reproducible from
   §Method.
