@@ -838,7 +838,7 @@ something. Belief is *transaction time*; it is deliberately separate from validi
 never true, so no supersession path ever writes `valid_at` or `invalid_at`: **correction ends belief
 and leaves validity alone.** See [ADR-0705](adr/0705-belief-time-separate-from-validity.md).
 
-**Corrections.** Resubmitting a changed `chunk_id` to `knowledge_process_chunk` supersedes that chunk's
+**Corrections.** Resubmitting a `chunk_id` with changed content to `knowledge_process_chunk` supersedes that chunk's
 earlier live episodes **in the same `group_id`**, at the new episode's ingest time, and only once the
 new ingest has fully succeeded. (A resubmission identical to the chunk's live episode is a no-op
 instead; see **Unchanged resubmission** below.) A failed re-ingest leaves the old episode live. The result gains

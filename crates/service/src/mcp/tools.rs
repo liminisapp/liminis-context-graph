@@ -984,7 +984,7 @@ pub fn registry() -> Vec<ToolSpec> {
                            of, the facts extracted from the chunk's prose (reachable from the \
                            episode via a MENTIONS hop). Returned by `knowledge_get_episodes` and \
                            `knowledge_search_passages`. \
-                           Resubmitting a changed `chunk_id` is a correction (issue #705): once \
+                           Resubmitting a `chunk_id` with changed content is a correction (issue #705): once \
                            the new ingest has fully succeeded, the chunk's earlier live episodes in this \
                            group are superseded, so the graph stops believing the facts they \
                            asserted. Nothing is deleted and `valid_at`/`invalid_at` are never \
