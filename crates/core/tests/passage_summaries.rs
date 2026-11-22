@@ -177,8 +177,20 @@ async fn a_paraphrase_only_summary_brings_in_its_notes_passage() {
     let kiln = corpus(&f).await;
     let before = f.summarize_calls.load(Ordering::SeqCst);
 
-    let off = search(&f, json!({"num_results": 1})).await;
-    assert_ne!(passages(&off)[0]["uuid"], kiln.as_str());
+    // Without summaries the kiln passage does not match `KILN`: every lower-case passage embeds
+    // to the same fallback axis, so all four tie. Their order is arbitrary (random uuids), so
+    // assert the tie, not which note happens to come first.
+    let off = search(&f, json!({})).await;
+    let off_scores: Vec<f64> = passages(&off)
+        .iter()
+        .map(|p| p["score"].as_f64().unwrap())
+        .collect();
+    assert_eq!(off_scores.len(), 4, "{off}");
+    assert!(
+        off_scores.iter().all(|s| (s - off_scores[0]).abs() < 1e-9),
+        "without summaries no passage should match KILN: {off}"
+    );
+    assert_eq!(via_count(&off), 0);
 
     let r = search(&f, json!({"summaries": true, "num_results": 3})).await;
     let first = &passages(&r)[0];
