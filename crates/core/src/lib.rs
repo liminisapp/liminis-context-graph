@@ -62,6 +62,7 @@ pub mod sidecar_client;
 pub mod source_id;
 pub mod source_identity;
 pub mod staged_search;
+pub mod status_breakdown;
 pub mod summary_merge;
 pub mod telemetry;
 pub mod test_providers;
