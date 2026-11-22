@@ -5,7 +5,7 @@
 //! The service route (not an in-process `AppState`) is deliberate — see ADR-0754: it measures the
 //! shipped IPC surface and does not duplicate the service's startup wiring.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -238,6 +238,36 @@ pub struct ServiceGuard {
     pub version: String,
     /// What the service reports as its ontology for [`EVAL_GROUP`], read right after startup.
     pub ontology: ServiceOntology,
+    /// What the service's `knowledge_status` said it embeds with (FR-005); not read from the
+    /// socket path or URL.
+    pub embedder: EmbedderIdentity,
+}
+
+/// The embedder identity a service reports in `knowledge_status`: `embedding_model` and
+/// `embedding_dim`, plus the effective instruction profile. `model` is `None` when the service
+/// does not report one (an older build, or an embedder that does not name itself).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EmbedderIdentity {
+    pub model: Option<String>,
+    pub dim: Option<i64>,
+    pub profile: Option<String>,
+}
+
+impl EmbedderIdentity {
+    pub fn from_status(status: &Value) -> Self {
+        let model = status["embedding_model"]
+            .as_str()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string);
+        Self {
+            model,
+            dim: status["embedding_dim"].as_i64(),
+            profile: status["embedding_instructions"]["profile"]
+                .as_str()
+                .map(str::to_string),
+        }
+    }
 }
 
 /// How long a kept run waits for the service to exit after `knowledge_close`.
@@ -394,11 +424,14 @@ pub async fn read_service_ontology(
 /// would silently override the profile's prefixes on that side while the service still reports
 /// the requested profile name — a mislabeled row. Both overrides are therefore removed whenever
 /// a profile is requested; with none requested the child keeps the operator's environment.
-fn apply_embedding_profile_env(cmd: &mut tokio::process::Command, profile: Option<&str>) {
-    if let Some(p) = profile {
-        cmd.env("LCG_EMBEDDING_PROFILE", p)
-            .env_remove("LCG_EMBEDDING_QUERY_PREFIX")
-            .env_remove("LCG_EMBEDDING_DOCUMENT_PREFIX");
+fn embedding_profile_env(profile: Option<&str>) -> Vec<(&'static str, Option<String>)> {
+    match profile {
+        Some(p) => vec![
+            ("LCG_EMBEDDING_PROFILE", Some(p.to_string())),
+            ("LCG_EMBEDDING_QUERY_PREFIX", None),
+            ("LCG_EMBEDDING_DOCUMENT_PREFIX", None),
+        ],
+        None => Vec::new(),
     }
 }
 
@@ -408,6 +441,59 @@ fn apply_embedding_profile_env(cmd: &mut tokio::process::Command, profile: Optio
 /// load an unrelated workspace's ontology. So it is always set, overriding the operator's.
 fn apply_workspace_root_env(cmd: &mut tokio::process::Command, ws: &Path) {
     cmd.env("LIMINIS_WORKSPACE_ROOT", ws);
+}
+
+/// Every environment variable `spawn_service` sets (`Some`) or removes (`None`) on the child, in
+/// application order. The single definition of the child's environment edits: `spawn_service`
+/// applies it to the `Command`, and [`effective_service_env`] applies it to a map for the report's
+/// `inputs.service_env` digest, so the digest cannot drift from what actually runs.
+pub fn service_env_overrides(o: &ServiceOpts) -> Vec<(&'static str, Option<String>)> {
+    let mut v: Vec<(&'static str, Option<String>)> = Vec::new();
+    if let Some(p) = &o.replay_cassette {
+        v.push(("LCG_REPLAY_LLM", Some(p.clone())));
+    }
+    if let Some(p) = &o.record_cassette {
+        v.push(("LCG_RECORD_LLM", Some(p.clone())));
+    }
+    v.extend(embedding_profile_env(o.embedding_profile.as_deref()));
+    // `lcg-passages` measures the shipped default (#806): an operator's passage-search overrides
+    // must not leak into the child and silently change what it measures.
+    // The DB, WAL and socket must live in this workspace (#821): an operator's overrides would put
+    // the DB outside a kept workspace, or point the eval at another service.
+    // The service also reads the legacy `GRAPHITI_*` names as fallbacks (`lcg_env_var`).
+    for k in [
+        "LCG_PASSAGE_SEARCH_MODE",
+        "LCG_PASSAGE_BELIEF_AWARE",
+        "LCG_SEARCH_MIN_SCORE",
+        "LCG_DB_PATH",
+        "LCG_WAL_DIR",
+        "LCG_SOCKET_PATH",
+        "GRAPHITI_DB_PATH",
+        "GRAPHITI_WAL_DIR",
+        "GRAPHITI_SOCKET_PATH",
+    ] {
+        v.push((k, None));
+    }
+    v
+}
+
+/// The child's environment after [`service_env_overrides`], given the `inherited` environment.
+pub fn effective_service_env<I>(o: &ServiceOpts, inherited: I) -> BTreeMap<String, String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut env: BTreeMap<String, String> = inherited.into_iter().collect();
+    for (k, v) in service_env_overrides(o) {
+        match v {
+            Some(v) => {
+                env.insert(k.to_string(), v);
+            }
+            None => {
+                env.remove(k);
+            }
+        }
+    }
+    env
 }
 
 pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
@@ -435,28 +521,13 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
         .stdout(std::process::Stdio::null())
         .stderr(stderr_file)
         .kill_on_drop(true);
-    if let Some(p) = &o.replay_cassette {
-        cmd.env("LCG_REPLAY_LLM", p);
+    for (k, v) in service_env_overrides(o) {
+        match v {
+            Some(v) => cmd.env(k, v),
+            None => cmd.env_remove(k),
+        };
     }
-    if let Some(p) = &o.record_cassette {
-        cmd.env("LCG_RECORD_LLM", p);
-    }
-    apply_embedding_profile_env(&mut cmd, o.embedding_profile.as_deref());
     apply_workspace_root_env(&mut cmd, ws.path());
-    // `lcg-passages` measures the shipped default (#806): an operator's passage-search overrides
-    // must not leak into the child and silently change what it measures.
-    cmd.env_remove("LCG_PASSAGE_SEARCH_MODE")
-        .env_remove("LCG_PASSAGE_BELIEF_AWARE")
-        .env_remove("LCG_SEARCH_MIN_SCORE");
-    // The DB, WAL and socket must live in this workspace (#821): an operator's overrides would put
-    // the DB outside a kept workspace, or point the eval at another service.
-    // The service also reads the legacy `GRAPHITI_*` names as fallbacks (`lcg_env_var`).
-    cmd.env_remove("LCG_DB_PATH")
-        .env_remove("LCG_WAL_DIR")
-        .env_remove("LCG_SOCKET_PATH")
-        .env_remove("GRAPHITI_DB_PATH")
-        .env_remove("GRAPHITI_WAL_DIR")
-        .env_remove("GRAPHITI_SOCKET_PATH");
     let mut child = cmd.spawn().map_err(|e| {
         format!(
             "cannot start service '{}': {e} (pass --service-bin, or build with `cargo build --release -p lcg-service`)",
@@ -466,7 +537,7 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     let sock = ws.path().join(".lcg").join("service.sock");
     let deadline = Instant::now() + Duration::from_secs(120);
     let ontology;
-    let client = loop {
+    let (client, embedder) = loop {
         // Fail fast if the service died at startup (bad embedder URL, conflicting record/replay
         // env, workspace error) instead of polling for the whole deadline.
         if let Ok(Some(status)) = child.try_wait() {
@@ -490,7 +561,7 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
                     // #881: confirm the service loaded the ontology this run staged, before any
                     // ingest — a free-form service would otherwise extract silently unconstrained.
                     ontology = read_service_ontology(&c, o.expect_ontology_hash.as_deref()).await?;
-                    break c;
+                    break (c, EmbedderIdentity::from_status(&status));
                 }
             }
         }
@@ -508,6 +579,7 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
         _workspace: ws,
         version: service_version(&o.bin).await,
         ontology,
+        embedder,
     })
 }
 
@@ -1216,25 +1288,73 @@ mod tests {
     #[test]
     fn requested_profile_strips_inherited_prefix_overrides() {
         let envs = |profile: Option<&str>| {
-            let mut cmd = tokio::process::Command::new("true");
-            apply_embedding_profile_env(&mut cmd, profile);
-            cmd.as_std()
-                .get_envs()
-                .map(|(k, v)| {
-                    (
-                        k.to_string_lossy().into_owned(),
-                        v.map(|v| v.to_string_lossy().into_owned()),
-                    )
-                })
-                .collect::<std::collections::BTreeMap<_, _>>()
+            service_env_overrides(&ServiceOpts {
+                embedding_profile: profile.map(str::to_string),
+                ..Default::default()
+            })
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>()
         };
         let e = envs(Some("none"));
         assert_eq!(e["LCG_EMBEDDING_PROFILE"].as_deref(), Some("none"));
-        // `Some(None)` is an explicit removal from the inherited environment.
+        // `None` is an explicit removal from the inherited environment.
         assert_eq!(e["LCG_EMBEDDING_QUERY_PREFIX"], None);
         assert_eq!(e["LCG_EMBEDDING_DOCUMENT_PREFIX"], None);
-        // No profile requested: the operator's environment is left alone.
-        assert!(envs(None).is_empty());
+        // No profile requested: the operator's prefixes are left alone (not in the edit list).
+        assert!(!envs(None).contains_key("LCG_EMBEDDING_QUERY_PREFIX"));
+        assert!(!envs(None).contains_key("LCG_EMBEDDING_PROFILE"));
+    }
+
+    #[test]
+    fn embedder_identity_comes_from_knowledge_status() {
+        let id = EmbedderIdentity::from_status(&json!({
+            "embedding_model": " bge-small ", "embedding_dim": 384,
+            "embedding_instructions": {"profile": "none"}
+        }));
+        assert_eq!(id.model.as_deref(), Some("bge-small"));
+        assert_eq!(id.dim, Some(384));
+        assert_eq!(id.profile.as_deref(), Some("none"));
+        for status in [
+            json!({}),
+            json!({"embedding_model": ""}),
+            json!({"embedding_model": null}),
+        ] {
+            assert_eq!(EmbedderIdentity::from_status(&status).model, None);
+        }
+    }
+
+    #[test]
+    fn effective_env_drops_removed_vars_and_applies_sets() {
+        let inherited = [
+            ("LCG_DB_PATH", "/x"),
+            ("LCG_SOCKET_PATH", "/s"),
+            ("GRAPHITI_WAL_DIR", "/w"),
+            ("LCG_PASSAGE_SEARCH_MODE", "vector"),
+            ("LCG_SEARCH_MIN_SCORE", "0.3"),
+            ("LCG_EMBEDDING_QUERY_PREFIX", "q: "),
+            ("LCG_RERANK_TOP_N", "40"),
+            ("HOME", "/h"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        let o = ServiceOpts {
+            embedding_profile: Some("embedder".into()),
+            replay_cassette: Some("/c.json".into()),
+            ..Default::default()
+        };
+        let e = effective_service_env(&o, inherited);
+        for gone in [
+            "LCG_DB_PATH",
+            "LCG_SOCKET_PATH",
+            "GRAPHITI_WAL_DIR",
+            "LCG_PASSAGE_SEARCH_MODE",
+            "LCG_SEARCH_MIN_SCORE",
+            "LCG_EMBEDDING_QUERY_PREFIX",
+        ] {
+            assert!(!e.contains_key(gone), "{gone} must be removed");
+        }
+        assert_eq!(e["LCG_EMBEDDING_PROFILE"], "embedder");
+        assert_eq!(e["LCG_REPLAY_LLM"], "/c.json");
+        assert_eq!(e["LCG_RERANK_TOP_N"], "40", "unrelated vars are inherited");
     }
 
     #[test]
