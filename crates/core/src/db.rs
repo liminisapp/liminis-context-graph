@@ -2270,6 +2270,60 @@ impl<'db> Conn<'db> {
         Ok(out)
     }
 
+    /// Supersession state **and** source identity of the given episode UUIDs, in one batched
+    /// lookup (`knowledge_walk` `include_provenance`, #860). A UUID absent from the result no
+    /// longer exists (hard-deleted). `source_file` is `None` on legacy rows (#853).
+    pub fn get_episode_provenance(
+        &self,
+        uuids: &[String],
+    ) -> Result<
+        std::collections::HashMap<
+            String,
+            (crate::belief::EpisodeSupersession, Option<String>, String),
+        >,
+        Error,
+    > {
+        let mut out = std::collections::HashMap::new();
+        if uuids.is_empty() {
+            return Ok(out);
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids \
+             RETURN ep.uuid, ep.superseded_at, ep.superseded_by_kind, ep.superseded_by, \
+             ep.supersession_reason, ep.group_id, ep.doc_id, ep.revision_id, \
+             ep.revision_committed_at, ep.source_file, ep.source_description",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        for r in rows {
+            let superseded = match &r[1] {
+                lbug::Value::Null(_) => None,
+                other => Some(value_as_timestamp_micros(other)),
+            };
+            let sup = crate::belief::EpisodeSupersession {
+                superseded_at_us: superseded,
+                kind: value_as_optional_string(&r[2]),
+                superseded_by: value_as_optional_string(&r[3]),
+                reason: value_as_optional_string(&r[4]),
+                group_id: value_as_string(&r[5]),
+                doc_id: value_as_optional_string(&r[6]),
+                revision_id_present: value_as_optional_string(&r[7]).is_some(),
+                revision_committed_at_us: match &r[8] {
+                    lbug::Value::Null(_) => None,
+                    other => Some(value_as_timestamp_micros(other)),
+                },
+            };
+            out.insert(
+                value_as_string(&r[0]),
+                (
+                    sup,
+                    value_as_optional_string(&r[9]),
+                    value_as_optional_string(&r[10]).unwrap_or_default(),
+                ),
+            );
+        }
+        Ok(out)
+    }
+
     // ── Episode origin (issue #752, ADR-0752) ─────────────────────────────────
 
     /// Origin, document and supersession state of the given episodes (one batched, uuid-keyed
