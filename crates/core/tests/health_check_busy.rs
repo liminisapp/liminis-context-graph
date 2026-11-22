@@ -286,6 +286,7 @@ async fn busy_reports_ready_for_reads_true() {
             "state": "busy",
             "ready_for_reads": true,
             "activity": "writing",
+            "providers": {"embedder": "real", "extractor": "real"},
         })
     );
 }
