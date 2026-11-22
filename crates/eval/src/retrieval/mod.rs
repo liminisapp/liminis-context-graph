@@ -16,6 +16,7 @@ pub mod mapping;
 pub mod metrics;
 pub mod origin;
 pub mod qmd;
+pub mod ranked;
 pub mod report;
 pub mod score_probe;
 pub mod stats;
@@ -35,7 +36,8 @@ use self::fixture::{Category, CorpusStats, Fixture, Question};
 use self::metrics::{score_question, summarize_by_category, QuestionScore};
 use self::origin::{origin_data, OriginIndex};
 use self::report::{
-    percentile, Bootstrap, ConfigOutcome, ConfigRun, Grounded, IngestCost, Report, RunMeta, Status,
+    percentile, Bootstrap, ConfigOutcome, ConfigRun, Grounded, IngestCost, RankedQuestion, Report,
+    RunMeta, Status,
 };
 
 /// Minimum questions per category before a plan warns that per-category figures are thin (SC-003).
@@ -334,6 +336,7 @@ pub async fn score_config(
     let mut evidence_gaps = 0;
     let mut legs_tally: Option<LegsTally> = None;
     let mut errors = Vec::new();
+    let mut ranked: Vec<RankedQuestion> = Vec::new();
     let mut judge_failure: Option<String> = None;
 
     for q in questions {
@@ -348,6 +351,13 @@ pub async fn score_config(
         calls.push(res.model_calls);
         lookup_calls += res.lookup_calls;
         evidence_gaps += res.evidence_gaps;
+        if let Some(hits) = &res.hits {
+            ranked.push(RankedQuestion {
+                question: q.id.clone(),
+                category: q.category,
+                hits: hits.clone(),
+            });
+        }
         if let Some(t) = res.legs_tally {
             legs_tally.get_or_insert_with(LegsTally::default).add(t);
         }
@@ -417,6 +427,7 @@ pub async fn score_config(
         query_errors: errors,
         grounded,
         origin: None,
+        ranked,
     }))
 }
 

@@ -91,6 +91,17 @@ pub struct ConfigRun {
     pub grounded: Grounded,
     /// Per-origin reading; `None` when the fixture declares no origins.
     pub origin: Option<OriginData>,
+    /// Passage-level hits per scored question, for `--record-ranked`. Collected for retrievers
+    /// that expose per-hit fields only; never serialised into `report.json`.
+    pub ranked: Vec<RankedQuestion>,
+}
+
+/// One question's passage-level hits (an empty list is a real answer: zero passages returned).
+#[derive(Debug, Clone)]
+pub struct RankedQuestion {
+    pub question: String,
+    pub category: Category,
+    pub hits: Vec<super::mapping::RankedHit>,
 }
 
 #[derive(Debug, Clone)]
@@ -1650,6 +1661,7 @@ mod tests {
             query_errors: vec![],
             grounded: Grounded::Skipped("no judge".into()),
             origin: None,
+            ranked: vec![],
         }))
     }
 
