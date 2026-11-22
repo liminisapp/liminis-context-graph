@@ -107,7 +107,10 @@ pub fn inspect_workspace(
             }
         }
     }
-    let onto = lcg_core::ontology::load_ontology(Some(ws));
+    // The ontology the service will use for the eval group: the per-group file first, then the
+    // workspace file (ADR-0446) — the same resolution order the service applies (#881).
+    let onto = lcg_core::ontology::load_group_ontology(ws, EVAL_GROUP)
+        .or_else(|| lcg_core::ontology::load_ontology(Some(ws)));
     Ok(WorkspaceInfo {
         kind: if onto.is_some() {
             "ontology"
@@ -298,6 +301,9 @@ pub async fn run_on_workspace(
         reranker_uds: a.reranker_uds.clone(),
         embedding_profile,
         seed_workspace: Some(a.workspace.clone()),
+        // #881: a workspace that has an ontology must be served under it, or the walk planner's
+        // menu and the graph are silently free-form.
+        expect_ontology_hash: (info.kind == "ontology").then(|| info.ontology_hash.clone()),
         ..Default::default()
     };
     eprintln!(
@@ -336,8 +342,9 @@ pub async fn run_on_workspace(
     let meta = report::Meta {
         workspace: a.workspace.display().to_string(),
         workspace_kind: info.kind,
-        ontology_hash: info.ontology_hash,
-        ontology_mode: info.ontology_mode,
+        // What the service reported (#881); equals the workspace's when it has an ontology.
+        ontology_hash: guard.ontology.hash.clone(),
+        ontology_mode: guard.ontology.mode.clone(),
         manifest: info.manifest,
         lcg_build: guard.version.clone(),
         // The report is written to disk and stdout: never the endpoint's credential.

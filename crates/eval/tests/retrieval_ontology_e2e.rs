@@ -15,7 +15,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -126,6 +126,16 @@ fn spawn_embedder() -> String {
 /// An OpenAI-compatible extractor whose output is distinct per chunk (cassette classify keys hash
 /// the extracted content, so identical extractions would collide). Counts requests.
 fn spawn_extractor() -> (String, Arc<AtomicUsize>) {
+    let (url, n, _) = spawn_extractor_logging();
+    (url, n)
+}
+
+/// [`spawn_extractor`], also keeping every request body so a test can check what the service
+/// actually put in the extraction prompts (#881: the stub used to ignore them, which is how a
+/// service running free-form passed this suite).
+fn spawn_extractor_logging() -> (String, Arc<AtomicUsize>, Arc<Mutex<Vec<String>>>) {
+    let bodies = Arc::new(Mutex::new(Vec::<String>::new()));
+    let bodies2 = bodies.clone();
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     let n = Arc::new(AtomicUsize::new(0));
@@ -134,7 +144,12 @@ fn spawn_extractor() -> (String, Arc<AtomicUsize>) {
         for s in l.incoming() {
             let Ok(mut s) = s else { break };
             n2.fetch_add(1, Ordering::SeqCst);
-            let req: Value = serde_json::from_slice(&read_body(&mut s)).unwrap_or(Value::Null);
+            let raw = read_body(&mut s);
+            bodies2
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&raw).into_owned());
+            let req: Value = serde_json::from_slice(&raw).unwrap_or(Value::Null);
             let msg = |role: &str| -> String {
                 req["messages"]
                     .as_array()
@@ -178,7 +193,23 @@ fn spawn_extractor() -> (String, Arc<AtomicUsize>) {
             );
         }
     });
-    (format!("http://127.0.0.1:{port}/v1/chat/completions"), n)
+    (
+        format!("http://127.0.0.1:{port}/v1/chat/completions"),
+        n,
+        bodies,
+    )
+}
+
+/// True when some recorded extraction request carries the ontology's entity-type and
+/// relation-type sections (their descriptions are in `ONTOLOGY`).
+fn prompts_carry_ontology(bodies: &Mutex<Vec<String>>) -> (bool, bool) {
+    let b = bodies.lock().unwrap();
+    (
+        b.iter()
+            .any(|r| r.contains("ENTITY_TYPES") && r.contains("An initiative with an owner.")),
+        b.iter()
+            .any(|r| r.contains("FACT_TYPES") && r.contains("A project is hosted by a provider.")),
+    )
 }
 
 fn lcg_eval(args: &[&str]) -> Output {
@@ -263,7 +294,7 @@ async fn ontology_ingest_round_trips_and_the_kept_workspace_serves_integrity_and
     let onto = t("onto.yaml");
     std::fs::write(&onto, ONTOLOGY).unwrap();
     let embedder = spawn_embedder();
-    let (extractor, extracted) = spawn_extractor();
+    let (extractor, extracted, prompts) = spawn_extractor_logging();
     let common = [
         "retrieval",
         "--corpus",
@@ -298,6 +329,12 @@ async fn ontology_ingest_round_trips_and_the_kept_workspace_serves_integrity_and
     let rec = lcg_eval(&a);
     ok(&rec);
     assert!(extracted.load(Ordering::SeqCst) > 0);
+    // #881 FR-007: the service really extracted under the ontology — its types are in the prompts.
+    assert_eq!(
+        prompts_carry_ontology(&prompts),
+        (true, true),
+        "the extraction prompts carry no ontology: the service ran free-form"
+    );
     let r1 = read_json(&tmp.path().join("r1/report.json"));
     let hash = r1["meta"]["ontology_hash"].as_str().unwrap().to_string();
     assert_ne!(hash, "none");
@@ -440,4 +477,97 @@ async fn ontology_ingest_round_trips_and_the_kept_workspace_serves_integrity_and
         snapshot(kept_p) == snap,
         "graph-qa or graph-integrity modified the workspace"
     );
+}
+
+fn onto_hash(path: &str, mode: lcg_core::OntologyMode) -> String {
+    lcg_core::ontology::content_hash(Some(
+        &lcg_core::ontology::load_ontology_from_path(Path::new(path), mode).unwrap(),
+    ))
+}
+
+/// #881 FR-009: a service started through the harness's spawn path with a staged ontology reports
+/// that ontology's hash for the eval group. Fails on the pre-fix code, where the child never got
+/// `LIMINIS_WORKSPACE_ROOT` and so started free-form (and `spawn_service` could not tell).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawned_service_loads_the_staged_ontology() {
+    use lcg_eval::retrieval::lcg::{spawn_service, RpcTransport, ServiceOpts, EVAL_GROUP};
+    let Some(bin) = service_bin() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let onto = tmp.path().join("onto.yaml");
+    std::fs::write(&onto, ONTOLOGY).unwrap();
+    let hash = onto_hash(onto.to_str().unwrap(), lcg_core::OntologyMode::Strict);
+    let opts = ServiceOpts {
+        bin,
+        embedder_http: Some(spawn_embedder()),
+        extractor_http: Some(spawn_extractor().0),
+        ontology_file: Some(onto),
+        ontology_mode: Some(lcg_core::OntologyMode::Strict),
+        ontology_hash: Some(hash.clone()),
+        // No expectation: this test must see the hash itself, not rely on the guard.
+        expect_ontology_hash: None,
+        ..Default::default()
+    };
+    let guard = spawn_service(&opts).await.unwrap();
+    let view = guard
+        .client
+        .call("knowledge_get_ontology", json!({"group_id": EVAL_GROUP}))
+        .await
+        .unwrap();
+    assert_eq!(view["has_ontology"], true, "{view}");
+    assert_eq!(view["ontology_hash"], hash.as_str(), "{view}");
+    assert_eq!(guard.ontology.hash, hash);
+    assert_eq!(guard.ontology.mode.as_deref(), Some("strict"));
+}
+
+/// #881 FR-010: a service that comes up without the staged ontology stops the run before any
+/// ingest, with an error naming the expected hash. A wrapper script deletes the staged file just
+/// before it `exec`s the real service — the same observable state as the original bug.
+#[cfg(unix)]
+#[test]
+fn a_service_without_the_staged_ontology_fails_the_run_before_ingest() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(bin) = service_bin() else { return };
+    let tmp = tempfile::tempdir().unwrap();
+    let t = |p: &str| tmp.path().join(p).to_str().unwrap().to_string();
+    let onto = t("onto.yaml");
+    std::fs::write(&onto, ONTOLOGY).unwrap();
+    let wrapper = t("service-without-ontology.sh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = \"--version\" ] || rm -f .lcg/ontology.yaml\nexec '{}' \"$@\"\n",
+            bin.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let embedder = spawn_embedder();
+    let (extractor, extracted) = spawn_extractor();
+    let corpus = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/retrieval");
+    let o = lcg_eval(&[
+        "retrieval",
+        "--corpus",
+        corpus.to_str().unwrap(),
+        "--configs",
+        "lcg-passages",
+        "--no-grounded",
+        "--service-bin",
+        &wrapper,
+        "--embedder-http",
+        &embedder,
+        "--extractor-http",
+        &extractor,
+        "--ontology",
+        &onto,
+        "--out",
+        &t("out"),
+    ]);
+    assert!(!o.status.success(), "the run must fail");
+    let err = String::from_utf8_lossy(&o.stderr);
+    let expected = onto_hash(&onto, lcg_core::OntologyMode::Strict);
+    assert!(err.contains("ontology verification failed"), "{err}");
+    assert!(err.contains("no ontology"), "{err}");
+    assert!(err.contains(&expected), "{err}");
+    assert!(!err.contains("ingesting"), "{err}");
+    assert_eq!(extracted.load(Ordering::SeqCst), 0, "no extraction call");
 }

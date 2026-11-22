@@ -163,6 +163,34 @@ pub struct ServiceOpts {
     /// An existing workspace to run on (`graph-qa`): it is **copied** into the temp workspace and
     /// the service runs on the copy, so the original is never opened, migrated or checkpointed.
     pub seed_workspace: Option<PathBuf>,
+    /// The ontology hash the service must report for [`EVAL_GROUP`] once it is ready (#881).
+    /// `Some` makes [`spawn_service`] fail — before any ingest — when the service has no ontology,
+    /// a different one, or cannot say; `None` (free-form runs) only records what it reports.
+    pub expect_ontology_hash: Option<String>,
+}
+
+/// The ontology a running service reports for [`EVAL_GROUP`] (`knowledge_get_ontology`, #881).
+/// This — not the file the harness staged — is what reports, cassette sidecars and kept-workspace
+/// manifests must state, because it is what extraction actually used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceOntology {
+    /// `ontology_hash`; `"none"` for a service with no ontology (free-form extraction).
+    pub hash: String,
+    /// The service's ontology mode; `None` when it has no ontology.
+    pub mode: Option<String>,
+}
+
+impl ServiceOntology {
+    pub fn free_form() -> Self {
+        Self {
+            hash: "none".to_string(),
+            mode: None,
+        }
+    }
+
+    pub fn is_free_form(&self) -> bool {
+        self.hash == "none"
+    }
 }
 
 /// Mock and hash embedders produce meaningless vectors, so a real embedder must be named
@@ -208,6 +236,8 @@ pub struct ServiceGuard {
     _child: tokio::process::Child,
     _workspace: tempfile::TempDir,
     pub version: String,
+    /// What the service reports as its ontology for [`EVAL_GROUP`], read right after startup.
+    pub ontology: ServiceOntology,
 }
 
 /// How long a kept run waits for the service to exit after `knowledge_close`.
@@ -295,6 +325,70 @@ pub fn verify_embedding_profile(requested: Option<&str>, status: &Value) -> Resu
     ))
 }
 
+/// Reads the ontology the service reports for [`EVAL_GROUP`] from a `knowledge_get_ontology`
+/// response (#881) and, when `expected` is given, checks it is that one.
+///
+/// With an expectation every divergence is an error naming both sides: the service has no
+/// ontology, reports a different hash, or (an older build) reports no `ontology_hash` at all.
+/// Without one this never fails — a free-form run just records what the service says.
+pub fn verify_ontology(expected: Option<&str>, view: &Value) -> Result<ServiceOntology, String> {
+    let has = view["has_ontology"].as_bool().unwrap_or(false);
+    let hash = view["ontology_hash"].as_str();
+    let Some(expected) = expected else {
+        return Ok(match (has, hash) {
+            (true, Some(h)) => ServiceOntology {
+                hash: h.to_string(),
+                mode: view["mode"].as_str().map(str::to_string),
+            },
+            _ => ServiceOntology::free_form(),
+        });
+    };
+    if !has {
+        return Err(format!(
+            "ontology verification failed: the service has no ontology (free-form extraction), \
+             but this run staged one with hash {expected}. The service finds its ontology through \
+             LIMINIS_WORKSPACE_ROOT/.lcg/ontology.yaml. Refusing to run a free-form extraction \
+             labelled as an ontology run."
+        ));
+    }
+    let Some(actual) = hash else {
+        return Err(format!(
+            "ontology verification failed: the service does not report an ontology hash \
+             (expected {expected}); it is an older build — rebuild it (`cargo build --release -p \
+             lcg-service`) or pass a current --service-bin"
+        ));
+    };
+    if actual != expected {
+        return Err(format!(
+            "ontology verification failed: the service loaded ontology hash {actual}, but this \
+             run staged hash {expected}"
+        ));
+    }
+    Ok(ServiceOntology {
+        hash: actual.to_string(),
+        mode: view["mode"].as_str().map(str::to_string),
+    })
+}
+
+/// Queries `knowledge_get_ontology` for [`EVAL_GROUP`] and applies [`verify_ontology`]. With an
+/// expectation, a failed call is an error naming this step; without one it degrades to free-form
+/// so an older service never fails a run that asked for no ontology.
+pub async fn read_service_ontology(
+    t: &dyn RpcTransport,
+    expected: Option<&str>,
+) -> Result<ServiceOntology, String> {
+    match t
+        .call("knowledge_get_ontology", json!({"group_id": EVAL_GROUP}))
+        .await
+    {
+        Ok(view) => verify_ontology(expected, &view),
+        Err(e) if expected.is_some() => Err(format!(
+            "ontology verification failed: knowledge_get_ontology: {e}"
+        )),
+        Err(_) => Ok(ServiceOntology::free_form()),
+    }
+}
+
 /// Pins the child's instruction config to the requested profile (#790). The child inherits the
 /// parent's environment, so a stray `LCG_EMBEDDING_QUERY_PREFIX` / `LCG_EMBEDDING_DOCUMENT_PREFIX`
 /// would silently override the profile's prefixes on that side while the service still reports
@@ -306,6 +400,14 @@ fn apply_embedding_profile_env(cmd: &mut tokio::process::Command, profile: Optio
             .env_remove("LCG_EMBEDDING_QUERY_PREFIX")
             .env_remove("LCG_EMBEDDING_DOCUMENT_PREFIX");
     }
+}
+
+/// Points the child at the eval workspace for ontology discovery (#881). The service finds its
+/// ontology (and corrections store) only through `LIMINIS_WORKSPACE_ROOT`, read once at startup:
+/// unset it starts free-form even with `.lcg/ontology.yaml` staged, and an inherited value would
+/// load an unrelated workspace's ontology. So it is always set, overriding the operator's.
+fn apply_workspace_root_env(cmd: &mut tokio::process::Command, ws: &Path) {
+    cmd.env("LIMINIS_WORKSPACE_ROOT", ws);
 }
 
 pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
@@ -340,6 +442,7 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
         cmd.env("LCG_RECORD_LLM", p);
     }
     apply_embedding_profile_env(&mut cmd, o.embedding_profile.as_deref());
+    apply_workspace_root_env(&mut cmd, ws.path());
     // `lcg-passages` measures the shipped default (#806): an operator's passage-search overrides
     // must not leak into the child and silently change what it measures.
     cmd.env_remove("LCG_PASSAGE_SEARCH_MODE")
@@ -362,6 +465,7 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
     })?;
     let sock = ws.path().join(".lcg").join("service.sock");
     let deadline = Instant::now() + Duration::from_secs(120);
+    let ontology;
     let client = loop {
         // Fail fast if the service died at startup (bad embedder URL, conflicting record/replay
         // env, workspace error) instead of polling for the whole deadline.
@@ -383,6 +487,9 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
                     // e.g. `embedder` is requested of an embedder that advertises no roles.
                     // Refuse to measure under a label the service is not actually running.
                     verify_embedding_profile(o.embedding_profile.as_deref(), &status)?;
+                    // #881: confirm the service loaded the ontology this run staged, before any
+                    // ingest — a free-form service would otherwise extract silently unconstrained.
+                    ontology = read_service_ontology(&c, o.expect_ontology_hash.as_deref()).await?;
                     break c;
                 }
             }
@@ -400,6 +507,7 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
         _child: child,
         _workspace: ws,
         version: service_version(&o.bin).await,
+        ontology,
     })
 }
 
@@ -1134,6 +1242,80 @@ mod tests {
         assert!(verify_embedding_profile(Some("none"), &json!({}))
             .unwrap_err()
             .contains("no profile"));
+    }
+
+    #[test]
+    fn child_workspace_root_is_always_the_eval_workspace() {
+        let mut cmd = tokio::process::Command::new("true");
+        // An inherited value is overridden, not left in place.
+        cmd.env("LIMINIS_WORKSPACE_ROOT", "/somewhere/else");
+        apply_workspace_root_env(&mut cmd, Path::new("/eval/ws"));
+        let v = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "LIMINIS_WORKSPACE_ROOT")
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(v.as_deref(), Some("/eval/ws"));
+    }
+
+    fn onto_view(hash: &str) -> Value {
+        json!({"has_ontology": true, "mode": "strict", "ontology_hash": hash})
+    }
+
+    #[test]
+    fn expected_ontology_must_be_the_one_the_service_reports() {
+        // Match: the service-reported hash and mode are returned.
+        let ok = verify_ontology(Some("abc"), &onto_view("abc")).unwrap();
+        assert_eq!(ok.hash, "abc");
+        assert_eq!(ok.mode.as_deref(), Some("strict"));
+        // Mismatch: both hashes are named.
+        let e = verify_ontology(Some("abc"), &onto_view("def")).unwrap_err();
+        assert!(e.contains("abc") && e.contains("def"), "{e}");
+        // The service has no ontology: says so and names the expected hash.
+        let none = json!({"has_ontology": false, "mode": "free-form", "ontology_hash": "none"});
+        let e = verify_ontology(Some("abc"), &none).unwrap_err();
+        assert!(e.contains("no ontology") && e.contains("abc"), "{e}");
+        // An older service reports no hash at all: a hard error, not a silent pass.
+        let old = json!({"has_ontology": true, "mode": "strict"});
+        let e = verify_ontology(Some("abc"), &old).unwrap_err();
+        assert!(e.contains("does not report an ontology hash"), "{e}");
+    }
+
+    #[test]
+    fn without_an_expectation_the_reported_ontology_is_only_recorded() {
+        let none = json!({"has_ontology": false, "mode": "free-form", "ontology_hash": "none"});
+        let r = verify_ontology(None, &none).unwrap();
+        assert!(r.is_free_form() && r.mode.is_none());
+        // An old service (no field) or a malformed view never fails a free-form run.
+        assert!(verify_ontology(None, &json!({})).unwrap().is_free_form());
+        assert_eq!(
+            verify_ontology(None, &onto_view("abc")).unwrap().hash,
+            "abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_service_ontology_queries_the_eval_group_and_degrades_without_expectation() {
+        let t = FakeTransport::new(|m, _| {
+            assert_eq!(m, "knowledge_get_ontology");
+            Ok(onto_view("abc"))
+        });
+        let r = read_service_ontology(&t, Some("abc")).await.unwrap();
+        assert_eq!(r.hash, "abc");
+        assert_eq!(t.log.lock().unwrap()[0].1["group_id"], EVAL_GROUP);
+
+        let failing = FakeTransport::new(|_, _| Err("boom".to_string()));
+        let e = read_service_ontology(&failing, Some("abc"))
+            .await
+            .unwrap_err();
+        assert!(
+            e.contains("knowledge_get_ontology") && e.contains("boom"),
+            "{e}"
+        );
+        assert!(read_service_ontology(&failing, None)
+            .await
+            .unwrap()
+            .is_free_form());
     }
 
     #[test]

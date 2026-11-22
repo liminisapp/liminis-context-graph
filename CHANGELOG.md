@@ -11,6 +11,16 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- **`lcg-eval` verifies the ontology the service loaded, and reports that (#881, ADR-0881).**
+  `knowledge_get_ontology` gains an additive `ontology_hash` (the semantic `content_hash` of the
+  loaded ontology, `"none"` without one; independent of `include_asserted`). After startup,
+  `lcg-eval retrieval --ontology` (and `graph-qa` on a workspace that has an ontology) queries it for
+  the eval group and exits non-zero, before any ingest, when the service has no ontology, a different
+  hash, or an older build that reports no hash — the error names both hashes. `report.md`,
+  `report.json` (`meta.ontology_hash` is `"none"` for a free-form run, no longer `null`), the
+  cassette `.meta.json` and the kept-workspace manifest now state the hash and mode the service
+  reported rather than the staged file's.
+
 - **`find_entities` `include_episodes`, and a `uuids` filter on `get_episodes` (#857, ADR-0857).**
   `knowledge_find_entities` returned `episode_uuids` and `source_descriptions` always empty while
   `get_entity_neighbors` and `get_entities_by_source` filled them, so the same field meant
@@ -278,6 +288,12 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   unchanged.
 
 ### Fixed
+
+- **`lcg-eval --ontology` never reached the spawned service (#881).** `spawn_service` staged
+  `.lcg/ontology.yaml` but did not set `LIMINIS_WORKSPACE_ROOT`, the only way the service finds its
+  ontology, so `retrieval --ontology` and `graph-qa` extracted free-form while the output claimed
+  the ontology. The variable is now always set to the eval workspace, overriding any inherited
+  value. Unreleased regression from #821 (#842); the service is unaffected.
 
 - **`knowledge_delete_by_source` no longer deletes other sources' episodes, and
   `knowledge_get_entities_by_source` returns only the requested source's live entities** (#829,

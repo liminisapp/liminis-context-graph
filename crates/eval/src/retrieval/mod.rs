@@ -577,7 +577,9 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             resamples: a.bootstrap_resamples,
         },
         private: a.private,
-        ontology_hash: a.ontology.as_ref().map(|_| onto.hash.clone()),
+        // Overwritten with what the service reports once one is running (#881); `"none"` (not
+        // omitted) for a free-form run.
+        ontology_hash: Some(onto.hash.clone()),
         ontology_mode: onto.mode.clone(),
         ontology_file: a.ontology.as_ref().map(|p| p.display().to_string()),
         kept_workspace: None,
@@ -616,6 +618,8 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
                 ontology_mode: a.ontology_mode.clone(),
                 ontology_hash: a.ontology.as_ref().map(|_| onto.hash.clone()),
                 seed_workspace: None,
+                // #881: with `--ontology`, `spawn_service` refuses a service that did not load it.
+                expect_ontology_hash: a.ontology.as_ref().map(|_| onto.hash.clone()),
             };
             eprintln!(
                 "lcg-eval retrieval: starting LCG service ({}){}",
@@ -627,6 +631,11 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             );
             let guard = lcg::spawn_service(&opts).await?;
             meta.lcg_build = guard.version.clone();
+            // #881: report what the service loaded, not what the harness staged. With
+            // `--ontology` the two are equal (verified in `spawn_service`); the report and the
+            // cassette sidecar state the former so a discrepancy can never be hidden.
+            meta.ontology_hash = Some(guard.ontology.hash.clone());
+            meta.ontology_mode = guard.ontology.mode.clone();
             meta.embedder = a
                 .embedder_http
                 .clone()
@@ -653,7 +662,11 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             // FR-003: the cassette this ingest recorded carries the ontology it was recorded under
             // (also "none"), so a later replay can be checked either way.
             if let Some(c) = &a.record_cassette {
-                workspace::write_cassette_meta(std::path::Path::new(c), &onto, &guard.version)?;
+                let served = workspace::OntologyIdentity {
+                    hash: guard.ontology.hash.clone(),
+                    mode: guard.ontology.mode.clone(),
+                };
+                workspace::write_cassette_meta(std::path::Path::new(c), &served, &guard.version)?;
             }
             // Ingest cost accumulates across profile runs (each re-ingests the corpus).
             ingest_cost.lcg_seconds = Some(ingest_cost.lcg_seconds.unwrap_or(0.0) + map.seconds);
@@ -881,8 +894,9 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             group_id: lcg::EVAL_GROUP.to_string(),
             corpus_version: meta.corpus_version.clone(),
             corpus_hash: meta.corpus_hash.clone(),
-            ontology_hash: onto.hash.clone(),
-            ontology_mode: onto.mode.clone(),
+            // What the service loaded (#881), not what was staged.
+            ontology_hash: guard.ontology.hash.clone(),
+            ontology_mode: guard.ontology.mode.clone(),
             // Redacted: the manifest is on disk next to the data, so no endpoint credential.
             embedder: workspace::redact_endpoint(
                 &a.embedder_http

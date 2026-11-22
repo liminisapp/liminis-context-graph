@@ -764,8 +764,9 @@ pub fn registry() -> Vec<ToolSpec> {
             name: "knowledge_get_ontology",
             description: "Return the effective ontology of a group (group file, then workspace, \
                            then none) as a planning menu for `knowledge_walk` (issue #820): \
-                           `mode`, `entity_types` (name, description, parent, identity, \
-                           extract) and `relation_types` (name, description, `source_type` and \
+                           `mode`, `ontology_hash` (the semantic content hash of the \
+                           loaded ontology, or \"none\"; issue #881), `entity_types` (name, \
+                           description, parent, identity, extract) and `relation_types` (name, description, `source_type` and \
                            `target_type` lists, `inverse_aliases`, `symmetric`, aliases, \
                            keywords, extract). Assert-only types (`extract: false`) are omitted \
                            unless `include_asserted` is true. A group with no ontology returns \

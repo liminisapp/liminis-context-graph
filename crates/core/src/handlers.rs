@@ -2795,12 +2795,16 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
 /// maps the in-memory `Ontology` to the wire shape. Signatures are the declared
 /// `source_types`/`target_types` lists, alongside `inverse_aliases` and `symmetric` (#816).
 ///
-/// `extract: false` (assert-only) types are omitted unless `include_asserted`.
+/// `extract: false` (assert-only) types are omitted unless `include_asserted`. `ontology_hash`
+/// is the semantic [`crate::ontology::content_hash`] of the *whole* ontology (`"none"` when there
+/// is none) — independent of `include_asserted` — so a client can verify which ontology the
+/// service actually loaded (#881).
 fn ontology_view(onto: Option<&crate::ontology::Ontology>, include_asserted: bool) -> Value {
     let Some(o) = onto else {
         return json!({
             "has_ontology": false,
             "mode": "free-form",
+            "ontology_hash": crate::ontology::content_hash(None),
             "entity_types": [],
             "entity_type_count": 0,
             "relation_types": [],
@@ -2842,6 +2846,7 @@ fn ontology_view(onto: Option<&crate::ontology::Ontology>, include_asserted: boo
     json!({
         "has_ontology": true,
         "mode": o.mode.to_string(),
+        "ontology_hash": crate::ontology::content_hash(Some(o)),
         "entity_type_count": entity_types.len(),
         "entity_types": entity_types,
         "relation_type_count": relation_types.len(),
