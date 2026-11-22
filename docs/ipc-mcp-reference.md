@@ -133,8 +133,8 @@ during a rebuild and under any `--writable-groups` policy.
 
 ```json
 {"server_version": "0.19.1", "protocol_version": 1,
- "features": ["chunk_supersede", "hybrid_passage_search", "lint", "origin", "process_document",
-              "walk", "writable_groups"],
+ "features": ["chunk_supersede", "entity_provenance", "hybrid_passage_search", "lint", "origin",
+              "process_document", "walk", "writable_groups"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -458,6 +458,46 @@ How it differs from `knowledge_search_passages`' `min_score`: the value is clamp
 way (a non-number is an invalid-params error), but `min_similarity` has **no default** — omitted
 or `null` means no floor and results are identical to before, apart from the added `search`
 object — and it acts before fusion and per path rather than as a post-filter on a single list.
+
+### Entity provenance: which episodes mention an entity (issue #857, feature `entity_provenance`)
+
+`EntityRow` carries `episode_uuids` and `source_descriptions`, but not every read fills them. Until
+#857 the same field meant different things on different methods, so they are spelled out here:
+
+| Method | `episode_uuids` / `source_descriptions` | `source_files` | Superseded episodes |
+|---|---|---|---|
+| `knowledge_find_entities` (default) | **Always `[]`** — not computed | absent | n/a |
+| `knowledge_find_entities` with `include_episodes: true` | Filled | Filled | **Excluded** (live only) |
+| `knowledge_get_entity_neighbors` | Filled | absent | **Included** |
+| `knowledge_get_entities_by_source` | Filled | absent | Included |
+
+`knowledge_find_entities` takes an opt-in boolean **`include_episodes`** (default `false`; any
+non-boolean is a validation error). Without it the response is byte-for-byte what it was before:
+`episode_uuids` and `source_descriptions` are `[]` and no new keys appear. With it, each node's
+fields come from the entity's **live** mentioning episodes — the same predicate `support` uses
+(not superseded at the read instant) — computed from the single batched mention query that
+already produces `support`, so there is no extra query per hit:
+
+- `episode_uuids` — newest first (`created_at` descending, `uuid` descending as tiebreaker, the
+  order `knowledge_get_episodes` uses), so a repeated call returns the same subset.
+- `source_descriptions` — index-aligned with `episode_uuids`; not de-duplicated.
+- `source_files` — the de-duplicated stored `source_file` values (#853) in order of first
+  appearance. Episodes with no recorded source file (older data) are omitted, so this list is
+  **not** index-aligned with `episode_uuids`. Present only with the flag.
+- `episodes_truncated` — `true` only when the per-entity cap (fixed at **50**, not a request
+  parameter) removed at least one live episode; absent otherwise.
+
+`support` and `corroboration` are unchanged by the flag and always count **every** live document,
+not just the capped list; because `support` counts distinct documents and the list counts
+episodes, the two need not agree. `get_entity_neighbors` and `get_entities_by_source` do not
+filter superseded episodes (unchanged), so a `find_entities` hit's `episode_uuids` equals the
+**live subset** of what `get_entity_neighbors` reports for the same entity. Also note that the
+live predicate here does not exclude pending document revisions, which
+`get_entities_by_source` does.
+
+To turn the UUIDs into episodes, call `knowledge_get_episodes` with `uuids` (see the paging
+table below) — two calls from a free-text query to every mentioning episode.
+See [ADR-0857](adr/0857-find-entities-episode-provenance.md).
 
 ### Hybrid passage search (`knowledge_search_passages`, issue #789)
 
@@ -1206,6 +1246,7 @@ additive parameters; with none of them the response is exactly `{<collection>, c
 | `cursor` | both | Opaque keyset cursor. Send `""` for the first page, then send back each response's `next_cursor` until it is `null`. |
 | `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, source_file, chunk_id`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
 | `name_prefix` | both | Names starting with this prefix, matched literally. Case-insensitive for entities (via Cypher `lower()`, so non-ASCII folds only as far as lbug does); case-sensitive for episodes. |
+| `uuids` (array of strings) | episodes | Return exactly these episodes (issue #857), still within the `group_ids` scope: a uuid in another group, or an unknown one, is simply absent — never an error. An empty array returns no episodes (not all). Duplicates return each episode once. Superseded episodes are returned like any other. Combines with `name_prefix`; `last_n` defaults to the number of uuids (so 50+ uuids are not truncated) and an explicit `last_n` still caps the result. `uuids` alone does not enable paging; a `cursor` is bound to the `uuids` set it was minted under. A non-array or non-string item is a validation error. |
 
 `next_cursor` appears only when the request contained `cursor`, `fields` or `name_prefix`; it is
 `null` on the last page. Order is deterministic (episodes newest first with a `uuid` tiebreaker;

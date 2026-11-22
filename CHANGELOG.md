@@ -11,6 +11,20 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- **`find_entities` `include_episodes`, and a `uuids` filter on `get_episodes` (#857, ADR-0857).**
+  `knowledge_find_entities` returned `episode_uuids` and `source_descriptions` always empty while
+  `get_entity_neighbors` and `get_entities_by_source` filled them, so the same field meant
+  different things per method (#831).
+  - New opt-in `include_episodes: true` fills each hit's `episode_uuids`, `source_descriptions`
+    and a new `source_files` from the entity's live (not superseded) mentioning episodes, newest
+    first, capped at 50 per entity, with `episodes_truncated: true` when the cap bites. It reuses
+    the batched mention query behind `support`, so there is no extra query per hit; `support` is
+    unchanged. Without the flag the response is byte-identical to before.
+  - `knowledge_get_episodes` accepts `uuids: [...]` and returns exactly those episodes, still
+    group-scoped; unknown uuids are absent, an empty array returns nothing.
+  - `knowledge_capabilities` lists the new feature `entity_provenance`. The reference docs and MCP
+    tool descriptions now say when the provenance fields are empty and when they are filled.
+
 - **Graph question answering eval: `lcg-eval graph-qa`, ontology ingest and kept workspaces
   (#821, ADR-0821).** E13's graph question-answering eval (#815) ran only as scratch Python, so
   none of its numbers could be reproduced and `knowledge_walk` (#820) had no regression check.
