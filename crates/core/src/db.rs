@@ -856,7 +856,9 @@ impl<'db> Conn<'db> {
 
     pub fn insert_episodic(&self, row: &EpisodicRow) -> Result<(), Error> {
         // Document-mode rows (issue #785) take their own template, so the chunk-mode statement —
-        // and with it every chunk-mode WAL line — is byte-identical to before (FR-019).
+        // and with it every chunk-mode WAL line — is byte-identical to before (FR-019). Source
+        // identity (issue #853, ADR-0853) deliberately extends both templates with
+        // `source_file`/`chunk_id`, appended last, so a rebuild restores them (FR-009).
         if row.revision_id.is_some() {
             return self.insert_document_episodic(row);
         }
@@ -868,7 +870,7 @@ impl<'db> Conn<'db> {
              superseded_at: $superseded_at, superseded_by: $superseded_by, \
              superseded_by_kind: $superseded_by_kind, \
              supersession_reason: $supersession_reason, doc_id: $doc_id, origin: $origin, \
-             write_path: $write_path})",
+             write_path: $write_path, source_file: $source_file, chunk_id: $chunk_id})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -889,6 +891,8 @@ impl<'db> Conn<'db> {
                 "doc_id": row.doc_id,
                 "origin": row.origin,
                 "write_path": row.write_path,
+                "source_file": row.source_file,
+                "chunk_id": row.chunk_id,
             }),
         )
     }
@@ -907,7 +911,8 @@ impl<'db> Conn<'db> {
              supersession_reason: $supersession_reason, doc_id: $doc_id, origin: $origin, \
              write_path: $write_path, revision_id: $revision_id, \
              revision_committed_at: $revision_committed_at, byte_start: $byte_start, \
-             byte_end: $byte_end, heading_path: $heading_path, chunk_hash: $chunk_hash})",
+             byte_end: $byte_end, heading_path: $heading_path, chunk_hash: $chunk_hash, \
+             source_file: $source_file, chunk_id: $chunk_id})",
             serde_json::json!({
                 "uuid": row.uuid,
                 "name": row.name,
@@ -934,6 +939,8 @@ impl<'db> Conn<'db> {
                 "byte_end": row.byte_end,
                 "heading_path": row.heading_path.clone().unwrap_or_default(),
                 "chunk_hash": row.chunk_hash,
+                "source_file": row.source_file,
+                "chunk_id": row.chunk_id,
             }),
         )
     }
@@ -1448,7 +1455,8 @@ impl<'db> Conn<'db> {
              ep.source_description, ep.content, ep.valid_at, ep.entity_edges, ep.attributes, \
              ep.ingested_at, ep.superseded_at, ep.superseded_by, ep.superseded_by_kind, \
              ep.supersession_reason, ep.doc_id, ep.origin, ep.revision_id, \
-             ep.revision_committed_at, ep.byte_start, ep.byte_end, ep.heading_path, ep.chunk_hash \
+             ep.revision_committed_at, ep.byte_start, ep.byte_end, ep.heading_path, ep.chunk_hash, \
+             ep.source_file, ep.chunk_id \
              ORDER BY ep.created_at DESC, ep.uuid DESC LIMIT $limit"
         );
         let result = self.query_params(&cypher, params)?;
@@ -1485,6 +1493,9 @@ impl<'db> Conn<'db> {
                         v => Some(value_as_str_list(v)),
                     },
                     chunk_hash: value_as_optional_string(&row[22]),
+                    // Source identity (issue #853): absent on a legacy row.
+                    source_file: value_as_optional_string(&row[23]),
+                    chunk_id: value_as_optional_string(&row[24]),
                     ..Default::default()
                 },
                 created_us,
@@ -1548,8 +1559,12 @@ impl<'db> Conn<'db> {
         Ok(out)
     }
 
-    /// Deletes all Episodic nodes whose source_description equals source_file or starts with
-    /// source_file + ":", scoped to the given group_ids. Returns the UUIDs of deleted episodes
+    /// Deletes every Episodic node that belongs to `source_file` under the exact source-identity
+    /// rule (issue #853, ADR-0853, [`crate::source_identity`]), scoped to the given group_ids:
+    /// a row whose stored `source_file` equals it byte for byte, or a legacy row (no stored
+    /// `source_file`) the safe legacy rule attributes to it. Never a prefix or substring match —
+    /// deleting `https://a.com` leaves `https://a.com:8443/...` alone. Superseded episodes of the
+    /// source are deleted too. Returns the UUIDs of deleted episodes
     /// alongside a [`GroupedMutations`] bucketing the deletion mutations by the `group_id` each
     /// one actually removed data from (issue #402).
     ///
@@ -1578,24 +1593,13 @@ impl<'db> Conn<'db> {
                 "remove_episodes_by_source requires a non-empty group_ids".to_string(),
             ));
         }
-        let prefix = format!("{}:", source_file);
-        let match_sql = "MATCH (ep:Episodic) WHERE (ep.source_description = $src \
-             OR ep.source_description STARTS WITH $prefix) AND ep.group_id IN $gids \
-             RETURN ep.uuid";
-
         self.exec_transaction_control("BEGIN TRANSACTION")?;
         let mut grouped: GroupedMutations = GroupedMutations::new();
         let mut all_uuids: Vec<String> = Vec::new();
         let mutate_result = (|| -> Result<(), Error> {
             for gid in group_ids {
                 let single = [*gid];
-                let params =
-                    serde_json::json!({ "src": source_file, "prefix": prefix, "gids": single });
-                let uuids: Vec<String> = self
-                    .query_params(match_sql, params)?
-                    .into_iter()
-                    .map(|row| value_as_string(&row[0]))
-                    .collect();
+                let uuids = self.episode_uuids_for_source(source_file, Some(&single), None)?;
                 if !uuids.is_empty() {
                     self.exec_params(
                         "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
@@ -2845,7 +2849,8 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
              WHERE n.uuid IN $uuids AND ep.group_id = $gid \
-             RETURN ep.uuid, ep.name, ep.ingested_at, ep.source_description, n.uuid",
+             RETURN ep.uuid, ep.name, ep.ingested_at, ep.source_description, n.uuid, \
+             ep.source_file, ep.chunk_id",
             serde_json::json!({ "uuids": entity_uuids, "gid": group_id }),
         )?;
         let mut by_uuid: std::collections::BTreeMap<
@@ -2865,6 +2870,8 @@ impl<'db> Conn<'db> {
                     },
                     source_description: value_as_string(&r[3]),
                     matched_entity_uuids: vec![],
+                    source_file: value_as_optional_string(&r[5]),
+                    chunk_id: value_as_optional_string(&r[6]),
                 }
             });
             if !entry.matched_entity_uuids.contains(&entity) {
@@ -3378,7 +3385,7 @@ impl<'db> Conn<'db> {
              WITH node, distance {where_clause} \
              RETURN node.uuid, node.name, node.content, node.source_description, \
              node.group_id, node.created_at, node.valid_at, node.attributes, distance, \
-             coalesce(node.origin, '') \
+             coalesce(node.origin, ''), node.source_file, node.chunk_id \
              ORDER BY distance ASC LIMIT $limit"
         );
         let mut params = serde_json::json!({
@@ -3390,7 +3397,7 @@ impl<'db> Conn<'db> {
         let result = self.query_params(&cypher, params)?;
         Ok(result
             .iter()
-            .map(|row| passage_from_row(row, value_as_f64(&row[8]), &row[9]))
+            .map(|row| passage_from_row(row, value_as_f64(&row[8]), 9))
             .collect())
     }
 
@@ -3433,12 +3440,12 @@ impl<'db> Conn<'db> {
             "MATCH (node:Episodic) WHERE node.uuid IN $uuids \
              RETURN node.uuid, node.name, node.content, node.source_description, \
              node.group_id, node.created_at, node.valid_at, node.attributes, \
-             coalesce(node.origin, '')",
+             coalesce(node.origin, ''), node.source_file, node.chunk_id",
             serde_json::json!({ "uuids": uuids }),
         )?;
         Ok(result
             .iter()
-            .map(|row| passage_from_row(row, 0.0, &row[8]))
+            .map(|row| passage_from_row(row, 0.0, 8))
             .collect())
     }
 
@@ -3663,31 +3670,43 @@ impl<'db> Conn<'db> {
         Ok(edges)
     }
 
-    /// Returns Entity nodes reachable via Episodic nodes whose source_description CONTAINS `source`.
+    /// Returns Entity nodes mentioned by the **live** episodes of `source` (issue #853,
+    /// ADR-0853): episodes that belong to `source` under the exact source-identity rule
+    /// ([`crate::source_identity`] — stored `source_file` equality, or the safe legacy rule for a
+    /// row with none), and that are believed now. Never a substring match, so `https://a.com/p`
+    /// does not return entities only `https://a.com/page` supports.
     ///
-    /// Uses Cypher `CONTAINS` predicate (substring semantics, FR-017). If lbug's dialect does not
-    /// support `CONTAINS`, this will return an error and the caller should fall back to Rust-side
-    /// filtering.
+    /// "Live" is the chunk-lineage predicate ([`Self::live_episode_uuids_for_chunk`]: not
+    /// superseded, or a document supersession not yet effective) plus the exclusion of a pending
+    /// or abandoned document-mode revision (`revision_id` set, `revision_committed_at` NULL),
+    /// which was never believed. An entity is returned when at least one live episode of the
+    /// source mentions it. The optional group filter applies to the entity's `group_id`, and
+    /// `LIMIT` applies after the source filter, so the result is never under-filled.
     pub fn get_entities_by_source(
         &self,
         source: &str,
         group_ids: Option<&[&str]>,
         limit: usize,
     ) -> Result<Vec<EntityRow>, Error> {
+        let live_at = ingested_at_or_now("");
+        let uuids = self.episode_uuids_for_source(source, None, Some(&live_at))?;
+        if uuids.is_empty() {
+            return Ok(Vec::new());
+        }
         let (cypher, params): (&str, serde_json::Value) = match group_ids {
             Some(gids) if !gids.is_empty() => (
                 "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
-                 WHERE ep.source_description CONTAINS $src AND e.group_id IN $gids \
+                 WHERE ep.uuid IN $uuids AND e.group_id IN $gids \
                  RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
                  e.summary, e.attributes, e.kind, e.ingested_at LIMIT $limit",
-                serde_json::json!({ "src": source, "gids": gids, "limit": limit as i64 }),
+                serde_json::json!({ "uuids": uuids, "gids": gids, "limit": limit as i64 }),
             ),
             _ => (
                 "MATCH (ep:Episodic)-[:MENTIONS]->(e:Entity) \
-                 WHERE ep.source_description CONTAINS $src \
+                 WHERE ep.uuid IN $uuids \
                  RETURN DISTINCT e.uuid, e.name, e.group_id, e.labels, e.created_at, \
                  e.summary, e.attributes, e.kind, e.ingested_at LIMIT $limit",
-                serde_json::json!({ "src": source, "limit": limit as i64 }),
+                serde_json::json!({ "uuids": uuids, "limit": limit as i64 }),
             ),
         };
         let result = self.query_params(cypher, params)?;
@@ -3707,6 +3726,62 @@ impl<'db> Conn<'db> {
             });
         }
         Ok(rows)
+    }
+
+    /// UUIDs of the episodes that belong to `source` under the exact source-identity rule
+    /// (issue #853, ADR-0853), optionally restricted to `group_ids` and to episodes live at
+    /// `live_at`.
+    ///
+    /// Cypher returns a candidate superset — rows whose stored `source_file` equals `source`, and
+    /// legacy rows (no stored `source_file`) whose `source_description` equals `source` or starts
+    /// with `source + ":"` — and [`crate::source_identity::episode_matches_source`] decides each
+    /// row exactly. Every legacy row the rule can attribute to `source` satisfies one of those two
+    /// predicates, so the candidate set is complete; the Rust filter removes the over-matches
+    /// (`https://a.com:8443/x:c1` for `https://a.com`). No Cypher string concatenation is needed.
+    fn episode_uuids_for_source(
+        &self,
+        source: &str,
+        group_ids: Option<&[&str]>,
+        live_at: Option<&str>,
+    ) -> Result<Vec<String>, Error> {
+        let mut cypher = String::from(
+            "MATCH (ep:Episodic) WHERE (ep.source_file = $src \
+             OR ((ep.source_file IS NULL OR ep.source_file = '') \
+                 AND (ep.source_description = $src \
+                      OR ep.source_description STARTS WITH $prefix)))",
+        );
+        let mut params = serde_json::json!({ "src": source, "prefix": format!("{source}:") });
+        if let Some(gids) = group_ids {
+            cypher.push_str(" AND ep.group_id IN $gids");
+            params["gids"] = serde_json::json!(gids);
+        }
+        if let Some(at) = live_at {
+            cypher.push_str(
+                " AND (ep.superseded_at IS NULL \
+                   OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+                 AND (ep.revision_id IS NULL OR ep.revision_committed_at IS NOT NULL)",
+            );
+            params["live_at"] = serde_json::json!(at);
+        }
+        cypher.push_str(
+            " RETURN ep.uuid, ep.source_file, ep.source_description, ep.name, ep.write_path",
+        );
+        Ok(self
+            .query_params(&cypher, params)?
+            .into_iter()
+            .filter(|row| {
+                let source_file = value_as_optional_string(&row[1]);
+                let write_path = value_as_optional_string(&row[4]);
+                crate::source_identity::episode_matches_source(
+                    source_file.as_deref(),
+                    &value_as_string(&row[2]),
+                    &value_as_string(&row[3]),
+                    write_path.as_deref(),
+                    source,
+                )
+            })
+            .map(|row| value_as_string(&row[0]))
+            .collect())
     }
 
     fn collect_uuid_score_pairs(
@@ -5381,7 +5456,7 @@ impl<'db> Conn<'db> {
     ///            content_embedding, valid_at, entity_edges, attributes, ingested_at,
     ///            superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, origin,
     ///            write_path, revision_id, revision_committed_at, byte_start, byte_end,
-    ///            heading_path, chunk_hash]
+    ///            heading_path, chunk_hash, source_file, chunk_id]
     pub(crate) fn dump_episodics_page(
         &self,
         group_id: Option<&str>,
@@ -5396,7 +5471,7 @@ impl<'db> Conn<'db> {
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
                  n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin, n.write_path, \
                  n.revision_id, n.revision_committed_at, n.byte_start, n.byte_end, \
-                 n.heading_path, n.chunk_hash \
+                 n.heading_path, n.chunk_hash, n.source_file, n.chunk_id \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -5408,7 +5483,7 @@ impl<'db> Conn<'db> {
                  n.attributes, n.ingested_at, n.superseded_at, n.superseded_by, \
                  n.superseded_by_kind, n.supersession_reason, n.doc_id, n.origin, n.write_path, \
                  n.revision_id, n.revision_committed_at, n.byte_start, n.byte_end, \
-                 n.heading_path, n.chunk_hash \
+                 n.heading_path, n.chunk_hash, n.source_file, n.chunk_id \
                  ORDER BY n.uuid SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
@@ -6329,8 +6404,10 @@ fn add_episodic_filter_params(
 
 /// Builds a [`PassageResult`] from a row of the columns
 /// `uuid, name, content, source_description, group_id, created_at, valid_at, attributes` at
-/// indices 0..=7, with the (coalesced) origin at `origin_col`.
-fn passage_from_row(row: &[Value], score: f64, origin_col: &Value) -> PassageResult {
+/// indices 0..=7, with the (coalesced) origin at `origin_idx` followed by `source_file` and
+/// `chunk_id` (issue #853) at `origin_idx + 1` and `origin_idx + 2`.
+fn passage_from_row(row: &[Value], score: f64, origin_idx: usize) -> PassageResult {
+    let origin_col = &row[origin_idx];
     let valid_at = match value_as_optional_timestamp_str(&row[6]) {
         Some(s) if s.is_empty() => None,
         other => other,
@@ -6352,6 +6429,8 @@ fn passage_from_row(row: &[Value], score: f64, origin_col: &Value) -> PassageRes
         matched_queries: None,
         rerank_score: None,
         belief: None,
+        source_file: value_as_optional_string(&row[origin_idx + 1]),
+        chunk_id: value_as_optional_string(&row[origin_idx + 2]),
     }
 }
 

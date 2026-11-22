@@ -495,7 +495,9 @@ fn mcp_write_path_over_real_corpus_fixture() {
         let by_source_a = structured(
             client.call_tool(
                 "knowledge_get_entities_by_source",
-                json!({"source": "us1-source-a.txt:us1-chunk-a", "group_ids": [group_id.clone()], "num_results": 10}),
+                // Issue #853: entities-by-source matches the stored `source_file` exactly, so the
+                // query names the source file, not the composed `source_description`.
+                json!({"source": "us1-source-a.txt", "group_ids": [group_id.clone()], "num_results": 10}),
             ),
             "US1 get_entities_by_source A",
         );
@@ -588,7 +590,8 @@ fn mcp_write_path_over_real_corpus_fixture() {
         let by_source_b = structured(
             client.call_tool(
                 "knowledge_get_entities_by_source",
-                json!({"source": "us1-source-b.txt:us1-chunk-b", "group_ids": [group_id.clone()], "num_results": 10}),
+                // Issue #853: exact `source_file` match (see scenario 1).
+                json!({"source": "us1-source-b.txt", "group_ids": [group_id.clone()], "num_results": 10}),
             ),
             "US1 get_entities_by_source B",
         );

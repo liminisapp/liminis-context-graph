@@ -52,6 +52,10 @@ pub struct MentioningEpisode {
     pub ingested_at_us: Option<i64>,
     pub source_description: String,
     pub matched_entity_uuids: Vec<String>,
+    /// Source identity (issue #853, ADR-0853); `None` on a legacy episode, and then omitted from
+    /// the response.
+    pub source_file: Option<String>,
+    pub chunk_id: Option<String>,
 }
 
 /// Two edges are the same fact when they share source entity, target entity, relation name and
@@ -293,13 +297,23 @@ pub fn affected_work_response(
         "group_id": group_id,
         "interval": interval_json,
         "basis": AFFECTED_WORK_BASIS,
-        "candidates": candidates.iter().map(|c| json!({
-            "uuid": c.uuid,
-            "name": c.name,
-            "ingested_at": opt_micros(c.ingested_at_us),
-            "source_description": c.source_description,
-            "matched_entity_uuids": c.matched_entity_uuids,
-        })).collect::<Vec<_>>(),
+        "candidates": candidates.iter().map(|c| {
+            let mut item = json!({
+                "uuid": c.uuid,
+                "name": c.name,
+                "ingested_at": opt_micros(c.ingested_at_us),
+                "source_description": c.source_description,
+                "matched_entity_uuids": c.matched_entity_uuids,
+            });
+            // Issue #853: additive, and absent on a legacy episode.
+            if let Some(sf) = &c.source_file {
+                item["source_file"] = json!(sf);
+            }
+            if let Some(cid) = &c.chunk_id {
+                item["chunk_id"] = json!(cid);
+            }
+            item
+        }).collect::<Vec<_>>(),
         "count": candidates.len(),
         "note": AFFECTED_WORK_NOTE,
     })
@@ -360,6 +374,8 @@ mod tests {
             ingested_at_us: ingested,
             source_description: String::new(),
             matched_entity_uuids: vec!["a".into()],
+            source_file: None,
+            chunk_id: None,
         }
     }
 

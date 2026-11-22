@@ -1621,6 +1621,8 @@ mod tests {
             matched_queries: None,
             rerank_score: None,
             belief: None,
+            source_file: None,
+            chunk_id: None,
         };
         let mk = |superseded_at_us| crate::belief::EpisodeSupersession {
             superseded_at_us,

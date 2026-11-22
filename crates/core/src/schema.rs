@@ -78,6 +78,11 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
     // Document mode (issue #785, ADR-0785) adds `revision_id`, `revision_committed_at`,
     // `byte_start`, `byte_end`, `heading_path` and `chunk_hash`: a fourth deliberate divergence,
     // all NULL on every episode `knowledge_process_document` did not write (FR-003), so no backfill.
+    // Source identity (issue #853, ADR-0853) adds `source_file` and `chunk_id`: a fifth deliberate
+    // divergence. The two halves of the composed `source_description` (`"{source_file}:{chunk_id}"`),
+    // stored separately because a URL source contains colons and the composed string cannot be
+    // split back. Written by the chunk and document ingest paths only; NULL on every legacy row,
+    // which source-scoped operations match under the safe rule in `source_identity.rs`. No backfill.
     conn.raw_query(&format!(
         "CREATE NODE TABLE IF NOT EXISTS Episodic (\
          uuid STRING PRIMARY KEY, \
@@ -104,7 +109,9 @@ fn create_node_tables(conn: &Conn<'_>, dim: usize) -> Result<(), Error> {
          byte_start INT64, \
          byte_end INT64, \
          heading_path STRING[], \
-         chunk_hash STRING\
+         chunk_hash STRING, \
+         source_file STRING, \
+         chunk_id STRING\
          )"
     ))?;
     conn.raw_query(&format!(
@@ -485,6 +492,9 @@ pub fn migrate(conn: &Conn<'_>, dim: usize) {
         ("Episodic", "byte_end", "INT64"),
         ("Episodic", "heading_path", "STRING[]"),
         ("Episodic", "chunk_hash", "STRING"),
+        // Source identity (issue #853, ADR-0853). NULL = legacy row; no backfill.
+        ("Episodic", "source_file", "STRING"),
+        ("Episodic", "chunk_id", "STRING"),
         ("RelatesToNode_", "warrant", "STRING"),
         ("RelatesToNode_", "valid_at_source", "STRING"),
     ] {

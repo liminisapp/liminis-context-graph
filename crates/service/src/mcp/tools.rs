@@ -801,6 +801,11 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_get_entities_by_source",
             description: "List entities that were extracted from a given source document. \
+                           Matches the episode's stored source file exactly (byte for byte, \
+                           no substring or prefix match, issue #853); an episode written \
+                           before source identity was stored matches only when its composed \
+                           `source_file:chunk_id` description provably names this source. \
+                           Only live (not superseded, committed) episodes count. \
                            Does not include episode `attributes` (issue #528) — this path \
                            surfaces only entity-scoped provenance, never a full episode object.",
             scope: Scope::Read,
@@ -1032,8 +1037,14 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_delete_by_source",
-            description: "Delete all episodes ingested from a given source file. Orphaned \
-                           entities remain in the graph.",
+            description: "Delete all episodes ingested from a given source file, superseded \
+                           ones included. Matches the episode's stored source file exactly \
+                           (byte for byte; deleting `https://a.com` never touches \
+                           `https://a.com:8443/...`, issue #853); an episode written before \
+                           source identity was stored is deleted only when its composed \
+                           `source_file:chunk_id` description provably names this source — \
+                           use knowledge_delete_chunk_episode for one it cannot attribute. \
+                           Orphaned entities remain in the graph.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
