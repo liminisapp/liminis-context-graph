@@ -17,6 +17,7 @@ use lcg_core::{
     extractor::ExtractOptions,
     handlers,
     ipc::IpcRequest,
+    ontology::{compute_ancestor_map, EntityTypeDef, Ontology, OntologyMode},
     telemetry::{TelemetryEvent, TelemetrySink},
     types::ExtractionOutcome,
     ConfigurableExtractor, Db, EmbedRole, Embedder, ExtractedEdge, ExtractedEntity,
@@ -648,5 +649,88 @@ async fn unchanged_resubmission_still_hits_the_doc_origin_guard() {
     let v = try_call("knowledge_process_chunk", p1, &h.state).await;
     let err = v["error"].to_string();
     assert!(err.contains("origin_conflict"), "expected a refusal: {v}");
+    assert_untouched(&before, &snap(&h));
+}
+
+/// An ontology with a single `Thing` entity type, optionally identity-bearing.
+fn thing_ontology(identity: bool) -> Ontology {
+    let entity_types = vec![EntityTypeDef {
+        name: "Thing".to_string(),
+        description: None,
+        parent: None,
+        identity,
+        extract: true,
+    }];
+    let ancestor_map = compute_ancestor_map(&entity_types);
+    Ontology {
+        mode: OntologyMode::Open,
+        entity_types,
+        relation_types: vec![],
+        ancestor_map,
+    }
+}
+
+/// A second `AppState` over the harness's DB, WAL and counting stand-ins, with its own
+/// workspace root and ontology (so the identity-set check can run).
+fn state_with_ontology(h: &Harness, root: &Path, ontology: Ontology) -> Arc<AppState> {
+    let s = &h.state;
+    Arc::new(AppState {
+        db: ArcSwapOption::from(Some(Arc::clone(&h.db))),
+        degraded_reason: Arc::new(Mutex::new(None)),
+        embedder: Arc::clone(&s.embedder),
+        extractor: Arc::clone(&s.extractor),
+        dedup: Arc::new(PassthroughDedupAdapter),
+        write_lock: Arc::new(tokio::sync::RwLock::new(())),
+        sink: Arc::clone(&s.sink),
+        db_path: "test.db".to_string(),
+        wal_root: s.wal_root.clone(),
+        wal_max_events_per_file: 10_000,
+        wal_max_bytes_per_file: 5 * 1024 * 1024,
+        embedding_model: "bge-base-en-v1.5".to_string(),
+        wal_writers: Arc::clone(&s.wal_writers),
+        active_writes: Arc::new(AtomicUsize::new(0)),
+        rebuild_jobs: Arc::new(Mutex::new(HashMap::new())),
+        workspace_root: Some(root.to_path_buf()),
+        indices_built: Arc::new(AtomicBool::new(false)),
+        cancel_token: CancellationToken::new(),
+        cancelled_chunks: Arc::new(AtomicUsize::new(0)),
+        ontology: Some(Arc::new(ontology)),
+        ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
+        group_ontologies: Arc::new(Mutex::new(HashMap::new())),
+        search_stages: Default::default(),
+        chunk_inflight: Default::default(),
+        embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
+    })
+}
+
+/// Review (PR 878): `check_identity` runs before the no-op, so a group whose identity-bearing set
+/// drifted (#616) refuses an identical resubmission exactly as it would refuse the ingest, rather
+/// than answering `unchanged`. Pins the ordering of the refusal and the shortcut.
+#[tokio::test]
+async fn identity_drift_refuses_an_identical_resubmission() {
+    let h = harness();
+    let root = TempDir::new().unwrap();
+
+    // Ingest under a flagless ontology: the group now holds `Thing` entities.
+    let s1 = state_with_ontology(&h, root.path(), thing_ontology(false));
+    let p = base_params(G, "c1");
+    let r = call("knowledge_process_chunk", p.clone(), &s1).await;
+    assert_eq!(r["success"], true, "{r}");
+    // Sanity: with no drift the identical resubmission is a no-op.
+    let r = call("knowledge_process_chunk", p.clone(), &s1).await;
+    assert_eq!(r["status"], "unchanged", "{r}");
+
+    // `Thing` becomes identity-bearing while entities already carry that label: refused.
+    let s2 = state_with_ontology(&h, root.path(), thing_ontology(true));
+    let before = snap(&h);
+    let v = try_call("knowledge_process_chunk", p, &s2).await;
+    assert!(
+        v.get("error").is_some(),
+        "expected an identity refusal: {v}"
+    );
+    assert!(
+        v["result"]["status"] != "unchanged",
+        "identity drift must not be reported as unchanged: {v}"
+    );
     assert_untouched(&before, &snap(&h));
 }
