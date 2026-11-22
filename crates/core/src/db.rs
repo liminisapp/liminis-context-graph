@@ -5891,7 +5891,9 @@ impl<'db> Conn<'db> {
 
     /// Page of MENTIONS edges for dump.
     /// Columns: [ep_uuid, en_uuid, r_uuid, r_group_id, r_created_at]
-    /// Rows with null r_uuid must be skipped by the caller (pre-migration edges).
+    /// `r_uuid` is NULL for edges written by native ingest (`insert_mentions_edge`); callers must
+    /// dump those too (ADR-0882). Ordered by `(ep.uuid, en.uuid, r.group_id)` — a total order, since
+    /// many rows share an `ep.uuid` and SKIP/LIMIT paging over a tie group can drop or repeat rows.
     pub(crate) fn dump_mentions_page(
         &self,
         group_id: Option<&str>,
@@ -5902,14 +5904,14 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (ep:Episodic)-[r:MENTIONS]->(en:Entity) WHERE r.group_id = $gid \
                  RETURN ep.uuid, en.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY ep.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY ep.uuid, en.uuid, r.group_id SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
         } else {
             self.query_params(
                 "MATCH (ep:Episodic)-[r:MENTIONS]->(en:Entity) \
                  RETURN ep.uuid, en.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY ep.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY ep.uuid, en.uuid, r.group_id SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
         }
