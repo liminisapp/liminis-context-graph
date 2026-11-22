@@ -1851,21 +1851,59 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
 // Guard stays in the async scope while spawn_blocking executes.
 // RwLockReadGuard is not 'static so it cannot move into the closure.
 
+/// Parses the optional `uuids` filter: absent/null ⇒ `None`; an array of strings ⇒ the
+/// de-duplicated list (first-seen order); anything else is a validation error.
+fn parse_uuids_param(v: &Value) -> Result<Option<Vec<String>>, Error> {
+    let err = || Error::Ipc("uuids must be an array of strings".to_string());
+    match v {
+        Value::Null => Ok(None),
+        Value::Array(a) => {
+            let mut out: Vec<String> = Vec::with_capacity(a.len());
+            for item in a {
+                let s = item.as_str().ok_or_else(err)?;
+                if !out.iter().any(|x| x == s) {
+                    out.push(s.to_string());
+                }
+            }
+            Ok(Some(out))
+        }
+        _ => Err(err()),
+    }
+}
+
 async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     use crate::read_page as rp;
 
     let p = &req.params;
-    let last_n = p["last_n"].as_u64().unwrap_or(50) as usize;
+    // Optional uuid filter (issue #857). Without it `last_n` defaults to 50 as ever; with it the
+    // default is "every requested uuid", and an explicit `last_n` still caps the result.
+    let uuids = parse_uuids_param(&p["uuids"])?;
+    let last_n = match (p["last_n"].as_u64(), &uuids) {
+        (Some(n), _) => n as usize,
+        (None, Some(u)) => u.len(),
+        (None, None) => 50,
+    };
     let opts = rp::parse_read_opts(p, rp::EPISODE_FIELDS)?;
     // Issue #667: `group_ids` and the legacy single-group `group_id` alias are unioned; neither
     // given ⇒ every group (reads broad, ADR-0615 D2), not the old `liminis` default.
     let groups = episode_group_scope(p);
-    let shape = rp::shape_hash(
+    // An empty `uuids` array selects nothing (not "all episodes").
+    if uuids.as_ref().is_some_and(|u| u.is_empty()) {
+        return Ok(if opts.paged {
+            json!({"episodes": [], "count": 0, "next_cursor": null})
+        } else {
+            json!({"episodes": [], "count": 0})
+        });
+    }
+    let mut shape = rp::shape_hash(
         rp::EPISODES_TAG,
         groups.as_deref(),
         None,
         opts.name_prefix.as_deref(),
     );
+    if let Some(u) = &uuids {
+        shape = rp::episodes_uuids_shape_hash(&shape, u);
+    }
     let after: Option<(i64, String)> = match opts.cursor.as_deref() {
         None => None,
         Some(c) => {
@@ -1888,11 +1926,15 @@ async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<V
             .unwrap_or_default();
         let gid_slice = groups.as_deref().map(|_| gid_refs.as_slice());
         // Fetch one extra row to learn whether another page exists.
-        conn.retrieve_episodes_page(
+        let uuid_refs: Option<Vec<&str>> = uuids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+        conn.retrieve_episodes_page_by_uuids(
             gid_slice,
             last_n.saturating_add(1),
             name_prefix.as_deref(),
             after.as_ref().map(|(us, u)| (*us, u.as_str())),
+            uuid_refs.as_deref(),
         )
     })
     .await??;

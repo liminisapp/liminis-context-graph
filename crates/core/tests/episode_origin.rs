@@ -1289,3 +1289,159 @@ async fn find_entities_include_episodes_caps_at_fifty_newest_first() {
     // De-duplicated files: one shared source file.
     assert_eq!(b["source_files"], json!(["notes/same.md"]));
 }
+
+// ── Issue #857: get_episodes `uuids` filter ──────────────────────────────────────────────────
+
+async fn episode_uuids_by_chunk(state: &Arc<AppState>) -> Vec<(String, String)> {
+    let r = call("knowledge_get_episodes", json!({"group_ids": [G]}), state).await;
+    r["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| {
+            (
+                e["chunk_id"].as_str().unwrap_or("").to_string(),
+                e["uuid"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+async fn get_eps(state: &Arc<AppState>, extra: Value) -> Vec<String> {
+    let mut params = json!({"group_ids": [G]});
+    for (k, v) in extra.as_object().cloned().unwrap_or_default() {
+        params[k] = v;
+    }
+    let r = call("knowledge_get_episodes", params, state).await;
+    assert_eq!(
+        r["count"].as_u64().unwrap() as usize,
+        r["episodes"].as_array().unwrap().len()
+    );
+    let mut u = str_list(&json!(r["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["uuid"].clone())
+        .collect::<Vec<_>>()));
+    u.sort();
+    u
+}
+
+#[tokio::test]
+async fn get_episodes_uuids_filter() {
+    let (state, _db, _d) = three_chunks_one_superseded().await;
+    let all = episode_uuids_by_chunk(&state).await;
+    assert_eq!(all.len(), 3);
+    let id = |c: &str| all.iter().find(|(ch, _)| ch == c).unwrap().1.clone();
+    let (a, b, c) = (id("c1"), id("c2"), id("c3"));
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+
+    // Exactly the listed episodes (superseded ones included — no liveness filter on get_episodes).
+    assert_eq!(
+        get_eps(&state, json!({"uuids": [a, b]})).await,
+        sorted(vec![a.clone(), b.clone()])
+    );
+    // Unknown uuid is absent, not an error.
+    assert_eq!(
+        get_eps(&state, json!({"uuids": [a, "nope"]})).await,
+        vec![a.clone()]
+    );
+    // Duplicates return each episode once.
+    assert_eq!(
+        get_eps(&state, json!({"uuids": [c, c, c]})).await,
+        vec![c.clone()]
+    );
+    // Empty array returns nothing.
+    assert!(get_eps(&state, json!({"uuids": []})).await.is_empty());
+    // No key: unchanged (all three).
+    assert_eq!(get_eps(&state, json!({})).await.len(), 3);
+    // Explicit last_n still caps a uuids request.
+    assert_eq!(
+        get_eps(&state, json!({"uuids": [a, b, c], "last_n": 2}))
+            .await
+            .len(),
+        2
+    );
+    // Group scope holds: another group sees none of them.
+    let r = call(
+        "knowledge_get_episodes",
+        json!({"group_ids": ["other-group"], "uuids": [a, b, c]}),
+        &state,
+    )
+    .await;
+    assert_eq!(r["count"], 0);
+    // A uuids-only call keeps the unpaged shape.
+    assert!(r.get("next_cursor").is_none());
+    // Malformed input is a validation error.
+    for bad in [json!([1]), json!("x"), json!({"a": 1})] {
+        let v = try_call(
+            "knowledge_get_episodes",
+            json!({"group_ids": [G], "uuids": bad}),
+            &state,
+        )
+        .await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("uuids must be an array of strings")),
+            "{bad}: {v}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn get_episodes_uuids_without_last_n_is_not_capped_at_fifty() {
+    let total = 55;
+    let queue: Vec<ExtractionResult> = (0..total).map(|_| fact("Aaa", "Bbb", "f")).collect();
+    let (state, _db, _d) = state_with(queue, None);
+    for i in 0..total {
+        put_file(&state, &format!("c{i:03}"), "n.md").await;
+    }
+    let everything = call(
+        "knowledge_get_episodes",
+        json!({"group_ids": [G], "last_n": 1000}),
+        &state,
+    )
+    .await;
+    let uuids: Vec<Value> = everything["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["uuid"].clone())
+        .collect();
+    assert_eq!(uuids.len(), total);
+    assert_eq!(get_eps(&state, json!({"uuids": uuids})).await.len(), total);
+}
+
+#[tokio::test]
+async fn get_episodes_cursor_is_bound_to_the_uuids_set() {
+    let (state, _db, _d) = three_chunks_one_superseded().await;
+    let all = episode_uuids_by_chunk(&state).await;
+    let ids: Vec<String> = all.iter().map(|(_, u)| u.clone()).collect();
+    let page = call(
+        "knowledge_get_episodes",
+        json!({"group_ids": [G], "uuids": ids, "last_n": 1, "cursor": null, "name_prefix": ""}),
+        &state,
+    )
+    .await;
+    let cursor = page["next_cursor"].as_str().expect("next page").to_string();
+    // Replayed under a different uuids set: rejected.
+    let v = try_call(
+        "knowledge_get_episodes",
+        json!({"group_ids": [G], "uuids": [ids[0]], "last_n": 1, "cursor": cursor}),
+        &state,
+    )
+    .await;
+    assert!(v.get("error").is_some(), "{v}");
+    // Replayed under the same set: accepted.
+    let v = try_call(
+        "knowledge_get_episodes",
+        json!({"group_ids": [G], "uuids": ids, "last_n": 1, "cursor": cursor}),
+        &state,
+    )
+    .await;
+    assert!(v.get("error").is_none(), "{v}");
+}

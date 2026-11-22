@@ -1422,6 +1422,23 @@ impl<'db> Conn<'db> {
         name_prefix: Option<&str>,
         after: Option<(i64, &str)>,
     ) -> Result<Vec<(EpisodicRow, i64)>, Error> {
+        self.retrieve_episodes_page_by_uuids(groups, limit, name_prefix, after, None)
+    }
+
+    /// [`Self::retrieve_episodes_page`] narrowed to `uuids` (issue #857). `None` applies no
+    /// uuid filter; `Some(&[])` matches nothing. Group scope is still enforced by `groups`, so a
+    /// uuid from another group is never returned, and an unknown uuid is simply absent.
+    pub fn retrieve_episodes_page_by_uuids(
+        &self,
+        groups: Option<&[&str]>,
+        limit: usize,
+        name_prefix: Option<&str>,
+        after: Option<(i64, &str)>,
+        uuids: Option<&[&str]>,
+    ) -> Result<Vec<(EpisodicRow, i64)>, Error> {
+        if uuids.is_some_and(|u| u.is_empty()) {
+            return Ok(vec![]);
+        }
         let mut preds: Vec<&str> = Vec::new();
         let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
         if let Some(gids) = groups.filter(|g| !g.is_empty()) {
@@ -1431,6 +1448,10 @@ impl<'db> Conn<'db> {
         if let Some(prefix) = name_prefix {
             preds.push("ep.name STARTS WITH $prefix");
             params["prefix"] = serde_json::json!(prefix);
+        }
+        if let Some(u) = uuids {
+            preds.push("ep.uuid IN $uuids");
+            params["uuids"] = serde_json::json!(u);
         }
         if let Some((us, uuid)) = after {
             preds.push(
