@@ -1414,3 +1414,140 @@ async fn torn_commit_tail_overlap_self_heals_on_next_ingest() {
     assert_eq!(uuids(&r["retired_episode_uuids"]).len(), 1);
     assert_eq!(believed(&s2).await, v2_facts, "self-healed");
 }
+
+// ── Issue #883: entity provenance uses the belief liveness predicate ────────────────────────
+
+async fn find_entity(state: &Arc<AppState>, name: &str) -> Value {
+    let r = call(
+        "knowledge_find_entities",
+        json!({"query": name, "group_ids": [G], "num_results": 50, "include_episodes": true}),
+        state,
+    )
+    .await;
+    r["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["name"] == name)
+        .unwrap_or_else(|| panic!("no entity {name} in {r}"))
+        .clone()
+}
+
+/// Ingests `NOTE`, then makes a rewrite (`.` -> `!`) fail on its third extraction so two pending
+/// episodes remain. Returns the fixture, the v2 content, and the first pending unit's source
+/// entity name (mentioned only by a pending episode) and its fact.
+async fn pending_revision_fixture() -> (Fx, String, String, String) {
+    let f = fx();
+    ingest(&f.state, "note-1", NOTE).await;
+    let v2 = NOTE.replace('.', "!");
+    let before = f.ex.call_count();
+    f.ex.fail_on.store(before + 3, Ordering::SeqCst);
+    let v = try_call(
+        "knowledge_process_document",
+        doc_params("note-1", &v2),
+        &f.state,
+    )
+    .await;
+    assert!(
+        v.get("error").is_some(),
+        "extraction was meant to fail: {v}"
+    );
+    let fact = fact_of(&f.ex.calls()[before].body);
+    assert!(fact.ends_with('!'), "{fact}");
+    (f, v2, format!("{fact} src"), fact)
+}
+
+/// #883 FR-002/FR-003, SC-002: an entity mentioned only by an episode of a pending revision
+/// reports no episodes and no support before commit, and the episode after commit.
+#[tokio::test]
+async fn find_entities_include_episodes_excludes_pending_revision_until_commit() {
+    let (f, v2, name, _fact) = pending_revision_fixture().await;
+
+    let pending = find_entity(&f.state, &name).await;
+    assert_eq!(pending["episode_uuids"], json!([]), "{pending}");
+    assert_eq!(pending["source_descriptions"], json!([]), "{pending}");
+    assert_eq!(pending["support"]["primary"], 0, "{pending}");
+    assert_eq!(pending["corroboration"], 0, "{pending}");
+
+    // Retry commits the revision: the episode becomes a live mention.
+    f.ex.fail_on.store(0, Ordering::SeqCst);
+    ingest(&f.state, "note-1", &v2).await;
+    let committed = find_entity(&f.state, &name).await;
+    assert_eq!(
+        committed["episode_uuids"].as_array().unwrap().len(),
+        1,
+        "{committed}"
+    );
+    assert_eq!(committed["support"]["primary"], 1, "{committed}");
+}
+
+/// #883 edge case: while a revision replacing a live one is pending, the earlier revision's
+/// episodes stay listed (belief/search keep them live); after commit they are superseded and
+/// drop out, and the new revision's appear.
+#[tokio::test]
+async fn pending_revision_keeps_previous_revision_episodes_listed_until_commit() {
+    let (f, v2, new_name, fact) = pending_revision_fixture().await;
+    let old_name = format!("{} src", fact.replace('!', "."));
+
+    let old = find_entity(&f.state, &old_name).await;
+    assert_eq!(old["episode_uuids"].as_array().unwrap().len(), 1, "{old}");
+    assert_eq!(old["support"]["primary"], 1, "{old}");
+
+    f.ex.fail_on.store(0, Ordering::SeqCst);
+    ingest(&f.state, "note-1", &v2).await;
+
+    let old = find_entity(&f.state, &old_name).await;
+    assert_eq!(old["episode_uuids"], json!([]), "superseded: {old}");
+    assert_eq!(old["support"]["primary"], 0, "{old}");
+    let new = find_entity(&f.state, &new_name).await;
+    assert_eq!(new["episode_uuids"].as_array().unwrap().len(), 1, "{new}");
+}
+
+/// #883 FR-004: edge `support` follows the same predicate as entity `support`.
+#[tokio::test]
+async fn edge_support_excludes_pending_revision_until_commit() {
+    let (f, v2, _name, fact) = pending_revision_fixture().await;
+    let edge_support = |state: Arc<AppState>, fact: String| async move {
+        let r = call(
+            "knowledge_find_relationships",
+            json!({"query": fact, "group_ids": [G], "num_results": 50}),
+            &state,
+        )
+        .await;
+        r["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["fact"] == fact.as_str())
+            .map(|e| e["support"]["primary"].clone())
+    };
+    // Pending: the edge is either not returned or carries no support — never `1`.
+    let pending = edge_support(Arc::clone(&f.state), fact.clone()).await;
+    assert!(
+        pending.is_none() || pending == Some(json!(0)),
+        "pending edge support: {pending:?}"
+    );
+
+    f.ex.fail_on.store(0, Ordering::SeqCst);
+    ingest(&f.state, "note-1", &v2).await;
+    assert_eq!(
+        edge_support(Arc::clone(&f.state), fact).await,
+        Some(json!(1))
+    );
+}
+
+/// #883: the ingest veto (`entities_with_corroborating_mention`) deliberately keeps the
+/// supersession-only predicate, so a pending *primary* mention still shields its entity.
+#[tokio::test]
+async fn corroborating_mention_veto_still_counts_pending_primary_revision() {
+    let (f, _v2, name, _fact) = pending_revision_fixture().await;
+    let entity = find_entity(&f.state, &name).await;
+    let uuid = entity["uuid"].as_str().unwrap().to_string();
+    let now_us = chrono::Utc::now().timestamp_micros();
+    let shielded =
+        f.db.connect()
+            .unwrap()
+            .entities_with_corroborating_mention(std::slice::from_ref(&uuid), now_us)
+            .unwrap();
+    assert!(shielded.contains(&uuid), "{shielded:?}");
+}
