@@ -142,11 +142,11 @@ fn with_belief(mut props: Value) -> Value {
     props
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (52 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (58 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
-        // ── read (17) ──────────────────────────────────────────────────────────────
+        // ── read (22) ──────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_status",
             description: "Get knowledge graph status: entity/episode/relationship counts, \
@@ -172,6 +172,20 @@ pub fn registry() -> Vec<ToolSpec> {
                            `default_group` and `see: \"wal_groups\"` (issue #667), so \
                            `exists: false` there means the default group has no stream, not \
                            that WAL is broken — read `wal_groups` for every group.",
+            scope: Scope::Read,
+            input_schema: empty_schema,
+        },
+        ToolSpec {
+            name: "knowledge_capabilities",
+            description: "Describe this server (issue #854): `server_version` (the crate \
+                           version, as `initialize` reports it), `protocol_version` (integer, \
+                           1 today; bumped only on a breaking change to the socket protocol), \
+                           `features` (sorted array of stable lower_snake_case feature strings; \
+                           append-only, so test for the one you need and ignore unknown ones) \
+                           and `methods` (sorted names of every IPC method the dispatcher \
+                           accepts). Static build information: no database access, no lock, so \
+                           it answers in degraded mode and while a write or rebuild is running. \
+                           Takes no parameters.",
             scope: Scope::Read,
             input_schema: empty_schema,
         },
@@ -203,7 +217,19 @@ pub fn registry() -> Vec<ToolSpec> {
                            (primary + external). Counts reflect live episodes now. `origins` \
                            keeps only entities mentioned by an episode of one of those origins; \
                            over-fetched and post-filtered, so fewer than `num_results` can come \
-                           back.",
+                           back. Provenance (issue #857): by default each node's \
+                           `episode_uuids` and `source_descriptions` are EMPTY here (unlike \
+                           `knowledge_get_entity_neighbors` / `knowledge_get_entities_by_source`, \
+                           which fill them) and there is no `source_files`. With \
+                           `include_episodes: true` they are filled from the entity's LIVE \
+                           (not superseded) mentioning episodes, newest first, capped at 50 per \
+                           entity: `episode_uuids` and `source_descriptions` are index-aligned; \
+                           `source_files` is the de-duplicated stored source files (episodes \
+                           with none recorded are omitted, so it is not aligned); \
+                           `episodes_truncated: true` appears only when the cap dropped \
+                           episodes. `support` still counts every live document, not just the \
+                           capped list. Fetch the episodes themselves with \
+                           `knowledge_get_episodes` and `uuids`.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -217,7 +243,15 @@ pub fn registry() -> Vec<ToolSpec> {
                             "description": "Maximum number of entities to return."
                         },
                         "min_similarity": min_similarity_prop(),
-                        "origins": origins_prop()
+                        "origins": origins_prop(),
+                        "include_episodes": {
+                            "type": "boolean", "default": false,
+                            "description": "When true, fill each node's `episode_uuids`, \
+                                             `source_descriptions` and `source_files` from its \
+                                             live mentioning episodes (newest first, at most 50; \
+                                             `episodes_truncated: true` when capped). Default \
+                                             false: those fields stay empty / absent."
+                        }
                     },
                     "required": ["query"]
                 })
@@ -372,7 +406,10 @@ pub fn registry() -> Vec<ToolSpec> {
                            set via `knowledge_process_chunk`/`knowledge_add_episode`. Page \
                            with `cursor`/`next_cursor`, drop large fields such as `content` \
                            with `fields`, and fetch e.g. every chunk of one document with \
-                           `name_prefix` (issue #667).",
+                           `name_prefix` (issue #667). `uuids` (issue #857) returns exactly \
+                           those episodes (still group-scoped; unknown uuids are simply absent, \
+                           an empty array returns nothing); pair it with `knowledge_find_entities` \
+                           `include_episodes`.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -386,7 +423,14 @@ pub fn registry() -> Vec<ToolSpec> {
                         },
                         "last_n": {
                             "type": "integer", "minimum": 1, "default": 50,
-                            "description": "Page size: number of most recent episodes to return."
+                            "description": "Page size: number of most recent episodes to return. \
+                                             With `uuids` the default is the number of uuids."
+                        },
+                        "uuids": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "Only these episodes (by uuid), within the group \
+                                             scope. Unknown uuids are absent, not an error; an \
+                                             empty array returns no episodes."
                         },
                         "name_prefix": {
                             "type": "string",
@@ -514,8 +558,15 @@ pub fn registry() -> Vec<ToolSpec> {
                            default unless the service sets LCG_PASSAGE_SEARCH_MODE) or `hybrid` \
                            (BM25 over episode text fused with the vector ranking by weighted \
                            Reciprocal Rank Fusion, the lexical list weighing less, issue #789); \
-                           in hybrid mode `score` is the fused rank score, not a cosine, and \
-                           `similarity` carries the cosine where the vector retriever matched. \
+                           in hybrid mode `score` is a rank-only fusion value (at most about \
+                           0.0233), not a relevance and not comparable across queries; \
+                           `similarity` carries the cosine where the vector retriever matched \
+                           and is the relevance signal. `min_score` floors the vector leg's \
+                           cosine only, so lexical (BM25) hits still appear below it. Each \
+                           hybrid result carries `legs` (`dense`, `lexical` or `both`: which \
+                           retrievers found it; `lexical` means no `similarity`) and, in \
+                           single-query hybrid, `lexical_score` (the raw BM25 value when the \
+                           lexical leg matched); both are omitted in `vector` mode. \
                            `belief_aware` (default on in both modes; send `false` to opt out, or \
                            set LCG_PASSAGE_BELIEF_AWARE=off on the service to restore the old \
                            default) ranks a derived page below the primary note it cites and a \
@@ -789,10 +840,10 @@ pub fn registry() -> Vec<ToolSpec> {
                                 "required": ["phrase"]
                             }
                         },
-                        "answer_type": {"type": "string", "description": "An entity type name, or \"value\". On the last hop (not in history mode) far ends of this type are preferred; if the hops end short of it a completion hop runs."},
+                        "answer_type": {"type": "string", "description": "An entity type name, or \"value\". On the last hop (not in history mode) far ends of this type are preferred; if the hops end short of it a completion hop runs. With \"value\" (or when absent), the last hop also offers the frontier entities' own literal-valued facts (self-loops such as a budget or price) as candidates."},
                         "query": {"type": "string", "description": "The question text; ranks the completion hop (which does not run without it)."},
                         "mode": {"type": "string", "enum": ["single", "list", "history"], "default": "single", "description": "single: top 3 per hop; list: top 10; history: top 10 and includes invalidated edges."},
-                        "direction_mode": {"type": "string", "enum": ["soft", "hard"], "default": "soft", "description": "soft: matching edges get a +0.05 ranking bonus; hard: only matching edges are kept (falls back if none)."}
+                        "direction_mode": {"type": "string", "enum": ["soft", "hard"], "default": "soft", "description": "soft: matching edges get a +0.05 ranking bonus; hard: only matching edges are kept (falls back to all if no moving edge matches). A frontier entity's own self-loop (a value fact, offered on the last hop of a value walk) matches either direction: it gets the soft bonus, is always kept in hard mode, and never decides the fallback."}
                     },
                     "required": ["start"]
                 })
@@ -864,7 +915,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── write (15) ────────────────────────────────────────────────────────────
+        // ── write (18) ────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_process_chunk",
             description: "Ingest a text chunk as an episode: extracts entities/relationships \
@@ -881,6 +932,11 @@ pub fn registry() -> Vec<ToolSpec> {
                            `edges_dropped_self_loop` counts edges dropped because both \
                            endpoints resolved to the same entity (they would have been \
                            self-loops); these are not in `dropped_edges`. \
+                           Under an ontology, `edges_literal_object` counts literal-valued facts \
+                           (a budget, date, price) stored as a self-loop on the one entity they \
+                           describe; `edges_suspected_misattachment` counts edges marked \
+                           `suspected_misattachment` because their fact states a value but does \
+                           not name both endpoints (never dropped). \
                            Recommended maximum `chunk_text` size is 8,000 characters (default, \
                            overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`) — extraction \
                            quality degrades well before any context-window limit is reached. \
@@ -1577,7 +1633,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── admin (16) — WAL/lifecycle/recovery/index maintenance ────────────────────
+        // ── admin (17) — WAL/lifecycle/recovery/index maintenance ────────────────────
         ToolSpec {
             name: "knowledge_stamp_origin",
             description: "Stamp `origin` (issue #752) onto EXISTING episodes of one group, without \
@@ -2092,18 +2148,18 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_57_unique_tools() {
+    fn registry_has_58_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 57);
+        assert_eq!(r.len(), 58);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 57, "tool names must be unique");
+        assert_eq!(names.len(), 58, "tool names must be unique");
     }
 
     #[test]
     fn scope_bucket_sizes_match_fr_004_table() {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
-        assert_eq!(count(Scope::Read), 21);
+        assert_eq!(count(Scope::Read), 22);
         assert_eq!(count(Scope::Write), 18);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 17);
@@ -2232,6 +2288,37 @@ mod tests {
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_entity_types"));
         assert!(!is_streaming_method("knowledge_status"));
+    }
+
+    /// Issue #857: `include_episodes` on `find_entities` and `uuids` on `get_episodes` are
+    /// advertised, and the descriptions state when the provenance fields are empty vs filled.
+    #[test]
+    fn provenance_params_are_advertised_and_described() {
+        let r = registry();
+        let find = r
+            .iter()
+            .find(|t| t.name == "knowledge_find_entities")
+            .unwrap();
+        let props = &(find.input_schema)()["properties"];
+        assert_eq!(props["include_episodes"]["type"], "boolean");
+        for needle in [
+            "include_episodes",
+            "episode_uuids",
+            "source_descriptions",
+            "source_files",
+            "episodes_truncated",
+            "EMPTY",
+        ] {
+            assert!(find.description.contains(needle), "missing {needle}");
+        }
+        let eps = r
+            .iter()
+            .find(|t| t.name == "knowledge_get_episodes")
+            .unwrap();
+        let props = &(eps.input_schema)()["properties"];
+        assert_eq!(props["uuids"]["type"], "array");
+        assert_eq!(props["uuids"]["items"]["type"], "string");
+        assert!(eps.description.contains("uuids"));
     }
 
     /// Issue #667: the two bulk reads advertise paging, projection and prefix filtering, and

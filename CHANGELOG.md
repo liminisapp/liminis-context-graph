@@ -11,6 +11,20 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- **`find_entities` `include_episodes`, and a `uuids` filter on `get_episodes` (#857, ADR-0857).**
+  `knowledge_find_entities` returned `episode_uuids` and `source_descriptions` always empty while
+  `get_entity_neighbors` and `get_entities_by_source` filled them, so the same field meant
+  different things per method (#831).
+  - New opt-in `include_episodes: true` fills each hit's `episode_uuids`, `source_descriptions`
+    and a new `source_files` from the entity's live (not superseded) mentioning episodes, newest
+    first, capped at 50 per entity, with `episodes_truncated: true` when the cap bites. It reuses
+    the batched mention query behind `support`, so there is no extra query per hit; `support` is
+    unchanged. Without the flag the response is byte-identical to before.
+  - `knowledge_get_episodes` accepts `uuids: [...]` and returns exactly those episodes, still
+    group-scoped; unknown uuids are absent, an empty array returns nothing.
+  - `knowledge_capabilities` lists the new feature `entity_provenance`. The reference docs and MCP
+    tool descriptions now say when the provenance fields are empty and when they are filled.
+
 - **Graph question answering eval: `lcg-eval graph-qa`, ontology ingest and kept workspaces
   (#821, ADR-0821).** E13's graph question-answering eval (#815) ran only as scratch Python, so
   none of its numbers could be reproduced and `knowledge_walk` (#820) had no regression check.
@@ -34,6 +48,46 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   - The judge, planner and reader share one Anthropic-compatible provider configuration:
     `--anthropic-base-url` / `--anthropic-endpoint`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`.
     The subscription bridge therefore works without an API key.
+
+- **Ontology extraction keeps literal-valued facts on the entity they describe (#823, ADR-0823).**
+  Under an ontology, a fact whose object is a value ("Marlin Core has a monthly budget of $4,200")
+  was often stored on an edge to an unrelated nearby entity (`Marlin Core HAS_MEASURE Tomas
+  Kowalski`): 27 of 440 value facts on the v2 corpus under ontology v3.1, against 2 free-form. The
+  cause was the edge contract: a value can never be an endpoint, and the prompt told the model to
+  find a second entity for every fact. Under an ontology with an extractable relation type (strict
+  and open), the edge prompt now asks for such a fact with both endpoints set to the one entity, and
+  ingest stores it as a self-loop marked `literal_object` (`edges_literal_object`); no value node is
+  created. Self-loops skip the direction check and survive merges, rebinds and the canonicalize
+  repair. In every mode, an edge whose fact states a value but does not name both endpoints is
+  stored with `suspected_misattachment` (`edges_suspected_misattachment`), never dropped. The
+  free-form edge prompt is byte-identical. Existing graphs are not repaired. `knowledge_walk`
+  returns these self-loops on the last hop of a value walk (`answer_type` `"value"` or absent), so
+  value questions stay answerable by a walk. A self-loop never extends the frontier and is not a
+  candidate on earlier hops (ADR-0820 amended). See `docs/ontology.md#literal-valued-facts`.
+
+- **Test-providers mode: built-in deterministic embedder and fact-line extractor (#851,
+  ADR-0851).** Consumers that run lcg in their own tests no longer need to fake its embedder and
+  extractor (the fakes matched lcg's prompts, and one embedder fake returned one vector for every
+  text, merging unrelated entities). `--embedder test` selects a deterministic, offline hashed
+  bag-of-words embedder (unit length, `LCG_EMBEDDING_DIM` or 768, model `lcg-test-bow`, bit-identical
+  across platforms); `--extractor test` extracts entities and edges only from fact lines,
+  `SRC -> DST: fact` (`RELATED_TO`) and `SRC -[REL_NAME]-> DST: fact`, and never touches a prompt.
+  Explicit flags only, never inferred from the environment; rejected with the matching real-provider
+  flags, with `--connect` and (for the extractor) with the cassette variables. `knowledge_status`
+  and `health_check` gain an additive `providers` object, and startup logs a `TEST PROVIDERS ACTIVE`
+  line. The fact-line grammar and embedder guarantees are published in `docs/test-providers.md`, and
+  every example there is executed by lcg's tests.
+
+- **`knowledge_capabilities`: the socket describes itself (#854, ADR-0854).** A new read-scope
+  method (IPC and MCP, no DB access, no lock, answers in degraded mode) returns `server_version`
+  (the crate version), `protocol_version` (integer, `1`; bumped only on a breaking socket-protocol
+  change), `features` (sorted stable feature strings, seeded with `process_document`,
+  `chunk_supersede`, `walk`, `origin`, `lint`, `writable_groups`, `hybrid_passage_search`) and
+  `methods` (sorted names of every method the dispatcher accepts, checked against the dispatcher by
+  a test). `health_check` additionally reports `server_version` and `protocol_version` in all three
+  states (additive; existing fields unchanged). The MCP registry grows from 57 to 58 tools and the
+  IPC surface from 58 to 59 methods.
+
 - **Ontology edge direction: define, validate and repair (#816, ADR-0816).** With an ontology, 34%
   of typed edges on known-true links on the v2 corpus pointed the wrong way (the extractor made the
   sentence's subject the source). Relation types now accept `source_type`/`target_type` as a name or
@@ -243,6 +297,18 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   after a rebuild), and the stored entity kinds are checked against the current identity set.
   Operators may now see a `-32003` refusal for a group with a missing stamp and stale identity-kind
   data, where it was previously accepted.
+
+### Documentation
+
+- **`health_check` field semantics, and a new `ready_for_reads` field (#855, ADR-0855).** Since
+  ADR-0628 (0.16.1, "0.16 era"), `healthy` means *idle and ready for writes*, not liveness: while any
+  write holds or waits for the write lock, `health_check` answers `{ok: true, healthy: false,
+  state: "busy"}`. Raw-socket clients written before then that read `healthy` as "LCG is up" will
+  see LCG as unavailable during every ingest, although reads keep working. Use `ok` for liveness
+  and the new additive `ready_for_reads` (`true` whenever the database is loaded, including while
+  `busy`; `false` only when `degraded`) for read availability. `busy` still reports
+  `healthy: false`. See the IPC reference's health check contract and
+  [`docs/releases/0.16.1.md`](docs/releases/0.16.1.md).
 
 ## [0.19.1] - 2026-11-16
 

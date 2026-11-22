@@ -1931,3 +1931,78 @@ fn demote_then_gated_rebind_repairs_stale_bound_pointer() {
         .target_node_uuid;
     assert_eq!(hop, bob);
 }
+
+/// ADR-0823: a cross-group edge that is *already* a self-loop (both sides point at one foreign
+/// entity) follows that entity's re-resolution as a self-loop. It is not invalidated as a
+/// rebind-created collapse, and is not mistaken for a duplicate.
+/// (`original_self_loop_layer_scenario_recovers_via_rebind_not_via_merge` covers the opposite
+/// case: a rebind that *creates* a self-loop is still invalidated.)
+#[test]
+fn rebind_pointers_keeps_pre_existing_self_loop_on_reresolved_entity() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir);
+    let conn = db.connect().unwrap();
+
+    let erin_old = make_entity("Erin", GROUP_A, "2026-01-01 00:00:00");
+    conn.insert_entity(&erin_old).unwrap();
+    conn.set_wal_position(GROUP_A, 1, None, None).unwrap();
+
+    let foreign_erin = || EndpointSpec::Foreign {
+        kind: None,
+        source_group_id: GROUP_A.to_string(),
+        endpoint_name: "Erin".to_string(),
+    };
+    let edge = cross_group::create_cross_group_edge(
+        &conn,
+        CreateCrossGroupEdgeParams {
+            name: "HAS_MEASURE".to_string(),
+            source: foreign_erin(),
+            target: foreign_erin(),
+            group_id: GROUP_LAYER.to_string(),
+            fact: "Erin has a monthly budget of $4,200".to_string(),
+            fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            valid_at: None,
+            relation_type: Some("HAS_MEASURE".to_string()),
+        },
+        TS,
+    )
+    .unwrap();
+    assert_eq!(edge.source_node_uuid, erin_old.uuid);
+    assert_eq!(edge.target_node_uuid, erin_old.uuid);
+
+    // Erin is merged onto a newer entity. The old row is tombstoned in place with `merged_into`,
+    // so the layer edge's hops still point at it (the actual pair is a self-loop) while
+    // re-resolution now forwards to the new entity.
+    let erin_new = make_entity("Erin", GROUP_A, "2026-01-02 00:00:00");
+    conn.insert_entity(&erin_new).unwrap();
+    let merged = merge_entities(
+        &conn,
+        &MergeEntitiesParams {
+            canonical_uuid: Some(erin_new.uuid.clone()),
+            alias_uuids: vec![erin_old.uuid.clone()],
+            group_id: GROUP_A.to_string(),
+            ..Default::default()
+        },
+        TS,
+    );
+    assert!(merged.success, "{:?}", merged.errors);
+    conn.set_wal_position(GROUP_A, 2, None, None).unwrap();
+
+    let (counts, _) = cross_group::rebind_pointers(&conn, GROUP_A, TS).unwrap();
+    assert_eq!(counts.invalidated_self_loop, 0, "{counts:?}");
+    assert_eq!(counts.invalidated_duplicate, 0, "{counts:?}");
+    assert_eq!(
+        counts.bound, 2,
+        "both sides re-bind to the new entity: {counts:?}"
+    );
+
+    let after = conn
+        .get_relates_to_by_uuids(std::slice::from_ref(&edge.uuid))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    assert!(after.invalid_at.is_none(), "{after:?}");
+    assert_eq!(after.source_node_uuid, erin_new.uuid);
+    assert_eq!(after.target_node_uuid, erin_new.uuid);
+}

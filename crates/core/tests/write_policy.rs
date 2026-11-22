@@ -3,6 +3,8 @@
 //! Every test drives `handlers::dispatch_with_policy` with an explicit policy, so nothing here
 //! touches the process-wide `OnceLock` or the environment (parallel-test safe).
 
+mod common;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -713,36 +715,12 @@ async fn unclassified_method_is_refused_when_a_list_is_set() {
     assert_eq!(v["error"]["code"], -32000, "{v}");
 }
 
-/// The method names `handlers::handle()` dispatches, read from its `match req.method.as_str()`
-/// arms (the arms are the only 8-space-indented `"name" =>` lines between the match and its
-/// `Method not found` fallback).
-fn dispatched_methods() -> std::collections::BTreeSet<String> {
-    let src = include_str!("../src/handlers.rs");
-    let start = src
-        .find("    match req.method.as_str() {\n        \"health_check\"")
-        .expect("handle() dispatch match not found — update this test if it moved");
-    let end = start
-        + src[start..]
-            .find("Method not found")
-            .expect("handle() fallback arm not found");
-    src[start..end]
-        .lines()
-        .filter_map(|l| {
-            let rest = l.strip_prefix("        \"")?;
-            let (name, tail) = rest.split_once('"')?;
-            tail.trim_start()
-                .starts_with("=>")
-                .then(|| name.to_string())
-        })
-        .collect()
-}
-
 /// `CLASSIFICATION` and the dispatcher must name exactly the same methods: a stale or misspelled
 /// key is dead weight that hides a gap, and a dispatched method with no entry would be refused as
 /// `unclassified_method` (and, if it is a writer, never properly gated).
 #[test]
 fn classification_table_matches_the_dispatched_methods_exactly() {
-    let dispatched = dispatched_methods();
+    let dispatched = common::dispatched_methods();
     assert!(
         dispatched.len() > 40,
         "dispatch-arm extraction looks broken: {dispatched:?}"

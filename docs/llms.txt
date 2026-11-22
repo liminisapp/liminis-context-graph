@@ -32,6 +32,7 @@
 ## Testing & Evaluation
 
 - [Testing & Evaluation](https://docs.liminis.app/liminis-context-graph/testing-and-evaluation): LLM record/replay cassettes and the `lcg-eval` extraction-quality harness.
+- [Test Providers](https://docs.liminis.app/liminis-context-graph/test-providers): `--embedder test` / `--extractor test` — built-in deterministic, offline providers and the stable fact-line contract for consumers' tests.
 - [Full-Corpus Extraction Benchmark Runbook](https://docs.liminis.app/liminis-context-graph/eval-full-corpus-runbook): Maintainer-run procedure for the full-corpus model comparison.
 - [Extraction-Quality Evaluation](https://docs.liminis.app/liminis-context-graph/extraction-quality-evaluation): Methodology, model rankings, and local-LLM guidance.
 - [Retrieval-Quality Evaluation](https://docs.liminis.app/liminis-context-graph/retrieval-quality-evaluation): `lcg-eval retrieval` — LCG vs qmd on a notebook corpus; question format, fixture, how to run.

@@ -310,6 +310,74 @@ writers do **not** run the check.
 Editing a signature, `inverse_aliases` or `symmetric` changes the ontology content hash (an ontology
 that does not use them is unaffected), so it shows up as drift until the group is re-processed.
 
+### Literal-valued facts
+
+**Under an ontology, a fact that states a literal value about one entity is stored on that entity
+alone.** A budget, date, price or uptime figure is not an entity, so it can never be an edge
+endpoint. Before #823 the edge prompt also told the model to find "the second entity" for every
+fact. Relations such as `HAS_MEASURE`, `HAS_TERM` and `SCHEDULED_FOR` ask for exactly these facts,
+so the model pinned them to whichever entity was nearby: "Marlin Core has a monthly budget of
+$4,200" was stored as `Marlin Core HAS_MEASURE Tomas Kowalski`. A walk from Tomas then reached
+Marlin Core's budget, and Tomas collected a fact that was not about him
+([ADR-0823](adr/0823-literal-object-edges-as-self-loops.md)).
+
+**In the extraction prompt** (strict and open mode, whenever the ontology offers at least one
+extractable relation type), the edge prompt's endpoint rules say:
+
+- when a fact states a literal value (an amount, price, budget, cost, date, deadline, duration,
+  percentage, count, score, version, role or title) about ONE entity, and no other listed entity
+  takes part in that fact, set **both** `source_name` and `target_name` to that entity. The value
+  stays in the fact text;
+- never attach such a fact to another listed entity just because it appears nearby;
+- if another listed entity genuinely takes part ("Tomas Kowalski set Marlin Core's monthly budget at
+  $4,200"), extract the edge between the two as usual;
+- a role or title held *in* another listed entity is a relation, not a literal ("Lena Moreau is the
+  project lead of Marlin Core" links the two). Only a role with no other listed entity ("Lena Moreau
+  is a senior engineer") becomes a self-loop.
+
+With no ontology, or one whose relation types are all `extract: false`, the edge prompt is unchanged.
+
+**At ingest**, under the same condition, an edge whose two endpoint names are the same entity is
+kept and stored as a **self-loop** on it, marked `"literal_object": true` in its `attributes` and
+counted in `edges_literal_object`. So "Marlin Core has a monthly budget of $4,200" becomes
+`Marlin Core HAS_MEASURE Marlin Core`. No node is created for the value. The self-loop:
+
+- is not checked against the relation's signature (there is no direction to check), so it never
+  picks up `signature_mismatch`, at ingest or in `knowledge_canonicalize_relations`;
+- survives an entity merge and a cross-group rebind (both ends move to the surviving entity), and
+  several value facts about one entity are all kept. Only a second copy of the same fact, with
+  the same text and relation type, is collapsed;
+- is returned by `knowledge_walk` on the **last** hop of a value walk (`answer_type` `"value"`
+  or absent). A walk that reaches Marlin Core returns its budget, but the self-loop is never a
+  step: it never extends the frontier, and it is not a candidate on earlier hops. See
+  [IPC/MCP reference → Typed relation walks](ipc-mcp-reference.md#typed-relation-walks-knowledge_get_ontology-knowledge_walk-issue-820)
+  and [ADR-0823](adr/0823-literal-object-edges-as-self-loops.md#consequences).
+
+Two cases are still dropped exactly as before: differently named endpoints that resolve to one
+entity (`edges_dropped_self_loop`), and endpoints made equal by salvage. With no ontology, a
+self-reference is always dropped.
+
+The admission rule is **name equality alone**: ingest does not check that the fact actually states
+a value, because role and title facts ("HAS_ROLE: the fact text names the role") carry no digit.
+So `literal_object` means "the model emitted this as a single-entity fact", not "the fact contains
+a literal". A single-entity fact that is not a value (`Alice ALSO_KNOWN_AS Alice`) is also stored
+as a marked self-loop and counted in `edges_literal_object`, which is therefore an upper bound on
+genuine literal-valued facts. Like every self-loop, such an edge is offered to a walk only on the
+last hop of a value walk.
+
+**Suspected misattachments are marked, in every mode.** An edge between two *different* entities
+whose fact states a literal value (it contains a digit or one of `$ € £ ¥`) but does not name both
+endpoints (case-insensitive, whole-word) is stored unchanged with `"suspected_misattachment": true`
+and counted in `edges_suspected_misattachment`. It is never dropped: the check is a text heuristic,
+so a fact that refers to an endpoint by a nickname is a false positive. Use the mark to find
+residual pins. A literal-object self-loop is never checked, so the inverse error goes unmarked: a
+self-loop whose fact names a second entity that does take part ("Tomas Kowalski set Marlin Core's
+budget at $4,200" stored as `Marlin Core → Marlin Core`) loses the link to Tomas silently. See
+[ADR-0823](adr/0823-literal-object-edges-as-self-loops.md) for why this is not marked.
+
+**Graphs extracted before this change are not repaired.** Re-process a group to get the new
+representation.
+
 ### Entity type hierarchy
 
 The optional `parent: <TypeName>` field on an entity type declares a single-parent (tree) subtype relationship. A node typed `Rfc` will carry labels `["Entity", "Document", "Rfc"]` — enabling both specific queries (`WHERE 'Rfc' IN e.labels`) and rollup queries (`WHERE 'Document' IN e.labels`).

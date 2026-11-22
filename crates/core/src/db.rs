@@ -1422,6 +1422,23 @@ impl<'db> Conn<'db> {
         name_prefix: Option<&str>,
         after: Option<(i64, &str)>,
     ) -> Result<Vec<(EpisodicRow, i64)>, Error> {
+        self.retrieve_episodes_page_by_uuids(groups, limit, name_prefix, after, None)
+    }
+
+    /// [`Self::retrieve_episodes_page`] narrowed to `uuids` (issue #857). `None` applies no
+    /// uuid filter; `Some(&[])` matches nothing. Group scope is still enforced by `groups`, so a
+    /// uuid from another group is never returned, and an unknown uuid is simply absent.
+    pub fn retrieve_episodes_page_by_uuids(
+        &self,
+        groups: Option<&[&str]>,
+        limit: usize,
+        name_prefix: Option<&str>,
+        after: Option<(i64, &str)>,
+        uuids: Option<&[&str]>,
+    ) -> Result<Vec<(EpisodicRow, i64)>, Error> {
+        if uuids.is_some_and(|u| u.is_empty()) {
+            return Ok(vec![]);
+        }
         let mut preds: Vec<&str> = Vec::new();
         let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
         if let Some(gids) = groups.filter(|g| !g.is_empty()) {
@@ -1431,6 +1448,10 @@ impl<'db> Conn<'db> {
         if let Some(prefix) = name_prefix {
             preds.push("ep.name STARTS WITH $prefix");
             params["prefix"] = serde_json::json!(prefix);
+        }
+        if let Some(u) = uuids {
+            preds.push("ep.uuid IN $uuids");
+            params["uuids"] = serde_json::json!(u);
         }
         if let Some((us, uuid)) = after {
             preds.push(
@@ -2415,23 +2436,36 @@ impl<'db> Conn<'db> {
         &self,
         entity_uuids: &[String],
     ) -> Result<Vec<(String, String, crate::origin::EpisodeOriginInfo)>, Error> {
+        Ok(self
+            .entity_mention_rows(entity_uuids)?
+            .into_iter()
+            .map(|r| (r.entity_uuid, r.episode_uuid, r.info))
+            .collect())
+    }
+
+    /// Like [`Self::entity_mention_origins`] but also carrying the episode's description, stored
+    /// source file and creation time — what `find_entities`' `include_episodes` needs (issue
+    /// #857). One batched query for all of `entity_uuids`, never one per entity.
+    pub fn entity_mention_rows(&self, entity_uuids: &[String]) -> Result<Vec<MentionRow>, Error> {
         if entity_uuids.is_empty() {
             return Ok(vec![]);
         }
         let rows = self.query_params(
             "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) WHERE n.uuid IN $uuids \
              RETURN DISTINCT n.uuid, ep.uuid, coalesce(ep.origin, ''), ep.doc_id, \
-             ep.superseded_at, ep.group_id",
+             ep.superseded_at, ep.group_id, ep.source_description, ep.source_file, \
+             ep.created_at",
             serde_json::json!({ "uuids": entity_uuids }),
         )?;
         Ok(rows
             .into_iter()
-            .map(|r| {
-                (
-                    value_as_string(&r[0]),
-                    value_as_string(&r[1]),
-                    episode_origin_info_from_cols(&r[2], &r[3], &r[4], &r[5]),
-                )
+            .map(|r| MentionRow {
+                entity_uuid: value_as_string(&r[0]),
+                episode_uuid: value_as_string(&r[1]),
+                info: episode_origin_info_from_cols(&r[2], &r[3], &r[4], &r[5]),
+                source_description: value_as_string(&r[6]),
+                source_file: value_as_optional_string(&r[7]).filter(|f| !f.is_empty()),
+                created_at_us: value_as_timestamp_micros(&r[8]),
             })
             .collect())
     }
@@ -5128,9 +5162,11 @@ impl<'db> Conn<'db> {
              rn.episodes, rn.warrant, rn.valid_at_source",
             serde_json::json!({ "uuid": entity_uuid }),
         )?;
-        // Incoming edges (entity is target)
+        // Incoming edges (entity is target). A self-loop (#823's literal-object edge) already
+        // matched as outgoing, so it is excluded here: each edge is returned exactly once.
         edges.extend(self.collect_full_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
+             WHERE src.uuid <> $uuid \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
              rn.valid_at, rn.invalid_at, rn.attributes, rn.fact_embedding, rn.created_at, rn.relation_type, rn.ingested_at, \
              rn.episodes, rn.warrant, rn.valid_at_source",
@@ -5212,6 +5248,33 @@ impl<'db> Conn<'db> {
         Ok(rows.into_iter().next().map(|row| value_as_string(&row[0])))
     }
 
+    /// Whether `entity_uuid` already has an active self-loop in `group_id` that duplicates the
+    /// edge `like_edge_uuid`: same fact text and same relation type, excluding that edge itself.
+    ///
+    /// The dedup key for #823's literal-object self-loops (ADR-0823), used by entity merge and
+    /// cross-group rebind in place of [`Self::has_directed_edge`]. `(src, dst, name)` is the
+    /// wrong key for value facts: several distinct ones (a budget, a headcount) legitimately
+    /// share `(A, A, relation)`, and ingest names an edge after its endpoints, so an alias's
+    /// self-loop never matches the canonical's by name. Two copies of the same value fact are a
+    /// duplicate. Two different facts are not.
+    pub fn has_duplicate_self_loop(
+        &self,
+        entity_uuid: &str,
+        group_id: &str,
+        like_edge_uuid: &str,
+    ) -> Result<bool, Error> {
+        let rows = self.query_params(
+            "MATCH (like:RelatesToNode_ {uuid: $like}) \
+             MATCH (a:Entity {uuid: $ent})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(b:Entity {uuid: $ent}) \
+             WHERE rn.invalid_at IS NULL AND rn.group_id = $group_id AND rn.uuid <> like.uuid \
+               AND rn.fact = like.fact \
+               AND coalesce(rn.relation_type, '') = coalesce(like.relation_type, '') \
+             RETURN rn.uuid LIMIT 1",
+            serde_json::json!({ "like": like_edge_uuid, "ent": entity_uuid, "group_id": group_id }),
+        )?;
+        Ok(!rows.is_empty())
+    }
+
     /// Returns a full RelatesToEdge by UUID, joining via the RelatesToNode_ shadow node.
     pub fn get_edge_by_uuid(&self, uuid: &str) -> Result<Option<RelatesToEdge>, Error> {
         let mut rows = self.collect_relates_to_edges(
@@ -5225,6 +5288,7 @@ impl<'db> Conn<'db> {
     }
 
     /// Returns all RELATES_TO edges where the entity with `entity_uuid` is either source or target.
+    /// Each edge is returned exactly once — a self-loop (#823) only via the outgoing match.
     pub fn get_edges_for_entity(&self, entity_uuid: &str) -> Result<Vec<RelatesToEdge>, Error> {
         let mut edges = self.collect_relates_to_edges(
             "MATCH (src:Entity {uuid: $uuid})-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity) \
@@ -5234,6 +5298,7 @@ impl<'db> Conn<'db> {
         )?;
         edges.extend(self.collect_relates_to_edges(
             "MATCH (src:Entity)-[:RELATES_TO]->(rn:RelatesToNode_)-[:RELATES_TO]->(dst:Entity {uuid: $uuid}) \
+             WHERE src.uuid <> $uuid \
              RETURN rn.uuid, rn.name, src.uuid, dst.uuid, rn.group_id, rn.fact, \
              rn.valid_at, rn.invalid_at, rn.attributes, rn.relation_type, rn.ingested_at, rn.created_at",
             serde_json::json!({ "uuid": entity_uuid }),
@@ -6137,6 +6202,19 @@ pub(crate) fn value_as_optional_timestamp_str(v: &lbug::Value) -> Option<String>
     }
 }
 
+/// One `Episodic-[:MENTIONS]->Entity` row (issue #857): the origin info `support` is computed
+/// from, plus the per-episode provenance `include_episodes` reports.
+#[derive(Debug, Clone)]
+pub struct MentionRow {
+    pub entity_uuid: String,
+    pub episode_uuid: String,
+    pub info: crate::origin::EpisodeOriginInfo,
+    pub source_description: String,
+    /// The stored `source_file`; `None` when NULL or empty (legacy rows).
+    pub source_file: Option<String>,
+    pub created_at_us: i64,
+}
+
 /// One `RelatesToNode_` row with its endpoints, for the "same fact" sibling grouping (ADR-0752).
 #[derive(Debug, Clone)]
 pub struct SiblingEdgeRow {
@@ -6431,6 +6509,8 @@ fn passage_from_row(row: &[Value], score: f64, origin_idx: usize) -> PassageResu
         belief: None,
         source_file: value_as_optional_string(&row[origin_idx + 1]),
         chunk_id: value_as_optional_string(&row[origin_idx + 2]),
+        legs: None,
+        lexical_score: None,
     }
 }
 

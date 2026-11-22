@@ -955,6 +955,12 @@ async fn test_health_check_ok() {
     assert_ok_resp(&v, 20);
     assert_eq!(v["result"]["ok"], true, "expected ok:true: {v}");
     assert_eq!(v["result"]["healthy"], true, "expected healthy:true: {v}");
+    // #851: additive `providers` field; this harness uses real (non-test) providers.
+    assert_eq!(v["result"]["providers"]["embedder"], "real", "{v}");
+    assert_eq!(v["result"]["providers"]["extractor"], "real", "{v}");
+    // Issue #854: additive version fields.
+    assert_eq!(v["result"]["server_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(v["result"]["protocol_version"], 1);
 }
 
 // ── Tier 1a: knowledge_status ─────────────────────────────────────────────────

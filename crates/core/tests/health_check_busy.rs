@@ -99,7 +99,11 @@ async fn idle_reports_healthy_unchanged() {
     let state = make_state(Some(db));
     assert_eq!(
         health(&state).await,
-        json!({"ok": true, "healthy": true, "state": "healthy"})
+        json!({
+            "ok": true, "healthy": true, "state": "healthy", "ready_for_reads": true,
+            "providers": {"embedder": "real", "extractor": "real"},
+            "server_version": env!("CARGO_PKG_VERSION"), "protocol_version": 1
+        })
     );
 }
 
@@ -114,8 +118,12 @@ async fn write_held_with_running_job_reports_rebuilding_with_progress() {
     assert_eq!(r["ok"], true);
     assert_eq!(r["healthy"], false);
     assert_eq!(r["state"], "busy");
+    assert_eq!(r["ready_for_reads"], true);
     assert_eq!(r["activity"], "rebuilding");
     assert_eq!(r["job_id"], "job-1");
+    // Issue #854: version fields ride along on the rebuilding shape too.
+    assert_eq!(r["server_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(r["protocol_version"], 1);
     assert_eq!(r["progress"]["mutations_replayed"], 100);
     assert_eq!(r["progress"]["wal_files_processed"], 2);
     assert_eq!(r["progress"]["wal_files_total"], 5);
@@ -153,7 +161,16 @@ async fn write_held_without_job_reports_writing() {
     let r = health(&state).await;
     assert_eq!(
         r,
-        json!({"ok": true, "healthy": false, "state": "busy", "activity": "writing"})
+        json!({
+            "ok": true,
+            "healthy": false,
+            "state": "busy",
+            "ready_for_reads": true,
+            "activity": "writing",
+            "providers": {"embedder": "real", "extractor": "real"},
+            "server_version": env!("CARGO_PKG_VERSION"),
+            "protocol_version": 1,
+        })
     );
 }
 
@@ -196,6 +213,7 @@ async fn contended_rebuild_jobs_mutex_falls_back_to_writing() {
     assert_eq!(r["state"], "busy");
     assert_eq!(r["activity"], "writing");
     assert!(r.get("progress").is_none());
+    assert_eq!(r["protocol_version"], 1);
 }
 
 #[tokio::test]
@@ -258,7 +276,67 @@ async fn degraded_is_never_masked_by_busy() {
     assert_eq!(r["ok"], false);
     assert_eq!(r["healthy"], false);
     assert_eq!(r["state"], "degraded");
+    assert_eq!(r["ready_for_reads"], false);
     assert_eq!(r["reason"], "corrupt wal");
+}
+
+/// SC-001 / ADR-0855: while the write lock is held, reads are still served, so
+/// `ready_for_reads` is true even though `healthy` is false.
+#[tokio::test]
+async fn busy_reports_ready_for_reads_true() {
+    let (db, _dir) = make_db();
+    let state = make_state(Some(db));
+    let _w = state.write_lock.write().await;
+
+    assert_eq!(
+        health(&state).await,
+        json!({
+            "ok": true,
+            "healthy": false,
+            "state": "busy",
+            "ready_for_reads": true,
+            "activity": "writing",
+            "providers": {"embedder": "real", "extractor": "real"},
+            "server_version": env!("CARGO_PKG_VERSION"),
+            "protocol_version": 1,
+        })
+    );
+}
+
+/// FR-001: every response shape carries a boolean `ready_for_reads`.
+#[tokio::test]
+async fn every_response_shape_has_ready_for_reads() {
+    let (db, _dir) = make_db();
+
+    // healthy
+    let state = make_state(Some(Arc::clone(&db)));
+    let r = health(&state).await;
+    assert_eq!(
+        (r["state"].as_str(), r["ready_for_reads"].as_bool()),
+        (Some("healthy"), Some(true))
+    );
+
+    // busy / writing
+    {
+        let _w = state.write_lock.write().await;
+        let r = health(&state).await;
+        assert_eq!(r["activity"], "writing");
+        assert_eq!(r["ready_for_reads"].as_bool(), Some(true));
+
+        // busy / rebuilding
+        insert_job(&state, "job-1", JobStatus::Running, 1, 1);
+        let r = health(&state).await;
+        assert_eq!(r["activity"], "rebuilding");
+        assert_eq!(r["ready_for_reads"].as_bool(), Some(true));
+    }
+
+    // degraded
+    let degraded = make_state(None);
+    let r = health(&degraded).await;
+    assert_eq!(
+        (r["state"].as_str(), r["ready_for_reads"].as_bool()),
+        (Some("degraded"), Some(false))
+    );
 }
 
 #[tokio::test]
@@ -271,6 +349,10 @@ async fn returns_to_healthy_after_writer_releases() {
     }
     assert_eq!(
         health(&state).await,
-        json!({"ok": true, "healthy": true, "state": "healthy"})
+        json!({
+            "ok": true, "healthy": true, "state": "healthy", "ready_for_reads": true,
+            "providers": {"embedder": "real", "extractor": "real"},
+            "server_version": env!("CARGO_PKG_VERSION"), "protocol_version": 1
+        })
     );
 }

@@ -3,6 +3,7 @@
 **Status**: Accepted
 **Date**: 2026-09-29
 **Issue**: #628 (implements community report #612)
+**Followed up by**: [ADR-0855](0855-health-check-ready-for-reads.md) (adds `ready_for_reads`; documents the `ok` / `healthy` / `ready_for_reads` semantics)
 
 ## Context
 

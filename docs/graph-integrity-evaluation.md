@@ -46,6 +46,7 @@ The command accepts any workspace whose DB a service could open.
 | `--db-path <PATH>` | `.lcg/db/liminis.db`, then `.graphiti/db` | DB location relative to the workspace. |
 | `--out <DIR>` | none | Also write `report.md` and `report.json` (the layout `lcg-eval retrieval --out` uses); with `--compare` also `compare.md`. The markdown is always printed to stdout. |
 | `--compare <FILE>` | none | An earlier `report.json`; print per-metric deltas. |
+| `--unstated-breakdown` | off | Also classify the value facts not stated on any edge of their entity by cause (see [Value facts](#value-facts)). Adds a report section and an `unstated_breakdown` JSON key; without the flag the report is unchanged. Not part of `--compare`. |
 
 **Workspace ontology default.** The group's own `.lcg/ontology/<group>.yaml` wins, then the
 workspace-wide `.lcg/ontology.yaml` (the order the service resolves it); with neither, the graph is
@@ -168,6 +169,27 @@ skeleton entity, de-duplicated by (entity, attribute, value). The denominator is
   not misattached. The two flags are independent: that Marlin Core edge is both stated and
   misattached; each fact is counted once per flag.
 
+A self-loop on the entity (the representation of a literal-valued fact under an ontology since
+#823, see [ontology.md](ontology.md#literal-valued-facts)) that states the value counts as stated
+and is never misattached, since its other end is the entity itself.
+
+**Why a fact is not stated (`--unstated-breakdown`, #823).** "Stated" reads only edge `fact` text,
+so a value can be in the graph and still count as not stated. With the flag, each not-stated value
+fact is put in the first of these that holds:
+
+1. **Only in the entity's node summary**: the value (exact bounded match, as for "stated") is in a
+   `summary` of one of the entity's own nodes.
+2. **On another entity**: the value is on an edge *not* incident to the entity, or in another node's
+   name or summary. For example "The offsite will take place in Aarhus" on an `offsite` node's edge.
+3. **Present in another surface form**: an incident edge or the entity's own summary states it in a
+   form the exact match misses. A `[day] Month YYYY` value matches its ISO (`2027-03`, `2026-11-02`)
+   and abbreviated (`Mar 2027`) spellings; any other value with digits matches when all its number
+   tokens appear, separators removed (`$4,200` ≈ `4200 USD`, `98.5%` ≈ `98.5 percent`). This is
+   loose, since a small number can match an unrelated figure, so this group is an upper bound.
+4. **Absent**: none of the above.
+
+The breakdown is diagnostic and does not change the stated or misattached definitions.
+
 ### Junk
 
 Nodes **named like a note ID**. A node is junk when it is not a skeleton entity and either its
@@ -254,7 +276,95 @@ Remaining residuals come from the string rules above: the junk count depends on 
 exact ID or a prefixed slug with a digit segment), and free-form typing depends on the `node_types`
 list in the mapping, which is the tuning point for a free-form graph's labels.
 
+## Value-fact misattachment (#823)
+
+Under an ontology, value facts were pinned to unrelated entities (27 of 440 misattached on the
+ontology v3.1 graph above, against 2 free-form). #823 stores a literal-valued fact as a self-loop on
+the entity it describes ([ADR-0823](adr/0823-literal-object-edges-as-self-loops.md)). The acceptance
+targets: misattached at most 3 under ontology v3.1, stated not lower than the baseline, and the other
+metrics within ±1 of a baseline from the same commit (direction-correct compared as a rate when the
+denominators differ), with free-form unchanged within ±1.
+
+### Why value facts are not stated: free-form proxy
+
+> **Provenance.** Research for #823 analysed the checked-in free-form v2 cassette
+> (`crates/eval/fixtures/retrieval-v2/cassette.jsonl`, recorded 2026-11-18 with Haiku 4.5, from
+> prompts that predate #816 and #824) with a script kept outside the repository. It counts the
+> *union of extractions* across the cassette's 1,006 calls, not a stored graph, so its figures
+> approximate the command's rather than reproduce them (252/440 stated, against E13's free-form
+> 259/428; 2 misattached, matching E13). The ontology v3.1 graph is not in the
+> repository; its breakdown comes from `--unstated-breakdown` on the maintainer's kept workspace
+> (below).
+
+Of the 440 value facts, 201 were not stated on any edge of their entity in the stating note:
+
+| Cause | Facts |
+|---|---|
+| Only in the entity's node summary | **138** |
+| On another entity: an edge not incident to it | 23 |
+| On another entity: another node's name or summary | 13 |
+| Present in another surface form | 3 |
+| Absent | 24 |
+
+Most of the gap is not missing data: two thirds of it sits in the entity's summary, which "stated"
+does not read. Only about 24 facts (5%) look genuinely absent, so a follow-up fix for the gap is
+warranted only if the ontology graph's breakdown differs materially. 335 of the 1,006 chunks had
+fewer than two entities, which the free-form prompt gives no way to carry an edge for.
+
+### Before and after (maintainer-reported, pending)
+
+> **Provenance.** To be filled in from the figures the maintainer reports on the #823 PR. Like
+> #819's, these runs need kept v2 workspaces and live extraction, which the repository alone cannot
+> reproduce. The repository's own checks are the deterministic tests (`crates/core/tests/literal_object_edges.rs`,
+> the prompt golden file, and the graph-integrity unit tests).
+
+Produce each arm from a fresh extraction with the same model and settings. **Before** is `main` at
+the merge base without this change, **after** is this branch. Ontology-mode ingest uses
+`lcg-eval retrieval --ontology` and kept workspaces (#821, ADR-0821), now on `main`:
+
+```sh
+# per arm and mode: extract v2 into a kept workspace, then
+target/release/lcg-eval graph-integrity --workspace <ws-before> --unstated-breakdown --out <dir-before>
+target/release/lcg-eval graph-integrity --workspace <ws-after>  --unstated-breakdown --out <dir-after> \
+  --compare <dir-before>/report.json
+```
+
+Also read a sample of the after-change `HAS_MEASURE`, `HAS_TERM` and `SCHEDULED_FOR` edges: a pin
+moved into a compound fact that names the other entity passes the metric while staying wrong.
+
+**Ontology v3.1**
+
+| Metric | Before | After | Target |
+|---|---|---|---|
+| Value facts stated | _pending_ | _pending_ | ≥ before |
+| Value facts misattached | _pending_ | _pending_ | ≤ 3 |
+| Entities found | _pending_ | _pending_ | ±1 |
+| Typed as expected | _pending_ | _pending_ | ±1 |
+| True links present | _pending_ | _pending_ | ±1 |
+| Expected relation type | _pending_ | _pending_ | ±1 |
+| Direction correct | _pending_ | _pending_ | ±1 (rate) |
+| Junk nodes | _pending_ | _pending_ | not higher |
+| `edges_literal_object` / `edges_suspected_misattachment` (ingest totals) | — | _pending_ | reported |
+
+**Free-form**
+
+| Metric | Before | After | Target |
+|---|---|---|---|
+| Every graph-integrity metric | _pending_ | _pending_ | ±1 |
+| Value facts misattached | _pending_ | _pending_ | ≤ 3 |
+| Junk nodes | _pending_ | _pending_ | not higher |
+
+**Ontology v3.1, not-stated value facts by cause (`--unstated-breakdown`)**
+
+| Cause | Before | After |
+|---|---|---|
+| Only in the entity's node summary | _pending_ | _pending_ |
+| On another entity | _pending_ | _pending_ |
+| Present in another surface form | _pending_ | _pending_ |
+| Absent | _pending_ | _pending_ |
+
 ## Not covered
 
-Repairing misattached or missing value facts, fixing note-ID junk nodes, running this in CI on every
+Repairing misattached or missing value facts in stored graphs (#823 prevents new misattachments at
+ingest but does not repair existing graphs), fixing note-ID junk nodes, running this in CI on every
 PR (it needs a kept workspace), and corpora without a skeleton.

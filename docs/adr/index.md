@@ -175,8 +175,13 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0819](0819-graph-integrity-eval.md) | `lcg-eval graph-integrity`: Deterministic Graph Scoring Over a Copied DB | 2026-11-21 |
 | [0820](0820-caller-plans-walk-no-lcg-llm.md) | Caller-Planned Typed Walk: LCG Makes No LLM Call | 2026-11-21 |
 | [0821](0821-graph-qa-eval-and-kept-workspaces.md) | `lcg-eval graph-qa`, Ontology Ingest and Kept Workspaces | 2026-11-21 |
+| [0823](0823-literal-object-edges-as-self-loops.md) | Literal-Object Edges as Self-Loops Under an Ontology | 2026-11-21 |
 | [0824](0824-own-source-id-entity-filter.md) | Drop Extracted Entities Named After the Episode's Own Source ID or a Cited Note ID | 2026-11-21 |
+| [0851](0851-test-providers-mode.md) | Test-Providers Mode: Built-in Deterministic Embedder and Fact-Line Extractor | 2026-11-21 |
 | [0853](0853-episode-source-identity-and-exact-source-matching.md) | Episode Source Identity and Exact Source Matching | 2026-11-21 |
+| [0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md) | `knowledge_capabilities` — Protocol Version, Feature Registry and a Self-Describing Socket | 2026-11-21 |
+| [0855](0855-health-check-ready-for-reads.md) | `health_check` Gains `ready_for_reads`; Documents `ok` / `healthy` / `ready_for_reads` Semantics | 2026-11-21 |
+| [0857](0857-find-entities-episode-provenance.md) | `find_entities` Episode Provenance and a `uuids` Filter on `get_episodes` | 2026-11-22 |
 
 ## Historical numbering
 
