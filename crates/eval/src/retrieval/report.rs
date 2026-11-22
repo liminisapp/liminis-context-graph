@@ -54,8 +54,9 @@ pub struct RunMeta {
     /// Private-notebook run (`--private`): the report carries metrics, counts and hashes only and
     /// withholds the detail of failed queries (a service error can echo query text).
     pub private: bool,
-    /// [`lcg_core::ontology::content_hash`] of the `--ontology` the corpus was ingested under
-    /// (#821 FR-002); `None` for a free-form ingest.
+    /// [`lcg_core::ontology::content_hash`] of the ontology the service **reported** for the
+    /// ingest (#821 FR-002, #881); `"none"` for a free-form ingest (`None` only when no service
+    /// ran).
     pub ontology_hash: Option<String>,
     pub ontology_mode: Option<String>,
     pub ontology_file: Option<String>,
@@ -1071,12 +1072,12 @@ impl Report {
             o,
             "- Ontology: {}",
             match (&m.ontology_hash, &m.ontology_mode) {
-                (Some(h), mode) => format!(
-                    "`{}` (hash `{h}`, mode {})",
+                (Some(h), mode) if h != "none" => format!(
+                    "`{}` (service-reported hash `{h}`, mode {})",
                     m.ontology_file.as_deref().unwrap_or("?"),
                     mode.as_deref().unwrap_or("?")
                 ),
-                (None, _) => "none (free-form extraction)".to_string(),
+                _ => "none (free-form extraction; hash `none`)".to_string(),
             }
         );
         if let Some(k) = &m.kept_workspace {
