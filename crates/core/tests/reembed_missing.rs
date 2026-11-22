@@ -430,8 +430,6 @@ async fn repairs_all_four_kinds() {
     assert!(events(&fx).is_empty());
 }
 
-/// AC3, SC-004: `dry_run` counts, makes no embedder call, writes nothing; the real run's
-/// `candidates` match.
 /// Issue #850: replay records a summary unit's zero `content_embedding` under the `content` kind,
 /// keyed by the summary's uuid. It must be repaired like an episode's, not taken for a stale entry
 /// (no `Episodic` row has that uuid) and dropped from the record with the zero vector left behind.
@@ -486,6 +484,8 @@ async fn repairs_a_summary_units_content_vector() {
     );
 }
 
+/// AC3, SC-004: `dry_run` counts, makes no embedder call, writes nothing; the real run's
+/// `candidates` match.
 #[tokio::test(flavor = "multi_thread")]
 async fn dry_run_has_no_side_effects_and_matches_real_candidates() {
     let fx = fixture();
