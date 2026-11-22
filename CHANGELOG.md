@@ -87,6 +87,20 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   read-scope, read-only (no WAL writes) and exposed as MCP tools (56 tools; the read scope
   has 21). LCG makes no LLM call: the agent using LCG is the planner. E13 measured this walk at
   0.91 against 0.37 for the best passage search on the v2 graph questions.
+- **`knowledge_reembed_missing`: repair zero-vector embeddings across all kinds (#809, ADR-0809).**
+  An admin tool, `knowledge_reembed_missing(group_id, kinds?, dry_run?)`, re-embeds exactly the rows
+  the zero-vector record (#808, `knowledge_status` `zero_vector_rows`) lists for a group — entity
+  `name`, entity `summary`, relationship `fact` and episode `content`, default all — from their
+  stored source text, with replay's retry/backoff policy and the document-role embedder. It returns
+  per-kind `candidates`, `reembedded`, `failed` and `skipped_no_source`; a repaired row leaves the
+  record (so the status count drops) and a failed one stays for a later retry. `dry_run` only counts.
+  All embedding finishes before any vector index is dropped, and only the indexes of kinds with
+  something to write are dropped and rebuilt; those indexes span every group, so writes are blocked
+  and vector search waits while one is down. A failed rebuild is reported in `index_rebuild_errors`
+  and the next search rebuilds automatically. Admin scope, group-scoped under `--writable-groups`
+  (MCP tools: 56 → 57). The index drop/write/rebuild lifecycle is now shared with
+  `knowledge_backfill_summary_embeddings`, which now restores the prior `indices_built` value
+  instead of forcing it `true` and attempts its rebuild even after a failed write.
 - **`LCG_SEARCH_MIN_SCORE`: configurable default `min_score` for `knowledge_search_passages`
   (#812, ADR-0812).** The default floor used when a request omits `min_score` was a hard-coded 0.5,
   which can let unrelated passages through for some embedders (#811). Operators can now set it per
@@ -119,6 +133,12 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Upgrading
 
+- **Source identity columns (#853), no storage-version change.** `Episodic` gains two nullable
+  columns, `source_file` and `chunk_id`. Existing rows read them as NULL and are matched by the
+  legacy rule; nothing is backfilled, so legacy episodes report neither field. A 0.19.1 binary
+  still opens and operates on an upgraded database, but it cannot *rebuild* from a WAL this release
+  wrote: the new `CREATE (:Episodic …)` statements fail to prepare on its schema and those episodes
+  are dropped. The #752, #292 and #785 columns already carry the same limitation.
 - **`knowledge_search_passages` result order changes by default** (#806): see *Changed*. Callers that
   rely on cosine `score` thresholds or on the old order should send `belief_aware: false` or set
   `LCG_PASSAGE_BELIEF_AWARE=off`.
@@ -212,6 +232,26 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Fixed
 
+- **`knowledge_delete_by_source` no longer deletes other sources' episodes, and
+  `knowledge_get_entities_by_source` returns only the requested source's live entities** (#829,
+  #830, #853). Both matched the composed `source_description = "<source_file>:<chunk_id>"`
+  loosely: delete-by-source prefix-matched, so deleting `https://a.com` also **permanently
+  deleted** every episode of `https://a.com:8443/...`; entities-by-source substring-matched, so
+  `https://a.com/p` also returned `/page`, `?x=1` and `/sub` entities, superseded episodes
+  included. Episodes now store `source_file` and `chunk_id` separately, and both operations match
+  the stored `source_file` exactly, byte for byte. Episodes written before this change fall back
+  to a safe legacy rule that derives the source from the episode's own name and never matches a
+  different source. Entities-by-source now counts live (not superseded, committed) episodes only.
+  `knowledge_mark_chunk_removed` and `knowledge_delete_chunk_episode` were checked: they match the
+  chunk ID exactly and are unchanged. See [ADR-0853](docs/adr/0853-episode-source-identity-and-exact-source-matching.md).
+  - **Behaviour change** for clients that relied on substring or prefix matching. In particular, a
+    `knowledge_add_episode` row with `source_description = "file:section"` is no longer deleted or
+    returned for source `"file"`; a raw episode matches only its exact `source_description`. Use
+    `knowledge_delete_chunk_episode` for a legacy row the rule cannot attribute.
+  - **Additive response fields:** `source_file` and `chunk_id` on `knowledge_get_episodes` items
+    (projectable with `fields`), `knowledge_search_passages` passages and
+    `knowledge_get_affected_work` candidates. They are omitted for legacy episodes. Request shapes
+    are unchanged.
 - The D1 identity-set guard now detects an identity removal when the group's stamp
   (`.lcg/identity-set/<group>.json`) is missing (#778). Previously a missing stamp read as the empty
   set, so removing `identity: true` from a group's only identity type compared equal and

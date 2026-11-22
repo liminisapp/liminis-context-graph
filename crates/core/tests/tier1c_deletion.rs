@@ -310,54 +310,73 @@ async fn delete_by_source_requires_group_ids() {
 }
 
 /// FR-003/FR-007, SC-005: a scoped `knowledge_delete_by_source` call touches only the named
-/// group's rows, both for an exact `source_description` match and a `source_file:` prefix
-/// match; a same-source row in another group is untouched.
+/// group's rows, both for a chunk episode of the source (matched on its stored `source_file`) and
+/// a raw `add_episode` row whose `source_description` is exactly the source; a same-source row in
+/// another group is untouched.
+///
+/// Issue #853 (ADR-0853) narrowed the match: an `add_episode` row whose free-form
+/// `source_description` merely *starts with* `"doc.md:"` is no longer deleted, because its name
+/// does not identify where the source file ends. This is the intended behaviour change, flagged
+/// in the CHANGELOG; before #853 the prefix match also deleted it.
 #[tokio::test]
 async fn delete_by_source_scoped_to_one_group() {
     let (db, _dir) = make_db(4);
     let state = make_state(db, "test.db");
 
-    // Exact match in both groups.
+    // A chunk episode of the source in both groups.
+    for (id, group) in [(1, "group-a"), (2, "group-b")] {
+        let v = dispatch_val(
+            id,
+            "knowledge_process_chunk",
+            json!({
+                "chunk_text": "Alice works at Acme Corp.",
+                "chunk_id": "section1",
+                "source_file": "doc.md",
+                "group_id": group,
+                "reference_time": "2024-01-01T00:00:00Z",
+            }),
+            Arc::clone(&state),
+        )
+        .await;
+        assert_ok(&v, id);
+    }
+    // An exact-description raw episode in both groups.
     assert_ok(
-        &add_episode(1, "ep-a1", "doc.md", "group-a", Arc::clone(&state)).await,
-        1,
-    );
-    assert_ok(
-        &add_episode(2, "ep-b1", "doc.md", "group-b", Arc::clone(&state)).await,
-        2,
-    );
-    // Prefix match in both groups.
-    assert_ok(
-        &add_episode(3, "ep-a2", "doc.md:section1", "group-a", Arc::clone(&state)).await,
+        &add_episode(3, "ep-a1", "doc.md", "group-a", Arc::clone(&state)).await,
         3,
     );
     assert_ok(
-        &add_episode(4, "ep-b2", "doc.md:section1", "group-b", Arc::clone(&state)).await,
+        &add_episode(4, "ep-b1", "doc.md", "group-b", Arc::clone(&state)).await,
         4,
+    );
+    // A raw episode whose description only starts with `doc.md:` (#853: not matched).
+    assert_ok(
+        &add_episode(5, "ep-a2", "doc.md:section2", "group-a", Arc::clone(&state)).await,
+        5,
     );
 
     let v = dispatch_val(
-        5,
+        6,
         "knowledge_delete_by_source",
         json!({"source_file": "doc.md", "group_ids": ["group-a"]}),
         Arc::clone(&state),
     )
     .await;
-    assert_ok(&v, 5);
+    assert_ok(&v, 6);
     assert_eq!(
         v["result"]["deleted_count"], 2,
-        "both exact and prefix matches in group-a must be deleted: {v}"
+        "the chunk episode and the exact raw episode in group-a must be deleted: {v}"
     );
 
     assert_eq!(
-        episode_count_in_group(6, "group-a", Arc::clone(&state)).await,
-        0,
-        "group-a rows must be gone"
+        episode_count_in_group(7, "group-a", Arc::clone(&state)).await,
+        1,
+        "only the prefix-only raw episode survives in group-a (#853)"
     );
     assert_eq!(
-        episode_count_in_group(7, "group-b", Arc::clone(&state)).await,
+        episode_count_in_group(8, "group-b", Arc::clone(&state)).await,
         2,
-        "group-b rows (exact and prefix) must survive"
+        "group-b rows must survive"
     );
 }
 

@@ -801,6 +801,11 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_get_entities_by_source",
             description: "List entities that were extracted from a given source document. \
+                           Matches the episode's stored source file exactly (byte for byte, \
+                           no substring or prefix match, issue #853); an episode written \
+                           before source identity was stored matches only when its composed \
+                           `source_file:chunk_id` description provably names this source. \
+                           Only live (not superseded, committed) episodes count. \
                            Does not include episode `attributes` (issue #528) — this path \
                            surfaces only entity-scoped provenance, never a full episode object.",
             scope: Scope::Read,
@@ -1037,8 +1042,14 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_delete_by_source",
-            description: "Delete all episodes ingested from a given source file. Orphaned \
-                           entities remain in the graph.",
+            description: "Delete all episodes ingested from a given source file, superseded \
+                           ones included. Matches the episode's stored source file exactly \
+                           (byte for byte; deleting `https://a.com` never touches \
+                           `https://a.com:8443/...`, issue #853); an episode written before \
+                           source identity was stored is deleted only when its composed \
+                           `source_file:chunk_id` description provably names this source — \
+                           use knowledge_delete_chunk_episode for one it cannot attribute. \
+                           Orphaned entities remain in the graph.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -1308,6 +1319,49 @@ pub fn registry() -> Vec<ToolSpec> {
                             "description": "Restricts candidate selection and WAL attribution to this group only (required; no default)."
                         },
                         "dry_run": {"type": "boolean", "default": false, "description": "Preview the candidate count without embedding or writing."}
+                    },
+                    "required": ["group_id"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_reembed_missing",
+            description: "Repairs rows that were stored with a zero-vector embedding because the \
+                           embedder failed during WAL replay (issue #809), which leaves them \
+                           invisible to vector search. Re-embeds exactly the rows recorded as \
+                           zero-vector for group_id (the per-group record `knowledge_status` \
+                           reports as `zero_vector_rows`), from their stored source text: entity \
+                           name (`name`), entity summary (`summary`), relationship fact (`fact`), \
+                           episode content (`content`). `kinds` restricts the repair to a subset \
+                           (default all four). Returns per-kind candidates, reembedded, failed \
+                           and skipped_no_source; a repaired row is removed from the record so \
+                           the `knowledge_status` count drops, and a failed row stays recorded for \
+                           a later retry. `dry_run` only counts: no embedder call, no write, no \
+                           index change. All embedding finishes before any index is dropped; then \
+                           only the vector indexes of kinds that have something to write are \
+                           dropped and rebuilt. Those indexes span ALL groups, so while one is \
+                           down every write is blocked and vector search for every group waits \
+                           for the rebuild — run `dry_run` first and prefer a low-traffic time. \
+                           If a rebuild fails the result carries `index_rebuild_errors` and the \
+                           next search rebuilds the indexes automatically. group_id is required. \
+                           Supports MCP progress notifications when called with a progress \
+                           token.",
+            scope: Scope::Admin,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {
+                            "type": "string",
+                            "description": "The group whose recorded zero-vector rows are repaired (required; no default)."
+                        },
+                        "kinds": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["name", "fact", "summary", "content"]},
+                            "minItems": 1,
+                            "description": "Which embedding kinds to repair. Default: all four."
+                        },
+                        "dry_run": {"type": "boolean", "default": false, "description": "Report per-kind candidate counts without embedding, writing or touching an index."}
                     },
                     "required": ["group_id"]
                 })
@@ -2023,7 +2077,7 @@ pub fn missing_required(schema: &Value, params: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Names of the six streaming methods that emit MCP progress notifications (FR-007).
+/// Names of the seven streaming methods that emit MCP progress notifications (FR-007).
 pub fn is_streaming_method(name: &str) -> bool {
     matches!(
         name,
@@ -2031,6 +2085,7 @@ pub fn is_streaming_method(name: &str) -> bool {
             | "knowledge_canonicalize_relations"
             | "knowledge_backfill_relation_types"
             | "knowledge_backfill_summary_embeddings"
+            | "knowledge_reembed_missing"
             | "knowledge_reprocess_relation_types"
             | "knowledge_reprocess_entity_types"
     )
@@ -2042,11 +2097,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_56_unique_tools() {
+    fn registry_has_57_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 56);
+        assert_eq!(r.len(), 57);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 56, "tool names must be unique");
+        assert_eq!(names.len(), 57, "tool names must be unique");
     }
 
     #[test]
@@ -2056,7 +2111,7 @@ mod tests {
         assert_eq!(count(Scope::Read), 21);
         assert_eq!(count(Scope::Write), 18);
         assert_eq!(count(Scope::Cypher), 1);
-        assert_eq!(count(Scope::Admin), 16);
+        assert_eq!(count(Scope::Admin), 17);
     }
 
     #[test]
@@ -2178,6 +2233,7 @@ mod tests {
         assert!(is_streaming_method("knowledge_canonicalize_relations"));
         assert!(is_streaming_method("knowledge_backfill_relation_types"));
         assert!(is_streaming_method("knowledge_backfill_summary_embeddings"));
+        assert!(is_streaming_method("knowledge_reembed_missing"));
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_entity_types"));
         assert!(!is_streaming_method("knowledge_status"));
@@ -2253,6 +2309,22 @@ mod tests {
             schema.get("required").and_then(|r| r.as_array()),
             Some(&vec![json!("group_id")]),
             "group_id must be the sole required field"
+        );
+    }
+
+    #[test]
+    fn reembed_missing_is_registered_admin_scope_with_required_group_id() {
+        let r = registry();
+        let tool = r
+            .iter()
+            .find(|t| t.name == "knowledge_reembed_missing")
+            .expect("knowledge_reembed_missing must be registered");
+        assert_eq!(tool.scope, Scope::Admin);
+        let schema = (tool.input_schema)();
+        assert_eq!(schema["required"], json!(["group_id"]));
+        assert_eq!(
+            schema["properties"]["kinds"]["items"]["enum"],
+            json!(["name", "fact", "summary", "content"])
         );
     }
 

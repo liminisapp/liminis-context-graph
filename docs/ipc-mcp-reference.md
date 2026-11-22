@@ -42,11 +42,11 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (57)
+## IPC methods (58)
 
-The socket dispatch handles **57 methods**: 56 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **58 methods**: 57 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (57) and the MCP tool registry (56, below) differ by exactly one — `health_check` is
+surface (58) and the MCP tool registry (57, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool.
 
 | Category | Methods |
@@ -67,7 +67,7 @@ not exposed as an MCP tool.
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
 | Ontology | `knowledge_reload_ontology` |
 | Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
-| Semantic search maintenance | `knowledge_backfill_summary_embeddings` |
+| Semantic search maintenance | `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing` |
 | Cross-group pointers | `knowledge_add_cross_group_edge`, `knowledge_rebind_pointers` |
 | WAL administration | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_build_indices` |
 | Recovery / lifecycle | `knowledge_recover`, `knowledge_recover_full`, `knowledge_close` |
@@ -229,7 +229,7 @@ union of all active scopes.
 | `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_ontology`, `knowledge_walk`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
 | `write` | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
-| `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |
+| `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |
 | `all` | every scope above (default) |
 
 **`cypher` is a power scope, not bundled into anything else.** `knowledge_query_cypher` executes
@@ -269,7 +269,7 @@ The check is made against the groups a call **actually changes**, not every grou
 | Tool(s) | Group(s) that must be listed |
 |---------|------------------------------|
 | `knowledge_add_episode`, `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_merge_entities`, `knowledge_add_cross_group_edge`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types` | `group_id` (default group if omitted) |
-| `knowledge_supersede_document`, `knowledge_stamp_origin`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reload_ontology` | the required `group_id` |
+| `knowledge_supersede_document`, `knowledge_stamp_origin`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing`, `knowledge_reload_ontology` | the required `group_id` |
 | `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed` | every entry of `group_ids` |
 | `knowledge_delete_episode` | the group that owns the episode (looked up; a missing episode is a no-op) |
 | `knowledge_delete_by_group`, `knowledge_rebuild_from_wal` (every call, not just `force_clear`) | the target group(s) **and** every group owning a cross-group pointer row into them (ADR-0385: the purge/replay rebinds those rows) |
@@ -1150,7 +1150,7 @@ additive parameters; with none of them the response is exactly `{<collection>, c
 | `group_ids` (array) | both | Groups to read. `knowledge_get_episodes` also accepts the single-group alias `group_id`; both given ⇒ their deduplicated union. **Neither given ⇒ every group** (episodes used to default to `liminis`). An explicit `[]` also means all groups. |
 | `last_n` / `num_results` | episodes / entities | Page size (defaults 50 / 500, unchanged). |
 | `cursor` | both | Opaque keyset cursor. Send `""` for the first page, then send back each response's `next_cursor` until it is `null`. |
-| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
+| `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, source_file, chunk_id`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
 | `name_prefix` | both | Names starting with this prefix, matched literally. Case-insensitive for entities (via Cypher `lower()`, so non-ASCII folds only as far as lbug does); case-sensitive for episodes. |
 
 `next_cursor` appears only when the request contained `cursor`, `fields` or `name_prefix`; it is
@@ -1199,6 +1199,59 @@ explicitly:
 This is a different contract from the read-tool one above — omitting `group_ids` here never means
 "all groups"; it means "reject the call." A `group_ids` naming a group with no matching rows still
 succeeds, returning `deleted_count: 0`.
+
+**`knowledge_delete_by_source` matches the source exactly (issue #853).** It deletes the episodes
+whose stored `source_file` equals the request byte for byte, superseded episodes included. It no
+longer prefix-matches the composed `source_description`, so deleting `https://a.com` leaves every
+episode of `https://a.com:8443/x` alone, and deleting `notes/a` leaves `notes/ab` alone. Episodes
+written before #853 are matched by the safe legacy rule described under
+[Source identity](#source-identity-source_file-and-chunk_id-issue-853). An episode that rule cannot
+attribute is never deleted by source; remove it with `knowledge_delete_chunk_episode` by its chunk
+ID.
+
+> **Behaviour change.** A client that wrote `source_description = "file:section"` through
+> `knowledge_add_episode` and relied on `delete_by_source("file")` prefix-matching it will now get
+> `deleted_count: 0` for those rows. A raw episode matches only its exact `source_description`.
+
+### Source identity: `source_file` and `chunk_id` (issue #853)
+
+Every episode written by `knowledge_process_chunk` or `knowledge_process_document` stores its
+source file and chunk ID as two separate values, alongside the unchanged display value
+`source_description = "<source_file>:<chunk_id>"`. A URL contains colons, so the display value
+cannot be split back reliably. Read the two fields instead of parsing it.
+
+- **Where they appear.** `source_file` and `chunk_id` are additive fields on
+  `knowledge_get_episodes` items (projectable with `fields`), `knowledge_search_passages` passages
+  and `knowledge_get_affected_work` candidates. For a chunk ingest they are the request's
+  `source_file` and `chunk_id`. For a document ingest they are the `source_path` (or the `doc_id`
+  when no path was given) and the minted chunk name (`{doc_id}::{hex}`).
+- **Legacy episodes** carry neither field, and the keys are omitted from the response. Those are
+  episodes written before #853, replayed from a pre-#853 WAL, or created by `knowledge_add_episode`
+  (which takes no structured source). There is no backfill.
+
+Two operations match a source on this identity, byte for byte, with no URL normalisation (case,
+trailing slash and default port all count):
+
+- **`knowledge_delete_by_source`**: see [Deletion](#deletion-delete_chunk_episode-delete_by_source).
+- **`knowledge_get_entities_by_source`** returns the entities mentioned by the **live** episodes
+  of the source. A live episode is one that is not superseded, or whose document supersession is
+  not yet effective, and that does not belong to an uncommitted document revision. An entity is
+  returned when at least one live episode of the source mentions it. `https://a.com/p` no longer
+  returns entities that only `https://a.com/page`, `https://a.com/p?x=1` or `https://a.com/p/sub`
+  support. The optional `group_ids` filter applies to the entity's group, as before.
+
+**The legacy rule.** For an episode without a stored `source_file`, the source is derived from its
+own `name`, never by splitting on a colon. Each episode maps to at most one source, so it can never
+match two different requests.
+
+| Episode | Source it belongs to |
+|---|---|
+| chunk- or document-path (`write_path` `chunk`/`document`) | `source_description` minus `":" + name`; none if it does not end that way |
+| written before 0.19.0 (no `write_path`) | `source_description` minus `":" + name` when it ends that way, otherwise the whole `source_description` |
+| raw `knowledge_add_episode` (`write_path` `episode`) | the whole `source_description` (exact equality only) |
+
+The rule may fail to attribute a legacy episode. It never attributes one to a different source.
+See [ADR-0853](adr/0853-episode-source-identity-and-exact-source-matching.md).
 
 ### Direct assertion (`assert_entity`, `assert_relationship`)
 
@@ -1575,6 +1628,80 @@ that predate the capability.
   folds a new description into an existing entity the merged summary is consolidated into one
   bounded description of at most 600 characters and re-embedded in the same write — ADR-0651.)
 
+
+### Repairing zero-vector rows (`reembed_missing`)
+
+**`knowledge_reembed_missing`** (issue #809, [ADR-0809](adr/0809-reembed-missing-zero-vectors.md))
+re-embeds exactly the rows that were stored with a fallback zero vector because the embedder failed
+during WAL replay. Such a row is invisible to vector search until repaired. Replay records each one
+durably as `(group, kind, uuid)`; `knowledge_status` reports the per-group count as
+`wal_groups.<gid>.zero_vector_rows` (#808), and this tool acts on that record. Unlike
+`knowledge_backfill_summary_embeddings` it does not touch rows that are fine, and unlike a full
+`knowledge_rebuild_from_wal` it takes time proportional to the number of recorded rows plus one
+index rebuild per affected kind.
+
+Parameters:
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `group_id` | string, required | The group whose recorded rows are repaired. Subject to `--writable-groups`: an unlisted group is refused before any embedder call, `dry_run` included. |
+| `kinds` | array, optional | Any non-empty subset of `name` (entity name), `summary` (entity summary), `fact` (relationship fact), `content` (episode content). Default: all four. An invalid value is rejected, naming the valid ones. |
+| `dry_run` | bool, default `false` | Report per-kind `candidates` only: no embedder call, no write, no record change, no index change. |
+
+Result:
+
+```json
+{
+  "group_id": "g1",
+  "dry_run": false,
+  "kinds": {
+    "name":    {"candidates": 12, "reembedded": 11, "failed": 1, "skipped_no_source": 0},
+    "fact":    {"candidates": 0,  "reembedded": 0,  "failed": 0, "skipped_no_source": 0},
+    "summary": {"candidates": 0,  "reembedded": 0,  "failed": 0, "skipped_no_source": 0},
+    "content": {"candidates": 0,  "reembedded": 0,  "failed": 0, "skipped_no_source": 0}
+  }
+}
+```
+
+All four kinds are always present. `candidates` is the number of recorded rows of the kind, so
+`reembedded + failed + skipped_no_source = candidates` and a `dry_run` reports what a real run would
+attempt. The envelope can also carry `cancelled: true`, `index_rebuild_errors` (see below) and
+`write_error`.
+
+- **What is repaired and how.** Each recorded row is re-embedded from the source text stored on the
+  same row, through the embedder's document role and instruction profile, using the same bounded
+  retry, backoff and failure-splitting policy as replay (`LCG_REPLAY_EMBED_RETRIES`,
+  `LCG_REPLAY_EMBED_BACKOFF_MS`, `LCG_REPLAY_EMBED_BACKOFF_MAX_MS` — the names say "replay" but they
+  apply here too). A text the embedder cannot process fails only its own row.
+- **`failed`** — the embedder failed for the row, returned a vector of the wrong dimension, with a
+  non-finite value or all zeros (never written), the write failed, or the row's text changed after
+  it was read (a vector from stale text is never written). It stays recorded; run the tool again.
+- **`skipped_no_source`** — the recorded row no longer exists (its stale record entry is removed), or
+  it exists but has empty/whitespace text or belongs to another group (it stays recorded).
+- **The record.** A repaired row is removed from the record, so `zero_vector_rows` in
+  `knowledge_status` drops by that amount; after a full repair it is `0`. Rows not in the record are
+  never modified.
+- **Index cost: read this before running it.** All four embedding columns carry a database-wide
+  vector index, and a plain write to an indexed column is rejected. The tool therefore finishes all
+  embedding first, with no lock held and no index touched, and only then takes the exclusive write
+  lock, drops **only the indexes of kinds that have something to write**, writes, and rebuilds them.
+  Because those indexes span *all* groups, repairing one group blocks writes everywhere, and vector
+  search for every group waits for the rebuild, while the index is down. With nothing to write — no
+  candidates, or every embed failed — no index is dropped and no repair write lock is held (removing stale record entries takes the write lock only briefly). Run `dry_run: true`
+  first and prefer a low-traffic time for a large database.
+- **If an index rebuild fails** the result still carries the counters (the rows are already written)
+  plus `index_rebuild_errors: [{"kind", "error"}]`, the service's "indexes built" state is left
+  `false`, and the next search rebuilds all indexes automatically. That search pays for a rebuild
+  proportional to database size.
+- **Cancellation.** Closing the client connection (or shutting the service down) cancels between
+  embedding windows, before anything is written, and the result carries `cancelled: true`. Once the
+  write phase has started it always finishes and rebuilds, so a cancel never leaves an index dropped.
+- **Not recorded in the WAL.** Vectors are a local cache recomputed on replay (ADR-0526), so the
+  repair writes in place and adds nothing to the WAL.
+- **Out of scope.** Renamed entities and changed source text are not detected, and zero-vector rows
+  that are not in the record are not found. Emits MCP progress notifications (`phase`:
+  `embedding`, then `writing`) when called with a progress token.
+
 ### Cross-group pointers (`add_cross_group_edge`, `rebind_pointers`)
 
 `knowledge_add_cross_group_edge` creates an edge whose endpoint(s) may live in a `group_id`
@@ -1760,9 +1887,9 @@ result fields exist for that, both introduced in 0.13.2.
 
 ### Progress notifications
 
-The six long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
+The seven long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
 `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`,
-`knowledge_reprocess_relation_types`, and `knowledge_reprocess_entity_types` — bridge to MCP
+`knowledge_reembed_missing`, `knowledge_reprocess_relation_types`, and `knowledge_reprocess_entity_types` — bridge to MCP
 progress notifications when the client
 attaches a progress token to the `tools/call` request (`_meta.progressToken`), in both
 standalone and attached mode. Without a progress token, these calls simply block until they

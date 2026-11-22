@@ -46,7 +46,7 @@ const EPISODIC_CYPHER: &str = "\
     n.revision_committed_at = CASE WHEN $revision_committed_at IS NULL THEN NULL \
     ELSE timestamp($revision_committed_at) END, \
     n.byte_start = $byte_start, n.byte_end = $byte_end, n.heading_path = $heading_path, \
-    n.chunk_hash = $chunk_hash";
+    n.chunk_hash = $chunk_hash, n.source_file = $source_file, n.chunk_id = $chunk_id";
 
 const DOC_REVISION_CYPHER: &str = "\
     MERGE (n:DocRevision {uuid: $uuid}) \
@@ -306,6 +306,11 @@ fn dump_episodic_nodes(
                         v => serde_json::json!(value_as_str_list(v)),
                     };
                     let chunk_hash = null_or_str(&row[24]);
+                    // Source identity (issue #853, ADR-0853), appended last. NULL on a legacy
+                    // row and must round-trip as NULL, or a rebuild from a compacted WAL would
+                    // turn it into an empty-string identity.
+                    let source_file = null_or_str(&row[25]);
+                    let chunk_id = null_or_str(&row[26]);
                     let params = serde_json::json!({
                         "uuid": uuid,
                         "name": name,
@@ -332,6 +337,8 @@ fn dump_episodic_nodes(
                         "byte_end": byte_end,
                         "heading_path": heading_path,
                         "chunk_hash": chunk_hash,
+                        "source_file": source_file,
+                        "chunk_id": chunk_id,
                     });
                     w.log_mutation(EPISODIC_CYPHER, params, "")?;
                 }
