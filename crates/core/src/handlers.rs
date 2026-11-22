@@ -334,6 +334,7 @@ fn busy_health_payload(state: &AppState) -> Value {
                 "ok": true,
                 "healthy": false,
                 "state": "busy",
+                "ready_for_reads": true,
                 "activity": "rebuilding",
                 "job_id": job.job_id,
                 "progress": {
@@ -345,15 +346,27 @@ fn busy_health_payload(state: &AppState) -> Value {
             });
         }
     }
-    json!({"ok": true, "healthy": false, "state": "busy", "activity": "writing"})
+    json!({
+        "ok": true,
+        "healthy": false,
+        "state": "busy",
+        "ready_for_reads": true,
+        "activity": "writing",
+    })
 }
 
 /// Liveness/readiness probe. Never waits on the write lock (issue #628).
 ///
-/// - DB not loaded: `{ok:false, healthy:false, state:"degraded", reason}`.
-/// - Write lock free: probes the DB, `{ok:true, healthy:true, state:"healthy"}`.
-/// - Write lock held or a write pending: `{ok:true, healthy:false, state:"busy", activity, ..}`
-///   (alive but not ready), answered without connecting to the DB.
+/// Three fields carry three distinct facts (ADR-0855): `ok` is liveness, `healthy` is
+/// "idle and ready for writes", and `ready_for_reads` is "the database is loaded, so reads are
+/// served now" (true even while `busy`; it is not a promise that every read succeeds).
+///
+/// - DB not loaded: `{ok:false, healthy:false, state:"degraded", ready_for_reads:false, reason}`.
+/// - Write lock free: probes the DB, `{ok:true, healthy:true, state:"healthy", ready_for_reads:true}`.
+/// - Write lock held or a write pending:
+///   `{ok:true, healthy:false, state:"busy", ready_for_reads:true, activity, ..}`
+///   (alive, reads served, not ready for writes), answered without connecting to the DB;
+///   `ready_for_reads` follows from the DB being loaded, not from a probe.
 async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
     let db_opt = state.db.load_full();
     match db_opt {
@@ -364,7 +377,13 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
                 .ok()
                 .and_then(|g| g.clone())
                 .unwrap_or_else(|| "unknown".to_string());
-            Ok(json!({"ok": false, "healthy": false, "state": "degraded", "reason": reason}))
+            Ok(json!({
+                "ok": false,
+                "healthy": false,
+                "state": "degraded",
+                "ready_for_reads": false,
+                "reason": reason,
+            }))
         }
         Some(db) => {
             let Ok(_guard) = state.write_lock.try_read() else {
@@ -376,7 +395,12 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
             })
             .await??;
             drop(_guard);
-            Ok(json!({"ok": true, "healthy": true, "state": "healthy"}))
+            Ok(json!({
+                "ok": true,
+                "healthy": true,
+                "state": "healthy",
+                "ready_for_reads": true,
+            }))
         }
     }
 }
