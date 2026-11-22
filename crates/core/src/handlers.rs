@@ -1536,6 +1536,15 @@ fn optional_min_similarity_param(v: &Value) -> Result<Option<f64>, Error> {
         .ok_or_else(|| Error::Ipc("min_similarity must be a number".to_string()))
 }
 
+/// Parses `include_episodes`: absent/null ⇒ `false`; any non-boolean is a validation error.
+fn parse_include_episodes(v: &Value) -> Result<bool, Error> {
+    match v {
+        Value::Null => Ok(false),
+        Value::Bool(b) => Ok(*b),
+        _ => Err(Error::Ipc("include_episodes must be a boolean".to_string())),
+    }
+}
+
 async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let query = p["query"].as_str().unwrap_or("").to_string();
@@ -1549,6 +1558,8 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     // Optional origin filter (issue #752, FR-014). Applied after fusion — the BM25/vector pools
     // know nothing about origin — so over-fetch like the belief filter and truncate afterwards.
     let origins = crate::origin::parse_origins_param(p)?;
+    // Optional provenance (issue #857): fill each hit's mentioning live episodes.
+    let include_episodes = parse_include_episodes(&p["include_episodes"])?;
     let requested = limit;
     let limit = if origins.is_some() {
         limit.saturating_mul(BELIEF_OVERFETCH)
@@ -1601,11 +1612,12 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let nodes = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, Error> {
         let conn = db.connect()?;
         let uuids: Vec<String> = entities.iter().map(|e| e.entity.uuid.clone()).collect();
-        let sup = crate::origin_reads::entity_support(
+        let sup = crate::origin_reads::entity_support_with_episodes(
             &conn,
             &uuids,
             origins.as_deref(),
             chrono::Utc::now().timestamp_micros(),
+            include_episodes,
         )?;
         let mut out = Vec::with_capacity(entities.len());
         for e in entities {
@@ -1615,6 +1627,7 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
             }
             let mut v = serde_json::to_value(&e).unwrap_or(Value::Null);
             s.annotate(&mut v);
+            s.annotate_provenance(&mut v);
             out.push(v);
         }
         out.truncate(requested);
