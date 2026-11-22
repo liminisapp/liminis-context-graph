@@ -1006,8 +1006,9 @@ pub fn registry() -> Vec<ToolSpec> {
                            episode_uuid}` with no ingest counters, so clients need no content-hash \
                            ledger. Any difference re-extracts and supersedes; the no-op never \
                            applies with `supersede: false`, `same_revision_episode_uuids`, more \
-                           than one live episode, a live episode from another write path, or no \
-                           live episode. `origin` (issue #752) declares what kind of content the \
+                           than one live episode, a live episode from another write path, a \
+                           pending document supersession, another call for the same chunk in \
+                           flight, or no live episode. `origin` (issue #752) declares what kind of content the \
                            chunk is; a `derived` or `answer` chunk is cited for provenance but \
                            never counted as corroboration, may not rewrite or merge into an \
                            entity with primary/external support, and is refused (error message \

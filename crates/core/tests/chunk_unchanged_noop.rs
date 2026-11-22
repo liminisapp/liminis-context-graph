@@ -181,6 +181,7 @@ fn harness() -> Harness {
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
     });
     Harness {
@@ -549,4 +550,103 @@ async fn unchanged_oversized_chunk_emits_no_warning_or_telemetry() {
     assert_eq!(r["status"], "unchanged", "{r}");
     assert!(r.get("warning").is_none(), "{r}");
     assert_eq!(h.oversize.0.load(Ordering::SeqCst), events);
+}
+
+/// Review item 1: a scheduled (future-effective) document supersession is pending on the live
+/// episode, so an identical resubmission must take the ordinary path, which overrides it.
+#[tokio::test]
+async fn pending_document_supersession_is_not_unchanged() {
+    let h = harness();
+    let p1 = with(base_params(G, "c1"), json!({"doc_id": "d1"}));
+    let first = chunk(&h, p1.clone()).await;
+    chunk(&h, with(base_params(G, "c2"), json!({"doc_id": "d2"}))).await;
+    let future = (chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+    let s = call(
+        "knowledge_supersede_document",
+        json!({
+            "group_id": G, "superseding_doc_id": "d2",
+            "superseded_doc_id": "d1", "effective_at": future,
+        }),
+        &h.state,
+    )
+    .await;
+    assert_eq!(s["success"], true, "{s}");
+    let before = snap(&h);
+    let r = chunk(&h, p1).await;
+    assert_ne!(r["status"], "unchanged", "{r}");
+    assert_ne!(r["episode_uuid"], first["episode_uuid"], "{r}");
+    assert!(
+        snap(&h).extract > before.extract,
+        "ordinary path must extract"
+    );
+}
+
+/// Review item 3: while another call for the same chunk is in flight, the no-op is not taken
+/// (commit-instant ordering decides); once it finishes the no-op applies again.
+#[tokio::test]
+async fn in_flight_call_for_the_chunk_disables_the_noop() {
+    let h = harness();
+    let first = chunk(&h, base_params(G, "c1")).await;
+    let (guard, alone) = h.state.chunk_inflight_enter(G, "c1");
+    assert!(alone);
+    let before = snap(&h);
+    let r = chunk(&h, base_params(G, "c1")).await;
+    assert_ne!(r["status"], "unchanged", "{r}");
+    assert_ne!(r["episode_uuid"], first["episode_uuid"], "{r}");
+    assert!(snap(&h).extract > before.extract);
+    // A different chunk, or the same chunk id in another group, is unaffected.
+    let other = chunk(&h, base_params(G, "c9")).await;
+    let before = snap(&h);
+    let r = chunk(&h, base_params(G, "c9")).await;
+    assert_eq!(r["status"], "unchanged", "{r}");
+    assert_eq!(r["episode_uuid"], other["episode_uuid"]);
+    assert_untouched(&before, &snap(&h));
+    drop(guard);
+    let live = chunk(&h, base_params(G, "c1")).await;
+    assert_eq!(live["status"], "unchanged", "{live}");
+    // Every call released its registration.
+    assert!(h.state.chunk_inflight.lock().unwrap().is_empty());
+}
+
+/// Review item 3: a concurrent `knowledge_mark_chunk_removed` counts as in flight too, and
+/// releases its registration when done.
+#[tokio::test]
+async fn mark_chunk_removed_counts_as_in_flight_and_releases() {
+    let h = harness();
+    chunk(&h, base_params(G, "c1")).await;
+    call(
+        "knowledge_mark_chunk_removed",
+        json!({"chunk_id": "c1", "group_ids": [G]}),
+        &h.state,
+    )
+    .await;
+    assert!(h.state.chunk_inflight.lock().unwrap().is_empty());
+    // Two registrations for one key: only the first is alone.
+    let (g1, a1) = h.state.chunk_inflight_enter(G, "c1");
+    let (g2, a2) = h.state.chunk_inflight_enter(G, "c1");
+    assert!(a1 && !a2);
+    drop(g1);
+    drop(g2);
+    assert!(h.state.chunk_inflight.lock().unwrap().is_empty());
+}
+
+/// Review item 4: the doc_id "one document has one origin" refusal applies to a no-op exactly as
+/// to the ingest it replaces.
+#[tokio::test]
+async fn unchanged_resubmission_still_hits_the_doc_origin_guard() {
+    let h = harness();
+    let p1 = with(base_params(G, "c1"), json!({"doc_id": "d1"}));
+    chunk(&h, p1.clone()).await;
+    chunk(&h, with(base_params(G, "c2"), json!({"doc_id": "d1"}))).await;
+    // Give the document's other chunk a different origin behind the guard's back.
+    {
+        let conn = h.db.connect().unwrap();
+        conn.cypher_query("MATCH (ep:Episodic) WHERE ep.name = 'c2' SET ep.origin = 'external'")
+            .unwrap();
+    }
+    let before = snap(&h);
+    let v = try_call("knowledge_process_chunk", p1, &h.state).await;
+    let err = v["error"].to_string();
+    assert!(err.contains("origin_conflict"), "expected a refusal: {v}");
+    assert_untouched(&before, &snap(&h));
 }

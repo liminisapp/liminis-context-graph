@@ -1891,8 +1891,12 @@ compared as an instant only when you pass one, so an omitted `reference_time` is
 takes the supersede path above, unchanged. The shortcut does **not** apply when: `supersede` is
 `false` or `same_revision_episode_uuids` is given (a multi-unit revision); more than one live
 episode exists for the `chunk_id`; a live same-named episode was written by another path
-(`knowledge_add_episode`, document mode); or no live episode exists (never ingested, superseded, or
-removed with `knowledge_mark_chunk_removed`). A malformed request is rejected as always, never
+(`knowledge_add_episode`, document mode); the live episode has a pending (future-effective) document supersession; another
+`knowledge_process_chunk` or `knowledge_mark_chunk_removed` call for the same `(group_id,
+chunk_id)` is in flight (the ordinary path then orders the two, so a revert is never lost to an
+earlier edit still extracting); or no live episode exists (never ingested, superseded, or removed
+with `knowledge_mark_chunk_removed`). With a `doc_id`, the "one document has one origin" refusal
+applies to a no-op as to an ingest. A malformed request is rejected as always, never
 reported as `unchanged`. A change of extractor, model or ontology does not by itself re-extract an
 identical chunk: change the chunk or use the reprocess operations. Discover support with the
 `unchanged_noop` entry in `knowledge_capabilities` `features`. See

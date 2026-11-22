@@ -1360,21 +1360,33 @@ async fn handle_knowledge_process_chunk(
     // Issue #707: never defaulted from `source_file` — omitted means none (FR-001, FR-010).
     let doc_id = optional_doc_id_param(&p["doc_id"])?;
 
-    // Issue #858 (ADR-0858): a resubmission identical to the chunk's single live episode is a
-    // no-op — no embed, no extract, no write, no WAL record. Runs only after every validation
-    // above (FR-008) and never for a multi-unit revision (FR-007). Fails closed: anything but one
-    // chunk-attributable live episode that matches on every compared field takes the ordinary
-    // supersede path below.
-    if supersede && keep.is_empty() {
+    // Issue #858 (ADR-0858): register this call as in flight for its chunk until the handler
+    // returns, whatever path it takes. The no-op below is taken only when no other
+    // `process_chunk` / `mark_chunk_removed` call for the same chunk is in flight (otherwise
+    // commit-instant ordering, ADR-0705, must decide), so an acknowledged revert cannot be
+    // overwritten by an earlier edit that is still extracting.
+    let (_inflight, alone) = state.chunk_inflight_enter(&group_id, &chunk_id);
+
+    // A resubmission identical to the chunk's single live episode is a no-op — no embed, no
+    // extract, no write, no WAL record. Runs only after every validation above (FR-008) and never
+    // for a multi-unit revision (FR-007). Fails closed: anything but one chunk-attributable live
+    // episode that matches on every compared field takes the ordinary supersede path below.
+    if supersede && keep.is_empty() && alone {
         // Refusals (#616 identity drift) apply to a no-op exactly as to an ingest.
         state.check_identity(&group_id)?;
         let db = load_db(&state)?;
         let (gid, cid) = (group_id.clone(), chunk_id.clone());
-        let live = tokio::task::spawn_blocking(move || {
-            let conn = db.connect()?;
-            conn.live_chunk_snapshot_for_chunk(&cid, &gid, &chrono::Utc::now().to_rfc3339())
-        })
-        .await??;
+        // Read under the shared lock, like the other read handlers, so a rebuild or clear in
+        // progress cannot be observed half-applied. Released before the ingest below, which
+        // takes the exclusive lock itself.
+        let live = {
+            let _read = state.write_lock.read().await;
+            tokio::task::spawn_blocking(move || {
+                let conn = db.connect()?;
+                conn.live_chunk_snapshot_for_chunk(&cid, &gid, &chrono::Utc::now().to_rfc3339())
+            })
+            .await??
+        };
         let view = crate::chunk_unchanged::ChunkRequestView {
             chunk_text: &chunk_text,
             chunk_id: &chunk_id,
@@ -1385,6 +1397,21 @@ async fn handle_knowledge_process_chunk(
             explicit_reference_time_us,
         };
         if let Some(existing) = crate::chunk_unchanged::unchanged_episode_uuid(&live, &view) {
+            let existing = existing.to_string();
+            // "One document has one origin": a no-op must be refused exactly where the ingest it
+            // replaces would be (the matched row has the request's origin, but the document's
+            // other chunks may not).
+            if doc_id.is_some() {
+                let db = load_db(&state)?;
+                let (gid, cid, did) = (group_id.clone(), chunk_id.clone(), doc_id.clone());
+                let org = origin.unwrap_or(crate::origin::Origin::Primary);
+                let _read = state.write_lock.read().await;
+                tokio::task::spawn_blocking(move || {
+                    let conn = db.connect()?;
+                    episode::check_origin_guards(&conn, &cid, &gid, org, did.as_deref(), true)
+                })
+                .await??;
+            }
             return Ok(json!({
                 "success": true,
                 "status": "unchanged",
@@ -3432,6 +3459,12 @@ async fn handle_mark_chunk_removed(req: &IpcRequest, state: Arc<AppState>) -> Re
     let acting_origin =
         crate::origin::parse_origin_param(p)?.unwrap_or(crate::origin::Origin::Primary);
 
+    // Counts as an in-flight chunk call so a concurrent identical resubmission does not take the
+    // unchanged no-op and then have its episode removed under it (issue #858, ADR-0858).
+    let _inflight: Vec<_> = group_ids_owned
+        .iter()
+        .map(|g| state.chunk_inflight_enter(g, &chunk_id).0)
+        .collect();
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;

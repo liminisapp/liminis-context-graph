@@ -50,8 +50,15 @@ same liveness predicate as `live_chunk_lineage_for_chunk`.
 The shortcut never applies when `supersede` is `false` or `same_revision_episode_uuids` is supplied
 (a multi-unit revision), when more than one live episode exists for the `chunk_id`, when any live
 same-named episode is not chunk-attributable (a foreign `knowledge_add_episode` or a document-mode
-episode), or when no live episode exists (never ingested, superseded, or removed). The check fails
-closed: an unparsable or NULL stored value counts as different.
+episode), when the live episode carries a pending (future-effective) document supersession
+(`knowledge_supersede_document`: the ordinary path overrides it, a no-op would let it take effect),
+when another `knowledge_process_chunk` or `knowledge_mark_chunk_removed` call for the same
+`(group_id, chunk_id)` is in flight (see below), or when no live episode exists (never ingested,
+superseded, or removed). The check fails closed: an unparsable or NULL stored value, including a
+NULL `valid_at` against an explicit `reference_time`, counts as different.
+
+When `doc_id` is set the no-op first runs the same "one document has one origin" guard as an ingest
+and is refused where the ingest would be.
 
 ## Consequences
 
@@ -61,9 +68,17 @@ closed: an unparsable or NULL stored value counts as different.
   A client that read those fields on every `success: true` must tolerate their absence.
 - A change of extractor, model or ontology does **not** by itself cause re-extraction of an
   identical chunk; alter the chunk or use the reprocess operations.
-- The read is lock-free. Two identical resubmissions of a live chunk both return `unchanged`; a
-  first-time chunk submitted concurrently takes today's path, and ADR-0705's commit-instant ordering
-  leaves exactly one live episode.
+- The snapshot is read under the shared `write_lock` guard like other read handlers, so a rebuild
+  or clear in progress is not observed half-applied. `AppState` tracks in-flight
+  `knowledge_process_chunk` / `knowledge_mark_chunk_removed` calls per `(group_id, chunk_id)`
+  (`chunk_inflight`), and the no-op is taken only when the call is the sole one in flight for its
+  key. Otherwise a revert could be acknowledged as `unchanged` and then overwritten by an earlier
+  edit that is still extracting (live T1, edit T2 in flight, revert T1), or by a concurrent removal;
+  with the rule, such a call takes the ordinary path and ADR-0705's commit-instant ordering decides.
+  Two identical resubmissions of a live chunk that arrive together therefore both take the ordinary
+  path (one extra extraction) rather than risk a lost revert; sequential ones return `unchanged`.
+  A first-time chunk submitted concurrently takes today's path and ADR-0705's ordering leaves
+  exactly one live episode.
 - Additive: a new `status` value and the `unchanged_noop` feature string in `knowledge_capabilities`
   ([ADR-0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md)); `PROTOCOL_VERSION`
   is not bumped. This qualifies ADR-0705's "resubmitting supersedes" rule without changing its text.

@@ -43,6 +43,11 @@ pub fn chunk_is_unchanged(row: &ChunkLiveSnapshot, req: &ChunkRequestView<'_>) -
     if !crate::types::write_path_is_chunk_eligible(row.write_path.as_deref()) {
         return false;
     }
+    // A scheduled document supersession is still pending: the ordinary path overrides it, a
+    // no-op would let it take effect.
+    if row.pending_supersession {
+        return false;
+    }
     // Content. Document mode hashes the exact source bytes (`sha256_hex(text.as_bytes())`, no
     // trim / line-ending / Unicode folding), so byte equality is the same normalisation. A stored
     // hash is honoured when present; chunk-mode rows store none, so they compare directly.
@@ -76,7 +81,8 @@ pub fn chunk_is_unchanged(row: &ChunkLiveSnapshot, req: &ChunkRequestView<'_>) -
         return false;
     }
     if let Some(us) = req.explicit_reference_time_us {
-        if row.valid_at_us != us {
+        // A NULL / unparsable stored `valid_at` never matches, not even an epoch request.
+        if row.valid_at_us != Some(us) {
             return false;
         }
     }
@@ -95,10 +101,11 @@ mod tests {
             origin: Some("primary".into()),
             source_file: Some("f.md".into()),
             source_description: "f.md:c1".into(),
-            valid_at_us: 1_700_000_000_123_456,
+            valid_at_us: Some(1_700_000_000_123_456),
             doc_id: None,
             write_path: Some("chunk".into()),
             chunk_hash: None,
+            pending_supersession: false,
         }
     }
 
@@ -238,5 +245,24 @@ mod tests {
         assert!(chunk_is_unchanged(&stored, &req()));
         stored.chunk_hash = Some(sha256_hex("other".as_bytes()));
         assert!(!chunk_is_unchanged(&stored, &req()));
+    }
+
+    #[test]
+    fn pending_document_supersession_is_a_difference() {
+        let mut stored = row();
+        stored.pending_supersession = true;
+        assert!(!chunk_is_unchanged(&stored, &req()));
+        assert_eq!(unchanged_episode_uuid(&[stored], &req()), None);
+    }
+
+    #[test]
+    fn missing_valid_at_never_matches_an_explicit_epoch() {
+        let mut stored = row();
+        stored.valid_at_us = None;
+        let mut r = req();
+        r.explicit_reference_time_us = Some(0);
+        assert!(!chunk_is_unchanged(&stored, &r));
+        // An omitted reference_time has no opinion, so it still matches.
+        assert!(chunk_is_unchanged(&stored, &req()));
     }
 }

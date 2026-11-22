@@ -148,7 +148,7 @@ fn guard_needed(origin: crate::origin::Origin, doc_id: Option<&str>, chunk_guard
 
 /// The origin refusals of an ingest (FR-012, FR-013). Pure reads: returns `Err` before the caller
 /// has written anything.
-fn check_origin_guards(
+pub(crate) fn check_origin_guards(
     conn: &crate::db::Conn<'_>,
     name: &str,
     group_id: &str,
