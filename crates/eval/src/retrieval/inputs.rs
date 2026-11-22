@@ -411,7 +411,7 @@ mod tests {
         b.insert("LCG_EMBEDDING_API_KEY".into(), "sk-bbb".into());
         b.insert("LCG_EMBEDDING_URL".into(), "http://b".into());
         b.insert("HOME".into(), "/other".into());
-        let (da, names) = service_env_digest(&[a.clone()]);
+        let (da, names) = service_env_digest(std::slice::from_ref(&a));
         assert_eq!(da, service_env_digest(&[b]).0);
         // A tuning value does change it.
         let mut c = a;
