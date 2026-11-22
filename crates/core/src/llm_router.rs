@@ -408,6 +408,10 @@ impl Extractor for LlmRouter {
     fn is_configured(&self) -> bool {
         self.primary.is_configured()
     }
+
+    fn is_test_provider(&self) -> bool {
+        self.primary.is_test_provider()
+    }
 }
 
 #[cfg(test)]

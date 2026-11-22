@@ -940,12 +940,15 @@ async fn strict_mode_reclassify_count_includes_edges_with_no_original_relation_t
 }
 
 // PR #311 review finding: an edge reclassified to UNCLASSIFIED by the pre-lock strict-mode pass
-// must NOT be counted in edges_reclassified_unclassified if it's subsequently dropped as
-// self-referential — the tally must reflect what's actually persisted (mirroring how
-// edges_dropped_unresolvable is only ever counted authoritatively at Phase C, per ADR-0051).
-// This out-of-vocabulary, self-referential edge must be dropped and must not inflate the count.
+// must NOT be counted in edges_reclassified_unclassified if it's subsequently dropped — the tally
+// must reflect what's actually persisted (mirroring how edges_dropped_unresolvable is only ever
+// counted authoritatively at Phase C, per ADR-0051).
+//
+// Since #823 (ADR-0823) a name-level self-reference under an ontology is no longer dropped: it is
+// the sanctioned literal-object form, stored as a self-loop, so its reclassification *is*
+// persisted and counted. The dropped case is exercised here with an unresolvable endpoint.
 #[tokio::test]
-async fn strict_mode_reclassified_self_referential_edge_not_counted() {
+async fn strict_mode_reclassify_count_covers_stored_self_loop_not_dropped_edge() {
     let (db, _dir) = make_db();
     let ontology = Ontology {
         mode: OntologyMode::Strict,
@@ -977,15 +980,28 @@ async fn strict_mode_reclassified_self_referential_edge_not_counted() {
                 summary: "A person".to_string(),
                 original_entity_type: None,
             }],
-            edges: vec![ExtractedEdge {
-                source_name: "Alice".to_string(),
-                target_name: "Alice".to_string(),
-                fact: "Alice also known as Alice".to_string(),
-                relation_type: Some("ALSO_KNOWN_AS".to_string()),
-                valid_at: None,
-                invalid_at: None,
-                original_relation_type: None,
-            }],
+            edges: vec![
+                // Reclassified, then dropped at Phase C: the endpoint exists nowhere.
+                ExtractedEdge {
+                    source_name: "Alice".to_string(),
+                    target_name: "Zqxv Nonexistent Entity 9".to_string(),
+                    fact: "Alice also known as Zqxv".to_string(),
+                    relation_type: Some("ALSO_KNOWN_AS".to_string()),
+                    valid_at: None,
+                    invalid_at: None,
+                    original_relation_type: None,
+                },
+                // Reclassified and stored as a literal-object self-loop (#823): counted.
+                ExtractedEdge {
+                    source_name: "Alice".to_string(),
+                    target_name: "Alice".to_string(),
+                    fact: "Alice's title is Staff Engineer".to_string(),
+                    relation_type: Some("HAS_TITLE".to_string()),
+                    valid_at: None,
+                    invalid_at: None,
+                    original_relation_type: None,
+                },
+            ],
         }]));
     let state = make_state_with_extractor(db, Some(ontology), extractor);
 
@@ -1004,13 +1020,15 @@ async fn strict_mode_reclassified_self_referential_edge_not_counted() {
     .await
     .unwrap();
 
+    assert_eq!(result.edges_dropped_unresolvable, 1, "{result:?}");
     assert_eq!(
-        result.edges_extracted, 0,
-        "the self-referential edge must still be dropped, even though it was also reclassified"
+        result.edges_extracted, 1,
+        "only the literal-object self-loop is stored: {result:?}"
     );
+    assert_eq!(result.edges_literal_object, 1);
     assert_eq!(
-        result.edges_reclassified_unclassified, 0,
-        "a reclassified edge that's later dropped as self-referential must not inflate the tally"
+        result.edges_reclassified_unclassified, 1,
+        "a reclassified edge that's later dropped must not inflate the tally; the stored one counts"
     );
 }
 

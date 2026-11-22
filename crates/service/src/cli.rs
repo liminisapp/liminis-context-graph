@@ -12,12 +12,18 @@ use crate::mcp::scope::Scope;
 pub enum EmbedderFlag {
     Uds(String),
     Http(String),
+    /// `--embedder test` (#851): the built-in deterministic, offline test embedder. Selected
+    /// only by this explicit flag — never from the environment.
+    Test,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExtractorFlag {
     Uds(String),
     Http(String),
+    /// `--extractor test` (#851): the built-in deterministic, offline fact-line extractor.
+    /// Selected only by this explicit flag — never from the environment.
+    Test,
 }
 
 /// Endpoint of an optional passage-search stage service (issue #796): the reranker
@@ -156,6 +162,17 @@ OPTIONS:
                                be listed to stay writable. Unset = every group writable. An empty
                                or malformed list fails startup. Not valid with --connect: set it
                                on the daemon.
+    --embedder test            TEST ONLY: use the built-in deterministic, offline embedder (a
+                               hashed bag of words) — no sidecar, network or credentials.
+                               Dimension: LCG_EMBEDDING_DIM, else 768. Never inferred from the
+                               environment. Mutually exclusive with --embedder-uds/-http; not
+                               valid with --connect. See docs/test-providers.md.
+    --extractor test           TEST ONLY: use the built-in deterministic, offline extractor,
+                               which extracts only from fact lines (`SRC -> DST: fact` or
+                               `SRC -[REL]-> DST: fact`) — no LLM, network or credentials.
+                               Never inferred from the environment. Mutually exclusive with
+                               --extractor-uds/-http; not valid with --connect.
+                               See docs/test-providers.md.
     --embedder-uds <SOCKET>    Reach the embedding sidecar over this Unix socket.
     --embedder-http <URL>      Reach the embedding sidecar over this HTTP URL.
                                (--embedder-uds and --embedder-http are mutually exclusive.)
@@ -209,6 +226,8 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
     let mut cli_http: Option<String> = None;
     let mut extractor_cli_uds: Option<String> = None;
     let mut extractor_cli_http: Option<String> = None;
+    let mut embedder_kind: Option<String> = None;
+    let mut extractor_kind: Option<String> = None;
     let mut anthropic = AnthropicCliArgs::default();
     let mut want_help = false;
     let mut want_version = false;
@@ -228,6 +247,20 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
                         .cloned()
                         .ok_or("--connect requires a socket path argument")?,
                 );
+            }
+            "--embedder" => {
+                i += 1;
+                embedder_kind =
+                    Some(args.get(i).cloned().ok_or(
+                        "--embedder requires a value (the only accepted value is 'test')",
+                    )?);
+            }
+            "--extractor" => {
+                i += 1;
+                extractor_kind =
+                    Some(args.get(i).cloned().ok_or(
+                        "--extractor requires a value (the only accepted value is 'test')",
+                    )?);
             }
             "--embedder-uds" => {
                 i += 1;
@@ -327,9 +360,25 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
                 .to_string(),
         );
     }
-    let embedder = match (cli_uds, cli_http) {
-        (Some(u), _) => Some(EmbedderFlag::Uds(u)),
-        (_, Some(h)) => Some(EmbedderFlag::Http(h)),
+    if let Some(kind) = &embedder_kind {
+        if kind != "test" {
+            return Err(format!(
+                "unknown value '{kind}' for --embedder: the only accepted value is 'test' \
+                 (use --embedder-uds or --embedder-http to reach a real embedding sidecar)"
+            ));
+        }
+        if cli_uds.is_some() || cli_http.is_some() {
+            return Err(
+                "--embedder test cannot be combined with --embedder-uds or --embedder-http; \
+                 specify only one embedder"
+                    .to_string(),
+            );
+        }
+    }
+    let embedder = match (embedder_kind.is_some(), cli_uds, cli_http) {
+        (true, _, _) => Some(EmbedderFlag::Test),
+        (_, Some(u), _) => Some(EmbedderFlag::Uds(u)),
+        (_, _, Some(h)) => Some(EmbedderFlag::Http(h)),
         _ => None,
     };
 
@@ -339,9 +388,29 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
                 .to_string(),
         );
     }
-    let extractor = match (extractor_cli_uds, extractor_cli_http) {
-        (Some(u), _) => Some(ExtractorFlag::Uds(u)),
-        (_, Some(h)) => Some(ExtractorFlag::Http(h)),
+    if let Some(kind) = &extractor_kind {
+        if kind != "test" {
+            return Err(format!(
+                "unknown value '{kind}' for --extractor: the only accepted value is 'test' \
+                 (use --extractor-uds or --extractor-http to reach a real extraction endpoint)"
+            ));
+        }
+        if extractor_cli_uds.is_some() || extractor_cli_http.is_some() {
+            return Err(
+                "--extractor test cannot be combined with --extractor-uds or --extractor-http; \
+                 specify only one extractor"
+                    .to_string(),
+            );
+        }
+    }
+    let extractor = match (
+        extractor_kind.is_some(),
+        extractor_cli_uds,
+        extractor_cli_http,
+    ) {
+        (true, _, _) => Some(ExtractorFlag::Test),
+        (_, Some(u), _) => Some(ExtractorFlag::Uds(u)),
+        (_, _, Some(h)) => Some(ExtractorFlag::Http(h)),
         _ => None,
     };
 
@@ -373,6 +442,17 @@ pub fn parse_args(args: &[String]) -> Result<CliMode, String> {
             "--reranker-uds/--reranker-http/--expander-uds/--expander-http cannot be combined \
              with --connect: the daemon runs the search, so set them on the daemon, not on the \
              attached MCP process"
+                .to_string(),
+        );
+    }
+
+    if connect.is_some()
+        && (matches!(embedder, Some(EmbedderFlag::Test))
+            || matches!(extractor, Some(ExtractorFlag::Test)))
+    {
+        return Err(
+            "--embedder test / --extractor test cannot be combined with --connect: the daemon \
+             owns the providers, so start the daemon with them, not the attached MCP process"
                 .to_string(),
         );
     }
@@ -967,5 +1047,117 @@ mod tests {
             .unwrap(),
             parse_args(&args(&[])).unwrap()
         );
+    }
+    // ── --embedder test / --extractor test (#851) ────────────────────────────
+
+    fn providers_of(mode: CliMode) -> (Option<EmbedderFlag>, Option<ExtractorFlag>) {
+        match mode {
+            CliMode::Socket {
+                embedder,
+                extractor,
+                ..
+            }
+            | CliMode::Mcp {
+                embedder,
+                extractor,
+                ..
+            } => (embedder, extractor),
+            other => panic!("unexpected mode {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_providers_flags_parse_in_socket_and_mcp_modes() {
+        for extra in [&[][..], &["--mcp-stdio"][..]] {
+            let mut a = vec!["--embedder", "test", "--extractor", "test"];
+            a.extend_from_slice(extra);
+            assert_eq!(
+                providers_of(parse_args(&args(&a)).unwrap()),
+                (Some(EmbedderFlag::Test), Some(ExtractorFlag::Test))
+            );
+        }
+    }
+
+    #[test]
+    fn test_providers_flags_are_independent() {
+        assert_eq!(
+            providers_of(parse_args(&args(&["--embedder", "test"])).unwrap()),
+            (Some(EmbedderFlag::Test), None)
+        );
+        assert_eq!(
+            providers_of(
+                parse_args(&args(&[
+                    "--embedder",
+                    "test",
+                    "--extractor-http",
+                    "http://x"
+                ]))
+                .unwrap()
+            ),
+            (
+                Some(EmbedderFlag::Test),
+                Some(ExtractorFlag::Http("http://x".into()))
+            )
+        );
+        assert_eq!(
+            providers_of(parse_args(&args(&["--extractor", "test"])).unwrap()),
+            (None, Some(ExtractorFlag::Test))
+        );
+    }
+
+    #[test]
+    fn test_providers_flags_reject_unknown_values_and_missing_values() {
+        for (a, needle) in [
+            (vec!["--embedder", "real"], "--embedder"),
+            (vec!["--extractor", "mock"], "--extractor"),
+            (vec!["--embedder"], "--embedder requires"),
+            (vec!["--extractor"], "--extractor requires"),
+        ] {
+            let err = parse_args(&args(&a)).unwrap_err();
+            assert!(err.contains(needle), "{a:?}: {err}");
+        }
+        // The `=` form is not supported (as for the other provider flags).
+        assert!(parse_args(&args(&["--embedder=test"])).is_err());
+    }
+
+    #[test]
+    fn test_providers_flags_conflict_with_real_provider_flags() {
+        for a in [
+            vec!["--embedder", "test", "--embedder-uds", "/s"],
+            vec!["--embedder", "test", "--embedder-http", "http://x"],
+            vec!["--extractor", "test", "--extractor-uds", "/s"],
+            vec!["--extractor", "test", "--extractor-http", "http://x"],
+        ] {
+            let err = parse_args(&args(&a)).unwrap_err();
+            assert!(err.contains("cannot be combined"), "{a:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_providers_flags_are_rejected_with_connect() {
+        for flag in ["--embedder", "--extractor"] {
+            let err =
+                parse_args(&args(&["--mcp-stdio", "--connect", "/s", flag, "test"])).unwrap_err();
+            assert!(err.contains("--connect"), "{flag}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_providers_are_never_inferred_from_the_environment() {
+        // parse_args reads no environment variable; setting look-alikes changes nothing.
+        std::env::set_var("LCG_EMBEDDER", "test");
+        std::env::set_var("LCG_EXTRACTOR", "test");
+        std::env::set_var("LCG_TEST_PROVIDERS", "1");
+        let got = providers_of(parse_args(&args(&[])).unwrap());
+        std::env::remove_var("LCG_EMBEDDER");
+        std::env::remove_var("LCG_EXTRACTOR");
+        std::env::remove_var("LCG_TEST_PROVIDERS");
+        assert_eq!(got, (None, None));
+    }
+
+    #[test]
+    fn usage_lists_the_test_provider_flags() {
+        assert!(usage().contains("--embedder test"));
+        assert!(usage().contains("--extractor test"));
     }
 }

@@ -65,6 +65,8 @@ pub struct AddEpisodeResult {
     /// commit time (dedup merges or salvage collapsing them onto one entity), dropped rather than
     /// inserted as a self-loop (issue #666). Distinct from the name-level self-reference filter
     /// (never counted) and from `edges_dropped_unresolvable`; carries no `dropped_edges` entry.
+    /// Under an ontology an edge with *identical* endpoint names is instead the sanctioned
+    /// literal-object form and is stored (`edges_literal_object`, #823).
     pub edges_dropped_self_loop: usize,
     /// Per-edge detail behind `edges_dropped_unresolvable` above — one entry per edge counted
     /// there, in extraction order, carrying the edge's extracted content and which endpoint(s)
@@ -83,6 +85,18 @@ pub struct AddEpisodeResult {
     /// Edges stored unchanged but marked `signature_mismatch` because their endpoints fit the
     /// relation's declared signature in neither direction (#816). Never dropped.
     pub edges_signature_mismatch: usize,
+    /// Edges stored as a self-loop on one entity because, under an ontology, the model emitted a
+    /// literal-valued fact about that entity with `source_name == target_name` — the sanctioned
+    /// literal-object form (#823, ADR-0823). Each carries `attributes.literal_object = true`.
+    /// Admission is by name equality alone (the fact is not checked for a value, since role and
+    /// title facts carry none), so this is an upper bound on genuine literal-valued facts.
+    /// Always 0 with no ontology, where such a self-reference is still dropped.
+    pub edges_literal_object: usize,
+    /// Edges between two different entities stored unchanged but marked
+    /// `attributes.suspected_misattachment = true` because their fact states a literal value
+    /// (a digit or currency symbol) yet does not name both endpoints (#823 FR-007, ADR-0823).
+    /// Counted in every mode; never dropped. A text heuristic, so false positives are expected.
+    pub edges_suspected_misattachment: usize,
     /// Strict-mode entities whose type was outside the ontology's declared vocabulary after
     /// normalisation, reclassified to `Unclassified` rather than dropped (issue #312 FR-004).
     /// The original entity type is preserved in the stored entity's `attributes` field, not
@@ -249,7 +263,7 @@ pub struct EpisodeOpts {
 /// Phase C's result: `(edges_inserted, edges_dropped_unresolvable,
 /// edges_reclassified_unclassified, dropped_edges, edges_dropped_self_loop,
 /// superseded_episode_uuids, left_alone_episode_uuids, edges_swapped,
-/// edges_signature_mismatch)`.
+/// edges_signature_mismatch, edges_literal_object, edges_suspected_misattachment)`.
 type PhaseCOutcome = (
     usize,
     usize,
@@ -258,6 +272,8 @@ type PhaseCOutcome = (
     usize,
     Vec<String>,
     Vec<String>,
+    usize,
+    usize,
     usize,
     usize,
 );
@@ -647,6 +663,10 @@ pub async fn add_episode_with_opts(
     // validation, and (via `ancestor_map` below) canonicalization for this group only.
     let resolved_ontology = state.resolve_ontology(group_id);
     let ontology_ref = resolved_ontology.as_deref();
+    // Literal-object edges (#823, ADR-0823): the same predicate that renders the edge prompt's
+    // literal-value rule decides whether a name-level self-reference is the sanctioned
+    // literal-object form (kept, stored as a self-loop) or an error (dropped, as before).
+    let literal_object_mode = crate::prompts::literal_object_edges_enabled(ontology_ref);
     let document_context = opts.document.as_ref().map(|d| d.context.clone());
     let extract_opts = ExtractOptions {
         episode_body: body,
@@ -1019,8 +1039,15 @@ pub async fn add_episode_with_opts(
     // (write-lock held), which is now the *sole* point that resolves an endpoint — falling back
     // to the persisted graph — or finally drops the edge, making `edges_dropped_unresolvable`
     // authoritative (FR-003, FR-005) instead of one of two independent, easily-desynced passes.
+    //
+    // Under an ontology (#823, ADR-0823) a name-level self-reference is the sanctioned
+    // literal-object form — the prompt asks for it when a fact states a literal value about one
+    // entity — so it is kept here and stored as a self-loop in Phase C. With no ontology it is
+    // still always wrong and dropped (ADR-0051 §1).
     extraction.edges.retain(|edge| {
-        if normalize_name(&edge.source_name) == normalize_name(&edge.target_name) {
+        if !literal_object_mode
+            && normalize_name(&edge.source_name) == normalize_name(&edge.target_name)
+        {
             eprintln!(
                 "liminis-context-graph: dropping self-referential edge: '{}' → '{}'",
                 edge.source_name, edge.target_name
@@ -1168,6 +1195,17 @@ pub async fn add_episode_with_opts(
         }
 
         if !salvage_map.is_empty() {
+            // Which edges were already sanctioned literal-object self-references before salvage
+            // (#823): only those survive the post-salvage filter below; an edge whose endpoints
+            // became equal *through* salvage is still a collision and is dropped.
+            let was_self_ref: Vec<bool> = extraction
+                .edges
+                .iter()
+                .map(|e| {
+                    literal_object_mode
+                        && normalize_name(&e.source_name) == normalize_name(&e.target_name)
+                })
+                .collect();
             for edge in extraction.edges.iter_mut() {
                 if let Some(canonical) = salvage_map.get(&normalize_name(&edge.source_name)) {
                     edge.source_name = canonical.clone();
@@ -1184,8 +1222,13 @@ pub async fn add_episode_with_opts(
             // inserted as a self-loop in Phase C. Phase C's UUID-level guard (#666) would still
             // catch it, but only as a counted `edges_dropped_self_loop`; this name-level filter
             // drops such collisions silently, as it always has.
+            let mut idx = 0usize;
             extraction.edges.retain(|edge| {
-                if normalize_name(&edge.source_name) == normalize_name(&edge.target_name) {
+                let sanctioned = was_self_ref[idx];
+                idx += 1;
+                if !sanctioned
+                    && normalize_name(&edge.source_name) == normalize_name(&edge.target_name)
+                {
                     eprintln!(
                         "liminis-context-graph: dropping self-referential edge after salvage: '{}' → '{}'",
                         edge.source_name, edge.target_name
@@ -1626,6 +1669,8 @@ pub async fn add_episode_with_opts(
         left_alone_episode_uuids,
         edges_swapped,
         edges_signature_mismatch,
+        edges_literal_object,
+        edges_suspected_misattachment,
     ) = tokio::task::spawn_blocking(
             move || -> Result<PhaseCOutcome, Error> {
         let conn = db_c.connect()?;
@@ -1654,6 +1699,10 @@ pub async fn add_episode_with_opts(
         // for endpoints persisted by an earlier ingest).
         let mut edges_swapped = 0usize;
         let mut edges_signature_mismatch = 0usize;
+        // #823 tallies: sanctioned literal-object self-loops, and value facts on an edge whose
+        // text does not name both endpoints (marked, never dropped).
+        let mut edges_literal_object = 0usize;
+        let mut edges_suspected_misattachment = 0usize;
         let mut label_cache: std::collections::HashMap<String, Option<Vec<String>>> =
             std::collections::HashMap::new();
 
@@ -1788,7 +1837,15 @@ pub async fn add_episode_with_opts(
             // resolve to one entity (dedup merges, salvage), which the name-level filters above
             // cannot see. Counted separately from unresolvable drops (ADR-0051's
             // one-`dropped_edges`-entry-per-unresolvable-drop contract is unchanged).
-            if src_uuid == dst_uuid {
+            //
+            // Exception (#823, ADR-0823): under an ontology, an edge the model emitted with one
+            // name on both ends is the sanctioned literal-object form — a literal-valued fact
+            // about that entity — and is stored as a self-loop. Differently named endpoints that
+            // collapse onto one UUID are still the #666 error and are dropped.
+            let literal_object = literal_object_mode
+                && src_uuid == dst_uuid
+                && normalize_name(&edge.source_name) == normalize_name(&edge.target_name);
+            if src_uuid == dst_uuid && !literal_object {
                 eprintln!(
                     "liminis-context-graph: dropping edge at commit, endpoints resolve to the same entity ({}): '{}' → '{}'",
                     src_uuid, edge.source_name, edge.target_name
@@ -1801,7 +1858,9 @@ pub async fn add_episode_with_opts(
             let (mut src_uuid, mut dst_uuid) = (src_uuid, dst_uuid);
             let (mut src_name, mut dst_name) = (&edge.source_name, &edge.target_name);
             let mut signature_mismatch = false;
-            if let Some(onto) = direction_onto.as_ref() {
+            // A self-loop has no direction to check: swapping is meaningless, and marking it
+            // would trade a misattachment for a spurious `signature_mismatch` (#823).
+            if let Some(onto) = direction_onto.as_ref().filter(|_| !literal_object) {
                 let rt_def = edge
                     .relation_type
                     .as_deref()
@@ -1844,6 +1903,20 @@ pub async fn add_episode_with_opts(
                     }
                 }
             }
+            // Ingest-time misattachment diagnostic (#823 FR-007): a literal-valued fact on an edge
+            // between two entities whose text does not name both of them. Marked, never dropped.
+            let suspected_misattachment = !literal_object
+                && crate::literal::is_suspected_misattachment(&edge.fact, src_name, dst_name);
+            if literal_object {
+                edges_literal_object += 1;
+            }
+            if suspected_misattachment {
+                eprintln!(
+                    "liminis-context-graph: suspected misattachment: '{}' → '{}': fact states a value but does not name both endpoints",
+                    src_name, dst_name
+                );
+                edges_suspected_misattachment += 1;
+            }
             // FR-011: record whether `valid_at` came from the text or defaulted to the episode's
             // reference time — the fallback was silent before.
             let llm_valid_at = validate_llm_timestamp(edge.valid_at.clone());
@@ -1871,6 +1944,12 @@ pub async fn add_episode_with_opts(
                     }
                     if signature_mismatch {
                         attrs.insert("signature_mismatch".to_string(), true.into());
+                    }
+                    if literal_object {
+                        attrs.insert("literal_object".to_string(), true.into());
+                    }
+                    if suspected_misattachment {
+                        attrs.insert("suspected_misattachment".to_string(), true.into());
                     }
                     serde_json::Value::Object(attrs).to_string()
                 },
@@ -2015,6 +2094,8 @@ pub async fn add_episode_with_opts(
             left_alone_episode_uuids,
             edges_swapped,
             edges_signature_mismatch,
+            edges_literal_object,
+            edges_suspected_misattachment,
         ))
             },
         )
@@ -2104,6 +2185,8 @@ pub async fn add_episode_with_opts(
         edges_reclassified_unclassified,
         edges_swapped,
         edges_signature_mismatch,
+        edges_literal_object,
+        edges_suspected_misattachment,
         entities_reclassified_unclassified,
         entities_dropped_malformed,
         entities_dropped_source_id,

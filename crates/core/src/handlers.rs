@@ -157,6 +157,9 @@ async fn handle(
         req.method.as_str(),
         "health_check"
             | "knowledge_status"
+            // Static build information (issue #854): no DB, no lock — most useful exactly when
+            // the server is degraded, so a client can learn which version it is talking to.
+            | "knowledge_capabilities"
             | "knowledge_recover"
             | "knowledge_recover_full"
             | "knowledge_close"
@@ -191,6 +194,7 @@ async fn handle(
     match req.method.as_str() {
         "health_check" => handle_health_check(state).await,
         "knowledge_status" => handle_knowledge_status(state).await,
+        "knowledge_capabilities" => Ok(crate::capabilities::payload()),
         "knowledge_process_chunk" => handle_knowledge_process_chunk(req, state).await,
         "knowledge_process_document" => {
             handle_knowledge_process_document(req, state, progress_tx).await
@@ -330,10 +334,11 @@ fn busy_health_payload(state: &AppState) -> Value {
                     .then_with(|| a.job_id.cmp(&b.job_id))
             });
         if let Some(job) = running {
-            return json!({
+            return crate::capabilities::with_version_fields(json!({
                 "ok": true,
                 "healthy": false,
                 "state": "busy",
+                "ready_for_reads": true,
                 "activity": "rebuilding",
                 "job_id": job.job_id,
                 "progress": {
@@ -342,19 +347,60 @@ fn busy_health_payload(state: &AppState) -> Value {
                     "wal_files_total": job.wal_files_total,
                     "elapsed_seconds": job.elapsed_seconds(),
                 },
-            });
+            }));
         }
     }
-    json!({"ok": true, "healthy": false, "state": "busy", "activity": "writing"})
+    crate::capabilities::with_version_fields(json!({
+        "ok": true,
+        "healthy": false,
+        "state": "busy",
+        "ready_for_reads": true,
+        "activity": "writing",
+    }))
 }
 
 /// Liveness/readiness probe. Never waits on the write lock (issue #628).
 ///
-/// - DB not loaded: `{ok:false, healthy:false, state:"degraded", reason}`.
-/// - Write lock free: probes the DB, `{ok:true, healthy:true, state:"healthy"}`.
-/// - Write lock held or a write pending: `{ok:true, healthy:false, state:"busy", activity, ..}`
-///   (alive but not ready), answered without connecting to the DB.
+/// Three fields carry three distinct facts (ADR-0855): `ok` is liveness, `healthy` is
+/// "idle and ready for writes", and `ready_for_reads` is "the database is loaded, so reads are
+/// served now" (true even while `busy`; it is not a promise that every read succeeds).
+///
+/// - DB not loaded: `{ok:false, healthy:false, state:"degraded", ready_for_reads:false, reason}`.
+/// - Write lock free: probes the DB, `{ok:true, healthy:true, state:"healthy", ready_for_reads:true}`.
+/// - Write lock held or a write pending:
+///   `{ok:true, healthy:false, state:"busy", ready_for_reads:true, activity, ..}`
+///   (alive, reads served, not ready for writes), answered without connecting to the DB;
+///   `ready_for_reads` follows from the DB being loaded, not from a probe.
 async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
+    let providers = providers_payload(&state);
+    let mut result = handle_health_check_inner(state).await?;
+    if let Some(obj) = result.as_object_mut() {
+        obj.insert("providers".to_string(), providers);
+    }
+    Ok(result)
+}
+
+/// Additive `providers` object (#851) reported by `health_check` and `knowledge_status`:
+/// `{"embedder": "test"|"real", "extractor": "test"|"real"|"none"}`. `"test"` means the built-in
+/// deterministic provider selected by `--embedder test` / `--extractor test`; `"none"` means no
+/// extractor is configured.
+pub fn providers_payload(state: &AppState) -> Value {
+    let embedder = if state.embedder.is_test_provider() {
+        "test"
+    } else {
+        "real"
+    };
+    let extractor = if state.extractor.is_test_provider() {
+        "test"
+    } else if state.extractor.is_configured() {
+        "real"
+    } else {
+        "none"
+    };
+    json!({"embedder": embedder, "extractor": extractor})
+}
+
+async fn handle_health_check_inner(state: Arc<AppState>) -> Result<Value, Error> {
     let db_opt = state.db.load_full();
     match db_opt {
         None => {
@@ -364,7 +410,13 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
                 .ok()
                 .and_then(|g| g.clone())
                 .unwrap_or_else(|| "unknown".to_string());
-            Ok(json!({"ok": false, "healthy": false, "state": "degraded", "reason": reason}))
+            Ok(crate::capabilities::with_version_fields(json!({
+                "ok": false,
+                "healthy": false,
+                "state": "degraded",
+                "ready_for_reads": false,
+                "reason": reason,
+            })))
         }
         Some(db) => {
             let Ok(_guard) = state.write_lock.try_read() else {
@@ -376,7 +428,12 @@ async fn handle_health_check(state: Arc<AppState>) -> Result<Value, Error> {
             })
             .await??;
             drop(_guard);
-            Ok(json!({"ok": true, "healthy": true, "state": "healthy"}))
+            Ok(crate::capabilities::with_version_fields(json!({
+                "ok": true,
+                "healthy": true,
+                "state": "healthy",
+                "ready_for_reads": true,
+            })))
         }
     }
 }
@@ -459,11 +516,14 @@ enum StatusOutcome {
     },
 }
 
-/// `knowledge_status` wrapper: adds the additive top-level `search_min_score_default` (issue
+/// `knowledge_status` wrapper: adds the additive top-level `providers` (#851) and
+/// `search_min_score_default` (issue
 /// #812) to every response shape (degraded, queryable, not-queryable) in one place.
 async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
+    let providers = providers_payload(&state);
     let mut result = handle_knowledge_status_inner(state).await?;
     if let Some(obj) = result.as_object_mut() {
+        obj.insert("providers".to_string(), providers);
         obj.insert(
             "search_min_score_default".to_string(),
             serde_json::json!(crate::search_config::default_min_score()),
@@ -1298,6 +1358,8 @@ async fn handle_knowledge_process_chunk(
         "edges_reclassified_unclassified": result.edges_reclassified_unclassified,
         "edges_swapped": result.edges_swapped,
         "edges_signature_mismatch": result.edges_signature_mismatch,
+        "edges_literal_object": result.edges_literal_object,
+        "edges_suspected_misattachment": result.edges_suspected_misattachment,
         "entities_reclassified_unclassified": result.entities_reclassified_unclassified,
         "entities_dropped_malformed": result.entities_dropped_malformed,
         "entities_dropped_source_id": result.entities_dropped_source_id,
@@ -1474,6 +1536,15 @@ fn optional_min_similarity_param(v: &Value) -> Result<Option<f64>, Error> {
         .ok_or_else(|| Error::Ipc("min_similarity must be a number".to_string()))
 }
 
+/// Parses `include_episodes`: absent/null ⇒ `false`; any non-boolean is a validation error.
+fn parse_include_episodes(v: &Value) -> Result<bool, Error> {
+    match v {
+        Value::Null => Ok(false),
+        Value::Bool(b) => Ok(*b),
+        _ => Err(Error::Ipc("include_episodes must be a boolean".to_string())),
+    }
+}
+
 async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let query = p["query"].as_str().unwrap_or("").to_string();
@@ -1487,6 +1558,8 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     // Optional origin filter (issue #752, FR-014). Applied after fusion — the BM25/vector pools
     // know nothing about origin — so over-fetch like the belief filter and truncate afterwards.
     let origins = crate::origin::parse_origins_param(p)?;
+    // Optional provenance (issue #857): fill each hit's mentioning live episodes.
+    let include_episodes = parse_include_episodes(&p["include_episodes"])?;
     let requested = limit;
     let limit = if origins.is_some() {
         limit.saturating_mul(BELIEF_OVERFETCH)
@@ -1539,11 +1612,12 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
     let nodes = tokio::task::spawn_blocking(move || -> Result<Vec<Value>, Error> {
         let conn = db.connect()?;
         let uuids: Vec<String> = entities.iter().map(|e| e.entity.uuid.clone()).collect();
-        let sup = crate::origin_reads::entity_support(
+        let sup = crate::origin_reads::entity_support_with_episodes(
             &conn,
             &uuids,
             origins.as_deref(),
             chrono::Utc::now().timestamp_micros(),
+            include_episodes,
         )?;
         let mut out = Vec::with_capacity(entities.len());
         for e in entities {
@@ -1553,6 +1627,7 @@ async fn handle_find_entities(req: &IpcRequest, state: Arc<AppState>) -> Result<
             }
             let mut v = serde_json::to_value(&e).unwrap_or(Value::Null);
             s.annotate(&mut v);
+            s.annotate_provenance(&mut v);
             out.push(v);
         }
         out.truncate(requested);
@@ -1776,21 +1851,59 @@ async fn handle_find_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
 // Guard stays in the async scope while spawn_blocking executes.
 // RwLockReadGuard is not 'static so it cannot move into the closure.
 
+/// Parses the optional `uuids` filter: absent/null ⇒ `None`; an array of strings ⇒ the
+/// de-duplicated list (first-seen order); anything else is a validation error.
+fn parse_uuids_param(v: &Value) -> Result<Option<Vec<String>>, Error> {
+    let err = || Error::Ipc("uuids must be an array of strings".to_string());
+    match v {
+        Value::Null => Ok(None),
+        Value::Array(a) => {
+            let mut out: Vec<String> = Vec::with_capacity(a.len());
+            for item in a {
+                let s = item.as_str().ok_or_else(err)?;
+                if !out.iter().any(|x| x == s) {
+                    out.push(s.to_string());
+                }
+            }
+            Ok(Some(out))
+        }
+        _ => Err(err()),
+    }
+}
+
 async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     use crate::read_page as rp;
 
     let p = &req.params;
-    let last_n = p["last_n"].as_u64().unwrap_or(50) as usize;
+    // Optional uuid filter (issue #857). Without it `last_n` defaults to 50 as ever; with it the
+    // default is "every requested uuid", and an explicit `last_n` still caps the result.
+    let uuids = parse_uuids_param(&p["uuids"])?;
+    let last_n = match (p["last_n"].as_u64(), &uuids) {
+        (Some(n), _) => n as usize,
+        (None, Some(u)) => u.len(),
+        (None, None) => 50,
+    };
     let opts = rp::parse_read_opts(p, rp::EPISODE_FIELDS)?;
     // Issue #667: `group_ids` and the legacy single-group `group_id` alias are unioned; neither
     // given ⇒ every group (reads broad, ADR-0615 D2), not the old `liminis` default.
     let groups = episode_group_scope(p);
-    let shape = rp::shape_hash(
+    // An empty `uuids` array selects nothing (not "all episodes").
+    if uuids.as_ref().is_some_and(|u| u.is_empty()) {
+        return Ok(if opts.paged {
+            json!({"episodes": [], "count": 0, "next_cursor": null})
+        } else {
+            json!({"episodes": [], "count": 0})
+        });
+    }
+    let mut shape = rp::shape_hash(
         rp::EPISODES_TAG,
         groups.as_deref(),
         None,
         opts.name_prefix.as_deref(),
     );
+    if let Some(u) = &uuids {
+        shape = rp::episodes_uuids_shape_hash(&shape, u);
+    }
     let after: Option<(i64, String)> = match opts.cursor.as_deref() {
         None => None,
         Some(c) => {
@@ -1813,11 +1926,15 @@ async fn handle_get_episodes(req: &IpcRequest, state: Arc<AppState>) -> Result<V
             .unwrap_or_default();
         let gid_slice = groups.as_deref().map(|_| gid_refs.as_slice());
         // Fetch one extra row to learn whether another page exists.
-        conn.retrieve_episodes_page(
+        let uuid_refs: Option<Vec<&str>> = uuids
+            .as_ref()
+            .map(|v| v.iter().map(String::as_str).collect());
+        conn.retrieve_episodes_page_by_uuids(
             gid_slice,
             last_n.saturating_add(1),
             name_prefix.as_deref(),
             after.as_ref().map(|(us, u)| (*us, u.as_str())),
+            uuid_refs.as_deref(),
         )
     })
     .await??;

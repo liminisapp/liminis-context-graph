@@ -5,6 +5,7 @@ pub mod backfill;
 pub mod backfill_summary_embeddings;
 pub mod belief;
 pub mod canonicalize;
+pub mod capabilities;
 pub mod cassette;
 pub(crate) mod checkpoint;
 pub mod correction_reads;
@@ -33,6 +34,7 @@ pub mod lbug_config;
 pub(crate) mod lbug_extension_home;
 pub(crate) mod legacy_wal;
 pub mod lint;
+pub mod literal;
 pub mod llm_router;
 pub mod ontology;
 pub mod ontology_sidecar;
@@ -62,6 +64,7 @@ pub mod source_identity;
 pub mod staged_search;
 pub mod summary_merge;
 pub mod telemetry;
+pub mod test_providers;
 pub mod token_budget;
 pub mod types;
 pub mod wal;
@@ -105,6 +108,10 @@ pub use replay::{
 };
 pub use schema::init as init_schema;
 pub use telemetry::{CaptureSink, NoopSink, TeeSink, TelemetryEvent, TelemetrySink};
+pub use test_providers::{
+    parse_fact_lines, resolve_test_embedding_dim, FactEntity, FactLine, ParsedFacts, TestEmbedder,
+    TestExtractor, TEST_EMBEDDER_MODEL, TEST_EMBEDDING_DEFAULT_DIM, TEST_EMBEDDING_MAX_DIM,
+};
 pub use types::{
     EntityRow, EpisodicRow, ExtractedEdge, ExtractedEntity, ExtractionOutcome, ExtractionResult,
     MentionsEdge, RelatesToEdge, SourceType,

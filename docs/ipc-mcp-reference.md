@@ -42,16 +42,20 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (58)
+## IPC methods (59)
 
-The socket dispatch handles **58 methods**: 57 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **59 methods**: 58 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (58) and the MCP tool registry (57, below) differ by exactly one — `health_check` is
-not exposed as an MCP tool.
+surface (59) and the MCP tool registry (58, below) differ by exactly one — `health_check` is
+not exposed as an MCP tool. MCP clients have no health tool; the `ok` / `healthy` /
+`ready_for_reads` semantics they would otherwise look for are in the
+[Health check contract](#health-check-contract) below
+([ADR-0855](adr/0855-health-check-ready-for-reads.md)).
 
 | Category | Methods |
 |----------|---------|
 | Health | `health_check` |
+| Capabilities | `knowledge_capabilities` |
 | Status | `knowledge_status`, `knowledge_rebuild_status` |
 | Ingestion | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode` |
 | Document chunking (read-only) | `knowledge_preview_chunks` |
@@ -76,6 +80,12 @@ For request/response shapes and parameter details, the dispatch `match` arms in
 [`handlers.rs`](https://github.com/liminisapp/liminis-context-graph/blob/main/crates/core/src/handlers.rs)
 and their handler functions are the source of truth — this page is the method index, not a
 copy of each handler's parameter parsing.
+
+`knowledge_status` and `health_check` also carry an additive top-level `providers` object,
+`{"embedder": "test" | "real", "extractor": "test" | "real" | "none"}` (#851), so a test can confirm
+it is talking to the built-in providers started with `--embedder test` / `--extractor test`
+rather than real ones; `"none"` means no extractor is configured. See
+[Test Providers](test-providers.md).
 
 `knowledge_status`'s WAL fields — including `wal.hydration_status` (issue #456), which
 distinguishes a genuinely empty group from one whose WAL holds unapplied content — are documented
@@ -108,34 +118,77 @@ until `connected` and `queryable` are both `true` and `initializing` is `false` 
 for the full rationale. A `degraded` response after startup has otherwise settled is a legitimate
 outcome (e.g. unrecovered corruption) — not something to retry indefinitely.
 
-A `busy` response (see [Health check contract](#health-check-contract)) is **not** a readiness
-signal: it means the service is alive but a write is holding or waiting for the write lock — most
-importantly a long `knowledge_rebuild_from_wal`. Pollers keep waiting on `busy` (gate on
-`result.healthy == true`) and must not treat it as failure.
+A `busy` response (see [Health check contract](#health-check-contract)) is **not** a *write*
+readiness signal: it means the service is alive but a write is holding or waiting for the write
+lock — most importantly a long `knowledge_rebuild_from_wal`. Pollers that need to send writes keep
+waiting on `busy` (gate on `result.healthy == true`) and must not treat it as failure. A client that
+only reads gates on `result.ready_for_reads == true` instead, which stays `true` while `busy`.
+
+### Capabilities
+
+`knowledge_capabilities` (read scope; IPC and MCP; [ADR-0854](adr/0854-knowledge-capabilities-protocol-version-and-feature-registry.md), #854)
+lets a client ask the running service what it is and what it supports. It takes no parameters
+(unknown ones are ignored), reads no database and takes no lock, so it answers in degraded mode,
+during a rebuild and under any `--writable-groups` policy.
+
+```json
+{"server_version": "0.19.1", "protocol_version": 1,
+ "features": ["chunk_supersede", "entity_provenance", "hybrid_passage_search", "lint", "origin",
+              "process_document", "walk", "writable_groups"],
+ "methods": ["health_check", "knowledge_add_episode", "…"]}
+```
+
+| Field | Meaning |
+|---|---|
+| `server_version` | The crate version, exactly as `--version` and MCP `initialize` report it (no `v` prefix; pre-release suffixes kept). |
+| `protocol_version` | Integer, `1` today. Bumped **only** on a breaking change to the socket protocol (a removed or renamed method, a changed default scope or response semantics). A new method, field or feature does not bump it. Compare it for compatibility; do not infer features from it. |
+| `features` | Sorted, duplicate-free `lower_snake_case` strings, one per capability. Append-only: a string is never renamed or removed once shipped. Test for the one you need; **ignore strings you do not recognise**. |
+| `methods` | Sorted, duplicate-free names of every IPC method the dispatcher accepts, including `health_check` and `knowledge_capabilities`. It lists a method even if a particular call would currently be refused (degraded mode, write policy). |
+
+**Old servers.** A server that predates this method answers `knowledge_capabilities` with its
+ordinary unknown-method error: JSON-RPC code `-32000` and a message beginning `Method not found:`.
+Treat that as "older than the capabilities method" and fall back to your own probing.
 
 ### Health check contract
 
 `health_check` never waits on the write lock, so it answers promptly even during a long WAL
 rebuild ([ADR-0628](adr/0628-health-check-busy-state.md), #628). The response's `state` is one of:
 
-| `state` | `ok` | `healthy` | Meaning | Supervisor action |
-|---|---|---|---|---|
-| `healthy` | `true` | `true` | Alive and ready: DB open, no write in progress or pending. | Ready — send work. |
-| `busy` | `true` | `false` | Alive, **not ready**: a write is pending or in progress. | Alive — keep waiting; do not restart. |
-| `degraded` | `false` | `false` | Alive but unusable: DB not loaded. `reason` says why. | Recover (`knowledge_recover`) or investigate. |
-| *(no answer)* | — | — | Dead or wedged. | Restart. |
+| `state` | `ok` | `healthy` | `ready_for_reads` | Meaning | Supervisor action |
+|---|---|---|---|---|---|
+| `healthy` | `true` | `true` | `true` | Alive and ready: DB open, no write in progress or pending. | Ready — send work. |
+| `busy` | `true` | `false` | `true` | Alive, reads served, **not ready for writes**: a write is pending or in progress. | Alive — keep waiting for writes; reads may proceed; do not restart. |
+| `degraded` | `false` | `false` | `false` | Alive but unusable: DB not loaded. `reason` says why. | Recover (`knowledge_recover`) or investigate. |
+| *(no answer)* | — | — | — | Dead or wedged. | Restart. |
+
+The three fields carry three different facts ([ADR-0855](adr/0855-health-check-ready-for-reads.md)):
+
+- **`ok`** — liveness: the process is alive and answered. Gate on it for restart decisions.
+- **`healthy`** — idle and ready for writes: DB loaded and no write pending or in progress. Gate on
+  it before sending writes, or to wait for a rebuild to finish. It is **not** a liveness signal.
+- **`ready_for_reads`** — reads are served now: the database is loaded. `true` while `busy`, `false`
+  only when `degraded`. Gate on it before sending reads. It means "loaded", not "every read will
+  succeed": indexes may still be rebuilding, and a read racing a mid-clear rebuild can fail.
+
+Since ADR-0628 (0.16 era) `healthy` stopped meaning liveness. Raw-socket clients written before then
+should use `ok` for liveness and `ready_for_reads` for read availability.
 
 `busy` carries an `activity` field. While a `knowledge_rebuild_from_wal` job is running:
 
 ```json
-{"ok": true, "healthy": false, "state": "busy", "activity": "rebuilding",
- "job_id": "…", "progress": {"mutations_replayed": 48210, "wal_files_processed": 3,
-                             "wal_files_total": 12, "elapsed_seconds": 91.4}}
+{"ok": true, "healthy": false, "state": "busy", "ready_for_reads": true,
+ "activity": "rebuilding", "job_id": "…",
+ "progress": {"mutations_replayed": 48210, "wal_files_processed": 3,
+              "wal_files_total": 12, "elapsed_seconds": 91.4}}
 ```
 
 `progress` uses the same values as `knowledge_rebuild_status`. For any other writer the response
-is `{"ok": true, "healthy": false, "state": "busy", "activity": "writing"}` with no `job_id` or
-`progress`. The busy path never connects to or queries the database.
+is `{"ok": true, "healthy": false, "state": "busy", "ready_for_reads": true, "activity": "writing"}`
+with no `job_id` or `progress`. The busy path never connects to or queries the database.
+
+Every `health_check` response, in every state, also carries `server_version` and
+`protocol_version` (issue #854), with the same values as
+[`knowledge_capabilities`](#capabilities). They are additive; no existing field changed.
 
 Notes:
 
@@ -150,7 +203,8 @@ Notes:
 - `healthy` can be reported in the short window after a rebuild job is registered but before it
   takes the write lock.
 - `busy` has `healthy: false` on purpose: existing pollers that gate on `healthy` keep waiting.
-  A liveness probe that only needs "is the process alive" should accept `ok: true`.
+  A liveness probe that only needs "is the process alive" should accept `ok: true`, and a read-only
+  client should gate on `ready_for_reads: true`.
 
 ## MCP-over-stdio transport
 
@@ -226,7 +280,7 @@ union of all active scopes.
 
 | Scope | Methods |
 |-------|---------|
-| `read` | `knowledge_status`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_ontology`, `knowledge_walk`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
+| `read` | `knowledge_status`, `knowledge_capabilities`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_ontology`, `knowledge_walk`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
 | `write` | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |
@@ -404,6 +458,46 @@ How it differs from `knowledge_search_passages`' `min_score`: the value is clamp
 way (a non-number is an invalid-params error), but `min_similarity` has **no default** — omitted
 or `null` means no floor and results are identical to before, apart from the added `search`
 object — and it acts before fusion and per path rather than as a post-filter on a single list.
+
+### Entity provenance: which episodes mention an entity (issue #857, feature `entity_provenance`)
+
+`EntityRow` carries `episode_uuids` and `source_descriptions`, but not every read fills them. Until
+#857 the same field meant different things on different methods, so they are spelled out here:
+
+| Method | `episode_uuids` / `source_descriptions` | `source_files` | Superseded episodes |
+|---|---|---|---|
+| `knowledge_find_entities` (default) | **Always `[]`** — not computed | absent | n/a |
+| `knowledge_find_entities` with `include_episodes: true` | Filled | Filled | **Excluded** (live only) |
+| `knowledge_get_entity_neighbors` | Filled | absent | **Included** |
+| `knowledge_get_entities_by_source` | Filled | absent | Included |
+
+`knowledge_find_entities` takes an opt-in boolean **`include_episodes`** (default `false`; any
+non-boolean is a validation error). Without it the response is byte-for-byte what it was before:
+`episode_uuids` and `source_descriptions` are `[]` and no new keys appear. With it, each node's
+fields come from the entity's **live** mentioning episodes — the same predicate `support` uses
+(not superseded at the read instant) — computed from the single batched mention query that
+already produces `support`, so there is no extra query per hit:
+
+- `episode_uuids` — newest first (`created_at` descending, `uuid` descending as tiebreaker, the
+  order `knowledge_get_episodes` uses), so a repeated call returns the same subset.
+- `source_descriptions` — index-aligned with `episode_uuids`; not de-duplicated.
+- `source_files` — the de-duplicated stored `source_file` values (#853) in order of first
+  appearance. Episodes with no recorded source file (older data) are omitted, so this list is
+  **not** index-aligned with `episode_uuids`. Present only with the flag.
+- `episodes_truncated` — `true` only when the per-entity cap (fixed at **50**, not a request
+  parameter) removed at least one live episode; absent otherwise.
+
+`support` and `corroboration` are unchanged by the flag and always count **every** live document,
+not just the capped list; because `support` counts distinct documents and the list counts
+episodes, the two need not agree. `get_entity_neighbors` and `get_entities_by_source` do not
+filter superseded episodes (unchanged), so a `find_entities` hit's `episode_uuids` equals the
+**live subset** of what `get_entity_neighbors` reports for the same entity. Also note that the
+live predicate here does not exclude pending document revisions, which
+`get_entities_by_source` does.
+
+To turn the UUIDs into episodes, call `knowledge_get_episodes` with `uuids` (see the paging
+table below) — two calls from a free-text query to every mentioning episode.
+See [ADR-0857](adr/0857-find-entities-episode-provenance.md).
 
 ### Hybrid passage search (`knowledge_search_passages`, issue #789)
 
@@ -1171,6 +1265,7 @@ additive parameters; with none of them the response is exactly `{<collection>, c
 | `cursor` | both | Opaque keyset cursor. Send `""` for the first page, then send back each response's `next_cursor` until it is `null`. |
 | `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, source_file, chunk_id`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
 | `name_prefix` | both | Names starting with this prefix, matched literally. Case-insensitive for entities (via Cypher `lower()`, so non-ASCII folds only as far as lbug does); case-sensitive for episodes. |
+| `uuids` (array of strings) | episodes | Return exactly these episodes (issue #857), still within the `group_ids` scope: a uuid in another group, or an unknown one, is simply absent — never an error. An empty array returns no episodes (not all). Duplicates return each episode once. Superseded episodes are returned like any other. Combines with `name_prefix`; `last_n` defaults to the number of uuids (so 50+ uuids are not truncated) and an explicit `last_n` still caps the result. `uuids` alone does not enable paging; a `cursor` is bound to the `uuids` set it was minted under. A non-array or non-string item is a validation error. |
 
 `next_cursor` appears only when the request contained `cursor`, `fields` or `name_prefix`; it is
 `null` on the last page. Order is deterministic (episodes newest first with a `uuid` tiebreaker;
@@ -1434,7 +1529,17 @@ completion hop runs, from the start entities. Anything else with empty `hops`, a
 Algorithm (E13's v5, generic — no relation names are hard-coded). Per hop:
 
 1. **Candidates** are edges incident to the frontier (either direction) whose far end has not been
-   visited (cycles and self-loops never revisit). Live edges only, except in `history` mode.
+   visited (cycles never revisit). Live edges only, except in `history` mode. On the **last** hop,
+   when `answer_type` is `"value"` or absent, the frontier entities' own **self-loops** are
+   candidates too. These are the literal-valued facts (a budget, a price, a date) an ontology
+   extraction stores on the entity they describe
+   ([ADR-0823](adr/0823-literal-object-edges-as-self-loops.md)). A self-loop is filtered and ranked
+   like any other edge. It matches either direction, so `direction_matched` is `null`, but it gets
+   the soft bonus and is always kept by the hard filter. The hard filter decides between
+   matching and falling back by looking at moving edges only, so a self-loop never hides that
+   fallback. It never becomes frontier. Self-loops are never
+   candidates on an earlier hop, where they would take beam slots meant for moving on, nor in the
+   completion hop.
 2. **Relation filter**: keep edges whose `relation_type` is in `relation_types`; if none match,
    keep all and record a fallback.
 3. **Answer-type filter** (last hop only, `answer_type` an entity type, mode not `history`): keep
@@ -1450,7 +1555,9 @@ If the hops end on no entity of an entity-type `answer_type` and `query` is give
 `history`), one **completion hop** runs: edges from the final frontier to entities of that type,
 ranked by cosine(`query`, fact embedding), no direction logic. It is an *edge* hop (not a node
 ranking), appears as an extra entry with `completion: true`, and sets `completion_hop_ran`. A hop
-with no candidates ends the walk early (`dead_end_at`).
+with no candidates ends the walk early (`dead_end_at`). A self-loop is not a move: a last hop whose
+only candidates are self-loops is also reported as `dead_end_at`, and that hop is still returned
+with their facts. In `facts_text` a self-loop renders once, as `(X [Type] -> X [Type])`.
 
 Response:
 
@@ -1822,7 +1929,8 @@ result fields exist for that, both introduced in 0.13.2.
   salvage); inserting that edge would create a self-loop, so Phase C drops it. The count is a
   separate top-level field, always present, and these edges are *not* in `dropped_edges` or
   `edges_dropped_unresolvable`. (Edges whose endpoint *names* are identical are filtered earlier
-  and never counted.) Separately, an off-list edge endpoint that already exists exactly (same
+  and never counted, except under an ontology, where they are stored as literal-object self-loops;
+  see `edges_literal_object` below.) Separately, an off-list edge endpoint that already exists exactly (same
   group, case-insensitive) in the stored graph resolves to that entity and is never salvaged onto
   a similar entity of the current chunk; a name stored under more than one eligible kind is dropped
   as ambiguous rather than salvaged
@@ -1835,6 +1943,21 @@ result fields exist for that, both introduced in 0.13.2.
   in their `attributes` because they fit in neither direction. No edge is dropped by this check.
   Both are `0` for an ontology that declares no signature. Swaps made by an inverse alias
   (strict mode) are not counted here. See [Ontology → Edge direction](ontology.md#edge-direction).
+
+- **`edges_literal_object` and `edges_suspected_misattachment` report literal-valued facts (#823).**
+  Two additive top-level counters, always present. Under an ontology with an extractable relation
+  type, `edges_literal_object` counts edges stored as a **self-loop** on one entity because the
+  model emitted a literal-valued fact about it ("Marlin Core has a monthly budget of $4,200") with
+  the same name on both ends; each such edge carries `"literal_object": true` in its `attributes`.
+  Admission is by name equality alone (the fact is not checked for a value), so this is an upper
+  bound on genuine literal-valued facts. It is always `0` with no ontology, where a self-reference
+  is still dropped.
+  `edges_suspected_misattachment` counts edges between two different entities, in every mode,
+  stored unchanged but marked `"suspected_misattachment": true` because their fact states a literal
+  value (a digit or currency symbol) without naming both endpoints. Neither drops an edge. A
+  self-loop's endpoints have the same UUID in `knowledge_get_edges_by_group` and the other edge
+  reads. See [Ontology → Literal-valued facts](ontology.md#literal-valued-facts) and
+  [ADR-0823](adr/0823-literal-object-edges-as-self-loops.md).
 
 - **`warning` reports oversized input.** A `chunk_text` longer than the advisory threshold
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see

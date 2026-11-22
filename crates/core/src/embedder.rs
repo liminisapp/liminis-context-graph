@@ -613,6 +613,13 @@ pub trait Embedder: Send + Sync {
     fn instructions(&self) -> EffectiveInstructions {
         EffectiveInstructions::none()
     }
+
+    /// `true` only for the built-in deterministic test embedder (`--embedder test`, #851), and
+    /// for wrappers around it. Surfaced as `providers.embedder` in `knowledge_status` and
+    /// `health_check` so a test can confirm it is not talking to a real provider.
+    fn is_test_provider(&self) -> bool {
+        false
+    }
 }
 
 // ── InstructedEmbedder ────────────────────────────────────────────────────────
@@ -682,6 +689,10 @@ impl Embedder for InstructedEmbedder {
 
     fn instructions(&self) -> EffectiveInstructions {
         self.instructions.clone()
+    }
+
+    fn is_test_provider(&self) -> bool {
+        self.inner.is_test_provider()
     }
 }
 
@@ -1578,6 +1589,10 @@ impl Embedder for CountingEmbedder {
 
     fn instructions(&self) -> EffectiveInstructions {
         self.inner.instructions()
+    }
+
+    fn is_test_provider(&self) -> bool {
+        self.inner.is_test_provider()
     }
 }
 
