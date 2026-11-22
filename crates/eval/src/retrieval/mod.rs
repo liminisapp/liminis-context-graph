@@ -62,7 +62,7 @@ impl LegsTally {
 }
 
 /// What one system returned for one question.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RankedResult {
     /// Note ids in rank order, duplicates allowed (metrics dedupe, keeping first occurrence).
     pub notes: Vec<String>,
@@ -78,6 +78,9 @@ pub struct RankedResult {
     /// Lexical-only tally for a hybrid-mode passage config (issue #871); `None` for every other
     /// retriever, so a vector row never reports a share.
     pub legs_tally: Option<LegsTally>,
+    /// Passage-level hits for `--record-ranked` (`ranked.jsonl`); `None` for retrievers with no
+    /// per-hit score fields (entities/facts, qmd).
+    pub hits: Option<Vec<mapping::RankedHit>>,
     pub latency: Duration,
 }
 
@@ -1028,6 +1031,7 @@ mod tests {
                     lookup_calls: 0,
                     evidence_gaps: 0,
                     legs_tally: None,
+                    hits: None,
                     latency: Duration::from_millis(1),
                 })
             })
@@ -1146,6 +1150,7 @@ mod tests {
                     lookup_calls: 0,
                     evidence_gaps: 0,
                     legs_tally: None,
+                    hits: None,
                     latency: Duration::from_millis(5),
                 })
             };

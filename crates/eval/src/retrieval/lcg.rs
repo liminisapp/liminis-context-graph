@@ -26,7 +26,7 @@ type UnixStream = tokio::io::DuplexStream;
 
 use super::fixture::Fixture;
 use super::mapping::{
-    chunk_markdown, edge_groups, edge_producers, entity_groups, map_edges, map_entities,
+    chunk_markdown, edge_groups, edge_producers, entity_groups, map_edges, map_entities, map_hits,
     map_passages, tally_legs,
 };
 use super::{RankedResult, Retriever};
@@ -871,6 +871,7 @@ impl Retriever for LcgPassages {
                 lookup_calls: 0,
                 evidence_gaps: 0,
                 legs_tally: self.mode.is_hybrid().then(|| tally_legs(&passages)),
+                hits: Some(map_hits(&passages)),
                 latency,
             })
         })
@@ -908,6 +909,7 @@ impl LcgVariants {
             lookup_calls: 0,
             evidence_gaps: 0,
             legs_tally: self.mode.is_hybrid().then(|| tally_legs(&passages)),
+            hits: Some(map_hits(&passages)),
             latency,
         })
     }
@@ -1036,7 +1038,8 @@ impl Retriever for LcgPassagesStaged {
                 .await?;
             let latency = t0.elapsed();
             self.check_applied(&r)?;
-            let (notes, evidence) = map_passages(&items(&r, "passages"));
+            let passages = items(&r, "passages");
+            let (notes, evidence) = map_passages(&passages);
             Ok(RankedResult {
                 notes,
                 evidence,
@@ -1046,6 +1049,7 @@ impl Retriever for LcgPassagesStaged {
                 lookup_calls: 0,
                 evidence_gaps: 0,
                 legs_tally: None,
+                hits: Some(map_hits(&passages)),
                 latency,
             })
         })
@@ -1166,6 +1170,7 @@ impl Retriever for LcgEntitiesFacts {
                 lookup_calls,
                 evidence_gaps: 0,
                 legs_tally: None,
+                hits: None,
                 latency,
             })
         })
