@@ -208,6 +208,29 @@ impl Conn<'_> {
             }
         };
         let mut out = HashMap::new();
+        self.collect_source_rows(cypher, uuids, &mut out)?;
+        if kind == ZeroKind::Content {
+            // A `content` record entry may name a summary unit (issue #850): replay records its
+            // `content_embedding` under the same kind. Look up whatever `Episodic` did not have,
+            // so such an entry is repaired instead of being taken for a stale one and dropped.
+            let rest: Vec<String> = uuids
+                .iter()
+                .filter(|u| !out.contains_key(*u))
+                .cloned()
+                .collect();
+            if !rest.is_empty() {
+                self.collect_source_rows(SUMMARY_UNIT_SOURCE_CYPHER, &rest, &mut out)?;
+            }
+        }
+        Ok(out)
+    }
+
+    fn collect_source_rows(
+        &self,
+        cypher: &str,
+        uuids: &[String],
+        out: &mut HashMap<String, (String, String)>,
+    ) -> Result<(), Error> {
         for chunk in uuids.chunks(LOOKUP_CHUNK) {
             for row in self.query_params(cypher, json!({ "uuids": chunk }))? {
                 if row.len() < 3 {
@@ -219,9 +242,19 @@ impl Conn<'_> {
                 );
             }
         }
-        Ok(out)
+        Ok(())
     }
 }
+
+/// Source text of the summary units among `$uuids` (issue #850), for the `content` kind.
+const SUMMARY_UNIT_SOURCE_CYPHER: &str =
+    "MATCH (n:SummaryUnit) WHERE n.uuid IN $uuids RETURN n.uuid, n.content, n.group_id";
+
+/// The guarded `SET` for a `content` record entry that names a summary unit (issue #850). Run only
+/// when the `Episodic` statement matched nothing; uuids are unique across the two tables.
+const SUMMARY_UNIT_SET_CYPHER: &str =
+    "MATCH (n:SummaryUnit {uuid: $uuid}) WHERE n.content = $text \
+     SET n.content_embedding = $emb RETURN count(*)";
 
 /// The guarded, row-addressed `SET` for one kind. Ends in `RETURN count(*)` so a guard that no
 /// longer matches (text changed, row gone) is distinguishable from a write that applied.
@@ -602,6 +635,8 @@ async fn write_all(
             tokio::task::spawn_blocking(move || -> Result<(), Error> {
                 let conn = db_b.connect().map_err(|e| Error::Ipc(format!("db: {e}")))?;
                 let mut stmt = conn.prepare(set_cypher(kind))?;
+                // Prepared on first use: only a `content` entry that is not an episode needs it.
+                let mut summary_stmt = None;
                 let mut ok: Vec<(ZeroKind, String)> = Vec::new();
                 for (uuid, text, vec) in &batch {
                     // Validated finite at embed time, so the conversion cannot fail.
@@ -613,7 +648,16 @@ async fn write_all(
                         continue;
                     };
                     let params = json!({ "uuid": uuid, "text": text, "emb": emb });
-                    match conn.execute_prepared_returning_count(&mut stmt, &params) {
+                    let mut res = conn.execute_prepared_returning_count(&mut stmt, &params);
+                    if kind == ZeroKind::Content && matches!(res, Ok(0)) {
+                        res = match summary_stmt
+                            .get_or_insert_with(|| conn.prepare(SUMMARY_UNIT_SET_CYPHER))
+                        {
+                            Ok(s) => conn.execute_prepared_returning_count(s, &params),
+                            Err(e) => Err(Error::Ipc(e.to_string())),
+                        };
+                    }
+                    match res {
                         Ok(n) if n > 0 => ok.push((kind, uuid.clone())),
                         // Guard no longer matches: the row changed or vanished in the gap.
                         Ok(_) => eprintln!(

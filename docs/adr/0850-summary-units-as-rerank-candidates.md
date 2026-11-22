@@ -118,8 +118,11 @@ embedded with the passage embedder:
 - Up to 10 summaries share the rerank head with passages (they displace passages rather than grow the
   head), so rerank latency is unchanged; each summaries search adds one ANN probe.
 - A replay embed failure on a summary row is recorded in the zero-vector record under kind `content`,
-  keyed by the summary uuid; a group purge of `SummaryUnit` clears no zero-vector kinds. Minor and
-  repairable.
+  keyed by the summary uuid; a group purge of `SummaryUnit` clears no zero-vector kinds.
+  `knowledge_reembed_missing` (ADR-0809) repairs such an entry: for kind `content` it reads the source
+  text from `SummaryUnit` when no `Episodic` row has the uuid, writes the vector there, and drops and
+  rebuilds `summary_unit_content_embedding_idx` together with the episode index. Without that, the
+  entry would be counted `skipped_no_source` as stale and removed, leaving the zero vector in place.
 
 ## Known gaps and follow-ups
 

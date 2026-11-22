@@ -42,7 +42,10 @@ pub enum IndexKind {
     Name,
     /// `entity_summary_embedding_idx` on `Entity.summary_embedding`.
     Summary,
-    /// `episodic_content_embedding_idx` on `Episodic.content_embedding`.
+    /// `episodic_content_embedding_idx` on `Episodic.content_embedding`, together with
+    /// `summary_unit_content_embedding_idx` on `SummaryUnit.content_embedding` (issue #850): both
+    /// columns are the `content` kind of the zero-vector record, so a repair of that kind may
+    /// write either table and drops and rebuilds both indexes.
     Content,
     /// `edge_fact_embedding_idx` on `RelatesToNode_.fact_embedding`.
     Fact,
@@ -98,7 +101,10 @@ impl IndexDdl for DbIndexDdl {
         match kind {
             IndexKind::Name => conn.drop_entity_name_embedding_index(),
             IndexKind::Summary => conn.drop_entity_summary_embedding_index(),
-            IndexKind::Content => conn.drop_episodic_content_embedding_index(),
+            IndexKind::Content => {
+                conn.drop_episodic_content_embedding_index();
+                conn.drop_summary_unit_content_embedding_index();
+            }
             IndexKind::Fact => conn.drop_edge_fact_embedding_index(),
         }
         Ok(())
@@ -112,7 +118,10 @@ impl IndexDdl for DbIndexDdl {
         match kind {
             IndexKind::Name => conn.create_entity_name_embedding_index(),
             IndexKind::Summary => conn.create_entity_summary_embedding_index(),
-            IndexKind::Content => conn.create_episodic_content_embedding_index(),
+            IndexKind::Content => {
+                conn.create_episodic_content_embedding_index()?;
+                conn.create_summary_unit_index()
+            }
             IndexKind::Fact => conn.create_edge_fact_embedding_index(),
         }
     }

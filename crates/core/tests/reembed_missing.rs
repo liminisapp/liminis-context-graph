@@ -432,6 +432,60 @@ async fn repairs_all_four_kinds() {
 
 /// AC3, SC-004: `dry_run` counts, makes no embedder call, writes nothing; the real run's
 /// `candidates` match.
+/// Issue #850: replay records a summary unit's zero `content_embedding` under the `content` kind,
+/// keyed by the summary's uuid. It must be repaired like an episode's, not taken for a stale entry
+/// (no `Episodic` row has that uuid) and dropped from the record with the zero vector left behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn repairs_a_summary_units_content_vector() {
+    let fx = fixture();
+    let conn = fx.db.connect().unwrap();
+    conn.insert_episodic(&episode("ep1", G, "episode content one"))
+        .unwrap();
+    conn.insert_summary_unit(&lcg_core::summary_units::SummaryUnitRow {
+        uuid: "su1".to_string(),
+        group_id: G.to_string(),
+        episode_uuid: "ep1".to_string(),
+        content: "a summary of the first episode".to_string(),
+        content_embedding: zero(),
+        created_at: TS.to_string(),
+    })
+    .unwrap();
+    record(&fx.db, G, ZeroKind::Content, "ep1");
+    record(&fx.db, G, ZeroKind::Content, "su1");
+    conn.build_indices_and_constraints().unwrap();
+    fx.state.indices_built.store(true, Ordering::SeqCst);
+    drop(conn);
+
+    let v = reembed_missing(
+        Arc::clone(&fx.state),
+        params(G, &[ZeroKind::Content], false),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(kind_counts(&v, "content"), (2, 2, 0, 0), "{v}");
+    assert!(v.get("index_rebuild_errors").is_none(), "{v}");
+    assert_eq!(count(&fx.db, G), 0, "both entries repaired, none dropped");
+
+    assert!(finds(&fx.db, ZeroKind::Content, "episode content one", "ep1").await);
+    let q = emb("a summary of the first episode").await;
+    let hits = fx
+        .db
+        .connect()
+        .unwrap()
+        .vector_search_summary_units(&q, Some(&[G]), 5, 5)
+        .unwrap();
+    let top = hits
+        .first()
+        .expect("the summary index is rebuilt and searchable");
+    assert_eq!(top.uuid, "su1");
+    assert!(
+        top.distance.abs() < 1e-3,
+        "repaired vector: {}",
+        top.distance
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dry_run_has_no_side_effects_and_matches_real_candidates() {
     let fx = fixture();

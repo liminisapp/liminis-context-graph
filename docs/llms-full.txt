@@ -2798,7 +2798,7 @@ Parameters:
 | Param | Type | Notes |
 |-------|------|-------|
 | `group_id` | string, required | The group whose recorded rows are repaired. Subject to `--writable-groups`: an unlisted group is refused before any embedder call, `dry_run` included. |
-| `kinds` | array, optional | Any non-empty subset of `name` (entity name), `summary` (entity summary), `fact` (relationship fact), `content` (episode content). Default: all four. An invalid value is rejected, naming the valid ones. |
+| `kinds` | array, optional | Any non-empty subset of `name` (entity name), `summary` (entity summary), `fact` (relationship fact), `content` (episode content, and the content of a summary unit, issue #850). Default: all four. An invalid value is rejected, naming the valid ones. |
 | `dry_run` | bool, default `false` | Report per-kind `candidates` only: no embedder call, no write, no record change, no index change. |
 
 Result:
