@@ -47,6 +47,7 @@ pub const FEATURES: &[&str] = &[
     "origin",
     "process_document",
     "walk",
+    "walk_provenance",
     "writable_groups",
 ];
 

@@ -803,7 +803,15 @@ pub fn registry() -> Vec<ToolSpec> {
                            `invalid_at`, `score`, `direction_matched`, `signature_mismatch`), \
                            the resolved `start_entities`, `completion_hop_ran`, and `facts_text` \
                            — typed, deduplicated facts ready to hand to a reader. If `start` \
-                           resolves to nothing, `found` is false. Read-only.",
+                           resolves to nothing, `found` is false. Set `include_provenance: true` \
+                           to cite sources: each edge then also carries `episodes` (UUIDs of the \
+                           LIVE producing episodes only — superseded or deleted ones are never \
+                           listed — at most 20), `episodes_truncated` (true when more than 20 \
+                           live producers exist) and `source_files` (the distinct sources of the \
+                           live producers: each episode's `source_file`, or for a legacy episode \
+                           its stored `source_description` unsplit; an edge with no recorded \
+                           producing episodes falls back to its legacy sources). Without the \
+                           flag the response is unchanged. Read-only.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -836,7 +844,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "answer_type": {"type": "string", "description": "An entity type name, or \"value\". On the last hop (not in history mode) far ends of this type are preferred; if the hops end short of it a completion hop runs. With \"value\" (or when absent), the last hop also offers the frontier entities' own literal-valued facts (self-loops such as a budget or price) as candidates."},
                         "query": {"type": "string", "description": "The question text; ranks the completion hop (which does not run without it)."},
                         "mode": {"type": "string", "enum": ["single", "list", "history"], "default": "single", "description": "single: top 3 per hop; list: top 10; history: top 10 and includes invalidated edges."},
-                        "direction_mode": {"type": "string", "enum": ["soft", "hard"], "default": "soft", "description": "soft: matching edges get a +0.05 ranking bonus; hard: only matching edges are kept (falls back to all if no moving edge matches). A frontier entity's own self-loop (a value fact, offered on the last hop of a value walk) matches either direction: it gets the soft bonus, is always kept in hard mode, and never decides the fallback."}
+                        "direction_mode": {"type": "string", "enum": ["soft", "hard"], "default": "soft", "description": "soft: matching edges get a +0.05 ranking bonus; hard: only matching edges are kept (falls back to all if no moving edge matches). A frontier entity's own self-loop (a value fact, offered on the last hop of a value walk) matches either direction: it gets the soft bonus, is always kept in hard mode, and never decides the fallback."},
+                        "include_provenance": {"type": "boolean", "default": false, "description": "When true, each returned edge also carries `episodes` (UUIDs of its LIVE producing episodes only, at most 20), `episodes_truncated` (true when more than 20 live producers exist) and `source_files` (distinct source files of all live producers; legacy episodes and edges fall back to their stored source description). Superseded or deleted episodes are never listed. Default false: the response is unchanged."}
                     },
                     "required": ["start"]
                 })
@@ -2638,6 +2647,21 @@ mod walk_tool_tests {
         );
         assert!(d.contains("answer_type"), "step 2 answer type");
         assert!(d.contains("knowledge_search_passages"), "step 3 fallback");
+    }
+
+    #[test]
+    fn walk_documents_include_provenance() {
+        let t = tool("knowledge_walk");
+        let prop = &(t.input_schema)()["properties"]["include_provenance"];
+        assert_eq!(prop["type"], "boolean");
+        assert_eq!(prop["default"], false);
+        let pd = prop["description"].as_str().unwrap();
+        for kw in ["LIVE", "20", "episodes_truncated", "source_files"] {
+            assert!(pd.contains(kw), "schema description lacks {kw}");
+        }
+        for kw in ["include_provenance", "LIVE", "20", "episodes_truncated"] {
+            assert!(t.description.contains(kw), "tool description lacks {kw}");
+        }
     }
 
     #[test]
