@@ -217,7 +217,19 @@ pub fn registry() -> Vec<ToolSpec> {
                            (primary + external). Counts reflect live episodes now. `origins` \
                            keeps only entities mentioned by an episode of one of those origins; \
                            over-fetched and post-filtered, so fewer than `num_results` can come \
-                           back.",
+                           back. Provenance (issue #857): by default each node's \
+                           `episode_uuids` and `source_descriptions` are EMPTY here (unlike \
+                           `knowledge_get_entity_neighbors` / `knowledge_get_entities_by_source`, \
+                           which fill them) and there is no `source_files`. With \
+                           `include_episodes: true` they are filled from the entity's LIVE \
+                           (not superseded) mentioning episodes, newest first, capped at 50 per \
+                           entity: `episode_uuids` and `source_descriptions` are index-aligned; \
+                           `source_files` is the de-duplicated stored source files (episodes \
+                           with none recorded are omitted, so it is not aligned); \
+                           `episodes_truncated: true` appears only when the cap dropped \
+                           episodes. `support` still counts every live document, not just the \
+                           capped list. Fetch the episodes themselves with \
+                           `knowledge_get_episodes` and `uuids`.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -231,7 +243,15 @@ pub fn registry() -> Vec<ToolSpec> {
                             "description": "Maximum number of entities to return."
                         },
                         "min_similarity": min_similarity_prop(),
-                        "origins": origins_prop()
+                        "origins": origins_prop(),
+                        "include_episodes": {
+                            "type": "boolean", "default": false,
+                            "description": "When true, fill each node's `episode_uuids`, \
+                                             `source_descriptions` and `source_files` from its \
+                                             live mentioning episodes (newest first, at most 50; \
+                                             `episodes_truncated: true` when capped). Default \
+                                             false: those fields stay empty / absent."
+                        }
                     },
                     "required": ["query"]
                 })
@@ -386,7 +406,10 @@ pub fn registry() -> Vec<ToolSpec> {
                            set via `knowledge_process_chunk`/`knowledge_add_episode`. Page \
                            with `cursor`/`next_cursor`, drop large fields such as `content` \
                            with `fields`, and fetch e.g. every chunk of one document with \
-                           `name_prefix` (issue #667).",
+                           `name_prefix` (issue #667). `uuids` (issue #857) returns exactly \
+                           those episodes (still group-scoped; unknown uuids are simply absent, \
+                           an empty array returns nothing); pair it with `knowledge_find_entities` \
+                           `include_episodes`.",
             scope: Scope::Read,
             input_schema: || {
                 json!({
@@ -400,7 +423,14 @@ pub fn registry() -> Vec<ToolSpec> {
                         },
                         "last_n": {
                             "type": "integer", "minimum": 1, "default": 50,
-                            "description": "Page size: number of most recent episodes to return."
+                            "description": "Page size: number of most recent episodes to return. \
+                                             With `uuids` the default is the number of uuids."
+                        },
+                        "uuids": {
+                            "type": "array", "items": {"type": "string"},
+                            "description": "Only these episodes (by uuid), within the group \
+                                             scope. Unknown uuids are absent, not an error; an \
+                                             empty array returns no episodes."
                         },
                         "name_prefix": {
                             "type": "string",
@@ -528,8 +558,15 @@ pub fn registry() -> Vec<ToolSpec> {
                            default unless the service sets LCG_PASSAGE_SEARCH_MODE) or `hybrid` \
                            (BM25 over episode text fused with the vector ranking by weighted \
                            Reciprocal Rank Fusion, the lexical list weighing less, issue #789); \
-                           in hybrid mode `score` is the fused rank score, not a cosine, and \
-                           `similarity` carries the cosine where the vector retriever matched. \
+                           in hybrid mode `score` is a rank-only fusion value (at most about \
+                           0.0233), not a relevance and not comparable across queries; \
+                           `similarity` carries the cosine where the vector retriever matched \
+                           and is the relevance signal. `min_score` floors the vector leg's \
+                           cosine only, so lexical (BM25) hits still appear below it. Each \
+                           hybrid result carries `legs` (`dense`, `lexical` or `both`: which \
+                           retrievers found it; `lexical` means no `similarity`) and, in \
+                           single-query hybrid, `lexical_score` (the raw BM25 value when the \
+                           lexical leg matched); both are omitted in `vector` mode. \
                            `belief_aware` (default on in both modes; send `false` to opt out, or \
                            set LCG_PASSAGE_BELIEF_AWARE=off on the service to restore the old \
                            default) ranks a derived page below the primary note it cites and a \
@@ -2251,6 +2288,37 @@ mod tests {
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_entity_types"));
         assert!(!is_streaming_method("knowledge_status"));
+    }
+
+    /// Issue #857: `include_episodes` on `find_entities` and `uuids` on `get_episodes` are
+    /// advertised, and the descriptions state when the provenance fields are empty vs filled.
+    #[test]
+    fn provenance_params_are_advertised_and_described() {
+        let r = registry();
+        let find = r
+            .iter()
+            .find(|t| t.name == "knowledge_find_entities")
+            .unwrap();
+        let props = &(find.input_schema)()["properties"];
+        assert_eq!(props["include_episodes"]["type"], "boolean");
+        for needle in [
+            "include_episodes",
+            "episode_uuids",
+            "source_descriptions",
+            "source_files",
+            "episodes_truncated",
+            "EMPTY",
+        ] {
+            assert!(find.description.contains(needle), "missing {needle}");
+        }
+        let eps = r
+            .iter()
+            .find(|t| t.name == "knowledge_get_episodes")
+            .unwrap();
+        let props = &(eps.input_schema)()["properties"];
+        assert_eq!(props["uuids"]["type"], "array");
+        assert_eq!(props["uuids"]["items"]["type"], "string");
+        assert!(eps.description.contains("uuids"));
     }
 
     /// Issue #667: the two bulk reads advertise paging, projection and prefix filtering, and

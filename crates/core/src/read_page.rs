@@ -168,6 +168,18 @@ pub fn shape_hash(
     hex_encode(&Sha256::digest(canonical.as_bytes()))
 }
 
+/// Shape of a `knowledge_get_episodes` query narrowed by a `uuids` filter (issue #857): the base
+/// [`shape_hash`] folded with the sorted, de-duplicated uuid set, so a cursor minted under one
+/// `uuids` set is rejected under another. Used only when `uuids` is present, so [`shape_hash`] —
+/// and every live cursor — is untouched.
+pub fn episodes_uuids_shape_hash(base: &str, uuids: &[String]) -> String {
+    let mut u: Vec<&str> = uuids.iter().map(String::as_str).collect();
+    u.sort_unstable();
+    u.dedup();
+    let canonical = json!([base, "uuids", u]).to_string();
+    hex_encode(&Sha256::digest(canonical.as_bytes()))
+}
+
 /// Shape of a `knowledge_lint` query (issue #755). Covers everything that changes which findings
 /// exist or in what order: the groups, the selected categories, the near-duplicate threshold, the
 /// minimum-mentions bound and the normalised single-valued relation set. The page `limit` is
@@ -344,6 +356,18 @@ mod tests {
             shape_hash(EPISODES_TAG, Some(&["g".to_string()]), None, None),
             hex_encode(&Sha256::digest(canonical.as_bytes()))
         );
+    }
+
+    #[test]
+    fn episodes_uuids_shape_is_set_based_and_leaves_base_untouched() {
+        let base = shape_hash(EPISODES_TAG, Some(&["g".to_string()]), None, None);
+        let a = episodes_uuids_shape_hash(&base, &["x".to_string(), "y".to_string()]);
+        let reordered =
+            episodes_uuids_shape_hash(&base, &["y".to_string(), "x".to_string(), "x".to_string()]);
+        let other = episodes_uuids_shape_hash(&base, &["x".to_string()]);
+        assert_eq!(a, reordered);
+        assert_ne!(a, other);
+        assert_ne!(a, base);
     }
 
     #[test]

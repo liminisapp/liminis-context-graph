@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{json, Value};
 
-use crate::db::Conn;
+use crate::db::{Conn, MentionRow};
 use crate::error::Error;
 use crate::origin::{EpisodeOriginInfo, Origin, SupportTally};
 
@@ -33,6 +33,46 @@ pub struct EdgeKey {
     pub name: String,
 }
 
+/// Maximum number of mentioning episodes `find_entities` reports per entity when
+/// `include_episodes` is set (issue #857). A fixed service default, not a request parameter.
+pub const ENTITY_EPISODE_CAP: usize = 50;
+
+/// One live episode mentioning an entity, as reported by `include_episodes`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveEpisode {
+    pub uuid: String,
+    pub source_description: String,
+    /// The stored `source_file`; `None` on legacy rows.
+    pub source_file: Option<String>,
+    pub created_at_us: i64,
+}
+
+/// The capped, ordered live mentioning episodes of one entity (issue #857).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EpisodeProvenance {
+    /// Newest first (`created_at DESC, uuid DESC`), at most [`ENTITY_EPISODE_CAP`].
+    pub episodes: Vec<LiveEpisode>,
+    /// `true` when the cap removed at least one live episode.
+    pub truncated: bool,
+}
+
+impl EpisodeProvenance {
+    /// Sorts `live` newest-first with a total order, then applies `cap`.
+    pub fn from_live(mut live: Vec<LiveEpisode>, cap: usize) -> Self {
+        live.sort_by(|a, b| {
+            b.created_at_us
+                .cmp(&a.created_at_us)
+                .then_with(|| b.uuid.cmp(&a.uuid))
+        });
+        let truncated = live.len() > cap;
+        live.truncate(cap);
+        Self {
+            episodes: live,
+            truncated,
+        }
+    }
+}
+
 /// The `support` annotation of one returned edge or entity, and whether it passes the filter.
 #[derive(Debug, Clone)]
 pub struct Support {
@@ -40,6 +80,8 @@ pub struct Support {
     pub corroboration: usize,
     /// Always `true` when no `origins` filter was given.
     pub matches: bool,
+    /// Live mentioning episodes of an entity; `Some` only when requested (issue #857).
+    pub episodes: Option<EpisodeProvenance>,
 }
 
 impl Support {
@@ -47,6 +89,31 @@ impl Support {
     pub fn annotate(&self, v: &mut Value) {
         v["support"] = self.support.clone();
         v["corroboration"] = json!(self.corroboration);
+    }
+
+    /// Fills the provenance fields of a serialized entity (issue #857); a no-op unless episodes
+    /// were requested. `episode_uuids` and `source_descriptions` are index-aligned and not
+    /// de-duplicated (as on `get_entity_neighbors`); `source_files` is a de-duplicated list in
+    /// first-appearance order that omits episodes with no stored file, so it is *not* aligned.
+    /// `episodes_truncated` is written only when the cap removed something.
+    pub fn annotate_provenance(&self, v: &mut Value) {
+        let Some(p) = &self.episodes else { return };
+        let mut files: Vec<&str> = Vec::new();
+        for f in p.episodes.iter().filter_map(|e| e.source_file.as_deref()) {
+            if !f.is_empty() && !files.contains(&f) {
+                files.push(f);
+            }
+        }
+        v["episode_uuids"] = json!(p.episodes.iter().map(|e| &e.uuid).collect::<Vec<_>>());
+        v["source_descriptions"] = json!(p
+            .episodes
+            .iter()
+            .map(|e| &e.source_description)
+            .collect::<Vec<_>>());
+        v["source_files"] = json!(files);
+        if p.truncated {
+            v["episodes_truncated"] = json!(true);
+        }
     }
 }
 
@@ -138,6 +205,7 @@ pub fn edge_support(
                 support: tally.to_json(),
                 corroboration: tally.corroboration(),
                 matches,
+                episodes: None,
             },
         );
     }
@@ -152,11 +220,42 @@ pub fn entity_support(
     filter: Option<&[Origin]>,
     as_of_us: i64,
 ) -> Result<HashMap<String, Support>, Error> {
-    let rows = conn.entity_mention_origins(entity_uuids)?;
+    entity_support_with_episodes(conn, entity_uuids, filter, as_of_us, false)
+}
+
+/// [`entity_support`], optionally also collecting each entity's live mentioning episodes
+/// (`collect_episodes`, issue #857). Both come from the same single batched mention query, so
+/// the flag adds no per-entity lookup; `support` is always computed over the full uncapped set.
+pub fn entity_support_with_episodes(
+    conn: &Conn<'_>,
+    entity_uuids: &[String],
+    filter: Option<&[Origin]>,
+    as_of_us: i64,
+    collect_episodes: bool,
+) -> Result<HashMap<String, Support>, Error> {
+    let rows = conn.entity_mention_rows(entity_uuids)?;
+    Ok(support_from_mention_rows(
+        &rows,
+        entity_uuids,
+        filter,
+        as_of_us,
+        collect_episodes,
+    ))
+}
+
+fn support_from_mention_rows(
+    rows: &[MentionRow],
+    entity_uuids: &[String],
+    filter: Option<&[Origin]>,
+    as_of_us: i64,
+    collect_episodes: bool,
+) -> HashMap<String, Support> {
     let mut tallies: HashMap<&str, SupportTally> = HashMap::new();
+    let mut live_eps: HashMap<&str, Vec<LiveEpisode>> = HashMap::new();
     let mut matched: HashSet<&str> = HashSet::new();
     let mut mentioned: HashSet<&str> = HashSet::new();
-    for (entity, ep, info) in &rows {
+    for r in rows {
+        let (entity, ep, info) = (&r.entity_uuid, &r.episode_uuid, &r.info);
         mentioned.insert(entity.as_str());
         if !info.is_live(as_of_us) {
             continue;
@@ -165,6 +264,17 @@ pub fn entity_support(
             .entry(entity.as_str())
             .or_default()
             .add(info.origin, info.doc_id.as_deref(), ep);
+        if collect_episodes {
+            live_eps
+                .entry(entity.as_str())
+                .or_default()
+                .push(LiveEpisode {
+                    uuid: ep.clone(),
+                    source_description: r.source_description.clone(),
+                    source_file: r.source_file.clone(),
+                    created_at_us: r.created_at_us,
+                });
+        }
         if passes(filter, info.origin) {
             matched.insert(entity.as_str());
         }
@@ -177,14 +287,132 @@ pub fn entity_support(
         } else {
             passes(filter, Origin::Primary)
         };
+        let episodes = collect_episodes.then(|| {
+            EpisodeProvenance::from_live(
+                live_eps.remove(u.as_str()).unwrap_or_default(),
+                ENTITY_EPISODE_CAP,
+            )
+        });
         out.insert(
             u.clone(),
             Support {
                 support: tally.to_json(),
                 corroboration: tally.corroboration(),
                 matches,
+                episodes,
             },
         );
     }
-    Ok(out)
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(
+        entity: &str,
+        ep: &str,
+        created: i64,
+        superseded: Option<i64>,
+        file: Option<&str>,
+    ) -> MentionRow {
+        MentionRow {
+            entity_uuid: entity.to_string(),
+            episode_uuid: ep.to_string(),
+            info: EpisodeOriginInfo {
+                origin: Origin::Primary,
+                doc_id: None,
+                superseded_at_us: superseded,
+                group_id: "g".to_string(),
+            },
+            source_description: format!("desc-{ep}"),
+            source_file: file.map(str::to_string),
+            created_at_us: created,
+        }
+    }
+
+    fn uuids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn flag_off_collects_no_episodes() {
+        let rows = vec![row("e", "a", 1, None, None)];
+        let out = support_from_mention_rows(&rows, &uuids(&["e"]), None, 100, false);
+        assert!(out["e"].episodes.is_none());
+        let mut v = json!({"episode_uuids": [], "source_descriptions": []});
+        out["e"].annotate_provenance(&mut v);
+        assert_eq!(v, json!({"episode_uuids": [], "source_descriptions": []}));
+    }
+
+    #[test]
+    fn live_only_newest_first_aligned_descriptions() {
+        let rows = vec![
+            row("e", "a", 10, None, Some("a.md")),
+            row("e", "b", 20, None, Some("b.md")),
+            row("e", "c", 30, Some(50), Some("c.md")), // superseded at 50 <= now 100
+        ];
+        let out = support_from_mention_rows(&rows, &uuids(&["e"]), None, 100, true);
+        let mut v = json!({});
+        out["e"].annotate_provenance(&mut v);
+        assert_eq!(v["episode_uuids"], json!(["b", "a"]));
+        assert_eq!(v["source_descriptions"], json!(["desc-b", "desc-a"]));
+        assert_eq!(v["source_files"], json!(["b.md", "a.md"]));
+        assert!(v.get("episodes_truncated").is_none());
+    }
+
+    #[test]
+    fn source_files_dedup_and_omit_missing() {
+        let rows = vec![
+            row("e", "a", 10, None, Some("x.md")),
+            row("e", "b", 20, None, None),
+            row("e", "c", 30, None, Some("x.md")),
+            row("e", "d", 40, None, Some("")),
+        ];
+        let out = support_from_mention_rows(&rows, &uuids(&["e"]), None, 100, true);
+        let mut v = json!({});
+        out["e"].annotate_provenance(&mut v);
+        assert_eq!(v["episode_uuids"].as_array().unwrap().len(), 4);
+        assert_eq!(v["source_files"], json!(["x.md"]));
+    }
+
+    #[test]
+    fn cap_truncates_deterministically_and_support_is_uncapped() {
+        let n = ENTITY_EPISODE_CAP + 7;
+        // Identical created_at: ties break on uuid DESC.
+        let rows: Vec<MentionRow> = (0..n)
+            .map(|i| row("e", &format!("ep{i:03}"), 5, None, None))
+            .collect();
+        let out = support_from_mention_rows(&rows, &uuids(&["e"]), None, 100, true);
+        let p = out["e"].episodes.as_ref().unwrap();
+        assert_eq!(p.episodes.len(), ENTITY_EPISODE_CAP);
+        assert!(p.truncated);
+        assert_eq!(p.episodes[0].uuid, format!("ep{:03}", n - 1));
+        assert_eq!(out["e"].support["primary"], json!(n));
+        let mut v = json!({});
+        out["e"].annotate_provenance(&mut v);
+        assert_eq!(v["episodes_truncated"], json!(true));
+    }
+
+    #[test]
+    fn exactly_at_cap_is_not_truncated() {
+        let rows: Vec<MentionRow> = (0..ENTITY_EPISODE_CAP)
+            .map(|i| row("e", &format!("ep{i:03}"), i as i64, None, None))
+            .collect();
+        let out = support_from_mention_rows(&rows, &uuids(&["e"]), None, 100, true);
+        assert!(!out["e"].episodes.as_ref().unwrap().truncated);
+    }
+
+    #[test]
+    fn entity_without_live_episodes_gets_empty_lists() {
+        let rows = vec![row("e", "a", 1, Some(2), None)];
+        let out = support_from_mention_rows(&rows, &uuids(&["e", "other"]), None, 100, true);
+        for k in ["e", "other"] {
+            let mut v = json!({});
+            out[k].annotate_provenance(&mut v);
+            assert_eq!(v["episode_uuids"], json!([]));
+            assert!(v.get("episodes_truncated").is_none());
+        }
+    }
 }

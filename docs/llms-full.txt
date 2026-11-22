@@ -1149,8 +1149,8 @@ during a rebuild and under any `--writable-groups` policy.
 
 ```json
 {"server_version": "0.19.1", "protocol_version": 1,
- "features": ["chunk_supersede", "hybrid_passage_search", "lint", "origin", "process_document",
-              "walk", "writable_groups"],
+ "features": ["chunk_supersede", "entity_provenance", "hybrid_passage_search", "lint", "origin",
+              "process_document", "walk", "writable_groups"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -1475,6 +1475,46 @@ way (a non-number is an invalid-params error), but `min_similarity` has **no def
 or `null` means no floor and results are identical to before, apart from the added `search`
 object — and it acts before fusion and per path rather than as a post-filter on a single list.
 
+### Entity provenance: which episodes mention an entity (issue #857, feature `entity_provenance`)
+
+`EntityRow` carries `episode_uuids` and `source_descriptions`, but not every read fills them. Until
+#857 the same field meant different things on different methods, so they are spelled out here:
+
+| Method | `episode_uuids` / `source_descriptions` | `source_files` | Superseded episodes |
+|---|---|---|---|
+| `knowledge_find_entities` (default) | **Always `[]`** — not computed | absent | n/a |
+| `knowledge_find_entities` with `include_episodes: true` | Filled | Filled | **Excluded** (live only) |
+| `knowledge_get_entity_neighbors` | Filled | absent | **Included** |
+| `knowledge_get_entities_by_source` | Filled | absent | Included |
+
+`knowledge_find_entities` takes an opt-in boolean **`include_episodes`** (default `false`; any
+non-boolean is a validation error). Without it the response is byte-for-byte what it was before:
+`episode_uuids` and `source_descriptions` are `[]` and no new keys appear. With it, each node's
+fields come from the entity's **live** mentioning episodes — the same predicate `support` uses
+(not superseded at the read instant) — computed from the single batched mention query that
+already produces `support`, so there is no extra query per hit:
+
+- `episode_uuids` — newest first (`created_at` descending, `uuid` descending as tiebreaker, the
+  order `knowledge_get_episodes` uses), so a repeated call returns the same subset.
+- `source_descriptions` — index-aligned with `episode_uuids`; not de-duplicated.
+- `source_files` — the de-duplicated stored `source_file` values (#853) in order of first
+  appearance. Episodes with no recorded source file (older data) are omitted, so this list is
+  **not** index-aligned with `episode_uuids`. Present only with the flag.
+- `episodes_truncated` — `true` only when the per-entity cap (fixed at **50**, not a request
+  parameter) removed at least one live episode; absent otherwise.
+
+`support` and `corroboration` are unchanged by the flag and always count **every** live document,
+not just the capped list; because `support` counts distinct documents and the list counts
+episodes, the two need not agree. `get_entity_neighbors` and `get_entities_by_source` do not
+filter superseded episodes (unchanged), so a `find_entities` hit's `episode_uuids` equals the
+**live subset** of what `get_entity_neighbors` reports for the same entity. Also note that the
+live predicate here does not exclude pending document revisions, which
+`get_entities_by_source` does.
+
+To turn the UUIDs into episodes, call `knowledge_get_episodes` with `uuids` (see the paging
+table below) — two calls from a free-text query to every mentioning episode.
+See [ADR-0857](adr/0857-find-entities-episode-provenance.md).
+
 ### Hybrid passage search (`knowledge_search_passages`, issue #789)
 
 `knowledge_search_passages` ranks episode passages in one of two modes, chosen per request with
@@ -1483,7 +1523,7 @@ object — and it acts before fusion and per path rather than as a post-filter o
 | `mode` | Ranking | `score` | `similarity` |
 |---|---|---|---|
 | `vector` | Vector cosine, then belief-aware re-ranking by default (see `belief_aware`); with `belief_aware: false` it is cosine only, exactly the behaviour before #789. | Cosine similarity (`1 - distance`); a demoted passage's score is lowered to just below the passage it ranks under. | Not present. |
-| `hybrid` | BM25 over episode text (the existing `episode_content` full-text index) and the vector ranking, fused with **weighted** Reciprocal Rank Fusion (`weight/(rank+60)` per list; the lexical list has weight 0.4, the vector list 1.0), then belief-aware re-ranking (see `belief_aware`). | The **fused rank score** (at most about 0.023). It orders results; it is not a cosine and not comparable across queries. | Cosine similarity where the vector retriever matched the passage; absent for a passage only the lexical retriever found. |
+| `hybrid` | BM25 over episode text (the existing `episode_content` full-text index) and the vector ranking, fused with **weighted** Reciprocal Rank Fusion (`weight/(rank+60)` per list; the lexical list has weight 0.4, the vector list 1.0), then belief-aware re-ranking (see `belief_aware`). | The **fused rank score** (at most about 0.0233). It orders results; it is a rank-only fusion value, not a relevance, not a cosine and not comparable across queries. | Cosine similarity where the vector retriever matched the passage; absent for a passage only the lexical retriever found. **This is the relevance signal.** |
 
 - **`mode`** is optional. Omitted, the service default applies: the `LCG_PASSAGE_SEARCH_MODE`
   environment variable (`vector` or `hybrid`; an unrecognised value warns on stderr and falls back
@@ -1513,9 +1553,25 @@ object — and it acts before fusion and per path rather than as a post-filter o
   requests that omit `belief_aware`; an explicit request value always wins. With the switch off,
   `hybrid` gives weighted RRF without the rules, which is not the pre-#806 hybrid default (rules on).
   A non-boolean value is an invalid-params error. The removed `top_rank_bonus` parameter is ignored.
+- **`legs`** and **`lexical_score`** (issue #871, additive, hybrid mode only): each hybrid passage
+  carries `legs`, which retrievers found it: `dense` (vector only), `lexical` (BM25 only) or
+  `both` (at any rank in each list). `dense` and `both` hold exactly when `similarity` is present,
+  so `legs: "lexical"` is the documented form of the older "`similarity` is absent" convention.
+  In single-query hybrid `lexical_score` is the raw BM25 value when the lexical leg matched, and is
+  omitted otherwise. With `queries` (variants), `legs` is the **union** over every query that
+  retrieved the passage (`dense` through one query plus `lexical` through another is `both`); the
+  vector side counts only candidates at or above `min_score`. `lexical_score` is not set with
+  `queries`, because BM25 values from different queries are not comparable. If the full-text
+  index is unavailable, hybrid falls back to vector-only and every hit is `dense`. Both fields are
+  omitted in `vector` mode, so a vector-mode response is unchanged. A passage that reached the
+  result only through an `expand` HyDE variant (a vector-only search) carries no `legs`; a passage
+  keeps the `legs` of the first stage list that returned it. `legs` does not change ranking,
+  scores or membership.
 - **`min_score`** (default `LCG_SEARCH_MIN_SCORE`, else 0.5; clamped 0–1) floors the *vector
   retriever's* cosine similarity before fusion, as `min_similarity` does for entity search. A
-  passage found only by the lexical retriever is **not** excluded by it. This is a deliberate change
+  passage found only by the lexical retriever is **not** excluded by it, so hybrid mode can still
+  return hits for an off-topic query (E15: 25 of 34 off-topic queries, against 13 in `vector`
+  mode); use `similarity` and `legs` to tell them apart. This is a deliberate change
   in meaning from `vector` mode, where `min_score` filters the single list. When a request omits
   `min_score` (or sends `null` or a non-number), the operator-configured default applies; an
   explicit number, including `0.0`, always wins. The effective default is reported by
@@ -2086,6 +2142,9 @@ on by default in both modes since #806; `belief_aware: false` opts out) runs **o
 simply absent). `score` is the **fused rank score** (rank-ordered, so it stays monotone through belief
 demotion), and `similarity` is the best cosine across the vector legs that matched the passage (absent for a
 lexical-only hit), exactly as in hybrid mode. `min_score` floors each query's vector list before fusion.
+In hybrid mode each passage also carries `legs`, the union of the legs over every query that retrieved it
+(see [Hybrid passage search](#hybrid-passage-search-knowledge_search_passages-issue-789)); `lexical_score` is not
+set with `queries`.
 Without `queries` (or with `[]` / `null`) the response is byte-for-byte what it was before: no
 `matched_queries` key.
 
@@ -2222,6 +2281,7 @@ additive parameters; with none of them the response is exactly `{<collection>, c
 | `cursor` | both | Opaque keyset cursor. Send `""` for the first page, then send back each response's `next_cursor` until it is `null`. |
 | `fields` (array) | both | Return only these keys per item. Episodes: `uuid, name, group_id, created_at, ingested_at, source, source_description, content, valid_at, entity_edges, attributes, superseded_at, superseded_by, superseded_by_kind, supersession_reason, doc_id, source_file, chunk_id`. Entities: `uuid, name, group_id, labels, kind, created_at, ingested_at, summary, attributes, episode_uuids, source_descriptions`. Unknown or empty `fields` is an error; embeddings are never returned. |
 | `name_prefix` | both | Names starting with this prefix, matched literally. Case-insensitive for entities (via Cypher `lower()`, so non-ASCII folds only as far as lbug does); case-sensitive for episodes. |
+| `uuids` (array of strings) | episodes | Return exactly these episodes (issue #857), still within the `group_ids` scope: a uuid in another group, or an unknown one, is simply absent — never an error. An empty array returns no episodes (not all). Duplicates return each episode once. Superseded episodes are returned like any other. Combines with `name_prefix`; `last_n` defaults to the number of uuids (so 50+ uuids are not truncated) and an explicit `last_n` still caps the result. `uuids` alone does not enable paging; a `cursor` is bound to the `uuids` set it was minted under. A non-array or non-string item is a validation error. |
 
 `next_cursor` appears only when the request contained `cursor`, `fields` or `name_prefix`; it is
 `null` on the last page. Order is deterministic (episodes newest first with a `uuid` tiebreaker;
@@ -8327,6 +8387,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0853](0853-episode-source-identity-and-exact-source-matching.md) | Episode Source Identity and Exact Source Matching | 2026-11-21 |
 | [0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md) | `knowledge_capabilities` — Protocol Version, Feature Registry and a Self-Describing Socket | 2026-11-21 |
 | [0855](0855-health-check-ready-for-reads.md) | `health_check` Gains `ready_for_reads`; Documents `ok` / `healthy` / `ready_for_reads` Semantics | 2026-11-21 |
+| [0857](0857-find-entities-episode-provenance.md) | `find_entities` Episode Provenance and a `uuids` Filter on `get_episodes` | 2026-11-22 |
 
 ## Historical numbering
 

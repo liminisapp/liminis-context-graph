@@ -474,6 +474,41 @@ pub struct PassageResult {
     /// The originating episode's chunk ID (issue #853). Omitted for a legacy episode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk_id: Option<String>,
+    /// Which hybrid retrieval legs found this passage (issue #871): `dense` (vector only),
+    /// `lexical` (BM25 only) or `both`. Set only by hybrid passage search and omitted from the
+    /// wire otherwise, so a vector-mode response is byte-identical to before. `dense`/`both`
+    /// hold exactly when `similarity` is `Some`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legs: Option<PassageLegs>,
+    /// Raw BM25 value of the lexical leg (issue #871). Set only by single-query hybrid passage
+    /// search where the lexical leg matched; omitted otherwise (including variants mode, where
+    /// per-query BM25 values are not comparable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lexical_score: Option<f64>,
+}
+
+/// Which retrieval legs found a hybrid passage hit (issue #871).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PassageLegs {
+    /// Found by the vector leg only.
+    Dense,
+    /// Found by the BM25 leg only.
+    Lexical,
+    /// Found by both legs.
+    Both,
+}
+
+impl PassageLegs {
+    /// Classify from per-leg membership; `None` when neither leg found the passage.
+    pub fn from_flags(dense: bool, lexical: bool) -> Option<PassageLegs> {
+        match (dense, lexical) {
+            (true, true) => Some(PassageLegs::Both),
+            (true, false) => Some(PassageLegs::Dense),
+            (false, true) => Some(PassageLegs::Lexical),
+            (false, false) => None,
+        }
+    }
 }
 
 /// Why an entity was returned by `knowledge_find_entities` (issue #629): the fused RRF score
