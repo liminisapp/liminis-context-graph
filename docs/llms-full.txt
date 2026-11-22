@@ -1671,6 +1671,7 @@ each method already did. The classes:
 |--------|---------------------|-------|
 | `health_check` | not applicable | takes no group |
 | `knowledge_status` | not applicable | takes no group |
+| `knowledge_capabilities` | not applicable | takes no group; returns the protocol version and feature registry |
 | `knowledge_find_entities` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
 | `knowledge_resolve_entity` | default group | `group_id`; resolves by `(group_id, name)` in `liminis` only (read, no warning) |
 | `knowledge_find_relationships` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
