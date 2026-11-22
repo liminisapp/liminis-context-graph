@@ -2909,6 +2909,52 @@ impl crate::walk::WalkGraph for DbWalkGraph<'_, '_> {
         }
         Ok(out)
     }
+
+    /// Live episodes only (#860): `EpisodeSupersession::live_at(now)` — the predicate belief,
+    /// search and rerank use — so a superseded, pending-revision or hard-deleted episode is
+    /// absent from the result.
+    fn live_episode_sources(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, crate::walk::EpisodeSource>, Error> {
+        let now_us = chrono::Utc::now().timestamp_micros();
+        let mut out = std::collections::HashMap::new();
+        for chunk in uuids.chunks(200) {
+            for (uuid, p) in self.conn.get_episode_provenance(chunk)? {
+                if p.supersession.live_at(now_us) {
+                    out.insert(
+                        uuid,
+                        crate::walk::EpisodeSource {
+                            group_id: p.supersession.group_id,
+                            source_file: p.source_file,
+                            source_description: p.source_description,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn mentioning_episodes(
+        &self,
+        entity_uuids: &[String],
+        group_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, Error> {
+        let gids: Vec<&str> = group_ids.iter().map(String::as_str).collect();
+        let mut out: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for chunk in entity_uuids.chunks(200) {
+            let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            let info = self
+                .conn
+                .get_episode_info_for_entities(&refs, Some(&gids))?;
+            for (ent, (eps, _)) in info {
+                out.entry(ent).or_default().extend(eps);
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Resolves `start` to every matching entity: a UUID-shaped string is tried as an entity uuid

@@ -1150,7 +1150,7 @@ during a rebuild and under any `--writable-groups` policy.
 ```json
 {"server_version": "0.19.1", "protocol_version": 1,
  "features": ["chunk_supersede", "entity_provenance", "hybrid_passage_search", "lint", "origin",
-              "process_document", "walk", "writable_groups"],
+              "process_document", "walk", "walk_provenance", "writable_groups"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -2539,6 +2539,7 @@ Request:
 | `query` | The question text; ranks the completion hop. |
 | `mode` | `single` (default, top 3 per hop), `list` (top 10) or `history` (top 10; includes invalidated edges). |
 | `direction_mode` | `soft` (default) or `hard`. |
+| `include_provenance` | Boolean, default `false`. When `true`, each returned edge also carries the episodes and source files behind it (see [Provenance](#provenance-include_provenance)). A non-boolean value is a `-32000` validation error. Clients detect support through the `walk_provenance` feature of `knowledge_capabilities`. |
 
 `hops` may be empty or omitted only when `answer_type` is an entity type and `query` is given — then only the
 completion hop runs, from the start entities. Anything else with empty `hops`, an unknown
@@ -2611,6 +2612,43 @@ Response:
   only the side that is present otherwise. Showing the reader each endpoint's type was E13's
   largest single gain.
 - An embedder failure is an explicit error, never a walk over zero vectors.
+
+##### Provenance (`include_provenance`)
+
+With `include_provenance: true`, every edge in every hop (completion-hop and self-loop edges
+included) gains three keys, appended after `signature_mismatch` and **always present** (empty list /
+`false`, never omitted):
+
+```json
+{"uuid": "...", "...": "...", "signature_mismatch": false,
+ "episodes": ["<episode uuid>", "..."], "source_files": ["notes/a.md", "https://h.example:8080/b.md"],
+ "episodes_truncated": false}
+```
+
+- `episodes`: the UUIDs of the edge's producing episodes (the `RelatesToNode_.episodes` column,
+  [ADR-0705](adr/0705-belief-time-separate-from-validity.md)) that are **live**: they still exist,
+  are not superseded and are not a pending document revision (the predicate belief and search use).
+  Superseded or deleted episodes are never listed, in any mode including `history`. Recorded order,
+  at most **20**. `episodes_truncated` is `true` only when *more than* 20 live producers exist.
+- `source_files`: the distinct sources of **all** live producers (not only the 20 shown), in
+  first-seen order: each episode's `source_file`
+  ([Source identity](#source-identity-source_file-and-chunk_id-issue-853), #853), or, for a legacy episode without one, its stored
+  `source_description` **unsplit** (the composed value cannot be reliably split).
+- An edge whose producers are all superseded or gone is still returned, with empty `episodes` and
+  `source_files` (no fallback to stale descriptions); provenance never filters, ranks or reorders
+  edges.
+- An edge with **no recorded producing episodes** (a legacy row, a direct assertion, a cross-group
+  edge) has empty `episodes` and falls back for `source_files`: first the edge's own
+  `source_descriptions`, otherwise, for an edge without a `warrant`, the sources of live episodes in
+  the edge's group that mention **both** endpoints (at most **20** distinct sources, ordered by
+  episode UUID; `episodes_truncated` is `true` when more were dropped). This is a heuristic for legacy
+  rows only; those episodes are not reported as producers.
+  The mention query itself is unbounded (every episode mentioning either endpoint is read), so a
+  hub entity mentioned by thousands of episodes costs proportionally even though at most 20 sources
+  are returned; only the liveness lookup is restricted to episodes mentioning both endpoints.
+- Without the flag (absent or `false`) the response is byte-identical to before, `facts_text` is
+  unchanged either way, and no extra lookups run. Episodes are looked up in the edge's own group.
+  The walk stays read-only. Fetch passages for a citation with the existing episode tools.
 
 **Known limit:** each hop loads every incident edge (with its fact embedding) of the frontier, so a
 hub entity with thousands of edges costs proportionally; the beam keeps later frontiers small. There
@@ -8395,6 +8433,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0821](0821-graph-qa-eval-and-kept-workspaces.md) | `lcg-eval graph-qa`, Ontology Ingest and Kept Workspaces | 2026-11-21 |
 | [0823](0823-literal-object-edges-as-self-loops.md) | Literal-Object Edges as Self-Loops Under an Ontology | 2026-11-21 |
 | [0824](0824-own-source-id-entity-filter.md) | Drop Extracted Entities Named After the Episode's Own Source ID or a Cited Note ID | 2026-11-21 |
+| [0828](0828-superseded-episode-retention.md) | Retention of Superseded Episodes — Measured Cost, Consumers, and a Decision Not to Prune Yet | 2026-11-22 |
 | [0851](0851-test-providers-mode.md) | Test-Providers Mode: Built-in Deterministic Embedder and Fact-Line Extractor | 2026-11-21 |
 | [0853](0853-episode-source-identity-and-exact-source-matching.md) | Episode Source Identity and Exact Source Matching | 2026-11-21 |
 | [0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md) | `knowledge_capabilities` — Protocol Version, Feature Registry and a Self-Describing Socket | 2026-11-21 |
