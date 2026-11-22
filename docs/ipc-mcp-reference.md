@@ -145,8 +145,9 @@ should use `ok` for liveness and `ready_for_reads` for read availability.
 
 ```json
 {"ok": true, "healthy": false, "state": "busy", "ready_for_reads": true,
- "activity": "rebuilding", "job_id": "…", "progress": {"mutations_replayed": 48210, "wal_files_processed": 3,
-                             "wal_files_total": 12, "elapsed_seconds": 91.4}}
+ "activity": "rebuilding", "job_id": "…",
+ "progress": {"mutations_replayed": 48210, "wal_files_processed": 3,
+              "wal_files_total": 12, "elapsed_seconds": 91.4}}
 ```
 
 `progress` uses the same values as `knowledge_rebuild_status`. For any other writer the response

@@ -310,8 +310,8 @@ field of its own) before treating the service as ready.
 **`busy` is alive, not dead.** `health_check` never waits on the write lock: while a write is
 pending or in progress — above all a long `knowledge_rebuild_from_wal` — it answers immediately
 with `{"ok": true, "healthy": false, "state": "busy", "ready_for_reads": true,
-"activity": "rebuilding" | "writing"}`, and for a rebuild job also `job_id` and `progress` (mutations replayed, WAL files processed/total,
-elapsed seconds). Keep polling on `busy`; **do not restart the service** — a restart mid-rebuild
+"activity": "rebuilding" | "writing"}`, and for a rebuild job also `job_id` and `progress`
+(mutations replayed, WAL files processed/total, elapsed seconds). Keep polling on `busy`; **do not restart the service** — a restart mid-rebuild
 discards the replay and starts it over, so on a large corpus the rebuild never completes (#612).
 Supervisor liveness probes should treat any response with `ok: true` as alive, gate write readiness
 on `healthy: true`, and gate read availability on `ready_for_reads: true` (which stays `true` while
