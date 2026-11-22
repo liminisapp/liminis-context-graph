@@ -12,7 +12,6 @@ use crate::{
     types::{EntityRow, EpisodicRow, MentionsEdge, PassageResult, RelatesToEdge},
 };
 
-/// Map from entity UUID to (episode_uuids, source_descriptions), positionally aligned.
 /// Supersession state plus source identity of one episode (`get_episode_provenance`, #860).
 #[derive(Debug, Clone)]
 pub struct EpisodeProvenance {
@@ -22,6 +21,7 @@ pub struct EpisodeProvenance {
     pub source_description: String,
 }
 
+/// Map from entity UUID to (episode_uuids, source_descriptions), positionally aligned.
 type EpisodeInfoMap = HashMap<String, (Vec<String>, Vec<String>)>;
 
 /// Mutations drained from a `Conn` and bucketed by the `group_id` whose data they modify
