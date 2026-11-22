@@ -142,6 +142,9 @@ pub struct WalkPlan {
     pub query: Option<String>,
     pub mode: WalkMode,
     pub direction_mode: DirectionMode,
+    /// `include_provenance` (#860): attach each returned edge's live producing episodes and
+    /// their source files. Off by default; when off nothing extra is read or serialized.
+    pub include_provenance: bool,
 }
 
 /// Parses the `answer_type` param: absent/empty → `None`; `"value"` → `None` (no entity-type
@@ -202,6 +205,49 @@ pub trait WalkGraph {
 
     /// Entity rows (name, labels) for the given uuids; unknown uuids are simply absent.
     fn entities(&self, uuids: &[String]) -> Result<Vec<EntityRow>, Error>;
+
+    /// Source identity of the **live** episodes among `uuids` (#860). An episode that no longer
+    /// exists, is superseded, or is a pending document revision is simply absent. Only called
+    /// when the plan asks for provenance. The default reports nothing.
+    fn live_episode_sources(
+        &self,
+        _uuids: &[String],
+    ) -> Result<HashMap<String, EpisodeSource>, Error> {
+        Ok(HashMap::new())
+    }
+
+    /// For each entity uuid, the uuids of episodes (restricted to `group_ids`) that MENTION it
+    /// (#860). Used only for the legacy-edge source fallback. The default reports nothing.
+    fn mentioning_episodes(
+        &self,
+        _entity_uuids: &[String],
+        _group_ids: &[String],
+    ) -> Result<HashMap<String, Vec<String>>, Error> {
+        Ok(HashMap::new())
+    }
+}
+
+/// Maximum episodes reported per edge with `include_provenance`.
+pub const MAX_PROVENANCE_EPISODES: usize = 20;
+
+/// Source identity of one live episode (#853): its `source_file` when stored, and the composed
+/// `source_description` display value (the only source a legacy episode has).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EpisodeSource {
+    pub group_id: String,
+    pub source_file: Option<String>,
+    pub source_description: String,
+}
+
+impl EpisodeSource {
+    /// The citation: `source_file` when set and non-empty, else `source_description` as stored
+    /// (never split — the composed value may contain colons). `None` when both are empty.
+    fn citation(&self) -> Option<&str> {
+        self.source_file
+            .as_deref()
+            .filter(|f| !f.is_empty())
+            .or_else(|| Some(self.source_description.as_str()).filter(|d| !d.is_empty()))
+    }
 }
 
 // ── Response ──────────────────────────────────────────────────────────────────
@@ -228,6 +274,34 @@ pub struct WalkEdge {
     /// `Some(true/false)` for an `out`/`in` hop; `None` for `any`.
     pub direction_matched: Option<bool>,
     pub signature_mismatch: bool,
+    /// Present only when the plan asked for `include_provenance`; flattened so the keys are
+    /// appended after `signature_mismatch` and absent (not `null`) when off.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<WalkProvenance>,
+    /// Edge-side inputs to the provenance lookup; filled only when provenance is requested.
+    #[serde(skip)]
+    recorded: Option<RecordedProvenance>,
+}
+
+/// Where a walked edge came from (`include_provenance`, #860).
+#[derive(Debug, Clone, Serialize, PartialEq, Default)]
+pub struct WalkProvenance {
+    /// Live producing episodes in recorded order, at most [`MAX_PROVENANCE_EPISODES`].
+    pub episodes: Vec<String>,
+    /// Distinct sources of all live producing episodes (not only the capped list).
+    pub source_files: Vec<String>,
+    /// More than [`MAX_PROVENANCE_EPISODES`] live producing episodes exist.
+    pub episodes_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct RecordedProvenance {
+    episodes: Vec<String>,
+    group_id: String,
+    source_descriptions: Vec<String>,
+    warranted: bool,
+    source: String,
+    target: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -431,7 +505,7 @@ impl<'a, G: WalkGraph> Walker<'a, G> {
         }
     }
 
-    fn to_walk_edge(&self, c: &Candidate) -> WalkEdge {
+    fn to_walk_edge(&self, c: &Candidate, include_provenance: bool) -> WalkEdge {
         let e = &c.edge;
         WalkEdge {
             uuid: e.uuid.clone(),
@@ -452,6 +526,15 @@ impl<'a, G: WalkGraph> Walker<'a, G> {
                 self.labels(&e.source_node_uuid),
                 self.labels(&e.target_node_uuid),
             ),
+            provenance: None,
+            recorded: include_provenance.then(|| RecordedProvenance {
+                episodes: e.episodes.clone(),
+                group_id: e.group_id.clone(),
+                source_descriptions: e.source_descriptions.clone(),
+                warranted: e.warrant.is_some(),
+                source: e.source_node_uuid.clone(),
+                target: e.target_node_uuid.clone(),
+            }),
         }
     }
 
@@ -687,7 +770,10 @@ pub fn run_with_ontologies<'a, G: WalkGraph>(
             hop: n,
             completion: false,
             candidate_count,
-            edges: cands.iter().map(|c| w.to_walk_edge(c)).collect(),
+            edges: cands
+                .iter()
+                .map(|c| w.to_walk_edge(c, plan.include_provenance))
+                .collect(),
         });
     }
 
@@ -718,12 +804,19 @@ pub fn run_with_ontologies<'a, G: WalkGraph>(
                             hop: n,
                             completion: true,
                             candidate_count,
-                            edges: cands.iter().map(|c| w.to_walk_edge(c)).collect(),
+                            edges: cands
+                                .iter()
+                                .map(|c| w.to_walk_edge(c, plan.include_provenance))
+                                .collect(),
                         });
                     }
                 }
             }
         }
+    }
+
+    if plan.include_provenance {
+        attach_provenance(graph, &mut out_hops)?;
     }
 
     let facts_text = facts_text(&out_hops);
@@ -734,6 +827,139 @@ pub fn run_with_ontologies<'a, G: WalkGraph>(
         dead_end_at,
         facts_text,
     })
+}
+
+/// Fills [`WalkEdge::provenance`] on every returned edge (#860) with one batched episode lookup
+/// (plus one mention lookup when a legacy edge needs the fallback). A post-selection pass: it
+/// never changes which edges are returned or their order.
+///
+/// Per edge:
+/// 1. recorded producing episodes → those the graph reports live, in the edge's own group, in
+///    recorded order. `episodes` is the first [`MAX_PROVENANCE_EPISODES`]; `episodes_truncated`
+///    is "more than that"; `source_files` covers **all** live ones. None live → both empty, no
+///    fallback (the stored descriptions would cite disowned sources).
+/// 2. no recorded episodes (legacy row, direct assertion, cross-group edge) → `episodes` is
+///    empty and `source_files` is the edge's own `source_descriptions`, else — for an edge with
+///    no warrant — the sources of live episodes that mention **both** endpoints.
+fn attach_provenance<G: WalkGraph>(graph: &G, hops: &mut [WalkHop]) -> Result<(), Error> {
+    // Edges needing the mention fallback: no recorded episodes, no own descriptions, no warrant.
+    let needs_mentions = |r: &RecordedProvenance| {
+        r.episodes.is_empty() && r.source_descriptions.is_empty() && !r.warranted
+    };
+    let mut ep_uuids: Vec<String> = Vec::new();
+    let mut ent_uuids: Vec<String> = Vec::new();
+    let mut groups: Vec<String> = Vec::new();
+    for e in hops.iter().flat_map(|h| h.edges.iter()) {
+        let Some(r) = e.recorded.as_ref() else {
+            continue;
+        };
+        ep_uuids.extend(r.episodes.iter().cloned());
+        if needs_mentions(r) {
+            ent_uuids.push(r.source.clone());
+            ent_uuids.push(r.target.clone());
+            groups.push(r.group_id.clone());
+        }
+    }
+    let dedup = |v: &mut Vec<String>| {
+        let mut seen = HashSet::new();
+        v.retain(|x| seen.insert(x.clone()));
+    };
+    dedup(&mut ent_uuids);
+    dedup(&mut groups);
+
+    let mentions = if ent_uuids.is_empty() {
+        HashMap::new()
+    } else {
+        graph.mentioning_episodes(&ent_uuids, &groups)?
+    };
+    // Episodes mentioning **both** endpoints of an edge — the only mention-derived candidates the
+    // fallback can cite. Looking up just these (not the union over every mentioning episode)
+    // bounds the liveness lookup on hub entities mentioned by thousands of episodes.
+    let both_mentioning = |r: &RecordedProvenance| -> Vec<String> {
+        let of = |ent: &str| -> HashSet<&str> {
+            mentions
+                .get(ent)
+                .map(|v| v.iter().map(String::as_str).collect())
+                .unwrap_or_default()
+        };
+        let (a, b) = (of(&r.source), of(&r.target));
+        let mut both: Vec<String> = a.intersection(&b).map(|u| (*u).to_string()).collect();
+        both.sort_unstable();
+        both
+    };
+    for r in hops
+        .iter()
+        .flat_map(|h| h.edges.iter())
+        .filter_map(|e| e.recorded.as_ref())
+        .filter(|r| needs_mentions(r))
+    {
+        ep_uuids.extend(both_mentioning(r));
+    }
+    dedup(&mut ep_uuids);
+    let live = if ep_uuids.is_empty() {
+        HashMap::new()
+    } else {
+        graph.live_episode_sources(&ep_uuids)?
+    };
+
+    for e in hops.iter_mut().flat_map(|h| h.edges.iter_mut()) {
+        let Some(r) = e.recorded.take() else {
+            continue;
+        };
+        let mut prov = WalkProvenance::default();
+        if !r.episodes.is_empty() {
+            let live_eps: Vec<(&String, &EpisodeSource)> = r
+                .episodes
+                .iter()
+                .filter_map(|u| live.get(u).map(|s| (u, s)))
+                .filter(|(_, s)| s.group_id == r.group_id)
+                .collect();
+            prov.episodes_truncated = live_eps.len() > MAX_PROVENANCE_EPISODES;
+            prov.episodes = live_eps
+                .iter()
+                .take(MAX_PROVENANCE_EPISODES)
+                .map(|(u, _)| (*u).clone())
+                .collect();
+            push_distinct(
+                &mut prov.source_files,
+                live_eps.iter().filter_map(|(_, s)| s.citation()),
+            );
+        } else if !r.source_descriptions.is_empty() {
+            push_distinct(
+                &mut prov.source_files,
+                r.source_descriptions
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|d| !d.is_empty()),
+            );
+        } else if needs_mentions(&r) {
+            let both = both_mentioning(&r);
+            push_distinct(
+                &mut prov.source_files,
+                both.iter()
+                    .filter_map(|u| live.get(u.as_str()))
+                    .filter(|s| s.group_id == r.group_id)
+                    .filter_map(EpisodeSource::citation),
+            );
+            // A hub entity can be mentioned by thousands of episodes; bound this path like the
+            // recorded-episodes path and say so through the same truncation flag.
+            if prov.source_files.len() > MAX_PROVENANCE_EPISODES {
+                prov.source_files.truncate(MAX_PROVENANCE_EPISODES);
+                prov.episodes_truncated = true;
+            }
+        }
+        e.provenance = Some(prov);
+    }
+    Ok(())
+}
+
+/// Appends each value not already present, keeping first-seen order.
+fn push_distinct<'a>(out: &mut Vec<String>, vals: impl Iterator<Item = &'a str>) {
+    for v in vals {
+        if !out.iter().any(|o| o == v) {
+            out.push(v.to_string());
+        }
+    }
 }
 
 /// The next frontier: the distinct far ends of the kept candidates. A self-loop never extends
@@ -801,6 +1027,15 @@ pub fn parse_hops(v: &serde_json::Value) -> Result<Vec<Hop>, Error> {
         .collect()
 }
 
+/// An optional boolean param: absent/`null` → `false`.
+fn bool_param(v: &serde_json::Value, name: &str) -> Result<bool, Error> {
+    match v {
+        serde_json::Value::Null => Ok(false),
+        serde_json::Value::Bool(b) => Ok(*b),
+        _ => Err(Error::Ipc(format!("{name} must be a boolean"))),
+    }
+}
+
 fn str_param<'a>(v: &'a serde_json::Value, name: &str) -> Result<Option<&'a str>, Error> {
     match v {
         serde_json::Value::Null => Ok(None),
@@ -835,6 +1070,7 @@ pub fn parse_request(p: &serde_json::Value) -> Result<ParsedWalkRequest, Error> 
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let include_provenance = bool_param(&p["include_provenance"], "include_provenance")?;
     // Validate the plan shape up front (start entities are filled in after resolution).
     let plan = WalkPlan {
         start: vec![String::new()],
@@ -843,6 +1079,7 @@ pub fn parse_request(p: &serde_json::Value) -> Result<ParsedWalkRequest, Error> 
         query,
         mode,
         direction_mode,
+        include_provenance,
     };
     plan.validate()?;
     Ok(ParsedWalkRequest { start, plan })
@@ -884,6 +1121,11 @@ mod tests {
     struct MemGraph {
         edges: Vec<RelatesToEdge>,
         ents: Vec<EntityRow>,
+        /// Live episodes (anything absent is superseded / deleted).
+        live: HashMap<String, EpisodeSource>,
+        /// entity uuid → mentioning episode uuids.
+        mentions: HashMap<String, Vec<String>>,
+        lookups: std::cell::Cell<usize>,
     }
 
     impl MemGraph {
@@ -924,6 +1166,33 @@ mod tests {
             self
         }
 
+        /// Registers a live episode in group `""` (the edges' default group).
+        fn episode(&mut self, uuid: &str, file: Option<&str>, desc: &str) -> &mut Self {
+            self.live.insert(
+                uuid.into(),
+                EpisodeSource {
+                    group_id: String::new(),
+                    source_file: file.map(str::to_string),
+                    source_description: desc.into(),
+                },
+            );
+            self
+        }
+
+        fn produced_by(&mut self, edge: &str, eps: &[&str]) -> &mut Self {
+            for e in &mut self.edges {
+                if e.uuid == edge {
+                    e.episodes = eps.iter().map(|s| s.to_string()).collect();
+                }
+            }
+            self
+        }
+
+        fn mention(&mut self, ent: &str, ep: &str) -> &mut Self {
+            self.mentions.entry(ent.into()).or_default().push(ep.into());
+            self
+        }
+
         fn invalidate(&mut self, uuid: &str) -> &mut Self {
             for e in &mut self.edges {
                 if e.uuid == uuid {
@@ -960,6 +1229,29 @@ mod tests {
                 .cloned()
                 .collect())
         }
+
+        fn live_episode_sources(
+            &self,
+            uuids: &[String],
+        ) -> Result<HashMap<String, EpisodeSource>, Error> {
+            self.lookups.set(self.lookups.get() + 1);
+            Ok(uuids
+                .iter()
+                .filter_map(|u| self.live.get(u).map(|s| (u.clone(), s.clone())))
+                .collect())
+        }
+
+        fn mentioning_episodes(
+            &self,
+            entity_uuids: &[String],
+            _group_ids: &[String],
+        ) -> Result<HashMap<String, Vec<String>>, Error> {
+            self.lookups.set(self.lookups.get() + 1);
+            Ok(entity_uuids
+                .iter()
+                .filter_map(|u| self.mentions.get(u).map(|v| (u.clone(), v.clone())))
+                .collect())
+        }
     }
 
     fn hop(rels: &[&str], dir: Direction) -> Hop {
@@ -978,6 +1270,7 @@ mod tests {
             query: None,
             mode: WalkMode::Single,
             direction_mode: DirectionMode::Soft,
+            include_provenance: false,
         }
     }
 
@@ -1644,5 +1937,289 @@ mod tests {
         assert_eq!(parse_answer_type(Some("value")), None);
         assert_eq!(parse_answer_type(Some(" ")), None);
         assert_eq!(parse_answer_type(Some("Company")), Some("Company".into()));
+    }
+
+    // ── include_provenance (#860) ─────────────────────────────────────────────
+
+    fn prov_plan(start: &str, hops: Vec<Hop>) -> WalkPlan {
+        WalkPlan {
+            include_provenance: true,
+            ..plan(start, hops)
+        }
+    }
+
+    fn walk_one(g: &MemGraph, p: &WalkPlan) -> WalkOutcome {
+        run(g, None, p, &emb(p.hops.len())).unwrap()
+    }
+
+    fn prov_of(o: &WalkOutcome) -> &WalkProvenance {
+        o.hops[0].edges[0].provenance.as_ref().expect("provenance")
+    }
+
+    fn one_edge_graph() -> MemGraph {
+        let mut g = MemGraph::default();
+        g.ent("a", "Person").ent("b", "Project");
+        g.edge("e1", "a", "b", "OWNS", [1.0, 0.0]);
+        g
+    }
+
+    #[test]
+    fn parse_request_include_provenance() {
+        let base = |v: serde_json::Value| {
+            let mut j = serde_json::json!({"start": "x", "hops": [{"phrase": "p"}]});
+            if !v.is_null() {
+                j["include_provenance"] = v;
+            }
+            parse_request(&j)
+        };
+        assert!(
+            !base(serde_json::Value::Null)
+                .unwrap()
+                .plan
+                .include_provenance
+        );
+        assert!(
+            !base(serde_json::json!(false))
+                .unwrap()
+                .plan
+                .include_provenance
+        );
+        assert!(
+            base(serde_json::json!(true))
+                .unwrap()
+                .plan
+                .include_provenance
+        );
+        let err = base(serde_json::json!("yes")).unwrap_err().to_string();
+        assert!(
+            err.contains("include_provenance must be a boolean"),
+            "{err}"
+        );
+        assert!(base(serde_json::json!(1)).is_err());
+    }
+
+    #[test]
+    fn provenance_returns_live_episodes_and_files_in_recorded_order() {
+        let mut g = one_edge_graph();
+        g.episode("ep2", Some("b.md"), "b.md:1")
+            .episode("ep1", Some("a.md"), "a.md:0")
+            .produced_by("e1", &["ep1", "ep2"]);
+        let o = walk_one(&g, &prov_plan("a", vec![hop(&[], Direction::Out)]));
+        let p = prov_of(&o);
+        assert_eq!(p.episodes, vec!["ep1", "ep2"]);
+        assert_eq!(p.source_files, vec!["a.md", "b.md"]);
+        assert!(!p.episodes_truncated);
+        assert!(g.lookups.get() >= 1);
+    }
+
+    #[test]
+    fn superseded_and_missing_episodes_are_excluded_even_in_history() {
+        let mut g = one_edge_graph();
+        // ep1 superseded (absent from `live`), ep3 deleted, ep2 live.
+        g.episode("ep2", Some("b.md"), "b.md:1")
+            .produced_by("e1", &["ep1", "ep2", "ep3"]);
+        let mut p = prov_plan("a", vec![hop(&[], Direction::Out)]);
+        for mode in [WalkMode::Single, WalkMode::History] {
+            p.mode = mode;
+            let o = walk_one(&g, &p);
+            let pr = prov_of(&o);
+            assert_eq!(pr.episodes, vec!["ep2"]);
+            assert_eq!(pr.source_files, vec!["b.md"]);
+        }
+    }
+
+    #[test]
+    fn all_producers_dead_gives_empty_lists_and_no_fallback() {
+        let mut g = one_edge_graph();
+        g.produced_by("e1", &["gone"]);
+        g.edges[0].source_descriptions = vec!["stale.md:3".into()];
+        let o = walk_one(&g, &prov_plan("a", vec![hop(&[], Direction::Out)]));
+        assert_eq!(o.hops[0].edges.len(), 1, "provenance never filters edges");
+        let p = prov_of(&o);
+        assert!(p.episodes.is_empty() && p.source_files.is_empty() && !p.episodes_truncated);
+    }
+
+    #[test]
+    fn episode_cap_is_twenty_and_truncation_is_exact() {
+        for (n, truncated) in [(19usize, false), (20, false), (21, true), (25, true)] {
+            let mut g = one_edge_graph();
+            let ids: Vec<String> = (0..n).map(|i| format!("ep{i:02}")).collect();
+            for (i, id) in ids.iter().enumerate() {
+                g.episode(id, Some(&format!("f{i:02}.md")), "d");
+            }
+            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            g.produced_by("e1", &refs);
+            let o = walk_one(&g, &prov_plan("a", vec![hop(&[], Direction::Out)]));
+            let p = prov_of(&o);
+            assert_eq!(p.episodes.len(), n.min(MAX_PROVENANCE_EPISODES), "n={n}");
+            assert_eq!(p.episodes_truncated, truncated, "n={n}");
+            assert_eq!(
+                p.episodes,
+                ids[..n.min(20)].to_vec(),
+                "recorded order, n={n}"
+            );
+            // source_files covers every live episode, not only the 20 shown.
+            assert_eq!(p.source_files.len(), n, "n={n}");
+            // Deterministic across runs.
+            assert_eq!(
+                prov_of(&walk_one(
+                    &g,
+                    &prov_plan("a", vec![hop(&[], Direction::Out)])
+                )),
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn source_files_dedup_and_legacy_description_is_unsplit() {
+        let mut g = one_edge_graph();
+        g.episode("ep1", Some("https://h:8080/x.md"), "https://h:8080/x.md:4")
+            .episode("ep2", Some("https://h:8080/x.md"), "https://h:8080/x.md:5")
+            .episode("ep3", None, "legacy.md:7")
+            .produced_by("e1", &["ep1", "ep2", "ep3"]);
+        let o = walk_one(&g, &prov_plan("a", vec![hop(&[], Direction::Out)]));
+        assert_eq!(
+            prov_of(&o).source_files,
+            vec!["https://h:8080/x.md", "legacy.md:7"]
+        );
+    }
+
+    #[test]
+    fn group_mismatch_is_not_live_for_the_edge() {
+        let mut g = one_edge_graph();
+        g.episode("ep1", Some("a.md"), "d")
+            .produced_by("e1", &["ep1"]);
+        g.live.get_mut("ep1").unwrap().group_id = "other".into();
+        let o = walk_one(&g, &prov_plan("a", vec![hop(&[], Direction::Out)]));
+        assert!(prov_of(&o).episodes.is_empty());
+    }
+
+    #[test]
+    fn no_recorded_episodes_falls_back_to_edge_source_descriptions() {
+        let mut g = one_edge_graph();
+        g.edges[0].source_descriptions =
+            vec!["old.md:1".into(), "old.md:1".into(), "x.md:2".into()];
+        let o = walk_one(&g, &prov_plan("a", vec![hop(&[], Direction::Out)]));
+        let p = prov_of(&o);
+        assert!(p.episodes.is_empty());
+        assert_eq!(p.source_files, vec!["old.md:1", "x.md:2"]);
+    }
+
+    #[test]
+    fn mention_fallback_needs_both_endpoints_live_and_no_warrant() {
+        let mut g = one_edge_graph();
+        g.episode("epB", Some("both.md"), "both.md:1")
+            .episode("epA", Some("onlya.md"), "onlya.md:1")
+            .episode("epD", Some("dead-not-registered"), "x");
+        g.live.remove("epD");
+        g.mention("a", "epB")
+            .mention("b", "epB")
+            .mention("a", "epA")
+            .mention("a", "epD")
+            .mention("b", "epD");
+        let p = prov_plan("a", vec![hop(&[], Direction::Out)]);
+        let o = walk_one(&g, &p);
+        let pr = prov_of(&o);
+        assert!(pr.episodes.is_empty(), "mention episodes are not producers");
+        assert_eq!(pr.source_files, vec!["both.md"]);
+
+        g.edges[0].warrant = Some("assertion".into());
+        let o = walk_one(&g, &p);
+        assert!(
+            prov_of(&o).source_files.is_empty(),
+            "no fallback for a warrant"
+        );
+    }
+
+    #[test]
+    fn mention_fallback_is_capped_and_flags_truncation() {
+        for (n, truncated) in [(20usize, false), (21, true), (40, true)] {
+            let mut g = one_edge_graph();
+            for i in 0..n {
+                let id = format!("ep{i:02}");
+                g.episode(&id, Some(&format!("f{i:02}.md")), "d");
+                g.mention("a", &id).mention("b", &id);
+            }
+            let o = walk_one(&g, &prov_plan("a", vec![hop(&[], Direction::Out)]));
+            let p = prov_of(&o);
+            assert!(p.episodes.is_empty(), "n={n}");
+            assert_eq!(
+                p.source_files.len(),
+                n.min(MAX_PROVENANCE_EPISODES),
+                "n={n}"
+            );
+            assert_eq!(p.episodes_truncated, truncated, "n={n}");
+            if n > 0 {
+                // Deterministic: sorted by episode uuid, then cut.
+                assert_eq!(p.source_files[0], "f00.md", "n={n}");
+            }
+        }
+    }
+
+    #[test]
+    fn completion_hop_and_self_loops_carry_provenance() {
+        let mut g = MemGraph::default();
+        g.ent("a", "Person").ent("b", "Project").ent("c", "Company");
+        g.edge("e1", "a", "b", "OWNS", [1.0, 0.0])
+            .edge("e2", "b", "c", "SUPPLIED_BY", [1.0, 0.0])
+            .edge("loop", "b", "b", "HAS_NOTE", [1.0, 0.0]);
+        g.episode("ep1", Some("a.md"), "d")
+            .produced_by("e1", &["ep1"])
+            .produced_by("e2", &["ep1"])
+            .produced_by("loop", &["ep1"]);
+        // Value walk, last hop: edge + self-loop.
+        let o = walk_one(
+            &g,
+            &prov_plan(
+                "a",
+                vec![hop(&[], Direction::Out), hop(&[], Direction::Out)],
+            ),
+        );
+        let all: Vec<&WalkEdge> = o.hops.iter().flat_map(|h| h.edges.iter()).collect();
+        assert!(all.iter().any(|e| e.uuid == "loop"));
+        assert!(all.iter().all(|e| e.provenance.is_some()));
+        // Completion hop.
+        let mut p = prov_plan("a", vec![hop(&[], Direction::Out)]);
+        p.answer_type = Some("Company".into());
+        p.query = Some("q".into());
+        let o = walk_one(&g, &p);
+        assert!(o.completion_hop_ran);
+        assert!(o
+            .hops
+            .iter()
+            .flat_map(|h| h.edges.iter())
+            .all(|e| e.provenance.is_some()));
+    }
+
+    #[test]
+    fn flag_off_adds_nothing_and_flag_on_changes_nothing_else() {
+        let mut g = one_edge_graph();
+        g.episode("ep1", Some("a.md"), "d")
+            .produced_by("e1", &["ep1"]);
+        let off = walk_one(&g, &plan("a", vec![hop(&[], Direction::Out)]));
+        assert_eq!(g.lookups.get(), 0, "no lookup without the flag");
+        let e = &off.hops[0].edges[0];
+        assert!(e.provenance.is_none());
+        let j = serde_json::to_value(e).unwrap();
+        for k in [
+            "episodes",
+            "source_files",
+            "episodes_truncated",
+            "provenance",
+        ] {
+            assert!(j.get(k).is_none(), "{k} must be absent when off");
+        }
+        let on = walk_one(&g, &prov_plan("a", vec![hop(&[], Direction::Out)]));
+        assert_eq!(on.facts_text, off.facts_text);
+        let mut on_json = serde_json::to_value(&on.hops[0].edges[0]).unwrap();
+        assert!(on_json["episodes"].is_array());
+        assert!(on_json["source_files"].is_array());
+        assert_eq!(on_json["episodes_truncated"], false);
+        let obj = on_json.as_object_mut().unwrap();
+        obj.remove("episodes");
+        obj.remove("source_files");
+        obj.remove("episodes_truncated");
+        assert_eq!(on_json, j, "all pre-existing fields identical");
     }
 }

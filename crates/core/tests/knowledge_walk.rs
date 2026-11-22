@@ -123,6 +123,15 @@ fn edge(uuid: &str, src: &str, dst: &str, rel: &str, emb: [f32; 4]) -> RelatesTo
 
 /// Bob —OWNS→ Apollo —SUPPLIED_BY→ Acme, plus an ambiguous name `Alice` (a Person and a Company).
 fn make_db() -> (Arc<Db>, TempDir) {
+    make_db_with(&[], |_| {})
+}
+
+/// Like [`make_db`]; `prepare` runs before the edges are inserted (to add episodes), and `e1`
+/// (Bob OWNS Apollo) records `e1_episodes` as its producers.
+fn make_db_with(
+    e1_episodes: &[String],
+    prepare: impl FnOnce(&lcg_core::db::Conn<'_>),
+) -> (Arc<Db>, TempDir) {
     let dir = TempDir::new().unwrap();
     let db = Arc::new(Db::open(dir.path().join("w.db").to_str().unwrap()).unwrap());
     {
@@ -138,14 +147,10 @@ fn make_db() -> (Arc<Db>, TempDir) {
             .unwrap();
         conn.insert_entity(&ent("u-alice-c", "Alice", "Company"))
             .unwrap();
-        conn.insert_relates_to_edge(&edge(
-            "e1",
-            "u-bob",
-            "u-apollo",
-            "OWNS",
-            [1.0, 0.0, 0.0, 0.0],
-        ))
-        .unwrap();
+        prepare(&conn);
+        let mut e1 = edge("e1", "u-bob", "u-apollo", "OWNS", [1.0, 0.0, 0.0, 0.0]);
+        e1.episodes = e1_episodes.to_vec();
+        conn.insert_relates_to_edge(&e1).unwrap();
         conn.insert_relates_to_edge(&edge(
             "e2",
             "u-apollo",
@@ -489,4 +494,219 @@ async fn get_ontology_without_an_ontology_is_a_well_formed_free_form_response() 
     assert_eq!(v["result"]["mode"], "free-form");
     assert_eq!(v["result"]["entity_types"], json!([]));
     assert_eq!(v["result"]["relation_types"], json!([]));
+}
+
+// ── include_provenance (#860) ────────────────────────────────────────────────
+
+fn episode(uuid: &str, file: Option<&str>, desc: &str) -> lcg_core::EpisodicRow {
+    lcg_core::EpisodicRow {
+        uuid: uuid.into(),
+        name: uuid.into(),
+        group_id: GROUP.into(),
+        created_at: "2024-01-01 00:00:00".into(),
+        source: "text".into(),
+        source_description: desc.into(),
+        content: "c".into(),
+        content_embedding: vec![0.0; DIM],
+        valid_at: "2024-01-01 00:00:00".into(),
+        source_file: file.map(str::to_string),
+        ..Default::default()
+    }
+}
+
+fn one_hop(provenance: Option<Value>) -> Value {
+    let mut p = json!({
+        "group_ids": [GROUP],
+        "start": "Bob",
+        "hops": [{"relation_types": ["OWNS"], "phrase": "owns the project", "direction": "out"}],
+    });
+    if let Some(v) = provenance {
+        p["include_provenance"] = v;
+    }
+    p
+}
+
+fn two_episode_db() -> (Arc<Db>, TempDir) {
+    make_db_with(&["ep1".to_string(), "ep2".to_string()], |c| {
+        c.insert_episodic(&episode("ep1", Some("a.md"), "a.md:0"))
+            .unwrap();
+        c.insert_episodic(&episode(
+            "ep2",
+            Some("https://h.example:8080/b.md"),
+            "https://h.example:8080/b.md:1",
+        ))
+        .unwrap();
+    })
+}
+
+#[tokio::test]
+async fn walk_provenance_lists_live_episodes_and_files_then_drops_superseded() {
+    let (db, _d) = two_episode_db();
+    let state = make_state(Some(Arc::clone(&db)), None, None);
+    let v = call(&state, "knowledge_walk", one_hop(Some(json!(true)))).await;
+    let e = &v["result"]["hops"][0]["edges"][0];
+    assert_eq!(e["uuid"], "e1", "{v}");
+    assert_eq!(e["episodes"], json!(["ep1", "ep2"]), "{v}");
+    assert_eq!(
+        e["source_files"],
+        json!(["a.md", "https://h.example:8080/b.md"])
+    );
+    assert_eq!(e["episodes_truncated"], false);
+
+    db.connect()
+        .unwrap()
+        .supersede_episodes_by_uuids(
+            &["ep1".to_string()],
+            "2024-05-01 00:00:00",
+            Some("ep2"),
+            "corrected",
+        )
+        .unwrap();
+    let v = call(&state, "knowledge_walk", one_hop(Some(json!(true)))).await;
+    let e = &v["result"]["hops"][0]["edges"][0];
+    assert_eq!(e["episodes"], json!(["ep2"]), "{v}");
+    assert_eq!(e["source_files"], json!(["https://h.example:8080/b.md"]));
+
+    // history mode still excludes the superseded episode.
+    let mut p = one_hop(Some(json!(true)));
+    p["mode"] = json!("history");
+    let v = call(&state, "knowledge_walk", p).await;
+    assert_eq!(
+        v["result"]["hops"][0]["edges"][0]["episodes"],
+        json!(["ep2"]),
+        "{v}"
+    );
+}
+
+#[tokio::test]
+async fn walk_provenance_flag_off_is_byte_identical_to_absent() {
+    let (db, _d) = two_episode_db();
+    let state = make_state(Some(db), None, None);
+    let absent = call(&state, "knowledge_walk", one_hop(None)).await;
+    let off = call(&state, "knowledge_walk", one_hop(Some(json!(false)))).await;
+    let null = call(&state, "knowledge_walk", one_hop(Some(Value::Null))).await;
+    assert_eq!(absent, off);
+    assert_eq!(absent, null);
+    assert_eq!(
+        serde_json::to_string(&absent).unwrap(),
+        serde_json::to_string(&off).unwrap()
+    );
+    let e = absent["result"]["hops"][0]["edges"][0].as_object().unwrap();
+    for k in ["episodes", "source_files", "episodes_truncated"] {
+        assert!(!e.contains_key(k), "{k} leaked into a flag-off response");
+    }
+    // The flag adds keys and changes nothing else.
+    let on = call(&state, "knowledge_walk", one_hop(Some(json!(true)))).await;
+    assert_eq!(on["result"]["facts_text"], absent["result"]["facts_text"]);
+    let mut on_edge = on["result"]["hops"][0]["edges"][0].clone();
+    let o = on_edge.as_object_mut().unwrap();
+    o.remove("episodes");
+    o.remove("source_files");
+    o.remove("episodes_truncated");
+    assert_eq!(on_edge, absent["result"]["hops"][0]["edges"][0]);
+}
+
+#[tokio::test]
+async fn walk_provenance_caps_at_twenty_with_truncation_flag() {
+    let ids: Vec<String> = (0..25).map(|i| format!("ep{i:02}")).collect();
+    let (db, _d) = make_db_with(&ids, |c| {
+        for (i, id) in (0..25).zip(ids.iter()) {
+            c.insert_episodic(&episode(id, Some(&format!("f{i:02}.md")), "d"))
+                .unwrap();
+        }
+    });
+    let state = make_state(Some(db), None, None);
+    let v = call(&state, "knowledge_walk", one_hop(Some(json!(true)))).await;
+    let e = &v["result"]["hops"][0]["edges"][0];
+    assert_eq!(e["episodes"].as_array().unwrap().len(), 20, "{v}");
+    assert_eq!(e["episodes"][0], "ep00");
+    assert_eq!(e["episodes_truncated"], true);
+    assert_eq!(e["source_files"].as_array().unwrap().len(), 25);
+}
+
+#[tokio::test]
+async fn walk_provenance_legacy_episode_and_legacy_edge_yield_a_source() {
+    let (db, _d) = make_db_with(&["epl".to_string()], |c| {
+        // Legacy producer: no source_file, composed description only.
+        c.insert_episodic(&episode("epl", None, "https://old.example:9/x.md:3"))
+            .unwrap();
+        // Legacy edge e2 (Apollo SUPPLIED_BY Acme) has no producers; an episode mentions both.
+        c.insert_episodic(&episode("epm", Some("m.md"), "m.md:0"))
+            .unwrap();
+        c.insert_episodic(&episode("epo", Some("only.md"), "only.md:0"))
+            .unwrap();
+        for (ep, ent) in [("epm", "u-apollo"), ("epm", "u-acme"), ("epo", "u-apollo")] {
+            c.insert_mentions_edge(&lcg_core::MentionsEdge {
+                episodic_uuid: ep.into(),
+                entity_uuid: ent.into(),
+                group_id: GROUP.into(),
+            })
+            .unwrap();
+        }
+    });
+    let state = make_state(Some(db), None, None);
+    let v = call(&state, "knowledge_walk", one_hop(Some(json!(true)))).await;
+    let e = &v["result"]["hops"][0]["edges"][0];
+    assert_eq!(
+        e["source_files"],
+        json!(["https://old.example:9/x.md:3"]),
+        "{v}"
+    );
+
+    let v = call(&state, "knowledge_walk", two_hop_params_with_provenance()).await;
+    let e2 = &v["result"]["hops"][1]["edges"][0];
+    assert_eq!(e2["uuid"], "e2", "{v}");
+    assert_eq!(e2["episodes"], json!([]));
+    assert_eq!(
+        e2["source_files"],
+        json!(["m.md"]),
+        "mention fallback ran against a real DB: {v}"
+    );
+    assert_eq!(e2["episodes_truncated"], false);
+}
+
+fn two_hop_params_with_provenance() -> Value {
+    let mut p = two_hop_params();
+    p["include_provenance"] = json!(true);
+    p
+}
+
+#[tokio::test]
+async fn walk_provenance_covers_every_hop_and_all_dead_producers_stay_empty() {
+    let (db, _d) = make_db_with(&["gone".to_string()], |_| {});
+    let state = make_state(Some(db), None, None);
+    let v = call(&state, "knowledge_walk", two_hop_params_with_provenance()).await;
+    let hops = v["result"]["hops"].as_array().unwrap();
+    for h in hops {
+        for e in h["edges"].as_array().unwrap() {
+            assert!(
+                e["episodes"].is_array() && e["source_files"].is_array(),
+                "{e}"
+            );
+            assert!(e["episodes_truncated"].is_boolean());
+        }
+    }
+    let e1 = &hops[0]["edges"][0];
+    assert_eq!(e1["episodes"], json!([]));
+    assert_eq!(
+        e1["source_files"],
+        json!([]),
+        "deleted producer: no fallback"
+    );
+}
+
+#[tokio::test]
+async fn walk_provenance_rejects_non_boolean_and_stays_read_only() {
+    let (db, _d) = two_episode_db();
+    let wal = TempDir::new().unwrap();
+    let state = make_state(Some(db), None, Some(wal.path().to_path_buf()));
+    let v = call(&state, "knowledge_walk", one_hop(Some(json!("yes")))).await;
+    assert_eq!(v["error"]["code"], -32000, "{v}");
+    let before = call(&state, "knowledge_status", json!({})).await["result"].clone();
+    let v = call(&state, "knowledge_walk", one_hop(Some(json!(true)))).await;
+    assert!(v["result"]["hops"][0]["edges"][0]["episodes"].is_array());
+    let after = call(&state, "knowledge_status", json!({})).await["result"].clone();
+    assert_eq!(before["entity_count"], after["entity_count"]);
+    assert_eq!(before["relationship_count"], after["relationship_count"]);
+    assert_eq!(files_under(wal.path()), 0, "no WAL writes");
 }
