@@ -25,13 +25,27 @@ graphiti-style bulk deletes by uuid.
   no backfill is needed and existing uuid-less graphs dump correctly. Replay stays idempotent
   (ADR-0026, ADR-0028): a second replay matches the existing edge. Distinct groups are not
   collapsed.
-- **Two templates.** Rows with a uuid use `MENTIONS_CYPHER` (also `SET r.uuid`); uuid-less rows
-  use `MENTIONS_NO_UUID_CYPHER`, which leaves `r.uuid` NULL on the rebuilt edge. The dump emits no
-  "null uuid — skipping" warning any more.
-- **Total paging order.** `Conn::dump_mentions_page` orders by `ep.uuid, en.uuid, r.group_id`.
-  Many rows share an `ep.uuid`, so `ORDER BY ep.uuid` alone is not total and SKIP/LIMIT paging
-  (`PAGE_SIZE` 500) could drop or repeat rows across a page boundary. This is MENTIONS-only; the
-  other edge phases (same latent shape) are untouched (FR-009) and are a follow-up.
+- **Four templates.** The dump picks per row on (uuid present?) × (`group_id` non-NULL?). Rows with
+  a uuid use `MENTIONS_CYPHER` (also `SET r.uuid`); uuid-less rows use `MENTIONS_NO_UUID_CYPHER`,
+  which leaves `r.uuid` NULL on the rebuilt edge. Legacy edges whose `group_id` is NULL use the
+  `MENTIONS_NULL_GROUP_*` pair, which `MERGE (ep)-[r:MENTIONS]->(en)` on the endpoints alone and
+  never `SET` `group_id`: `value_as_string` would turn NULL into `""`, which never matches a stored
+  NULL under a `{group_id: $group_id}` key, so replaying onto a graph that still held the NULL-group
+  edge would create a second one (breaking idempotent replay). The dump emits no "null uuid —
+  skipping" warning any more.
+- **Paging order covers every dumped column.** `ORDER BY ep.uuid` alone is not total (many rows
+  share an `ep.uuid`), and `ORDER BY ep.uuid, en.uuid, r.group_id` still ties on parallel duplicate
+  edges, so SKIP/LIMIT paging (`PAGE_SIZE` 500) could emit one duplicate twice and drop the other —
+  including the uuid-bearing one. lbug rejects `ORDER BY ID(r)` ("Order by INTERNAL_ID is not
+  supported"), so the tiebreaker is the remaining returned columns: `(ep.uuid, en.uuid,
+  r.group_id, r.uuid, r.created_at)`. Rows that still tie are identical in every dumped column, so
+  which lands on which page cannot change the emitted set; "total" here means total over the
+  dumped row, not over physical edges.
+- **The other edge phases get the same ordering.** `dump_has_episode_page`,
+  `dump_has_member_entity_page`, `dump_has_member_community_page` and `dump_next_episode_page`
+  ordered only by the source uuid, so a saga/community/episode with more than a page of edges had
+  the same defect. Fixed here at the reviewer's request (this supersedes the original FR-009
+  scope); their templates and row handling are unchanged.
 
 ## Alternatives Considered
 
@@ -50,4 +64,4 @@ graphiti-style bulk deletes by uuid.
   the same entity. The MERGE-based rebuild collapses them, so the rebuilt *count* can be lower
   than the source count while the tuple set is identical. Parity is defined on distinct tuples.
 - `edges_dumped` now includes MENTIONS edges that were previously skipped.
-- Rows with a NULL `group_id` come back with `group_id = ""`; readers match on endpoints.
+- NULL-`group_id` MENTIONS edges stay NULL-group after a rebuild and replay idempotently.

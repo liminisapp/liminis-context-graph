@@ -122,14 +122,16 @@ A regression test guards against the defect returning, exercising the normal wri
 ### Functional Requirements
 
 - **FR-001**: `knowledge_dump_wal` MUST emit every MENTIONS edge present in the graph, including edges that have no uuid.
-- **FR-002**: A graph rebuilt from a dump MUST contain the same MENTIONS edges as the source graph, with identical count and identical `(episode, entity)` pairs (per `group_id`).
+- **FR-002**: A graph rebuilt from a dump MUST contain the same MENTIONS edges as the source graph, with identical distinct `(episode, entity, group_id)` tuples. Parallel duplicate edges with the same tuple collapse to one by design, so parity is on distinct tuples, not raw edge count.
 - **FR-003**: Dumping a graph with uuid-less MENTIONS edges MUST work without any prior backfill or migration having run.
 - **FR-004**: Applying the dump's MENTIONS statements MUST be idempotent: replaying them over a graph that already holds the edge MUST NOT create duplicates (consistent with ADR-0026 and ADR-0028).
 - **FR-005**: The dump MUST NOT log the "null uuid — skipping" warning for MENTIONS edges that are now dumped; a warning, if kept, applies only to rows that genuinely cannot be dumped.
 - **FR-006**: MENTIONS edges that already carry a uuid MUST continue to be dumped and rebuilt correctly, with no duplicates when uuid-bearing and uuid-less edges coexist.
 - **FR-007**: A regression test MUST build a small graph through the normal write paths (native ingest), dump it, rebuild it in a fresh workspace, and assert MENTIONS count and `(episode, entity)` pair parity, alongside the existing node/edge parity checks.
 - **FR-008**: After a dump→rebuild, entity→episode provenance readers (`get_entity_neighbors`, `get_entities_by_source`, `find_entities` `include_episodes`, `knowledge_walk` `include_provenance` mention fallback, entity support/corroboration counts) MUST return the same results as on the source graph.
-- **FR-009**: The fix MUST NOT change the dump's behavior for any non-MENTIONS node or edge phase.
+- **FR-009**: The fix MUST NOT change the dump's emitted statements or row handling for any non-MENTIONS node or edge phase. The only exception (added at review): the paging `ORDER BY` of the HAS_EPISODE, HAS_MEMBER and NEXT_EPISODE edge pages gets a tiebreaker so a source with more than one page of edges cannot lose or repeat edges.
+- **FR-010**: MENTIONS edges with a NULL `group_id` MUST round-trip as NULL-group edges, and replaying the dump over a graph already holding them MUST NOT create duplicates.
+- **FR-011**: Dump paging over MENTIONS and the other edge phases MUST use an order that is total over the dumped row (a tiebreaker beyond the source uuid), so SKIP/LIMIT paging neither drops nor repeats edges.
 
 ### Key Entities *(if applicable)*
 
@@ -140,7 +142,7 @@ A regression test guards against the defect returning, exercising the normal wri
 
 ### Measurable Outcomes
 
-- **SC-001**: For a graph built by native ingest, the MENTIONS count in a graph rebuilt from its dump equals the source count (e.g. 792 of 792 in the #828 measurement scenario, versus 0 before).
+- **SC-001**: For a graph built by native ingest, the number of MENTIONS edges in a graph rebuilt from its dump equals the number of distinct `(episode, entity, group_id)` tuples in the source (e.g. 792 of 792 in the #828 measurement scenario, versus 0 before; equal to the raw count when the source has no parallel duplicates).
 - **SC-002**: The set of `(episode, entity, group_id)` MENTIONS tuples in the rebuilt graph is identical to the source graph's.
 - **SC-003**: Provenance reads (`episode_uuids`, `source_descriptions`, `include_episodes`, support/corroboration counts) on the rebuilt graph match the source graph for the same queries.
 - **SC-004**: A graph with existing uuid-less MENTIONS edges achieves SC-001 and SC-002 with no backfill step run.
@@ -159,7 +161,7 @@ A regression test guards against the defect returning, exercising the normal wri
 
 - Retention or pruning work (the ADR-0828 contingency design).
 - Downgrade or backward compatibility with older binaries.
-- Changes to non-MENTIONS dump phases.
+- Changes to non-MENTIONS dump phases beyond the paging tiebreaker (see FR-009).
 - A standalone backfill or migration tool for adding uuids to existing MENTIONS edges (the fix must work without one).
 
 ## Source References *(optional)*

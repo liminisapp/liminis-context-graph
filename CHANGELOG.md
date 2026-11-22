@@ -312,8 +312,11 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   dump→rebuild had zero MENTIONS and entity→episode provenance (`episode_uuids`,
   `include_episodes`, `support`/`corroboration`) was lost. The dump now emits every MENTIONS edge,
   keyed on `(episode, entity, group_id)` rather than the edge uuid, so existing graphs need no
-  backfill and replay stays idempotent. MENTIONS paging now uses a total order. Parallel duplicate
-  `(episode, entity)` edges collapse to one on rebuild.
+  backfill and replay stays idempotent (including legacy NULL-`group_id` edges, which are merged
+  on their endpoints and stay NULL-group). Edge-dump paging (MENTIONS, HAS_EPISODE, HAS_MEMBER,
+  NEXT_EPISODE) now orders by every dumped column, so a source with more than a page of edges can
+  no longer lose or repeat edges across a page boundary. Parallel duplicate
+  `(episode, entity, group_id)` edges collapse to one on rebuild.
 
 - **`knowledge_delete_by_source` no longer deletes other sources' episodes, and
   `knowledge_get_entities_by_source` returns only the requested source's live entities** (#829,
