@@ -222,8 +222,10 @@ pub fn registry() -> Vec<ToolSpec> {
                            `knowledge_get_entity_neighbors` / `knowledge_get_entities_by_source`, \
                            which fill them) and there is no `source_files`. With \
                            `include_episodes: true` they are filled from the entity's LIVE \
-                           (not superseded) mentioning episodes, newest first, capped at 50 per \
-                           entity: `episode_uuids` and `source_descriptions` are index-aligned; \
+                           mentioning episodes (not superseded, deleted or part of an uncommitted \
+                           document revision, the same predicate `knowledge_walk` provenance and \
+                           search use), newest first, capped at 50 per entity (`knowledge_walk` \
+                           caps at 20 per edge): `episode_uuids` and `source_descriptions` are index-aligned; \
                            `source_files` is the de-duplicated stored source files (episodes \
                            with none recorded are omitted, so it is not aligned); \
                            `episodes_truncated: true` appears only when the cap dropped \
