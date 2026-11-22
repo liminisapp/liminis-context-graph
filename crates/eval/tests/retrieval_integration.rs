@@ -244,6 +244,7 @@ async fn full_run(
             qmd_seconds,
         },
         configs,
+        inputs: None,
     }
 }
 

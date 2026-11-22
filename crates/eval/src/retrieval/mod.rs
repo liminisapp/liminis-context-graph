@@ -608,6 +608,12 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
     // (#790): a document-prefix change means a re-embed, so each profile gets a fresh workspace
     // and a fresh ingest rather than reusing another profile's vectors.
     let mut _service_guards: Vec<lcg::ServiceGuard> = Vec::new();
+    // What the report's `inputs` block is built from (issue #872): one embedder identity and one
+    // effective child environment per spawned service, plus the binary that ran.
+    let mut embedders: Vec<lcg::EmbedderIdentity> = Vec::new();
+    let mut service_envs: Vec<BTreeMap<String, String>> = Vec::new();
+    let mut service_bin: Option<(PathBuf, String)> = None;
+    let mut extractor_identity: Option<String> = None;
     if plan.needs_lcg {
         let profile_runs: Vec<Option<String>> = if a.embedding_profiles.is_empty() {
             vec![None]
@@ -651,6 +657,13 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             // cassette sidecar state the former so a discrepancy can never be hidden.
             meta.ontology_hash = Some(guard.ontology.hash.clone());
             meta.ontology_mode = guard.ontology.mode.clone();
+            embedders.push(guard.embedder.clone());
+            service_envs.push(lcg::effective_service_env(&opts, std::env::vars()));
+            service_bin = Some((opts.bin.clone(), guard.version.clone()));
+            extractor_identity = Some(inputs::extractor_identity(
+                a.replay_cassette.is_some(),
+                a.extractor_http.as_deref().or(a.extractor_uds.as_deref()),
+            ));
             meta.embedder = a
                 .embedder_http
                 .clone()
@@ -965,10 +978,29 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             return Err(e);
         }
     };
+    // Built here, after ingest, so a cassette this run recorded is hashed once it is written.
+    let variants_path = a.corpus.join(variants::FILE);
+    let cassette_path = a
+        .replay_cassette
+        .as_ref()
+        .or(a.record_cassette.as_ref())
+        .map(PathBuf::from);
+    let input_digests = inputs::InputDigests::build(&inputs::InputSources {
+        corpus: &fx.corpus_digest,
+        questions: &fx.questions_digest,
+        variants_file: (query_variants.is_some()).then_some(variants_path.as_path()),
+        cassette_file: cassette_path.as_deref(),
+        embedders: &embedders,
+        extractor_identity: extractor_identity.as_deref(),
+        service_bin: service_bin.as_ref().map(|(b, v)| (b.as_path(), v.as_str())),
+        path_var: std::env::var_os("PATH").as_deref(),
+        envs: &service_envs,
+    });
     let report = Report {
         meta,
         ingest: ingest_cost,
         configs: outcomes,
+        inputs: Some(input_digests),
     };
 
     let written = write_report(&report, a.out.as_deref());

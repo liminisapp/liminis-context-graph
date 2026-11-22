@@ -1231,6 +1231,7 @@ async fn run_report(fx: &Fixture, judge_path: &Path) -> Report {
             ..Default::default()
         },
         configs,
+        inputs: None,
     }
 }
 
