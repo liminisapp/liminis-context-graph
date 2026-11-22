@@ -2915,16 +2915,14 @@ impl crate::walk::WalkGraph for DbWalkGraph<'_, '_> {
         let now_us = chrono::Utc::now().timestamp_micros();
         let mut out = std::collections::HashMap::new();
         for chunk in uuids.chunks(200) {
-            for (uuid, (sup, source_file, source_description)) in
-                self.conn.get_episode_provenance(chunk)?
-            {
-                if sup.live_at(now_us) {
+            for (uuid, p) in self.conn.get_episode_provenance(chunk)? {
+                if p.supersession.live_at(now_us) {
                     out.insert(
                         uuid,
                         crate::walk::EpisodeSource {
-                            group_id: sup.group_id,
-                            source_file,
-                            source_description,
+                            group_id: p.supersession.group_id,
+                            source_file: p.source_file,
+                            source_description: p.source_description,
                         },
                     );
                 }

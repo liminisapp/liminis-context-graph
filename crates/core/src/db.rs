@@ -13,6 +13,15 @@ use crate::{
 };
 
 /// Map from entity UUID to (episode_uuids, source_descriptions), positionally aligned.
+/// Supersession state plus source identity of one episode (`get_episode_provenance`, #860).
+#[derive(Debug, Clone)]
+pub struct EpisodeProvenance {
+    pub supersession: crate::belief::EpisodeSupersession,
+    /// `None` on a legacy row (#853).
+    pub source_file: Option<String>,
+    pub source_description: String,
+}
+
 type EpisodeInfoMap = HashMap<String, (Vec<String>, Vec<String>)>;
 
 /// Mutations drained from a `Conn` and bucketed by the `group_id` whose data they modify
@@ -2276,13 +2285,7 @@ impl<'db> Conn<'db> {
     pub fn get_episode_provenance(
         &self,
         uuids: &[String],
-    ) -> Result<
-        std::collections::HashMap<
-            String,
-            (crate::belief::EpisodeSupersession, Option<String>, String),
-        >,
-        Error,
-    > {
+    ) -> Result<std::collections::HashMap<String, EpisodeProvenance>, Error> {
         let mut out = std::collections::HashMap::new();
         if uuids.is_empty() {
             return Ok(out);
@@ -2314,11 +2317,11 @@ impl<'db> Conn<'db> {
             };
             out.insert(
                 value_as_string(&r[0]),
-                (
-                    sup,
-                    value_as_optional_string(&r[9]),
-                    value_as_optional_string(&r[10]).unwrap_or_default(),
-                ),
+                EpisodeProvenance {
+                    supersession: sup,
+                    source_file: value_as_optional_string(&r[9]),
+                    source_description: value_as_optional_string(&r[10]).unwrap_or_default(),
+                },
             );
         }
         Ok(out)
