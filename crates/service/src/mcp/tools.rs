@@ -142,7 +142,7 @@ fn with_belief(mut props: Value) -> Value {
     props
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (57 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (58 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -1596,7 +1596,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── admin (16) — WAL/lifecycle/recovery/index maintenance ────────────────────
+        // ── admin (17) — WAL/lifecycle/recovery/index maintenance ────────────────────
         ToolSpec {
             name: "knowledge_stamp_origin",
             description: "Stamp `origin` (issue #752) onto EXISTING episodes of one group, without \
@@ -2111,11 +2111,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_57_unique_tools() {
+    fn registry_has_58_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 57);
+        assert_eq!(r.len(), 58);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 57, "tool names must be unique");
+        assert_eq!(names.len(), 58, "tool names must be unique");
     }
 
     #[test]

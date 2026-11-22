@@ -1058,11 +1058,11 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (58)
+## IPC methods (59)
 
-The socket dispatch handles **58 methods**: 57 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **59 methods**: 58 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (58) and the MCP tool registry (57, below) differ by exactly one — `health_check` is
+surface (59) and the MCP tool registry (58, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool. MCP clients have no health tool; the `ok` / `healthy` /
 `ready_for_reads` semantics they would otherwise look for are in the
 [Health check contract](#health-check-contract) below
