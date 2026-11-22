@@ -1523,7 +1523,7 @@ See [ADR-0857](adr/0857-find-entities-episode-provenance.md).
 | `mode` | Ranking | `score` | `similarity` |
 |---|---|---|---|
 | `vector` | Vector cosine, then belief-aware re-ranking by default (see `belief_aware`); with `belief_aware: false` it is cosine only, exactly the behaviour before #789. | Cosine similarity (`1 - distance`); a demoted passage's score is lowered to just below the passage it ranks under. | Not present. |
-| `hybrid` | BM25 over episode text (the existing `episode_content` full-text index) and the vector ranking, fused with **weighted** Reciprocal Rank Fusion (`weight/(rank+60)` per list; the lexical list has weight 0.4, the vector list 1.0), then belief-aware re-ranking (see `belief_aware`). | The **fused rank score** (at most about 0.023). It orders results; it is not a cosine and not comparable across queries. | Cosine similarity where the vector retriever matched the passage; absent for a passage only the lexical retriever found. |
+| `hybrid` | BM25 over episode text (the existing `episode_content` full-text index) and the vector ranking, fused with **weighted** Reciprocal Rank Fusion (`weight/(rank+60)` per list; the lexical list has weight 0.4, the vector list 1.0), then belief-aware re-ranking (see `belief_aware`). | The **fused rank score** (at most about 0.0233). It orders results; it is a rank-only fusion value, not a relevance, not a cosine and not comparable across queries. | Cosine similarity where the vector retriever matched the passage; absent for a passage only the lexical retriever found. **This is the relevance signal.** |
 
 - **`mode`** is optional. Omitted, the service default applies: the `LCG_PASSAGE_SEARCH_MODE`
   environment variable (`vector` or `hybrid`; an unrecognised value warns on stderr and falls back
@@ -1553,9 +1553,25 @@ See [ADR-0857](adr/0857-find-entities-episode-provenance.md).
   requests that omit `belief_aware`; an explicit request value always wins. With the switch off,
   `hybrid` gives weighted RRF without the rules, which is not the pre-#806 hybrid default (rules on).
   A non-boolean value is an invalid-params error. The removed `top_rank_bonus` parameter is ignored.
+- **`legs`** and **`lexical_score`** (issue #871, additive, hybrid mode only): each hybrid passage
+  carries `legs`, which retrievers found it: `dense` (vector only), `lexical` (BM25 only) or
+  `both` (at any rank in each list). `dense` and `both` hold exactly when `similarity` is present,
+  so `legs: "lexical"` is the documented form of the older "`similarity` is absent" convention.
+  In single-query hybrid `lexical_score` is the raw BM25 value when the lexical leg matched, and is
+  omitted otherwise. With `queries` (variants), `legs` is the **union** over every query that
+  retrieved the passage (`dense` through one query plus `lexical` through another is `both`); the
+  vector side counts only candidates at or above `min_score`. `lexical_score` is not set with
+  `queries`, because BM25 values from different queries are not comparable. If the full-text
+  index is unavailable, hybrid falls back to vector-only and every hit is `dense`. Both fields are
+  omitted in `vector` mode, so a vector-mode response is unchanged. A passage that reached the
+  result only through an `expand` HyDE variant (a vector-only search) carries no `legs`; a passage
+  keeps the `legs` of the first stage list that returned it. `legs` does not change ranking,
+  scores or membership.
 - **`min_score`** (default `LCG_SEARCH_MIN_SCORE`, else 0.5; clamped 0–1) floors the *vector
   retriever's* cosine similarity before fusion, as `min_similarity` does for entity search. A
-  passage found only by the lexical retriever is **not** excluded by it. This is a deliberate change
+  passage found only by the lexical retriever is **not** excluded by it, so hybrid mode can still
+  return hits for an off-topic query (E15: 25 of 34 off-topic queries, against 13 in `vector`
+  mode); use `similarity` and `legs` to tell them apart. This is a deliberate change
   in meaning from `vector` mode, where `min_score` filters the single list. When a request omits
   `min_score` (or sends `null` or a non-number), the operator-configured default applies; an
   explicit number, including `0.0`, always wins. The effective default is reported by
@@ -2126,6 +2142,9 @@ on by default in both modes since #806; `belief_aware: false` opts out) runs **o
 simply absent). `score` is the **fused rank score** (rank-ordered, so it stays monotone through belief
 demotion), and `similarity` is the best cosine across the vector legs that matched the passage (absent for a
 lexical-only hit), exactly as in hybrid mode. `min_score` floors each query's vector list before fusion.
+In hybrid mode each passage also carries `legs`, the union of the legs over every query that retrieved it
+(see [Hybrid passage search](#hybrid-passage-search-knowledge_search_passages-issue-789)); `lexical_score` is not
+set with `queries`.
 Without `queries` (or with `[]` / `null`) the response is byte-for-byte what it was before: no
 `matched_queries` key.
 
@@ -8401,6 +8420,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0821](0821-graph-qa-eval-and-kept-workspaces.md) | `lcg-eval graph-qa`, Ontology Ingest and Kept Workspaces | 2026-11-21 |
 | [0823](0823-literal-object-edges-as-self-loops.md) | Literal-Object Edges as Self-Loops Under an Ontology | 2026-11-21 |
 | [0824](0824-own-source-id-entity-filter.md) | Drop Extracted Entities Named After the Episode's Own Source ID or a Cited Note ID | 2026-11-21 |
+| [0828](0828-superseded-episode-retention.md) | Retention of Superseded Episodes — Measured Cost, Consumers, and a Decision Not to Prune Yet | 2026-11-22 |
 | [0851](0851-test-providers-mode.md) | Test-Providers Mode: Built-in Deterministic Embedder and Fact-Line Extractor | 2026-11-21 |
 | [0853](0853-episode-source-identity-and-exact-source-matching.md) | Episode Source Identity and Exact Source Matching | 2026-11-21 |
 | [0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md) | `knowledge_capabilities` — Protocol Version, Feature Registry and a Self-Describing Socket | 2026-11-21 |

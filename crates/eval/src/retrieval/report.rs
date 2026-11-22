@@ -84,6 +84,8 @@ pub struct ConfigRun {
     pub lookup_calls: u64,
     /// Returned hits with no evidence text, judged unsupported (see `RankedResult::evidence_gaps`).
     pub evidence_gaps: u64,
+    /// Lexical-only share of returned hybrid passage hits (issue #871); `None` for non-hybrid configs.
+    pub legs_tally: Option<super::LegsTally>,
     pub query_errors: Vec<String>,
     pub grounded: Grounded,
     /// Per-origin reading; `None` when the fixture declares no origins.
@@ -1036,6 +1038,16 @@ impl Report {
                     c.id, r.evidence_gaps
                 );
             }
+            if let Some(t) = r.legs_tally {
+                let share = t
+                    .share()
+                    .map_or("n/a".to_string(), |x| format!("{:.1}%", x * 100.0));
+                let _ = writeln!(
+                    o,
+                    "- `{}`: lexical-only share of returned hits: {share} ({}/{}). Those hits have no cosine (`legs: \"lexical\"`); `min_score` does not floor them.",
+                    c.id, t.lexical_only, t.total
+                );
+            }
             for e in r.query_errors.iter().take(3) {
                 if m.private {
                     let id = e.split(':').next().unwrap_or("?");
@@ -1509,6 +1521,9 @@ impl Report {
                         "model_calls_per_query": r.model_calls_per_query,
                         "lookup_calls": r.lookup_calls,
                         "evidence_gaps": r.evidence_gaps,
+                        "lexical_only_share": r.legs_tally.map(|t| json!({
+                            "lexical_only": t.lexical_only, "total": t.total, "share": t.share(),
+                        })),
                         "query_errors": if m.private {
                             r.query_errors.iter().map(|e| json!(format!("{}: error (detail withheld)", e.split(':').next().unwrap_or("?")))).collect::<Vec<_>>()
                         } else {
@@ -1630,6 +1645,7 @@ mod tests {
             model_calls_per_query: None,
             lookup_calls: 0,
             evidence_gaps: 0,
+            legs_tally: None,
             query_errors: vec![],
             grounded: Grounded::Skipped("no judge".into()),
             origin: None,
@@ -2119,6 +2135,29 @@ mod tests {
         assert!(md.contains("3 returned hit(s) carried no snippet"), "{md}");
         assert!(md.contains("lower bound"));
         assert_eq!(r.to_json()["configs"][0]["evidence_gaps"], 3);
+    }
+
+    #[test]
+    fn hybrid_rows_report_the_lexical_only_share_and_vector_rows_do_not() {
+        let mut r = report();
+        let md = r.render_markdown();
+        assert!(!md.contains("lexical-only share"), "{md}");
+        assert!(r.to_json()["configs"][0]["lexical_only_share"].is_null());
+        if let Status::Ran(run) = &mut r.configs[0].status {
+            run.legs_tally = Some(crate::retrieval::LegsTally {
+                lexical_only: 1,
+                total: 4,
+            });
+        }
+        let md = r.render_markdown();
+        assert!(
+            md.contains("lexical-only share of returned hits: 25.0% (1/4)"),
+            "{md}"
+        );
+        let j = r.to_json();
+        assert_eq!(j["configs"][0]["lexical_only_share"]["lexical_only"], 1);
+        assert_eq!(j["configs"][0]["lexical_only_share"]["total"], 4);
+        assert_eq!(j["configs"][0]["lexical_only_share"]["share"], 0.25);
     }
 
     #[test]
