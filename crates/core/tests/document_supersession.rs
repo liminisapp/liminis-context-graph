@@ -144,14 +144,14 @@ async fn call(method: &str, params: Value, state: &Arc<AppState>) -> Value {
     v["result"].clone()
 }
 
-//// Issue #858: an identical resubmission is a no-op, so each submission gets distinct text; a
+/// Issue #858: an identical resubmission is a no-op, so each submission gets distinct text; a
 /// repeat of a `chunk_id` here is then a genuine correction, as these tests intend.
 fn next_submission() -> usize {
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
 }
 
-// Ingests one chunk as part of document `doc` (or none) in `group`.
+/// Ingests one chunk as part of document `doc` (or none) in `group`.
 async fn ingest(state: &Arc<AppState>, group: &str, chunk_id: &str, doc: Option<&str>) -> Value {
     let mut params = json!({
         "chunk_text": format!("text of {chunk_id} (submission {})", next_submission()), "chunk_id": chunk_id,
