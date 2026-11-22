@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -7,8 +7,8 @@ use crate::{
     embedder::{EmbedRole, Embedder},
     error::{is_fts_inconsistent_error, Error},
     types::{
-        EdgeSearchEvidence, EntityRow, EntitySearchEvidence, PassageResult, RelatesToEdge,
-        ScoredEdge, ScoredEntity,
+        EdgeSearchEvidence, EntityRow, EntitySearchEvidence, PassageLegs, PassageResult,
+        RelatesToEdge, ScoredEdge, ScoredEntity,
     },
 };
 
@@ -161,6 +161,17 @@ fn similarity(distance: Option<f64>) -> Option<f64> {
 /// A BM25 score for the evidence, `None` when absent or not finite.
 fn finite(v: Option<f64>) -> Option<f64> {
     v.filter(|x| x.is_finite())
+}
+
+/// Which hybrid legs retrieved a passage (issue #871), from the per-list raw slots of a
+/// [`FusedHit`] built over `[bm25, vector]`. Presence-based: slot 0 set means BM25 retrieved it,
+/// slot 1 set means the (floored) vector list did. A below-floor vector candidate is absent from
+/// the vector list, so it reads as `lexical` when BM25 also found it.
+fn legs_from_raw(raw: &[Option<f64>]) -> Option<PassageLegs> {
+    PassageLegs::from_flags(
+        raw.get(1).is_some_and(Option::is_some),
+        raw.first().is_some_and(Option::is_some),
+    )
 }
 
 /// Reorders `rows` to follow `ranked_uuids`, the fused ranking they were fetched for.
@@ -718,6 +729,8 @@ pub async fn search_passages_hybrid(
                 let mut p = rows.remove(&hit.uuid)?;
                 p.score = hit.rrf_score;
                 p.similarity = similarity(hit.raw[1]);
+                p.legs = legs_from_raw(&hit.raw);
+                p.lexical_score = finite(hit.raw[0]);
                 Some(p)
             })
             .collect();
@@ -777,6 +790,8 @@ struct QueryLeg {
     ranked: Vec<String>,
     /// The vector retriever's rows for this query (`score` is the cosine *distance*).
     vector_rows: Vec<PassageResult>,
+    /// Uuids this query's BM25 list contained (issue #871). Empty in vector mode.
+    bm25: Vec<String>,
 }
 
 /// Runs the request's retrieval mode for one query: the floored vector list and, in hybrid mode,
@@ -803,20 +818,22 @@ fn retrieve_one_query(
             .collect(),
         Some(min_score),
     );
-    let ranked: Vec<String> = match mode {
-        PassageSearchMode::Vector => vector.into_iter().map(|(u, _)| u).collect(),
+    let (ranked, bm25_uuids): (Vec<String>, Vec<String>) = match mode {
+        PassageSearchMode::Vector => (vector.into_iter().map(|(u, _)| u).collect(), Vec::new()),
         PassageSearchMode::Hybrid => {
             let bm25 = lexical_passage_list(&conn, text, group_ids, origins, candidate_limit)?;
-            rrf_fuse_scored_weighted(&[&bm25, &vector], &[LEXICAL_RRF_WEIGHT, 1.0])
+            let ranked = rrf_fuse_scored_weighted(&[&bm25, &vector], &[LEXICAL_RRF_WEIGHT, 1.0])
                 .into_iter()
                 .map(|h| h.uuid)
-                .collect()
+                .collect();
+            (ranked, bm25.into_iter().map(|(u, _)| u).collect())
         }
     };
     Ok(QueryLeg {
         index,
         ranked,
         vector_rows,
+        bm25: bm25_uuids,
     })
 }
 
@@ -959,6 +976,12 @@ pub async fn search_passages_variants(
             }
         }
 
+        // Union, across queries, of the uuids any BM25 list contained (hybrid mode only).
+        let lexical: HashSet<&str> = legs
+            .iter()
+            .flat_map(|l| l.bm25.iter().map(String::as_str))
+            .collect();
+
         let conn = db.connect()?;
         let missing: Vec<String> = fused
             .iter()
@@ -982,6 +1005,15 @@ pub async fn search_passages_variants(
                 let mut m = matched.get(uuid.as_str()).cloned().unwrap_or_default();
                 m.sort_unstable();
                 p.matched_queries = Some(m);
+                // Dense uses the floored `best_cosine` set, not `vector_rows` (which includes
+                // below-floor candidates), so a lexical-only hit is never labelled dense.
+                p.legs = match mode {
+                    PassageSearchMode::Hybrid => PassageLegs::from_flags(
+                        best_cosine.contains_key(uuid.as_str()),
+                        lexical.contains(uuid.as_str()),
+                    ),
+                    PassageSearchMode::Vector => None,
+                };
                 Some(p)
             })
             .collect();
@@ -1605,6 +1637,48 @@ mod tests {
     }
 
     #[test]
+    fn legs_from_raw_classifies_each_leg_combination() {
+        // raw order is [bm25, vector].
+        assert_eq!(
+            legs_from_raw(&[Some(2.5), Some(0.1)]),
+            Some(PassageLegs::Both)
+        );
+        assert_eq!(legs_from_raw(&[None, Some(0.1)]), Some(PassageLegs::Dense));
+        assert_eq!(
+            legs_from_raw(&[Some(2.5), None]),
+            Some(PassageLegs::Lexical)
+        );
+        assert_eq!(legs_from_raw(&[None, None]), None);
+        assert_eq!(legs_from_raw(&[]), None);
+    }
+
+    #[test]
+    fn passage_legs_from_flags_and_serialization() {
+        assert_eq!(PassageLegs::from_flags(true, true), Some(PassageLegs::Both));
+        assert_eq!(
+            PassageLegs::from_flags(true, false),
+            Some(PassageLegs::Dense)
+        );
+        assert_eq!(
+            PassageLegs::from_flags(false, true),
+            Some(PassageLegs::Lexical)
+        );
+        assert_eq!(PassageLegs::from_flags(false, false), None);
+        assert_eq!(
+            serde_json::to_string(&PassageLegs::Lexical).unwrap(),
+            "\"lexical\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PassageLegs::Dense).unwrap(),
+            "\"dense\""
+        );
+        assert_eq!(
+            serde_json::to_string(&PassageLegs::Both).unwrap(),
+            "\"both\""
+        );
+    }
+
+    #[test]
     fn belief_facts_treat_a_pending_document_supersession_as_still_live() {
         let row = PassageResult {
             uuid: "old".into(),
@@ -1623,6 +1697,8 @@ mod tests {
             belief: None,
             source_file: None,
             chunk_id: None,
+            legs: None,
+            lexical_score: None,
         };
         let mk = |superseded_at_us| crate::belief::EpisodeSupersession {
             superseded_at_us,

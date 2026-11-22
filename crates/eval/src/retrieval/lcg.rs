@@ -27,7 +27,7 @@ type UnixStream = tokio::io::DuplexStream;
 use super::fixture::Fixture;
 use super::mapping::{
     chunk_markdown, edge_groups, edge_producers, entity_groups, map_edges, map_entities,
-    map_passages,
+    map_passages, tally_legs,
 };
 use super::{RankedResult, Retriever};
 
@@ -644,6 +644,11 @@ pub enum PassageMode {
 }
 
 impl PassageMode {
+    /// True for the modes that send `mode: "hybrid"`, the only ones whose passages carry `legs`.
+    pub fn is_hybrid(self) -> bool {
+        matches!(self, PassageMode::Hybrid | PassageMode::HybridBelief)
+    }
+
     pub fn config_id(self) -> &'static str {
         match self {
             PassageMode::Default => "lcg-passages",
@@ -746,13 +751,15 @@ impl Retriever for LcgPassages {
                 .call("knowledge_search_passages", self.mode.request(q, k))
                 .await?;
             let latency = t0.elapsed();
-            let (notes, evidence) = map_passages(&items(&r, "passages"));
+            let passages = items(&r, "passages");
+            let (notes, evidence) = map_passages(&passages);
             Ok(RankedResult {
                 notes,
                 evidence,
                 model_calls: Some(1),
                 lookup_calls: 0,
                 evidence_gaps: 0,
+                legs_tally: self.mode.is_hybrid().then(|| tally_legs(&passages)),
                 latency,
             })
         })
@@ -780,7 +787,8 @@ impl LcgVariants {
         let t0 = Instant::now();
         let r = self.t.call("knowledge_search_passages", params).await?;
         let latency = t0.elapsed();
-        let (notes, evidence) = map_passages(&items(&r, "passages"));
+        let passages = items(&r, "passages");
+        let (notes, evidence) = map_passages(&passages);
         Ok(RankedResult {
             notes,
             evidence,
@@ -788,6 +796,7 @@ impl LcgVariants {
             model_calls: Some(1),
             lookup_calls: 0,
             evidence_gaps: 0,
+            legs_tally: self.mode.is_hybrid().then(|| tally_legs(&passages)),
             latency,
         })
     }
@@ -925,6 +934,7 @@ impl Retriever for LcgPassagesStaged {
                 model_calls: (!self.expand).then_some(1 + u64::from(self.rerank)),
                 lookup_calls: 0,
                 evidence_gaps: 0,
+                legs_tally: None,
                 latency,
             })
         })
@@ -1044,6 +1054,7 @@ impl Retriever for LcgEntitiesFacts {
                 model_calls: Some(2),
                 lookup_calls,
                 evidence_gaps: 0,
+                legs_tally: None,
                 latency,
             })
         })
