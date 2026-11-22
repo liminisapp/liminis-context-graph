@@ -45,6 +45,10 @@ pub const FEATURES: &[&str] = &[
     "lint",
     "origin",
     "process_document",
+    // #850: `knowledge_search_passages` accepts `summaries` / `max_summary_slots` and may mark
+    // a result `via: "summary"`. An older server ignores the unknown params silently, so a
+    // client tests for this string before relying on them.
+    "summary_units",
     "walk",
     "writable_groups",
 ];

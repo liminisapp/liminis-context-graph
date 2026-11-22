@@ -97,6 +97,8 @@ async fn reports_version_protocol_and_seeded_features() {
         "lint",
         "writable_groups",
         "hybrid_passage_search",
+        // #850 summary units on knowledge_search_passages.
+        "summary_units",
     ] {
         assert!(features.iter().any(|x| x == f), "missing feature {f}");
     }

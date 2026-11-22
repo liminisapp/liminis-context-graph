@@ -134,7 +134,7 @@ during a rebuild and under any `--writable-groups` policy.
 ```json
 {"server_version": "0.19.1", "protocol_version": 1,
  "features": ["chunk_supersede", "hybrid_passage_search", "lint", "origin", "process_document",
-              "walk", "writable_groups"],
+              "summary_units", "walk", "writable_groups"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -559,7 +559,9 @@ does not use). When the operator has turned on `LCG_SUMMARY_UNITS`, ingest write
 LLM-written description per episode, a *summary unit* (see
 [Configuration: summary units](configuration.md#summary-units-opt-in-probe)). A call that sets
 `summaries: true` adds the summaries nearest the query to the candidates. With the key omitted,
-`null` or `false` the call is byte-identical to before, whatever else it sends.
+`null` or `false` the call is byte-identical to before, whatever else it sends. A server that
+supports these parameters lists `summary_units` in `knowledge_capabilities` → `features`. An older
+server ignores them silently, so test for that string first.
 
 | Param | Type | Meaning |
 |-------|------|---------|

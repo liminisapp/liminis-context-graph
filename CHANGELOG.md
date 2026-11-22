@@ -21,7 +21,8 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `max_summary_slots` times, with a `summaries` status block. Both switches are off by default and a
   call without `summaries` is byte-identical; no LLM is called at query time. New eval config
   `lcg-passages-belief-rerank-summaries`, paired with `lcg-passages-belief-rerank` and reporting the
-  recommendation bar. An implementation probe of E14: a null result is an acceptable outcome.
+  recommendation bar. `knowledge_capabilities` advertises the feature string `summary_units`.
+  An implementation probe of E14: a null result is an acceptable outcome.
 - **Graph question answering eval: `lcg-eval graph-qa`, ontology ingest and kept workspaces
   (#821, ADR-0821).** E13's graph question-answering eval (#815) ran only as scratch Python, so
   none of its numbers could be reproduced and `knowledge_walk` (#820) had no regression check.
