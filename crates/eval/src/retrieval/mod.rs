@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod origin;
 pub mod qmd;
 pub mod report;
+pub mod score_probe;
 pub mod stats;
 pub mod variants;
 pub mod workspace;
