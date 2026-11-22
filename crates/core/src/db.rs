@@ -1422,6 +1422,23 @@ impl<'db> Conn<'db> {
         name_prefix: Option<&str>,
         after: Option<(i64, &str)>,
     ) -> Result<Vec<(EpisodicRow, i64)>, Error> {
+        self.retrieve_episodes_page_by_uuids(groups, limit, name_prefix, after, None)
+    }
+
+    /// [`Self::retrieve_episodes_page`] narrowed to `uuids` (issue #857). `None` applies no
+    /// uuid filter; `Some(&[])` matches nothing. Group scope is still enforced by `groups`, so a
+    /// uuid from another group is never returned, and an unknown uuid is simply absent.
+    pub fn retrieve_episodes_page_by_uuids(
+        &self,
+        groups: Option<&[&str]>,
+        limit: usize,
+        name_prefix: Option<&str>,
+        after: Option<(i64, &str)>,
+        uuids: Option<&[&str]>,
+    ) -> Result<Vec<(EpisodicRow, i64)>, Error> {
+        if uuids.is_some_and(|u| u.is_empty()) {
+            return Ok(vec![]);
+        }
         let mut preds: Vec<&str> = Vec::new();
         let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
         if let Some(gids) = groups.filter(|g| !g.is_empty()) {
@@ -1431,6 +1448,10 @@ impl<'db> Conn<'db> {
         if let Some(prefix) = name_prefix {
             preds.push("ep.name STARTS WITH $prefix");
             params["prefix"] = serde_json::json!(prefix);
+        }
+        if let Some(u) = uuids {
+            preds.push("ep.uuid IN $uuids");
+            params["uuids"] = serde_json::json!(u);
         }
         if let Some((us, uuid)) = after {
             preds.push(
@@ -2415,23 +2436,36 @@ impl<'db> Conn<'db> {
         &self,
         entity_uuids: &[String],
     ) -> Result<Vec<(String, String, crate::origin::EpisodeOriginInfo)>, Error> {
+        Ok(self
+            .entity_mention_rows(entity_uuids)?
+            .into_iter()
+            .map(|r| (r.entity_uuid, r.episode_uuid, r.info))
+            .collect())
+    }
+
+    /// Like [`Self::entity_mention_origins`] but also carrying the episode's description, stored
+    /// source file and creation time — what `find_entities`' `include_episodes` needs (issue
+    /// #857). One batched query for all of `entity_uuids`, never one per entity.
+    pub fn entity_mention_rows(&self, entity_uuids: &[String]) -> Result<Vec<MentionRow>, Error> {
         if entity_uuids.is_empty() {
             return Ok(vec![]);
         }
         let rows = self.query_params(
             "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) WHERE n.uuid IN $uuids \
              RETURN DISTINCT n.uuid, ep.uuid, coalesce(ep.origin, ''), ep.doc_id, \
-             ep.superseded_at, ep.group_id",
+             ep.superseded_at, ep.group_id, ep.source_description, ep.source_file, \
+             ep.created_at",
             serde_json::json!({ "uuids": entity_uuids }),
         )?;
         Ok(rows
             .into_iter()
-            .map(|r| {
-                (
-                    value_as_string(&r[0]),
-                    value_as_string(&r[1]),
-                    episode_origin_info_from_cols(&r[2], &r[3], &r[4], &r[5]),
-                )
+            .map(|r| MentionRow {
+                entity_uuid: value_as_string(&r[0]),
+                episode_uuid: value_as_string(&r[1]),
+                info: episode_origin_info_from_cols(&r[2], &r[3], &r[4], &r[5]),
+                source_description: value_as_string(&r[6]),
+                source_file: value_as_optional_string(&r[7]).filter(|f| !f.is_empty()),
+                created_at_us: value_as_timestamp_micros(&r[8]),
             })
             .collect())
     }
@@ -6166,6 +6200,19 @@ pub(crate) fn value_as_optional_timestamp_str(v: &lbug::Value) -> Option<String>
         lbug::Value::Null(_) => None,
         other => Some(value_as_timestamp_str(other)),
     }
+}
+
+/// One `Episodic-[:MENTIONS]->Entity` row (issue #857): the origin info `support` is computed
+/// from, plus the per-episode provenance `include_episodes` reports.
+#[derive(Debug, Clone)]
+pub struct MentionRow {
+    pub entity_uuid: String,
+    pub episode_uuid: String,
+    pub info: crate::origin::EpisodeOriginInfo,
+    pub source_description: String,
+    /// The stored `source_file`; `None` when NULL or empty (legacy rows).
+    pub source_file: Option<String>,
+    pub created_at_us: i64,
 }
 
 /// One `RelatesToNode_` row with its endpoints, for the "same fact" sibling grouping (ADR-0752).

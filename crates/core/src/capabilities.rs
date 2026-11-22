@@ -41,6 +41,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// string here when they ship (see the module docs).
 pub const FEATURES: &[&str] = &[
     "chunk_supersede",
+    "entity_provenance",
     "hybrid_passage_search",
     "lint",
     "origin",
