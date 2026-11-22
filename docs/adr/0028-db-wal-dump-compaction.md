@@ -91,3 +91,4 @@ On any failure during the dump, `std::fs::remove_dir_all(&target_dir)` is called
 - `db.rs` gains 11 `pub(crate)` paginated dump query methods and the value accessor functions (`value_as_string`, `value_as_timestamp_str`, etc.) are promoted to `pub(crate)` for use by `dump.rs`.
 - `db.rs` also gains `count_mentions_edges` (public) for test verification.
 - The Python `service_protocol.py` in the liminis-app repo must be updated to expose `knowledge_dump_wal` to callers (FR-014 — tracked separately, out of scope for this repo).
+- **Update (#882, ADR-0882):** MENTIONS edges are keyed on `(episode, entity, group_id)`, not on the edge uuid; uuid-less edges (the shape native ingest writes) are legitimate and are dumped, using a template that leaves `r.uuid` NULL. MENTIONS paging orders by `ep.uuid, en.uuid, r.group_id`.
