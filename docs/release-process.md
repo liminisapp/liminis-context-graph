@@ -62,6 +62,28 @@ conclusion alone is not sufficient. Set `RELEASE_SHA` to the exact commit being 
 Do not treat step 1 alone as sufficient evidence that "full e2e passed." Step 2 is the
 one that actually verifies it.
 
+## Response schemas are release assets
+
+Each release carries the response JSON Schemas (`contract/*.schema.json`) and a generated
+`contract-manifest.json` (`lcg_version`, `tag`, `draft`, and a sha256 per file) as release assets, beside
+the binaries (#852, [ADR-0852](adr/0852-published-response-json-schemas.md)). Consumers fetch them at the
+tag they pin; see the [response contract](ipc-mcp-reference.md#response-contract-json-schemas-issue-852).
+
+- **Nothing to do by hand.** The `host` job in `release.yml` runs
+  `scripts/stage-contract-assets.sh <tag> artifacts` just before `gh release create`, which attaches
+  everything in `artifacts/`. The script fails the job if `contract/` holds no schemas or one is
+  malformed, so a release cannot silently ship without its contract.
+- **The committed schemas are already in sync.** CI's `committed_schemas_match_generated` test fails
+  when `contract/*.schema.json` differ from what the source types generate, and a PR that changes a
+  schema must also change `CHANGELOG.md` (`scripts/assert-contract-changelog.sh`). Before tagging,
+  confirm the `[Unreleased]` changelog entries for any schema change mark removed or renamed fields as
+  **BREAKING**, and that the section is renamed to the version being released.
+- **First check after a release publishes.** `release.yml` does not run on pull requests (ADR-0639), so
+  the asset step is first exercised on a tag. Confirm the release lists the seven
+  `*.schema.json` files and `contract-manifest.json`, and that `jq -r .lcg_version contract-manifest.json`
+  matches the tag. If it does not, fix forward; the files can be attached to the existing release with
+  `scripts/stage-contract-assets.sh <tag> <dir>` followed by `gh release upload <tag> <dir>/*.json --clobber`.
+
 ## Release packaging is verified post-merge
 
 `release.yml` does **not** run on pull requests. Release packaging — the four-target build

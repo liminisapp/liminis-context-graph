@@ -179,6 +179,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0824](0824-own-source-id-entity-filter.md) | Drop Extracted Entities Named After the Episode's Own Source ID or a Cited Note ID | 2026-11-21 |
 | [0828](0828-superseded-episode-retention.md) | Retention of Superseded Episodes — Measured Cost, Consumers, and a Decision Not to Prune Yet | 2026-11-22 |
 | [0851](0851-test-providers-mode.md) | Test-Providers Mode: Built-in Deterministic Embedder and Fact-Line Extractor | 2026-11-21 |
+| [0852](0852-published-response-json-schemas.md) | Published JSON Schemas for Response Shapes, Validated in lcg CI | 2026-11-22 |
 | [0853](0853-episode-source-identity-and-exact-source-matching.md) | Episode Source Identity and Exact Source Matching | 2026-11-21 |
 | [0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md) | `knowledge_capabilities` — Protocol Version, Feature Registry and a Self-Describing Socket | 2026-11-21 |
 | [0855](0855-health-check-ready-for-reads.md) | `health_check` Gains `ready_for_reads`; Documents `ok` / `healthy` / `ready_for_reads` Semantics | 2026-11-21 |

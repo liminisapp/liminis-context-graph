@@ -23,6 +23,27 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   deliberately unchanged. The reference now states why the per-entity cap (50) and the per-edge
   walk cap (20) differ.
 
+### Response schemas
+
+- **Published JSON Schemas for the responses consumers read (#852, ADR-0852).** Consumers knew lcg's
+  method names but not the shapes of the results, and typed them by guessing: a notebook-health view read
+  `knowledge_lint` details by the wrong keys (`details.derived_document`, the `causes` map and
+  `finding.reason`) and shipped a bug that no lcg test could catch.
+  - New `contract/<method>.schema.json` (JSON Schema draft-07, self-contained) for the result of
+    `health_check`, `knowledge_status` (including `wal` and `wal_groups`), `knowledge_search_passages`,
+    `knowledge_find_entities` (including the #857 provenance fields), `knowledge_find_relationships`
+    (including `belief`), `knowledge_process_chunk` and `knowledge_lint` (per-category `details`).
+    Every release attaches them, with a generated `contract-manifest.json` naming the lcg version, so a
+    consumer fetches them at the pinned version like the binary and validates a recorded response or
+    generates types with no running engine.
+  - lcg's own tests validate real handler responses against the committed schemas, so renaming,
+    removing or retyping a field fails lcg's CI first; a second test fails when the committed files are
+    stale. A PR that changes a schema must update this changelog.
+  - Compatibility policy: removing or renaming a field, narrowing its type or making an optional field
+    required is **BREAKING**; adding an optional field is not. Additional properties are allowed.
+  - No wire change: handlers are untouched and the schemas were written against the real responses
+    (the shapes pinned include `derived_document`, the `causes` map and `finding.reason`).
+
 ### Added
 
 - **`lcg-eval` verifies the ontology the service loaded, and reports that (#881, ADR-0881).**
