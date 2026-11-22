@@ -479,6 +479,43 @@ pub fn refusal_data(reason: &str, group_ids: &[String], policy: Option<&Writable
     })
 }
 
+/// Warning appended to a write response's `warnings` array when the request omitted `group_id`
+/// and the write therefore fell back to [`DEFAULT_GROUP_ID`] (issue #856). The defaults themselves
+/// do not change; this only makes the implicit fallback visible to the caller.
+pub const IMPLICIT_DEFAULT_GROUP_WARNING: &str = "group_id omitted; wrote to default group \
+\"liminis\". Third-party writers should pass their own group_id.";
+
+/// True when `method` is a defaulting write ([`WriteClass::GroupParam`]) and the request did not
+/// carry a string `group_id` — the exact predicate the write guard and the handlers use
+/// (`as_str().unwrap_or(DEFAULT_GROUP_ID)`), so `null`/non-string fall back and warn while `""`
+/// and an explicit `"liminis"` do not.
+pub fn implicit_default_group_applies(method: &str, params: &Value) -> bool {
+    classify(method) == Some(WriteClass::GroupParam) && !params["group_id"].is_string()
+}
+
+/// Appends [`IMPLICIT_DEFAULT_GROUP_WARNING`] to a successful result of an implicit default-group
+/// write. Leaves the result untouched when the warning does not apply, when it is not a JSON
+/// object, or when it is an `Ok({"success": false, ...})` soft failure (an error path).
+pub fn annotate_implicit_default(method: &str, params: &Value, mut result: Value) -> Value {
+    if !implicit_default_group_applies(method, params) {
+        return result;
+    }
+    let Some(obj) = result.as_object_mut() else {
+        return result;
+    };
+    if obj.get("success") == Some(&Value::Bool(false)) {
+        return result;
+    }
+    let warning = Value::String(IMPLICIT_DEFAULT_GROUP_WARNING.to_string());
+    match obj.get_mut("warnings").and_then(Value::as_array_mut) {
+        Some(arr) => arr.push(warning),
+        None => {
+            obj.insert("warnings".to_string(), Value::Array(vec![warning]));
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,5 +569,70 @@ mod tests {
         for (m, _) in CLASSIFICATION {
             assert!(seen.insert(*m), "duplicate classification for {m}");
         }
+    }
+
+    #[test]
+    fn implicit_default_applies_only_without_string_group() {
+        use serde_json::json;
+        let m = "knowledge_process_chunk";
+        assert!(implicit_default_group_applies(m, &json!({})));
+        assert!(implicit_default_group_applies(
+            m,
+            &json!({"group_id": null})
+        ));
+        assert!(implicit_default_group_applies(m, &json!({"group_id": 7})));
+        assert!(!implicit_default_group_applies(m, &json!({"group_id": ""})));
+        assert!(!implicit_default_group_applies(
+            m,
+            &json!({"group_id": "liminis"})
+        ));
+        assert!(!implicit_default_group_applies(
+            m,
+            &json!({"group_id": "x"})
+        ));
+        // Not a defaulting write.
+        assert!(!implicit_default_group_applies(
+            "knowledge_walk",
+            &json!({})
+        ));
+        assert!(!implicit_default_group_applies(
+            "knowledge_delete_by_source",
+            &json!({})
+        ));
+    }
+
+    #[test]
+    fn annotate_adds_and_appends_warning() {
+        use serde_json::json;
+        let m = "knowledge_assert_entity";
+        let out = annotate_implicit_default(m, &json!({}), json!({"created": true}));
+        assert_eq!(out["warnings"], json!([IMPLICIT_DEFAULT_GROUP_WARNING]));
+        assert_eq!(out["created"], json!(true));
+        let out = annotate_implicit_default(m, &json!({}), json!({"warnings": ["existing"]}));
+        assert_eq!(
+            out["warnings"],
+            json!(["existing", IMPLICIT_DEFAULT_GROUP_WARNING])
+        );
+    }
+
+    #[test]
+    fn annotate_leaves_other_results_untouched() {
+        use serde_json::json;
+        let m = "knowledge_process_chunk";
+        let explicit = json!({"group_id": "x"});
+        let body = json!({"success": true});
+        assert_eq!(annotate_implicit_default(m, &explicit, body.clone()), body);
+        let soft = json!({"success": false, "error": "bad scope"});
+        assert_eq!(annotate_implicit_default(m, &json!({}), soft.clone()), soft);
+        let non_object = json!([1, 2]);
+        assert_eq!(
+            annotate_implicit_default(m, &json!({}), non_object.clone()),
+            non_object
+        );
+        let ro = json!({"a": 1});
+        assert_eq!(
+            annotate_implicit_default("knowledge_walk", &json!({}), ro.clone()),
+            ro
+        );
     }
 }

@@ -60,7 +60,11 @@ pub async fn dispatch_with_policy(
     let start = Instant::now();
 
     let (response, success) = match handle(&req, Arc::clone(&state), progress_tx, policy).await {
-        Ok(result) => (IpcResponse::ok(req.id, result), true),
+        Ok(result) => {
+            let result =
+                crate::write_policy::annotate_implicit_default(&method, &req.params, result);
+            (IpcResponse::ok(req.id, result), true)
+        }
         Err(e) => {
             use crate::error::Error;
             match e {
