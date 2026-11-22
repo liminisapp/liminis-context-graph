@@ -927,6 +927,12 @@ fn attach_provenance<G: WalkGraph>(graph: &G, hops: &mut [WalkHop]) -> Result<()
                     .filter(|s| s.group_id == r.group_id)
                     .filter_map(EpisodeSource::citation),
             );
+            // A hub entity can be mentioned by thousands of episodes; bound this path like the
+            // recorded-episodes path and say so through the same truncation flag.
+            if prov.source_files.len() > MAX_PROVENANCE_EPISODES {
+                prov.source_files.truncate(MAX_PROVENANCE_EPISODES);
+                prov.episodes_truncated = true;
+            }
         }
         e.provenance = Some(prov);
     }
@@ -2110,6 +2116,31 @@ mod tests {
             prov_of(&o).source_files.is_empty(),
             "no fallback for a warrant"
         );
+    }
+
+    #[test]
+    fn mention_fallback_is_capped_and_flags_truncation() {
+        for (n, truncated) in [(20usize, false), (21, true), (40, true)] {
+            let mut g = one_edge_graph();
+            for i in 0..n {
+                let id = format!("ep{i:02}");
+                g.episode(&id, Some(&format!("f{i:02}.md")), "d");
+                g.mention("a", &id).mention("b", &id);
+            }
+            let o = walk_one(&g, &prov_plan("a", vec![hop(&[], Direction::Out)]));
+            let p = prov_of(&o);
+            assert!(p.episodes.is_empty(), "n={n}");
+            assert_eq!(
+                p.source_files.len(),
+                n.min(MAX_PROVENANCE_EPISODES),
+                "n={n}"
+            );
+            assert_eq!(p.episodes_truncated, truncated, "n={n}");
+            if n > 0 {
+                // Deterministic: sorted by episode uuid, then cut.
+                assert_eq!(p.source_files[0], "f00.md", "n={n}");
+            }
+        }
     }
 
     #[test]

@@ -2618,8 +2618,9 @@ included) gains three keys, appended after `signature_mismatch` and **always pre
 - An edge with **no recorded producing episodes** (a legacy row, a direct assertion, a cross-group
   edge) has empty `episodes` and falls back for `source_files`: first the edge's own
   `source_descriptions`, otherwise, for an edge without a `warrant`, the sources of live episodes in
-  the edge's group that mention **both** endpoints. This is a heuristic for legacy rows only; those
-  episodes are not reported as producers.
+  the edge's group that mention **both** endpoints (at most **20** distinct sources, ordered by
+  episode UUID; `episodes_truncated` is `true` when more were dropped). This is a heuristic for legacy
+  rows only; those episodes are not reported as producers.
 - Without the flag (absent or `false`) the response is byte-identical to before, `facts_text` is
   unchanged either way, and no extra lookups run. Episodes are looked up in the edge's own group.
   The walk stays read-only. Fetch passages for a citation with the existing episode tools.
