@@ -253,7 +253,8 @@ The check is made against the groups a call **actually changes**, not every grou
 
 - An omitted (or `null`/non-string) `group_id` resolves to the default group, `liminis` — **the
   default group must be listed to stay writable.** `group_id: ""` is a distinct group that can
-  never be listed, so it is always refused.
+  never be listed, so it is always refused. A write that falls back to the default group also
+  carries an [implicit default-group warning](#implicit-default-group-writes).
 - `knowledge_add_cross_group_edge` is checked against the edge's own `group_id`. The
   `source_group_id` of a foreign endpoint is a read-only pointer and is not checked: with
   `--writable-groups=a`, `{group_id: "a", target: {source_group_id: "b", …}}` succeeds and
@@ -524,6 +525,121 @@ before relying on `[]` to mean "nothing" — on the other six it doesn't.
 
 This section is the single, central statement of that contract; individual tool entries on this
 page don't restate it.
+
+### Omitted-group behaviour per method (issue #856)
+
+Many methods treat `group_id` as optional, and "omitted" does not mean the same thing everywhere:
+writes fall back to the default group `liminis` (the Liminis app's own graph), most reads span
+every group, and some methods refuse. **No default changed** with #856 — this table records what
+each method already did. The classes:
+
+- **default group + warning** — an omitted (or `null`/non-string) `group_id` resolves to `liminis`
+  and the response carries an [implicit default-group warning](#implicit-default-group-writes).
+- **default group** — an omitted group resolves to `liminis`, but the method is a read or an admin
+  operation and gets no warning.
+- **every group** — an omitted group means all groups.
+- **refused** — the group is required; omitting it is an error.
+- **not applicable** — the method takes no group (or is addressed by uuid / job id).
+
+| Method | Omitted group means | Notes |
+|--------|---------------------|-------|
+| `health_check` | not applicable | takes no group |
+| `knowledge_status` | not applicable | takes no group |
+| `knowledge_find_entities` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_resolve_entity` | default group | `group_id`; resolves by `(group_id, name)` in `liminis` only (read, no warning) |
+| `knowledge_find_relationships` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_get_episodes` | every group | `group_ids` plus the legacy `group_id` alias are unioned; neither means all groups |
+| `knowledge_lint` | every group | `group_ids` / legacy `group_id` scope; neither means all groups |
+| `knowledge_get_nodes_by_group` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_get_edges_by_group` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_get_edges_by_uuids` | not applicable | addressed by edge `uuids`, not by group |
+| `knowledge_get_correction_changes` | not applicable | addressed by episode uuid, not by group |
+| `knowledge_get_affected_work` | not applicable | addressed by edge uuid, not by group |
+| `knowledge_rebuild_status` | not applicable | addressed by `job_id` |
+| `knowledge_search_passages` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_list_entities` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_list_relationships` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_get_entity_neighbors` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_get_ontology` | default group | `group_id` (blank also means default); read, no warning |
+| `knowledge_walk` | default group | `group_ids` omitted means `["liminis"]`; read-style traversal, no warning |
+| `knowledge_get_entities_by_source` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_validate_corrections` | not applicable | takes no group |
+| `knowledge_preview_chunks` | not applicable | takes no group |
+| `knowledge_add_episode` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_process_chunk` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_process_document` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_assert_entity` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_assert_relationship` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_merge_entities` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_add_cross_group_edge` | default group + warning | `group_id` is the edge's own group; `source_group_id` on an endpoint is a pointer, not a default |
+| `knowledge_reprocess_entity_types` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_reprocess_relation_types` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_supersede_document` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_stamp_origin` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_canonicalize_relations` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_backfill_relation_types` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_backfill_summary_embeddings` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_reembed_missing` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_reload_ontology` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_delete_by_source` | refused | `group_ids` is a required non-empty array; an omitted one is an error (no all-groups delete) |
+| `knowledge_delete_chunk_episode` | refused | `group_ids` is a required non-empty array; an omitted one is an error (no all-groups delete) |
+| `knowledge_mark_chunk_removed` | refused | `group_ids` is a required non-empty array; an omitted one is an error (no all-groups delete) |
+| `knowledge_rebuild_from_wal` | default group | `group_id` (`""` also maps to `liminis`); replays that group's WAL directory; admin, no warning |
+| `knowledge_delete_episode` | not applicable | takes `episode_uuid`; the group is looked up from the episode |
+| `knowledge_rebind_pointers` | refused | `source_group_id` is required |
+| `knowledge_delete_by_group` | refused | `group_ids` is a required non-empty array; an omitted one is an error (no all-groups delete) |
+| `knowledge_clear_all` | every group | carries no group; acts on every group present |
+| `knowledge_apply_corrections` | every group | carries no group; acts on every group present |
+| `knowledge_query_cypher` | not applicable | takes no group |
+| `knowledge_recover` | not applicable | takes no group |
+| `knowledge_recover_full` | not applicable | takes no group |
+| `knowledge_close` | not applicable | takes no group |
+| `knowledge_strip_wal_embeddings` | every group | `group_id` omitted means every group's WAL directory; file-level |
+| `knowledge_build_indices` | not applicable | takes no group |
+| `knowledge_prepare_checkpoint` | not applicable | takes no group |
+| `knowledge_dump_wal` | every group | `group_id` omitted means every group's WAL directory; file-level |
+| `knowledge_wal_mark_create` | default group | `group_id` (`""` also maps to `liminis`); that group's checkpoints; admin, no warning |
+| `knowledge_wal_mark_list` | default group | `group_id` (`""` also maps to `liminis`); that group's checkpoints; admin, no warning |
+| `knowledge_wal_mark_delete` | default group | `group_id` (`""` also maps to `liminis`); that group's checkpoints; admin, no warning |
+
+The nine **default group + warning** rows are exactly the defaulting write methods in the
+[write allow-list](#per-group-write-allow-list) table ("default group if omitted"). A test keeps
+this table, the dispatch classification and the warning behaviour in agreement.
+
+### Implicit default-group writes
+
+When a request to one of the nine defaulting write methods omits `group_id` — or sends `null` or a
+non-string — the write still goes to the default group `liminis`, exactly as before, and the
+successful response gains an additive `warnings` array:
+
+```json
+{"result": {"success": true, "…": "…",
+            "warnings": ["group_id omitted; wrote to default group \"liminis\". Third-party writers should pass their own group_id."]}}
+```
+
+Where the warning does **not** appear:
+
+- an explicit `group_id` string, including exactly `"liminis"` (a deliberate choice), and
+  `group_id: ""` (a distinct group, not the default);
+- error responses, `-32004` write refusals, and `Ok({"success": false, …})` soft failures such as
+  an unknown `scope` — nothing was written, so there is nothing to warn about;
+- reads, `knowledge_walk` and the admin defaulters in the table above;
+- daemon-internal writes (WAL replay, auto-heal, degraded-mode recovery), which are not client
+  requests.
+
+`dry_run` calls that would have written to the default group do warn, since the fallback occurred.
+The `warnings` array is separate from — and does not replace — the existing `warning` object on
+`knowledge_process_chunk` (oversized chunk) and `embedding_warning` on `knowledge_assert_entity`.
+The same field arrives in the MCP tool result's structured content, over standalone and attached
+`--mcp-stdio` alike.
+
+**Guidance for third-party writers.** The default group is the Liminis app's own graph: content
+written there is entity-resolved together with the user's notes. A client that is not the Liminis
+app should **always pass its own `group_id`**. To enforce that, start the daemon with
+`--writable-groups=<your-group>` (or `LCG_WRITABLE_GROUPS`; see [Configuration](configuration.md)
+and the [per-group write allow-list](#per-group-write-allow-list)): an omitted `group_id` resolves
+to `liminis`, so a write without one is refused unless `liminis` is itself listed — the default
+group must be listed to stay writable. See [ADR-0742](adr/0742-per-group-write-allow-list.md).
 
 ### Time: event time vs ingest time (`reference_time`, `ingested_at`)
 
