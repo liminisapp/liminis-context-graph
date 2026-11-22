@@ -21,6 +21,18 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   cassette `.meta.json` and the kept-workspace manifest now state the hash and mode the service
   reported rather than the staged file's.
 
+- **`knowledge_status` per-group episode breakdown (#884, ADR-0884).** ADR-0828's reopening
+  trigger "superseded : live episodes exceeds 2 : 1 in any group" could not be checked because
+  `episode_count` is a total.
+  - New opt-in `include_episode_breakdown: true` adds `episode_breakdown: {as_of_us, groups:
+    [{group_id, live, superseded, pending, only_superseded_entities, only_superseded_edges}]}`.
+    Liveness is `EpisodeSupersession::live_at` (pending revisions are counted separately); edges
+    use the belief rule, entities need a superseded and no live `MENTIONS`. Opt-in because it scans
+    every episode, `MENTIONS` edge and edge under the read lock. Without the flag the response is
+    unchanged; when it cannot be computed it is `null` with `episode_breakdown_unavailable`.
+  - `knowledge_capabilities` lists the new feature `status_episode_breakdown`. Read-only; no
+    `PROTOCOL_VERSION` change.
+
 - **`find_entities` `include_episodes`, and a `uuids` filter on `get_episodes` (#857, ADR-0857).**
   `knowledge_find_entities` returned `episode_uuids` and `source_descriptions` always empty while
   `get_entity_neighbors` and `get_entities_by_source` filled them, so the same field meant
