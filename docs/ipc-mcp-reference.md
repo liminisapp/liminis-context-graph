@@ -1494,7 +1494,8 @@ unavailable.
 none, as for extraction):
 
 ```json
-{"group_id": "liminis", "has_ontology": true, "mode": "strict", "include_asserted": false,
+{"group_id": "liminis", "has_ontology": true, "mode": "strict", "ontology_hash": "9c1f…",
+ "include_asserted": false,
  "entity_type_count": 2, "entity_types": [
    {"name": "Employee", "description": "...", "parent": "Person", "identity": false, "extract": true}],
  "relation_type_count": 1, "relation_types": [
@@ -1505,7 +1506,9 @@ none, as for extraction):
 Types with `extract: false` (assert-only) are omitted unless `include_asserted: true`. A group with
 no ontology returns `has_ontology: false`, `mode: "free-form"` and empty lists — not an error.
 `source_type`/`target_type`, `inverse_aliases` and `symmetric` are always present and carry the
-declared values (#816).
+declared values (#816). `ontology_hash` is the semantic content hash of the ontology in effect for
+the group (`"none"` when there is none), whatever `include_asserted` says; clients use it to verify
+which ontology a service actually loaded (#881). An older service omits it.
 
 #### `knowledge_walk`
 

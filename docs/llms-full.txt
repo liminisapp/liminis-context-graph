@@ -2510,7 +2510,8 @@ unavailable.
 none, as for extraction):
 
 ```json
-{"group_id": "liminis", "has_ontology": true, "mode": "strict", "include_asserted": false,
+{"group_id": "liminis", "has_ontology": true, "mode": "strict", "ontology_hash": "9c1f…",
+ "include_asserted": false,
  "entity_type_count": 2, "entity_types": [
    {"name": "Employee", "description": "...", "parent": "Person", "identity": false, "extract": true}],
  "relation_type_count": 1, "relation_types": [
@@ -2521,7 +2522,9 @@ none, as for extraction):
 Types with `extract: false` (assert-only) are omitted unless `include_asserted: true`. A group with
 no ontology returns `has_ontology: false`, `mode: "free-form"` and empty lists — not an error.
 `source_type`/`target_type`, `inverse_aliases` and `symmetric` are always present and carry the
-declared values (#816).
+declared values (#816). `ontology_hash` is the semantic content hash of the ontology in effect for
+the group (`"none"` when there is none), whatever `include_asserted` says; clients use it to verify
+which ontology a service actually loaded (#881). An older service omits it.
 
 #### `knowledge_walk`
 
@@ -3570,7 +3573,9 @@ returns the ontology that applies to a group — the same group → workspace �
 for extraction — as a planning menu for `knowledge_walk`: mode, entity types (description, parent)
 and relation types (description, `source_type` / `target_type` lists, `inverse_aliases`,
 `symmetric`). Assert-only types (`extract: false`) are omitted unless `include_asserted: true`; a
-group with no ontology gets `has_ontology: false` and `mode: "free-form"`. See
+group with no ontology gets `has_ontology: false` and `mode: "free-form"`. The response also carries
+`ontology_hash`, the content hash of the ontology in effect (`"none"` without one), so a client can
+check which ontology the service actually loaded (#881). See
 [IPC/MCP reference → Typed relation walks](ipc-mcp-reference.md#typed-relation-walks-knowledge_get_ontology-knowledge_walk-issue-820).
 
 ## Reloading a group's ontology
@@ -6917,7 +6922,15 @@ target/release/lcg-eval retrieval --corpus crates/eval/fixtures/retrieval-v2 \
 
 **The ontology hash.** The report records the ontology's hash and mode in its Reproduction block
 and in `meta.ontology_hash` / `meta.ontology_mode`. It is `lcg_core::ontology::content_hash`, the
-hash LCG already computes; a run without an ontology records `none`.
+hash LCG already computes; a run without an ontology records `none`. The value is the one the
+**service reports** (`knowledge_get_ontology.ontology_hash` for the eval group), not the staged
+file's: the spawned service is always given the eval workspace through `LIMINIS_WORKSPACE_ROOT`
+(overriding any value in your shell), and right after startup `lcg-eval` checks that the service
+loaded the staged ontology. If the service has no ontology, a different one, or is an older build
+that reports no hash, the run exits non-zero before any ingest with an error naming both hashes
+(#881). `graph-qa` applies the same check when its workspace has an ontology (the eval group's
+`.lcg/ontology/retrieval-eval.yaml`, else `.lcg/ontology.yaml`). The cassette sidecar and the
+kept-workspace manifest also record the service-reported hash.
 
 **The cassette check.** A cassette's records carry no ontology, so `--record-cassette C` also
 writes `C.meta.json` with the hash it was recorded under (`none` without an ontology). Replaying
@@ -8387,6 +8400,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md) | `knowledge_capabilities` — Protocol Version, Feature Registry and a Self-Describing Socket | 2026-11-21 |
 | [0855](0855-health-check-ready-for-reads.md) | `health_check` Gains `ready_for_reads`; Documents `ok` / `healthy` / `ready_for_reads` Semantics | 2026-11-21 |
 | [0857](0857-find-entities-episode-provenance.md) | `find_entities` Episode Provenance and a `uuids` Filter on `get_episodes` | 2026-11-22 |
+| [0881](0881-eval-verifies-service-reported-ontology.md) | `lcg-eval` Verifies and Reports the Service-Reported Ontology | 2026-11-22 |
 
 ## Historical numbering
 
