@@ -1306,13 +1306,15 @@ async fn handle_knowledge_process_chunk(
     let attributes = attributes_param_to_string(&p["attributes"]);
     let origin = crate::origin::parse_origin_param(p)?;
 
-    let ref_time = match p["reference_time"].as_str() {
+    // `explicit_reference_time_us` is the parsed instant of a caller-supplied `reference_time`
+    // (none when omitted, i.e. "now"); the unchanged check (#858) reuses it rather than re-parsing.
+    let (ref_time, explicit_reference_time_us) = match p["reference_time"].as_str() {
         Some(s) => {
-            chrono::DateTime::parse_from_rfc3339(s)
+            let t = chrono::DateTime::parse_from_rfc3339(s)
                 .map_err(|_| Error::Ipc(format!("reference_time is not valid ISO 8601: {s}")))?;
-            s.to_string()
+            (s.to_string(), Some(t.timestamp_micros()))
         }
-        None => chrono::Utc::now().to_rfc3339(),
+        None => (chrono::Utc::now().to_rfc3339(), None),
     };
 
     // #407 FR-001/FR-006: purely observational — character count (not bytes), computed
@@ -1366,11 +1368,6 @@ async fn handle_knowledge_process_chunk(
     if supersede && keep.is_empty() {
         // Refusals (#616 identity drift) apply to a no-op exactly as to an ingest.
         state.check_identity(&group_id)?;
-        let explicit_reference_time_us = p["reference_time"].as_str().and_then(|s| {
-            chrono::DateTime::parse_from_rfc3339(s)
-                .ok()
-                .map(|t| t.timestamp_micros())
-        });
         let db = load_db(&state)?;
         let (gid, cid) = (group_id.clone(), chunk_id.clone());
         let live = tokio::task::spawn_blocking(move || {

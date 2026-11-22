@@ -439,10 +439,9 @@ async fn first_time_chunk_is_ingested_normally() {
 }
 
 #[tokio::test]
-async fn multi_unit_opt_outs_never_shortcut() {
+async fn supersede_false_never_shortcuts() {
     let h = harness();
-    let first = chunk(&h, base_params(G, "c1")).await;
-    let uuid = first["episode_uuid"].as_str().unwrap();
+    chunk(&h, base_params(G, "c1")).await;
 
     // supersede:false is a non-final unit of a multi-call revision.
     let before = snap(&h);
@@ -452,28 +451,37 @@ async fn multi_unit_opt_outs_never_shortcut() {
     assert_eq!(r["superseded_episode_uuids"], json!([]), "{r}");
     // Two live episodes for the chunk now.
     assert_eq!(episode_counts(&h.db), (2, 2));
+}
+
+#[tokio::test]
+async fn more_than_one_live_episode_never_shortcuts() {
+    let h = harness();
+    chunk(&h, base_params(G, "c1")).await;
+    chunk(&h, with(base_params(G, "c1"), json!({"supersede": false}))).await;
+    assert_eq!(episode_counts(&h.db), (2, 2));
 
     // More than one live episode: never `unchanged`, even for identical text.
     let before = snap(&h);
     let r = chunk(&h, base_params(G, "c1")).await;
     assert_ne!(r["status"], "unchanged", "{r}");
     assert!(snap(&h).extract > before.extract);
+}
 
-    // same_revision_episode_uuids supplied: no shortcut.
-    let h2 = harness();
-    let f2 = chunk(&h2, base_params(G, "c1")).await;
-    let before = snap(&h2);
+#[tokio::test]
+async fn same_revision_episode_uuids_never_shortcuts() {
+    let h = harness();
+    let first = chunk(&h, base_params(G, "c1")).await;
+    let before = snap(&h);
     let r = chunk(
-        &h2,
+        &h,
         with(
             base_params(G, "c1"),
-            json!({"same_revision_episode_uuids": [f2["episode_uuid"]]}),
+            json!({"same_revision_episode_uuids": [first["episode_uuid"]]}),
         ),
     )
     .await;
     assert_ne!(r["status"], "unchanged", "{r}");
-    assert!(snap(&h2).extract > before.extract);
-    let _ = uuid;
+    assert!(snap(&h).extract > before.extract);
 }
 
 #[tokio::test]
