@@ -456,6 +456,9 @@ async fn get_ontology_round_trips_fields_and_honours_include_asserted() {
     assert_eq!(rts[0]["aliases"], json!(["MANAGED_BY"]));
     assert_eq!(rts[0]["inverse_aliases"], json!(["MANAGES"]));
     assert_eq!(rts[0]["symmetric"], true);
+    // #881: the service-reported hash is the semantic content hash of the whole ontology.
+    let expected_hash = lcg_core::ontology::content_hash(Some(&sample_ontology()));
+    assert_eq!(r["ontology_hash"], json!(expected_hash));
 
     let v = call(
         &state,
@@ -463,6 +466,11 @@ async fn get_ontology_round_trips_fields_and_honours_include_asserted() {
         json!({"group_id": GROUP, "include_asserted": true}),
     )
     .await;
+    assert_eq!(
+        v["result"]["ontology_hash"],
+        json!(expected_hash),
+        "hash must not depend on include_asserted"
+    );
     assert_eq!(v["result"]["entity_types"].as_array().unwrap().len(), 3);
     assert_eq!(v["result"]["relation_types"].as_array().unwrap().len(), 2);
     assert_eq!(v["result"]["entity_types"][2]["extract"], false);
@@ -487,6 +495,7 @@ async fn get_ontology_without_an_ontology_is_a_well_formed_free_form_response() 
     assert!(v.get("error").is_none(), "{v}");
     assert_eq!(v["result"]["has_ontology"], false);
     assert_eq!(v["result"]["mode"], "free-form");
+    assert_eq!(v["result"]["ontology_hash"], "none");
     assert_eq!(v["result"]["entity_types"], json!([]));
     assert_eq!(v["result"]["relation_types"], json!([]));
 }
