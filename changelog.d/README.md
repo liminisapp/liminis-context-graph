@@ -3,7 +3,9 @@
 Each PR with a user-visible change records it as **one new file in this directory** instead of
 editing `CHANGELOG.md`. Two PRs then never touch the same file, so the merge train can batch them
 (#904, [ADR-0904](../docs/adr/0904-changelog-fragments-and-generated-llms-full.md)). This file is
-documentation: the tooling ignores it, along with any file that does not end in `.md`.
+documentation: the tooling ignores only this README. Every other entry in this directory that is
+not a `<number>-<slug>.md` fragment (a `.txt` or `.gitkeep` file, a subdirectory, `.markdown`, `.MD`)
+is an error, so keep notes elsewhere.
 
 ## Writing a fragment
 

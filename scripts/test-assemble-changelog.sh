@@ -307,6 +307,9 @@ if "$script" --bogus >/dev/null 2>&1; then fail "unknown flag should fail"; else
 # --- 15. the repository's own fragments are valid -----------------------------------------------
 if "$script" --check >/dev/null 2>"$tmp/err"; then pass "repository changelog.d/ fragments are valid"; else fail "repo fragments invalid: $(cat "$tmp/err")"; fi
 
+# --help prints the whole header comment (no hard-coded line range to drift)
+[ "$("$script" --help | tail -1)" = "Portable: bash 3.2 + POSIX awk (macOS and Linux). No external dependencies." ] && pass "--help prints the full header" || fail "--help output truncated"
+
 echo
 if [ "$failures" -ne 0 ]; then echo "$failures failure(s)"; exit 1; fi
 echo "all assemble-changelog checks passed"

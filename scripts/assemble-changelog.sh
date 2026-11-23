@@ -51,7 +51,7 @@ mode=assemble
 case "${1:-}" in
   "") ;;
   --check) mode=check ;;
-  -h|--help) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"; exit 0 ;;
   *) echo "usage: $0 [--check]" >&2; exit 2 ;;
 esac
 
