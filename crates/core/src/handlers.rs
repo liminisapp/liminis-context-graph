@@ -559,8 +559,10 @@ async fn episode_breakdown(state: &Arc<AppState>, queryable: bool) -> Result<Val
         .db
         .load_full()
         .ok_or_else(|| "database not open".to_string())?;
-    let now_us = chrono::Utc::now().timestamp_micros();
     let _guard = state.write_lock.read().await;
+    // Taken after the lock is held so `as_of_us` is the instant the scan actually evaluates
+    // liveness at, not an earlier one a slow writer made stale.
+    let now_us = chrono::Utc::now().timestamp_micros();
     tokio::task::spawn_blocking(move || {
         let conn = db.connect()?;
         crate::status_breakdown::compute(&conn, now_us).map(|b| b.to_json())
