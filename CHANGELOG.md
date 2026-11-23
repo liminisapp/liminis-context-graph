@@ -120,6 +120,18 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   gains a "Connections, concurrency and timeouts" section: one request at a time per connection,
   use several connections for parallel ingest or reads alongside ingest, and timeout/retry
   guidance. `deadline_ms`, joining a duplicate in-flight resubmit and pipelining remain deferred.
+- **`lcg-eval retrieval --ingest-concurrency N` (#900, ADR-0900).** Keeps up to N
+  `knowledge_process_chunk` calls in flight during ingest, each on its own socket connection
+  (default 1: behaviour, call order, outputs and digests unchanged). Per-chunk results are folded in
+  manifest order, a failed chunk still names its note id and chunk index, and supersessions, the
+  index build and the entity-link pass run after every chunk. `retrieval-score-probe` accepts it
+  too. The value used is recorded in `report.md` and `report.json` `meta.ingest_concurrency`.
+  **Cassette rule:** replay always runs at N = 1 (and says so); recording at N > 1 is allowed but
+  warns and marks the cassette sidecar `order_dependent`, because its `consolidate_summary` /
+  `judge_duplicates` keys depend on commit order (measured: 3 of 3 `consolidate_summary` misses on a
+  four-chunk shared-entity corpus replayed sequentially). Live N > 1 graphs can differ from run to
+  run (ADR-0029).
+
 - **`lcg-eval` verifies the ontology the service loaded, and reports that (#881, ADR-0881).**
   `knowledge_get_ontology` gains an additive `ontology_hash` (the semantic `content_hash` of the
   loaded ontology, `"none"` without one; independent of `include_asserted`). After startup,
