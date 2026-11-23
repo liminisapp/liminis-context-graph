@@ -92,7 +92,7 @@ target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2
    `ambiguous` one (the wording supports it but does not settle it, e.g. "led by" for Owner) is
    listed under the question's `optional_answers` instead: for `set` scoring it counts towards
    neither precision nor recall. Only `Owner` facts are supported, `notes` must name real notes,
-   and `retrieval-gen` fails on any other entry. The overlay changes `answers`/`optional_answers`
+   the entity must be a project the skeleton gives no Owner (a second owner would make the gold contradictory), and `retrieval-gen` fails on any other entry. The overlay changes `answers`/`optional_answers`
    only: `hops` still describe the skeleton's facts, and it never adds or reselects a question. The
    prose itself is never edited (that would change the corpus hash and invalidate the cassette).
    Changing the file means regenerating `graph-questions.jsonl` and bumping `questions_version`.

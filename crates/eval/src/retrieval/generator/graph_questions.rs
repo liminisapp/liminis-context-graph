@@ -235,6 +235,18 @@ pub fn parse_prose_facts(text: &str, sk: &Skeleton) -> Result<Vec<ProseFact>, St
                 ));
             }
         }
+        // The overlay is for projects the skeleton does not own-assign: a second owner would list
+        // the project under both owners and make the gold contradictory.
+        if sk
+            .notes
+            .iter()
+            .flat_map(|n| &n.facts)
+            .any(|sf| sf.entity == f.entity && sf.attribute == "Owner")
+        {
+            return Err(format!(
+                "{at}: the skeleton already states an Owner for this entity; the overlay only covers projects absent from the skeleton's Owner facts"
+            ));
+        }
     }
     Ok(facts)
 }
@@ -1137,6 +1149,19 @@ mod tests {
         assert!(parse_prose_facts(&one(&bad), &sk)
             .unwrap_err()
             .contains("project"));
+        // A project the skeleton already assigns an Owner cannot get a second one from the overlay.
+        let owned = sk
+            .notes
+            .iter()
+            .flat_map(|n| &n.facts)
+            .find(|sf| sf.attribute == "Owner")
+            .map(|sf| sf.entity.clone())
+            .expect("the skeleton has an Owner fact");
+        let mut bad = good.clone();
+        bad.entity = owned;
+        assert!(parse_prose_facts(&one(&bad), &sk)
+            .unwrap_err()
+            .contains("already states an Owner"));
         // Unknown status and unknown fields.
         let json = r#"[{"entity":"X","attribute":"Owner","value":"Marcus Haddad","notes":["journal-04"],"status":"maybe"}]"#;
         assert!(parse_prose_facts(json, &sk).is_err());
