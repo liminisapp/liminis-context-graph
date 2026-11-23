@@ -1547,6 +1547,14 @@ by index with one of these codes:
 
 An empty `moves` array and mismatched `from` / `to` kinds are request errors.
 
+**History is checked by `doc_id`, not by path.** `destination_has_history` guards a destination `doc_id`,
+because that is the key revision and supersession lineage hang off. A destination *source path* that
+only retired or superseded episodes of another document still carry (no live episode) is **not**
+refused: a path is shared exactly as it already is when a new document is ingested at the path of a
+deleted or retired one. Such history then shares the stored `source_file`, so `knowledge_delete_by_source`
+on that path removes it together with the moved document. A consumer that wants a clean path deletes
+the old history first.
+
 **Reply.** `{success, dry_run, group_id, moved, episodes_rekeyed, moves: [{from, to, episodes,
 chunk_ids_rewritten}]}`; there is no per-episode list, because a folder rename covers hundreds of
 documents.

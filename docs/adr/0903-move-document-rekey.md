@@ -50,6 +50,15 @@ duplicate destination, a destination that is another move's source). The batch i
 state before the batch, so chains and swaps are refused rather than ordered. Any refusal changes nothing
 and writes nothing to the WAL.
 
+The history check is keyed by `doc_id` only. A destination *source path* that only retired or
+superseded episodes of another document carry is deliberately not refused: path sharing with earlier
+history already happens whenever a new document is ingested at the path of a deleted or retired one
+(`source_file` is matched exactly, ADR-0853), so a move does not introduce it, whereas `doc_id` is the
+key revision and supersession lineage hang off and two histories under one `doc_id` is a real merge.
+Refusing on path-only history would also block the common "delete a note, then rename another onto its
+path" case. The consequence — `knowledge_delete_by_source` on that path also removes the old history —
+is documented in the reference.
+
 **6. Validate-then-apply, not a transaction.** lbug auto-commits per statement (ADR-0705), and an
 explicit transaction would disable the statement-level FTS backstop (`repair_fts_after`), which matters
 because `source_description` is FTS-indexed. Atomicity comes from full validation under the
