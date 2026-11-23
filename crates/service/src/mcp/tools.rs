@@ -30,6 +30,23 @@ fn empty_schema() -> Value {
     json!({"type": "object", "properties": {}})
 }
 
+/// `knowledge_status` input schema (issue #884): one optional opt-in flag.
+fn status_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "include_episode_breakdown": {
+                "type": "boolean", "default": false,
+                "description": "When true, add `episode_breakdown`: per group, the live, \
+                                 superseded and pending episode counts plus \
+                                 only_superseded_entities and only_superseded_edges (ADR-0828 \
+                                 reopening triggers). Scans every episode, MENTIONS edge and \
+                                 edge under the read lock, so it is off by default."
+            }
+        }
+    })
+}
+
 fn group_ids_prop() -> Value {
     json!({
         "type": "array",
@@ -171,9 +188,15 @@ pub fn registry() -> Vec<ToolSpec> {
                            WAL root is configured it carries `scope: \"default_group\"`, \
                            `default_group` and `see: \"wal_groups\"` (issue #667), so \
                            `exists: false` there means the default group has no stream, not \
-                           that WAL is broken — read `wal_groups` for every group.",
+                           that WAL is broken — read `wal_groups` for every group. Pass \
+                           `include_episode_breakdown: true` (issue #884, opt-in because it scans \
+                           every episode, MENTIONS edge and edge) to add `episode_breakdown`: \
+                           `{as_of_us, groups: [{group_id, live, superseded, pending, \
+                           only_superseded_entities, only_superseded_edges}]}`; the superseded : \
+                           live ratio per group is ADR-0828's reopening trigger 1. When it cannot \
+                           be computed it is null with `episode_breakdown_unavailable`.",
             scope: Scope::Read,
-            input_schema: empty_schema,
+            input_schema: status_schema,
         },
         ToolSpec {
             name: "knowledge_capabilities",
@@ -2300,6 +2323,27 @@ mod tests {
         assert!(is_streaming_method("knowledge_reprocess_relation_types"));
         assert!(is_streaming_method("knowledge_reprocess_entity_types"));
         assert!(!is_streaming_method("knowledge_status"));
+    }
+
+    /// Issue #884: `knowledge_status` advertises the opt-in `include_episode_breakdown` flag.
+    #[test]
+    fn status_advertises_episode_breakdown_flag() {
+        let r = registry();
+        let t = r.iter().find(|t| t.name == "knowledge_status").unwrap();
+        let schema = (t.input_schema)();
+        assert_eq!(
+            schema["properties"]["include_episode_breakdown"]["type"],
+            "boolean"
+        );
+        assert!(schema.get("required").is_none());
+        for needle in [
+            "include_episode_breakdown",
+            "episode_breakdown_unavailable",
+            "only_superseded_entities",
+            "only_superseded_edges",
+        ] {
+            assert!(t.description.contains(needle), "missing {needle}");
+        }
     }
 
     /// Issue #857: `include_episodes` on `find_entities` and `uuids` on `get_episodes` are

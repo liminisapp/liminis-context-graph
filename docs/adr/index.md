@@ -185,6 +185,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0857](0857-find-entities-episode-provenance.md) | `find_entities` Episode Provenance and a `uuids` Filter on `get_episodes` | 2026-11-22 |
 | [0880](0880-restatement-aware-corroboration.md) | Restatement-Aware Corroboration — Independent Sources, Not Documents | 2026-11-22 |
 | [0881](0881-eval-verifies-service-reported-ontology.md) | `lcg-eval` Verifies and Reports the Service-Reported Ontology | 2026-11-22 |
+| [0884](0884-status-episode-breakdown-opt-in.md) | `knowledge_status` Opt-in Per-group Episode Breakdown | 2026-11-22 |
 
 ## Historical numbering
 
