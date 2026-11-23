@@ -1,4 +1,5 @@
 mod cli;
+mod connection;
 mod mcp;
 mod migration;
 #[cfg(unix)]
@@ -32,116 +33,33 @@ use lcg_core::{
     },
     extractor::{Extractor, OaiExtractor, UnconfiguredExtractor},
     handlers,
-    ipc::IpcRequest,
     llm_router::LlmRouter,
     telemetry::{now_ms, TeeSink, TelemetryEvent, TelemetrySink},
-    IpcResponse,
 };
 use rmcp::ServiceExt;
-use serde_json::Value;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncWrite},
     sync::Notify,
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
 
 /// Serves one client connection. Generic over the stream so the same loop runs over a Unix socket
-/// or a Windows named pipe (`transport`, #581).
+/// or a Windows named pipe (`transport`, #581). The loop itself lives in [`connection`].
 async fn handle_connection<S>(stream: S, state: Arc<AppState>, shutdown_notify: Arc<Notify>)
 where
     S: AsyncRead + AsyncWrite + Send + 'static,
 {
-    let (reader, mut writer) = tokio::io::split(stream);
-    let mut lines = BufReader::new(reader).lines();
-
-    while let Ok(Some(line)) = lines.next_line().await {
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            continue;
-        }
-
-        let req: IpcRequest = match serde_json::from_str(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                write_parse_error(&mut writer, e).await;
-                continue;
-            }
-        };
-
-        let is_close = req.method == "knowledge_close";
-        let is_streaming = req
-            .params
-            .get("_progress_token")
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
-
-        let resp = if is_streaming {
-            handle_streaming_request(req, Arc::clone(&state), &mut writer).await
-        } else {
-            Some(handlers::dispatch(req, Arc::clone(&state), None).await)
-        };
-
-        if let Some(resp) = resp {
-            let json = serde_json::to_string(&resp).unwrap_or_default();
-            let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
-        }
-
-        if is_close {
-            // Trigger graceful shutdown instead of std::process::exit(0) (R3).
-            shutdown_notify.notify_one();
-            return;
-        }
-    }
-}
-
-async fn write_parse_error<W: AsyncWrite + Unpin>(writer: &mut W, e: serde_json::Error) {
-    let response = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": null,
-        "error": {"code": -32700, "message": format!("Parse error: {e}")}
-    });
-    let json = serde_json::to_string(&response).unwrap_or_default();
-    let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
-}
-
-/// Returns `Some(response)` if the streaming dispatch produced a final response, or `None` if the
-/// client disconnected and the dispatch task was aborted.
-async fn handle_streaming_request<W: AsyncWrite + Unpin>(
-    req: IpcRequest,
-    state: Arc<AppState>,
-    writer: &mut W,
-) -> Option<IpcResponse> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-    let req_id = req.id.clone();
-    let dispatch_handle = tokio::spawn(handlers::dispatch(req, state, Some(tx)));
-
-    let mut client_ok = true;
-    while let Some(val) = rx.recv().await {
-        let json = serde_json::to_string(&val).unwrap_or_default();
-        if writer
-            .write_all(format!("{json}\n").as_bytes())
-            .await
-            .is_err()
-        {
-            client_ok = false;
-            break;
-        }
-    }
-
-    if client_ok {
-        Some(
-            dispatch_handle
-                .await
-                .unwrap_or_else(|_| IpcResponse::err(req_id, -32000, "Internal error")),
-        )
-    } else {
-        drop(rx);
-        dispatch_handle.abort();
-        None
-    }
+    let parent = state.cancel_token.clone();
+    connection::handle_connection_with(
+        stream,
+        parent,
+        move |req, cancel, tx| handlers::dispatch_cancellable(req, Arc::clone(&state), tx, cancel),
+        shutdown_notify,
+    )
+    .await;
 }
 
 /// Fans `telemetry_sink` out to also feed the `<cassette>.failures.jsonl` sidecar (#306

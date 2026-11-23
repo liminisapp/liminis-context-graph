@@ -43,6 +43,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Stable feature strings. Sorted, `lower_snake_case`, append-only. Later issues add their own
 /// string here when they ship (see the module docs).
 pub const FEATURES: &[&str] = &[
+    "cancel_on_disconnect",
+    "chunk_progress",
     "chunk_supersede",
     "entity_provenance",
     "episode_source_fields",

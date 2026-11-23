@@ -111,6 +111,8 @@ async fn reports_version_protocol_and_seeded_features() {
         "passage_legs",
         "implicit_default_group_warning",
         "zero_vector_record",
+        "chunk_progress",
+        "cancel_on_disconnect",
     ] {
         assert!(features.iter().any(|x| x == f), "missing feature {f}");
     }
