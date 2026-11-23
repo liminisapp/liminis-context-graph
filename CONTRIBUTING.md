@@ -298,6 +298,36 @@ If a release build fails: delete the local and remote tags (`git tag --delete vX
 `git push --delete origin vX.Y.Z`), fix the issue on a branch, merge it, then re-tag the
 corrected commit and re-push.
 
+## Published response schemas
+
+The results of `health_check`, `knowledge_status`, `knowledge_search_passages`,
+`knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_process_chunk` and
+`knowledge_lint` have a published JSON Schema in [`contract/`](contract/), shipped with each release
+([ADR-0852](docs/adr/0852-published-response-json-schemas.md); consumer docs in the
+[IPC & MCP reference](docs/ipc-mcp-reference.md#response-contract-json-schemas-issue-852)). If you change
+what one of those methods returns:
+
+1. **Update the schema-only mirror** in [`crates/core/src/contract/`](crates/core/src/contract/)
+   (the handlers build responses with `json!`, so the schema types are separate and are *not* used on the
+   dispatch path). Required means "always emitted"; use `Option` with `skip_serializing_if` for a field
+   that is sometimes omitted, and `Nullable<T>` for one that is always emitted but may be `null`. Do not
+   add `deny_unknown_fields`.
+2. **Regenerate and commit** the schemas: `LCG_UPDATE_CONTRACT=1 cargo test -p lcg-core --lib contract::`.
+   Never edit `contract/*.schema.json` by hand; the `committed_schemas_match_generated` test fails on drift.
+3. **Cover the new shape** in `crates/core/tests/contract_schemas.rs`: make a real handler call that
+   produces it (a conditional field needs a call that triggers the condition) and, for a new field a
+   consumer will read, add a drift check that renames or retypes it and asserts the schema rejects it.
+   A response that no longer validates fails this suite, naming the method and the JSON path.
+4. **Record it in `CHANGELOG.md`** under `[Unreleased]`. CI fails a PR that touches `contract/` without
+   touching the changelog.
+
+**What is breaking.** The schemas describe what lcg emits and consumers read it, so judge a change
+from the reader's side. Removing or renaming a field, widening a type (`string` to `string|null`,
+`integer` to `number`), making an always-present field optional, or adding an alternative to a
+`oneOf`/`anyOf` is breaking for consumers: say **BREAKING** in the changelog entry. Adding an
+optional field, narrowing a type (`string|null` to `string`) or making an optional field always
+present is not. Adding a method to the covered set is additive.
+
 ## Questions
 
 Open an issue or start a GitHub Discussion. The maintainer will respond on a best-effort basis.

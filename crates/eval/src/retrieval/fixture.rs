@@ -156,6 +156,10 @@ pub struct Fixture {
     pub notes: BTreeMap<String, String>,
     pub corpus_hash: String,
     pub questions_hash: String,
+    /// Full-length (64 hex) form of `corpus_hash`, recorded in the report's `inputs` block.
+    pub corpus_digest: String,
+    /// Full-length (64 hex) form of `questions_hash`.
+    pub questions_digest: String,
 }
 
 impl Fixture {
@@ -240,13 +244,19 @@ pub fn valid_note_id(id: &str) -> bool {
         && !id.ends_with('-')
 }
 
-fn sha_hex(parts: &[&[u8]]) -> String {
+/// Length-prefixed sha256 over `parts`, full 64 hex.
+pub fn sha_full(parts: &[&[u8]]) -> String {
     let mut buf = Vec::new();
     for p in parts {
         buf.extend_from_slice(&(p.len() as u64).to_le_bytes());
         buf.extend_from_slice(p);
     }
-    lcg_core::sha256_hex::sha256_hex(&buf)[..16].to_string()
+    lcg_core::sha256_hex::sha256_hex(&buf)
+}
+
+/// [`sha_full`] truncated to the first 16 hex, as printed in reports' `meta`.
+fn sha_hex(parts: &[&[u8]]) -> String {
+    sha_full(parts)[..16].to_string()
 }
 
 /// Hash of a `questions.jsonl` text, as printed in reports (first 16 hex of sha256).
@@ -281,14 +291,17 @@ pub fn load(dir: &Path) -> Result<Fixture, String> {
         hash_parts.push(body.as_bytes().to_vec());
         notes.insert(n.id.clone(), body);
     }
-    let corpus_hash = sha_hex(&hash_parts.iter().map(|v| v.as_slice()).collect::<Vec<_>>());
+    let hash_slices: Vec<&[u8]> = hash_parts.iter().map(|v| v.as_slice()).collect();
+    let corpus_digest = sha_full(&hash_slices);
+    let corpus_hash = corpus_digest[..16].to_string();
 
     let qpath = dir.join("questions.jsonl");
     let qtext = std::fs::read_to_string(&qpath)
         .map_err(|e| format!("cannot read {}: {e}", qpath.display()))?;
     let known: HashSet<&str> = manifest.notes.iter().map(|n| n.id.as_str()).collect();
     let questions = parse_questions(&qtext, &known)?;
-    let questions_hash = questions_hash_of(&qtext);
+    let questions_digest = sha_full(&[qtext.as_bytes()]);
+    let questions_hash = questions_digest[..16].to_string();
 
     let questions_version = match std::fs::read_to_string(dir.join("questions.meta.json")) {
         Ok(s) => serde_json::from_str::<Value>(&s)
@@ -306,6 +319,8 @@ pub fn load(dir: &Path) -> Result<Fixture, String> {
         notes,
         corpus_hash,
         questions_hash,
+        corpus_digest,
+        questions_digest,
     })
 }
 
@@ -840,6 +855,15 @@ mod tests {
         let f1 = load(d.path()).unwrap();
         let f2 = load(d.path()).unwrap();
         assert_eq!(f1.corpus_hash, f2.corpus_hash);
+        // The printed hashes are the first 16 hex of the full digests recorded in `inputs`.
+        assert_eq!(f1.corpus_digest.len(), 64);
+        assert_eq!(f1.questions_digest.len(), 64);
+        assert!(f1.corpus_digest.starts_with(&f1.corpus_hash));
+        assert!(f1.questions_digest.starts_with(&f1.questions_hash));
+        assert_eq!(
+            f1.questions_hash,
+            questions_hash_of(&std::fs::read_to_string(d.path().join("questions.jsonl")).unwrap())
+        );
         assert_eq!(f1.questions_version, "unversioned");
         std::fs::write(d.path().join("notes/a.md"), "# A\nchanged").unwrap();
         assert_ne!(load(d.path()).unwrap().corpus_hash, f1.corpus_hash);

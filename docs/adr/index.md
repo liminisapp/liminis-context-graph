@@ -179,11 +179,13 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0824](0824-own-source-id-entity-filter.md) | Drop Extracted Entities Named After the Episode's Own Source ID or a Cited Note ID | 2026-11-21 |
 | [0828](0828-superseded-episode-retention.md) | Retention of Superseded Episodes — Measured Cost, Consumers, and a Decision Not to Prune Yet | 2026-11-22 |
 | [0851](0851-test-providers-mode.md) | Test-Providers Mode: Built-in Deterministic Embedder and Fact-Line Extractor | 2026-11-21 |
+| [0852](0852-published-response-json-schemas.md) | Published JSON Schemas for Response Shapes, Validated in lcg CI | 2026-11-22 |
 | [0853](0853-episode-source-identity-and-exact-source-matching.md) | Episode Source Identity and Exact Source Matching | 2026-11-21 |
 | [0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md) | `knowledge_capabilities` — Protocol Version, Feature Registry and a Self-Describing Socket | 2026-11-21 |
 | [0855](0855-health-check-ready-for-reads.md) | `health_check` Gains `ready_for_reads`; Documents `ok` / `healthy` / `ready_for_reads` Semantics | 2026-11-21 |
 | [0857](0857-find-entities-episode-provenance.md) | `find_entities` Episode Provenance and a `uuids` Filter on `get_episodes` | 2026-11-22 |
 | [0858](0858-unchanged-chunk-resubmission-noop.md) | `knowledge_process_chunk` No-Ops on an Identical Resubmission | 2026-11-21 |
+| [0872](0872-retrieval-run-comparability.md) | `lcg-eval retrieval` Run Comparability: Input Digests, Hard/Soft Inputs, `--compare` | 2026-11-22 |
 | [0880](0880-restatement-aware-corroboration.md) | Restatement-Aware Corroboration — Independent Sources, Not Documents | 2026-11-22 |
 | [0881](0881-eval-verifies-service-reported-ontology.md) | `lcg-eval` Verifies and Reports the Service-Reported Ontology | 2026-11-22 |
 | [0882](0882-dump-mentions-endpoint-keyed-uuidless.md) | `knowledge_dump_wal` Dumps uuid-less MENTIONS Edges, Keyed on `(episode, entity, group_id)` | 2026-11-22 |

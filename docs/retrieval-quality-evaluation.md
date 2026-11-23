@@ -522,7 +522,10 @@ target/release/lcg-eval retrieval \
 | `--replay-cassette <PATH>` / `--record-cassette <PATH>` | Replay or record ingest extraction ([cassettes](testing-and-evaluation.md#recordreplay-cassettes)) for a free, repeatable LCG ingest. |
 | `--qmd-bin`, `--qmd-index` | qmd executable and named index. The default index name includes the corpus hash (`lcg-eval-<corpus_version>-<hash8>`), so a changed corpus gets a fresh index. qmd keeps a collection's original directory: if you pass your own `--qmd-index` and reuse it after changing `--corpus` or editing notes, the run warns, and you must remove the old collection or pick a new name. |
 | `--judge-model`, `--judge-cache`, `--no-grounded` | Grounded-evidence judge (needs `ANTHROPIC_API_KEY`); verdicts are cached so re-runs cost nothing. Without a key the grounded columns are **skipped**, not zero. |
-| `--out <DIR>` | Write `report.md` and `report.json`. |
+| `--out <DIR>` | Write `report.md` and `report.json` (and `compare.md` / `ranked.jsonl` when those flags are used). A stale `compare.md` or `ranked.jsonl` left by an earlier run in the same directory is removed first, so the directory never mixes runs. |
+| `--compare <FILE>` | Compare against an earlier `report.json`; see [Comparing two runs](#comparing-two-runs). |
+| `--strict` | With `--compare`, also refuse a run whose soft inputs differ. Requires `--compare`. |
+| `--record-ranked` | Write `ranked.jsonl` beside the report; see [Per-question ranked lists](#per-question-ranked-lists). Requires `--out`; refused with `--private`. |
 | `--bootstrap-seed <N>`, `--bootstrap-resamples <N>` | Confidence-interval settings (default seed 788, 10,000 resamples). Recorded in the report. |
 | `--private` | Private-notebook run; see below. |
 | `--dry-run` | Print the resolved plan and exit. |
@@ -530,6 +533,78 @@ target/release/lcg-eval retrieval \
 The extraction backend for LCG ingestion (live Anthropic, a local OpenAI-compatible endpoint,
 or a cassette) and the ontology are whatever the spawned service uses; the report records the
 choice.
+
+## Input digests (`inputs`)
+
+Every `report.json` carries a top-level `inputs` block (schema version 1) so a later reader can tell
+whether two runs measured the same thing. Each entry is a full-length sha256 hex string in JSON (the
+Markdown report's `## Inputs` table shows the first 16), or one of two literals: `none` (the run does
+not use that input) and `unknown` (it does, but its identity could not be determined). The existing
+`meta.corpus_hash` / `meta.questions_hash` are unchanged and are the first 16 hex of
+`inputs.corpus` / `inputs.questions`.
+
+| Entry | What is digested |
+|---|---|
+| `corpus`, `questions` | The fixture, with the same length-prefixed sha256 as `meta.*_hash`. |
+| `variants` | Bytes of `<corpus>/query-variants.jsonl`; `none` unless a `*-variants` config ran. |
+| `cassette` | Bytes of the `--replay-cassette` / `--record-cassette` file (after ingest, so a recorded cassette is hashed once written); `none` without one. The `.meta.json` sidecar is not hashed. |
+| `embedder_model` | The model name, dimension and effective instruction profile the service reports in `knowledge_status`, not the socket path or URL. `unknown` when the service reports no model; `none` for a qmd-only run. With several `--embedding-profile` values, one digest over the sorted set, so profile order does not matter. |
+| `extractor` | A path-free identity: `cassette-replay`, the endpoint with credentials stripped, or the service default. The cassette's path and contents belong to `cassette` alone. |
+| `service_binary` | Streamed sha256 of the resolved `--service-bin` (a bare name is looked up on `PATH`); the `--version` string if the file cannot be read; else `unknown`. |
+| `service_env` | The `LCG_*` variables, and the legacy `GRAPHITI_*` spellings the service still reads as fallbacks, in the spawned service's *effective* environment (the inherited one after the eval's own removals and settings, e.g. `LCG_PASSAGE_*`, `LCG_DB_PATH`). Names ending `_API_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, and names containing `URL` or `ENDPOINT`, contribute their name only, so no credential is hashed into a shared report (a changed key or URL is therefore not detected). `LCG_REPLAY_LLM` / `LCG_RECORD_LLM` are left to `cassette` when `--replay-cassette` / `--record-cassette` set them; one inherited from the shell is digested like any other variable. `service_env_names` lists the sorted names so a mismatch is explainable. |
+
+`--private` runs record the digests too: they are hashes, not content.
+
+## Comparing two runs
+
+```sh
+lcg-eval retrieval --corpus fixtures/retrieval-v2 ... --out run-b --compare run-a/report.json
+```
+
+`--compare` reads the earlier report before anything is started or spent, runs the new evaluation,
+writes this run's `report.md` / `report.json`, and then judges comparability (so a refusal never
+discards a finished run). It prints per-config and per-category nDCG@k deltas, and writes them to
+`compare.md` beside the report when `--out` is set.
+
+| Kind | Inputs | When they differ |
+|---|---|---|
+| Hard | `inputs.corpus`, `inputs.questions`, `k` | Exit 2 naming **every** differing hard input. No deltas are printed and no `compare.md` is written. |
+| Soft | `variants`, `cassette`, `embedder_model`, `extractor`, `service_binary`, `service_env`, `meta.lcg_build` (the service build), `meta.ontology_hash` | The deltas are printed under a banner listing each changed input. With `--strict`, exit 2 instead. |
+
+`none` equals `none`. `unknown` against a known value is a difference; `unknown` against `unknown` is
+a gap rather than a change, except under `--strict`, where an unidentifiable input always counts as a
+mismatch. A config (or category) present in one report only, or skipped in one, shows `n/a` for the
+missing side and is not itself a mismatch.
+
+An earlier report with no `inputs` block (a run from before this existed) is refused with exit 2 and a
+message to re-run it; it is never compared silently. A `--compare` file that cannot be read or is not a
+retrieval report exits 1. `--strict` without `--compare` is a usage error. `--private` runs may use
+`--compare`. The comparison policy is recorded in
+[ADR-0872](adr/0872-retrieval-run-comparability.md).
+
+Exit codes of `lcg-eval retrieval`: 0 success; 1 runtime error (including an unreadable or invalid
+`--compare` file); 2 usage error, or incompatible inputs under `--compare` (including an earlier
+report with no `inputs`). A run without `--compare` behaves as before.
+
+## Per-question ranked lists
+
+`--record-ranked` writes `ranked.jsonl` beside the report: one line per config and scored question,
+
+```json
+{"config":"lcg-passages-hybrid","question":"para-03","category":"paraphrase",
+ "hits":[{"rank":1,"note":"policy-marlin","uuid":"…","score":0.031,"similarity":0.82,"legs":"both"}]}
+```
+
+`hits` are the service's passages in response order, before the note de-duplication the metrics use.
+`score` is the config's own ranking score, `similarity` is present only in hybrid mode (absent for a
+lexical-only hit), and `legs` (`dense`, `lexical` or `both`) is present when the service supplies it
+(hybrid mode, service build with #871 or later); a field the service did not supply is omitted, never
+`null`. Evidence text is not written. Only `lcg-passages*` configs write lines (entities/facts and qmd
+expose no per-hit scores). A question that returned no passages has an empty `hits` list, and a
+question whose query failed is absent, so the dense (`lcg-passages-raw`) and fused
+(`lcg-passages-hybrid`) lines of one run join on `question` with no gaps and show where fusion changed
+the top-k. The flag needs `--out` and is refused with `--private` (a usage error), since the file
+holds per-question note pointers and scores.
 
 ## Comparing embedding profiles
 

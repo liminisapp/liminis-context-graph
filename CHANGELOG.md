@@ -23,6 +23,43 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   deliberately unchanged. The reference now states why the per-entity cap (50) and the per-edge
   walk cap (20) differ.
 
+### Response schemas
+
+- **Published JSON Schemas for the responses consumers read (#852, ADR-0852).** Consumers knew lcg's
+  method names but not the shapes of the results, and typed them by guessing: a notebook-health view read
+  `knowledge_lint` details by the wrong keys (`details.derived_document`, the `causes` map and
+  `finding.reason`) and shipped a bug that no lcg test could catch.
+  - New `contract/<method>.schema.json` (JSON Schema draft-07, self-contained) for the result of
+    `health_check`, `knowledge_status` (including `wal` and `wal_groups`), `knowledge_search_passages`,
+    `knowledge_find_entities` (including the #857 provenance fields), `knowledge_find_relationships`
+    (including `belief`), `knowledge_process_chunk` and `knowledge_lint` (per-category `details`).
+    Every release attaches them, with a generated `contract-manifest.json` naming the lcg version, so a
+    consumer fetches them at the pinned version like the binary and validates a recorded response or
+    generates types with no running engine.
+  - lcg's own tests validate real handler responses against the committed schemas, so renaming,
+    removing or retyping a field fails lcg's CI first; a second test fails when the committed files are
+    stale. A PR that changes a schema must update this changelog.
+  - Compatibility policy, judged from the reader's side (the schemas describe what lcg emits): removing
+    or renaming a field, widening a type (`T` to `T|null`), making an always-present field optional or
+    adding a union alternative is **BREAKING**; adding an optional field, narrowing a type or making an
+    optional field always present is not. Additional properties are allowed.
+  - No wire change: handlers are untouched and the schemas were written against the real responses
+    (the shapes pinned include `derived_document`, the `causes` map and `finding.reason`).
+  - `contract/knowledge_status.schema.json`: describes the opt-in `episode_breakdown` block (#884,
+    `include_episode_breakdown: true`) and `episode_breakdown_unavailable` as optional properties.
+    Additive, not breaking.
+  - `contract/knowledge_find_entities.schema.json`: describes the `include_episodes` provenance fields
+    (`episode_uuids`, `source_descriptions`, `source_files`, `episodes_truncated`; #857, #883) as
+    optional properties. Additive, not breaking.
+  - `contract/knowledge_process_chunk.schema.json`: describes the optional `warnings` array (#856).
+    Additive, not breaking.
+  - `contract/knowledge_process_chunk.schema.json`: the result is now an `anyOf` of the ingested shape
+    and the #858 unchanged-resubmission shape (`status: "unchanged"` with `success`, `chunk_id`,
+    `source_file`, `episode_uuid`, `duration_seconds` and none of the ingest counters). Additive for
+    readers of the ingested shape: that shape has no `status` key and is unchanged.
+  - `contract/knowledge_search_passages.schema.json`: describes the optional `legs` and `lexical_score`
+    passage fields (#871). Additive, not breaking.
+
 ### Added
 
 - **`knowledge_capabilities` advertises eight 0.19.2 capabilities that shipped without a feature
@@ -46,6 +83,20 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `report.json` (`meta.ontology_hash` is `"none"` for a free-form run, no longer `null`), the
   cassette `.meta.json` and the kept-workspace manifest now state the hash and mode the service
   reported rather than the staged file's.
+- **`lcg-eval retrieval` input digests, `--compare`/`--strict`, and `--record-ranked` (#872, ADR-0872).**
+  Two retrieval reports could be read against each other even when their inputs differed.
+  - `report.json` gains an `inputs` block (schema 1) with full sha256 digests of the corpus,
+    questions, variants file, cassette, embedder model (as the service reports it), extractor
+    identity, service binary and effective `LCG_*` environment (credential-bearing names by name
+    only); `none` when an input is unused, `unknown` when it cannot be identified. The Markdown
+    report shows the first 16 hex and a `lexical (direct)` vs `paraphrase` nDCG@k summary.
+  - `--compare <report.json>` prints per-config and per-category nDCG@k deltas. A different corpus,
+    questions or `k`, or an earlier report with no `inputs` block, exits 2 with no deltas; a
+    soft-input difference prints a banner (`--strict` refuses it). This run's report is written
+    before the comparison is judged.
+  - `--record-ranked` writes `ranked.jsonl` (passage-level `score`, `similarity`, `legs`) beside the
+    report so dense and fused configs join on question id. Refused with `--private`.
+  - A run without these flags is unchanged apart from the added `inputs` key.
 
 - **`knowledge_status` per-group episode breakdown (#884, ADR-0884).** ADR-0828's reopening
   trigger "superseded : live episodes exceeds 2 : 1 in any group" could not be checked because

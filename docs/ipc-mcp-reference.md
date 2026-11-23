@@ -276,6 +276,85 @@ Notes:
   A liveness probe that only needs "is the process alive" should accept `ok: true`, and a read-only
   client should gate on `ready_for_reads: true`.
 
+## Response contract (JSON Schemas, issue #852)
+
+Method *names* are discoverable from the dispatch table; method *result shapes* used to be known
+only from the code that built them, so consumers guessed key names. One such guess shipped a bug:
+a notebook-health view read `knowledge_lint` details by the wrong keys (`details.derived_document`,
+the `causes` map and `finding.reason` were each missed). lcg now publishes a
+[JSON Schema (draft-07)](https://json-schema.org/draft-07/schema) for the result of each of these
+methods, and its own test suite fails when a real response stops validating:
+
+`health_check`, `knowledge_status` (including `wal` and `wal_groups`), `knowledge_search_passages`,
+`knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_process_chunk` and
+`knowledge_lint` (with a per-category `details` shape, discriminated by `category`, and by `reason`
+where one category has two shapes).
+
+The schemas live in [`contract/`](https://github.com/liminisapp/liminis-context-graph/tree/main/contract)
+as `<method>.schema.json` and are attached to every GitHub release, next to the binaries, together
+with a `contract-manifest.json` that names the lcg version they belong to:
+
+```json
+{ "lcg_version": "0.19.1", "tag": "v0.19.1", "draft": "draft-07",
+  "schemas": [ { "method": "knowledge_lint", "file": "knowledge_lint.schema.json", "sha256": "..." } ] }
+```
+
+**Fetch them at the version you pin**, exactly as you fetch the binary:
+
+```sh
+V=v0.19.1   # the lcg version you run
+BASE=https://github.com/liminisapp/liminis-context-graph/releases/download/$V
+curl -fsSLO $BASE/contract-manifest.json
+for f in $(jq -r '.schemas[].file' contract-manifest.json); do curl -fsSLO "$BASE/$f"; done
+```
+
+**Validate a recorded response offline** with any draft-07 validator (no engine, no source
+checkout). The schemas are self-contained: the only `$ref`s are internal (`#/definitions/...`).
+
+```sh
+# the recorded response is the JSON-RPC `result` value, saved to lint-result.json
+npx ajv-cli validate -s knowledge_lint.schema.json -d lint-result.json
+```
+
+```python
+import json, jsonschema   # pip install jsonschema
+schema = json.load(open("knowledge_lint.schema.json"))
+jsonschema.Draft7Validator(schema).validate(json.load(open("lint-result.json")))
+```
+
+**Generate types** from them with a stock generator, for example
+`npx json-schema-to-typescript knowledge_lint.schema.json > knowledge-lint.d.ts` or
+`quicktype -s schema knowledge_lint.schema.json -o knowledge_lint.rs`.
+
+What the schemas say, and do not say:
+
+- They describe a method's successful `result` only: not JSON-RPC error objects, `_progress_token`
+  progress lines, or the MCP envelope (the MCP tools return the same result inside their own
+  wrapper).
+- A field that is always present is `required`. A field that is sometimes omitted is optional
+  (`index_created_at` on an empty graph, `source_files` without `include_episodes`, `belief`
+  without `believed_only` / `as_of`, `warning` on a normal `process_chunk`, `wal.scope` without a
+  WAL root). A field that is always present but may be `null` is `required` and nullable
+  (`derived_document`, `valid_at`, `embedding_cosine`, `next_cursor`).
+- Alternatives are modelled as `oneOf` / `anyOf`: `health_check` by `state`, `knowledge_status`
+  as degraded / queryable / not queryable, `knowledge_lint` findings by `category`.
+- Free-form members stay loose on purpose (`attributes` is a JSON string, `rerank` / `expansion`
+  are objects, `causes` is a map from cause to count), so they can grow without a breaking change.
+- **Additional properties are allowed.** Validate with a stock validator and an unknown extra field
+  still passes; do not turn on "additional properties: false" yourself unless you want every
+  additive release to break you.
+
+**Compatibility policy.** The schemas describe what lcg *emits*, so "breaking" is judged from the
+reader's side. Removing or renaming a field, widening a type (`string` to `string|null`, `integer`
+to `number`), making an always-present field optional, or adding an alternative to a `oneOf` /
+`anyOf` is a **breaking change** to a published schema and is announced in the release notes as
+such: a consumer that reads the old shape can crash or mis-parse the new one. Adding an optional
+field, narrowing a type (`string|null` to `string`) or making an optional field always present is
+not breaking: every response that validated against the new schema still validates for readers of
+the old one. Every release that changes a schema lists the
+change in the CHANGELOG. Contributors: see
+[CONTRIBUTING.md](https://github.com/liminisapp/liminis-context-graph/blob/main/CONTRIBUTING.md#published-response-schemas).
+
 ## MCP-over-stdio transport
 
 `liminis-context-graph --mcp-stdio` starts a native [Model Context Protocol](https://modelcontextprotocol.io)

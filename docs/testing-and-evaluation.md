@@ -13,6 +13,16 @@ lcg-owned, deterministic, offline providers: no sidecar, no LLM, no network. The
 words, so texts that share words are closer than unrelated ones. The fact-line syntax is a stable
 contract, tested in lcg's own CI. See [Test Providers](test-providers.md).
 
+## Checking your types against lcg's response schemas
+
+lcg publishes a JSON Schema for the result of each method a client typically reads, attached to every
+release and versioned with it (see the
+[response contract](ipc-mcp-reference.md#response-contract-json-schemas-issue-852)). In your own fast unit
+tests, fetch the schemas at the lcg version you pin, record a response (for example from
+`--embedder test --extractor test`, above), and validate it with a stock draft-07 validator, or generate
+your types from the schemas. This needs no running engine and takes seconds, so a shape drift fails your
+test instead of surfacing as a runtime guess at a key name.
+
 ## Record/replay cassettes
 
 Every test that exercises the real extraction pipeline used to face a choice: pay for a live

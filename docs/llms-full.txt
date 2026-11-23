@@ -1292,6 +1292,85 @@ Notes:
   A liveness probe that only needs "is the process alive" should accept `ok: true`, and a read-only
   client should gate on `ready_for_reads: true`.
 
+## Response contract (JSON Schemas, issue #852)
+
+Method *names* are discoverable from the dispatch table; method *result shapes* used to be known
+only from the code that built them, so consumers guessed key names. One such guess shipped a bug:
+a notebook-health view read `knowledge_lint` details by the wrong keys (`details.derived_document`,
+the `causes` map and `finding.reason` were each missed). lcg now publishes a
+[JSON Schema (draft-07)](https://json-schema.org/draft-07/schema) for the result of each of these
+methods, and its own test suite fails when a real response stops validating:
+
+`health_check`, `knowledge_status` (including `wal` and `wal_groups`), `knowledge_search_passages`,
+`knowledge_find_entities`, `knowledge_find_relationships`, `knowledge_process_chunk` and
+`knowledge_lint` (with a per-category `details` shape, discriminated by `category`, and by `reason`
+where one category has two shapes).
+
+The schemas live in [`contract/`](https://github.com/liminisapp/liminis-context-graph/tree/main/contract)
+as `<method>.schema.json` and are attached to every GitHub release, next to the binaries, together
+with a `contract-manifest.json` that names the lcg version they belong to:
+
+```json
+{ "lcg_version": "0.19.1", "tag": "v0.19.1", "draft": "draft-07",
+  "schemas": [ { "method": "knowledge_lint", "file": "knowledge_lint.schema.json", "sha256": "..." } ] }
+```
+
+**Fetch them at the version you pin**, exactly as you fetch the binary:
+
+```sh
+V=v0.19.1   # the lcg version you run
+BASE=https://github.com/liminisapp/liminis-context-graph/releases/download/$V
+curl -fsSLO $BASE/contract-manifest.json
+for f in $(jq -r '.schemas[].file' contract-manifest.json); do curl -fsSLO "$BASE/$f"; done
+```
+
+**Validate a recorded response offline** with any draft-07 validator (no engine, no source
+checkout). The schemas are self-contained: the only `$ref`s are internal (`#/definitions/...`).
+
+```sh
+# the recorded response is the JSON-RPC `result` value, saved to lint-result.json
+npx ajv-cli validate -s knowledge_lint.schema.json -d lint-result.json
+```
+
+```python
+import json, jsonschema   # pip install jsonschema
+schema = json.load(open("knowledge_lint.schema.json"))
+jsonschema.Draft7Validator(schema).validate(json.load(open("lint-result.json")))
+```
+
+**Generate types** from them with a stock generator, for example
+`npx json-schema-to-typescript knowledge_lint.schema.json > knowledge-lint.d.ts` or
+`quicktype -s schema knowledge_lint.schema.json -o knowledge_lint.rs`.
+
+What the schemas say, and do not say:
+
+- They describe a method's successful `result` only: not JSON-RPC error objects, `_progress_token`
+  progress lines, or the MCP envelope (the MCP tools return the same result inside their own
+  wrapper).
+- A field that is always present is `required`. A field that is sometimes omitted is optional
+  (`index_created_at` on an empty graph, `source_files` without `include_episodes`, `belief`
+  without `believed_only` / `as_of`, `warning` on a normal `process_chunk`, `wal.scope` without a
+  WAL root). A field that is always present but may be `null` is `required` and nullable
+  (`derived_document`, `valid_at`, `embedding_cosine`, `next_cursor`).
+- Alternatives are modelled as `oneOf` / `anyOf`: `health_check` by `state`, `knowledge_status`
+  as degraded / queryable / not queryable, `knowledge_lint` findings by `category`.
+- Free-form members stay loose on purpose (`attributes` is a JSON string, `rerank` / `expansion`
+  are objects, `causes` is a map from cause to count), so they can grow without a breaking change.
+- **Additional properties are allowed.** Validate with a stock validator and an unknown extra field
+  still passes; do not turn on "additional properties: false" yourself unless you want every
+  additive release to break you.
+
+**Compatibility policy.** The schemas describe what lcg *emits*, so "breaking" is judged from the
+reader's side. Removing or renaming a field, widening a type (`string` to `string|null`, `integer`
+to `number`), making an always-present field optional, or adding an alternative to a `oneOf` /
+`anyOf` is a **breaking change** to a published schema and is announced in the release notes as
+such: a consumer that reads the old shape can crash or mis-parse the new one. Adding an optional
+field, narrowing a type (`string|null` to `string`) or making an optional field always present is
+not breaking: every response that validated against the new schema still validates for readers of
+the old one. Every release that changes a schema lists the
+change in the CHANGELOG. Contributors: see
+[CONTRIBUTING.md](https://github.com/liminisapp/liminis-context-graph/blob/main/CONTRIBUTING.md#published-response-schemas).
+
 ## MCP-over-stdio transport
 
 `liminis-context-graph --mcp-stdio` starts a native [Model Context Protocol](https://modelcontextprotocol.io)
@@ -5173,6 +5252,16 @@ lcg-owned, deterministic, offline providers: no sidecar, no LLM, no network. The
 words, so texts that share words are closer than unrelated ones. The fact-line syntax is a stable
 contract, tested in lcg's own CI. See [Test Providers](test-providers.md).
 
+## Checking your types against lcg's response schemas
+
+lcg publishes a JSON Schema for the result of each method a client typically reads, attached to every
+release and versioned with it (see the
+[response contract](ipc-mcp-reference.md#response-contract-json-schemas-issue-852)). In your own fast unit
+tests, fetch the schemas at the lcg version you pin, record a response (for example from
+`--embedder test --extractor test`, above), and validate it with a stock draft-07 validator, or generate
+your types from the schemas. This needs no running engine and takes seconds, so a shape drift fails your
+test instead of surfacing as a runtime guess at a key name.
+
 ## Record/replay cassettes
 
 Every test that exercises the real extraction pipeline used to face a choice: pay for a live
@@ -7030,7 +7119,10 @@ target/release/lcg-eval retrieval \
 | `--replay-cassette <PATH>` / `--record-cassette <PATH>` | Replay or record ingest extraction ([cassettes](testing-and-evaluation.md#recordreplay-cassettes)) for a free, repeatable LCG ingest. |
 | `--qmd-bin`, `--qmd-index` | qmd executable and named index. The default index name includes the corpus hash (`lcg-eval-<corpus_version>-<hash8>`), so a changed corpus gets a fresh index. qmd keeps a collection's original directory: if you pass your own `--qmd-index` and reuse it after changing `--corpus` or editing notes, the run warns, and you must remove the old collection or pick a new name. |
 | `--judge-model`, `--judge-cache`, `--no-grounded` | Grounded-evidence judge (needs `ANTHROPIC_API_KEY`); verdicts are cached so re-runs cost nothing. Without a key the grounded columns are **skipped**, not zero. |
-| `--out <DIR>` | Write `report.md` and `report.json`. |
+| `--out <DIR>` | Write `report.md` and `report.json` (and `compare.md` / `ranked.jsonl` when those flags are used). A stale `compare.md` or `ranked.jsonl` left by an earlier run in the same directory is removed first, so the directory never mixes runs. |
+| `--compare <FILE>` | Compare against an earlier `report.json`; see [Comparing two runs](#comparing-two-runs). |
+| `--strict` | With `--compare`, also refuse a run whose soft inputs differ. Requires `--compare`. |
+| `--record-ranked` | Write `ranked.jsonl` beside the report; see [Per-question ranked lists](#per-question-ranked-lists). Requires `--out`; refused with `--private`. |
 | `--bootstrap-seed <N>`, `--bootstrap-resamples <N>` | Confidence-interval settings (default seed 788, 10,000 resamples). Recorded in the report. |
 | `--private` | Private-notebook run; see below. |
 | `--dry-run` | Print the resolved plan and exit. |
@@ -7038,6 +7130,78 @@ target/release/lcg-eval retrieval \
 The extraction backend for LCG ingestion (live Anthropic, a local OpenAI-compatible endpoint,
 or a cassette) and the ontology are whatever the spawned service uses; the report records the
 choice.
+
+## Input digests (`inputs`)
+
+Every `report.json` carries a top-level `inputs` block (schema version 1) so a later reader can tell
+whether two runs measured the same thing. Each entry is a full-length sha256 hex string in JSON (the
+Markdown report's `## Inputs` table shows the first 16), or one of two literals: `none` (the run does
+not use that input) and `unknown` (it does, but its identity could not be determined). The existing
+`meta.corpus_hash` / `meta.questions_hash` are unchanged and are the first 16 hex of
+`inputs.corpus` / `inputs.questions`.
+
+| Entry | What is digested |
+|---|---|
+| `corpus`, `questions` | The fixture, with the same length-prefixed sha256 as `meta.*_hash`. |
+| `variants` | Bytes of `<corpus>/query-variants.jsonl`; `none` unless a `*-variants` config ran. |
+| `cassette` | Bytes of the `--replay-cassette` / `--record-cassette` file (after ingest, so a recorded cassette is hashed once written); `none` without one. The `.meta.json` sidecar is not hashed. |
+| `embedder_model` | The model name, dimension and effective instruction profile the service reports in `knowledge_status`, not the socket path or URL. `unknown` when the service reports no model; `none` for a qmd-only run. With several `--embedding-profile` values, one digest over the sorted set, so profile order does not matter. |
+| `extractor` | A path-free identity: `cassette-replay`, the endpoint with credentials stripped, or the service default. The cassette's path and contents belong to `cassette` alone. |
+| `service_binary` | Streamed sha256 of the resolved `--service-bin` (a bare name is looked up on `PATH`); the `--version` string if the file cannot be read; else `unknown`. |
+| `service_env` | The `LCG_*` variables, and the legacy `GRAPHITI_*` spellings the service still reads as fallbacks, in the spawned service's *effective* environment (the inherited one after the eval's own removals and settings, e.g. `LCG_PASSAGE_*`, `LCG_DB_PATH`). Names ending `_API_KEY`, `_TOKEN`, `_SECRET` or `_PASSWORD`, and names containing `URL` or `ENDPOINT`, contribute their name only, so no credential is hashed into a shared report (a changed key or URL is therefore not detected). `LCG_REPLAY_LLM` / `LCG_RECORD_LLM` are left to `cassette` when `--replay-cassette` / `--record-cassette` set them; one inherited from the shell is digested like any other variable. `service_env_names` lists the sorted names so a mismatch is explainable. |
+
+`--private` runs record the digests too: they are hashes, not content.
+
+## Comparing two runs
+
+```sh
+lcg-eval retrieval --corpus fixtures/retrieval-v2 ... --out run-b --compare run-a/report.json
+```
+
+`--compare` reads the earlier report before anything is started or spent, runs the new evaluation,
+writes this run's `report.md` / `report.json`, and then judges comparability (so a refusal never
+discards a finished run). It prints per-config and per-category nDCG@k deltas, and writes them to
+`compare.md` beside the report when `--out` is set.
+
+| Kind | Inputs | When they differ |
+|---|---|---|
+| Hard | `inputs.corpus`, `inputs.questions`, `k` | Exit 2 naming **every** differing hard input. No deltas are printed and no `compare.md` is written. |
+| Soft | `variants`, `cassette`, `embedder_model`, `extractor`, `service_binary`, `service_env`, `meta.lcg_build` (the service build), `meta.ontology_hash` | The deltas are printed under a banner listing each changed input. With `--strict`, exit 2 instead. |
+
+`none` equals `none`. `unknown` against a known value is a difference; `unknown` against `unknown` is
+a gap rather than a change, except under `--strict`, where an unidentifiable input always counts as a
+mismatch. A config (or category) present in one report only, or skipped in one, shows `n/a` for the
+missing side and is not itself a mismatch.
+
+An earlier report with no `inputs` block (a run from before this existed) is refused with exit 2 and a
+message to re-run it; it is never compared silently. A `--compare` file that cannot be read or is not a
+retrieval report exits 1. `--strict` without `--compare` is a usage error. `--private` runs may use
+`--compare`. The comparison policy is recorded in
+[ADR-0872](adr/0872-retrieval-run-comparability.md).
+
+Exit codes of `lcg-eval retrieval`: 0 success; 1 runtime error (including an unreadable or invalid
+`--compare` file); 2 usage error, or incompatible inputs under `--compare` (including an earlier
+report with no `inputs`). A run without `--compare` behaves as before.
+
+## Per-question ranked lists
+
+`--record-ranked` writes `ranked.jsonl` beside the report: one line per config and scored question,
+
+```json
+{"config":"lcg-passages-hybrid","question":"para-03","category":"paraphrase",
+ "hits":[{"rank":1,"note":"policy-marlin","uuid":"…","score":0.031,"similarity":0.82,"legs":"both"}]}
+```
+
+`hits` are the service's passages in response order, before the note de-duplication the metrics use.
+`score` is the config's own ranking score, `similarity` is present only in hybrid mode (absent for a
+lexical-only hit), and `legs` (`dense`, `lexical` or `both`) is present when the service supplies it
+(hybrid mode, service build with #871 or later); a field the service did not supply is omitted, never
+`null`. Evidence text is not written. Only `lcg-passages*` configs write lines (entities/facts and qmd
+expose no per-hit scores). A question that returned no passages has an empty `hits` list, and a
+question whose query failed is absent, so the dense (`lcg-passages-raw`) and fused
+(`lcg-passages-hybrid`) lines of one run join on `question` with no gaps and show where fusion changed
+the top-k. The flag needs `--out` and is refused with `--private` (a usage error), since the file
+holds per-question note pointers and scores.
 
 ## Comparing embedding profiles
 
@@ -7496,7 +7660,7 @@ treated as free-form and the fit section is not applicable. The report states wh
 |---|---|
 | 0 | Success. |
 | 1 | Runtime error: unreadable skeleton or mapping, an invalid `--compare` file (the message names it), an unloadable `--ontology`, an unwritable `--out`. |
-| 2 | Usage error, or `--compare` against a report produced with a different skeleton or mapping. |
+| 2 | Usage error, or `--compare` against a report produced with a different skeleton or mapping. (`lcg-eval retrieval --compare` follows the same shape with its own hard/soft input policy; see [retrieval-quality-evaluation.md](retrieval-quality-evaluation.md#comparing-two-runs).) |
 | 3 | The workspace is unusable: missing, not an ingested workspace, its DB cannot be opened or queried (degraded or corrupt; nothing is repaired), or it holds no nodes in the group. An all-zero report is never produced. |
 
 ### How it reads without writing
@@ -8323,6 +8487,28 @@ conclusion alone is not sufficient. Set `RELEASE_SHA` to the exact commit being 
 Do not treat step 1 alone as sufficient evidence that "full e2e passed." Step 2 is the
 one that actually verifies it.
 
+## Response schemas are release assets
+
+Each release carries the response JSON Schemas (`contract/*.schema.json`) and a generated
+`contract-manifest.json` (`lcg_version`, `tag`, `draft`, and a sha256 per file) as release assets, beside
+the binaries (#852, [ADR-0852](adr/0852-published-response-json-schemas.md)). Consumers fetch them at the
+tag they pin; see the [response contract](ipc-mcp-reference.md#response-contract-json-schemas-issue-852).
+
+- **Nothing to do by hand.** The `host` job in `release.yml` runs
+  `scripts/stage-contract-assets.sh <tag> artifacts` just before `gh release create`, which attaches
+  everything in `artifacts/`. The script fails the job if `contract/` holds no schemas or one is
+  malformed, so a release cannot silently ship without its contract.
+- **The committed schemas are already in sync.** CI's `committed_schemas_match_generated` test fails
+  when `contract/*.schema.json` differ from what the source types generate, and a PR that changes a
+  schema must also change `CHANGELOG.md` (`scripts/assert-contract-changelog.sh`). Before tagging,
+  confirm the `[Unreleased]` changelog entries for any schema change mark breaking changes (removed or
+  renamed fields, widened types, required fields made optional) as **BREAKING**, and that the section is renamed to the version being released.
+- **First check after a release publishes.** `release.yml` does not run on pull requests (ADR-0639), so
+  the asset step is first exercised on a tag. Confirm the release lists the seven
+  `*.schema.json` files and `contract-manifest.json`, and that `jq -r .lcg_version contract-manifest.json`
+  matches the tag. If it does not, fix forward; the files can be attached to the existing release with
+  `scripts/stage-contract-assets.sh <tag> <dir>` followed by `gh release upload <tag> <dir>/*.json --clobber`.
+
 ## Release packaging is verified post-merge
 
 `release.yml` does **not** run on pull requests. Release packaging — the four-target build
@@ -8678,11 +8864,13 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0824](0824-own-source-id-entity-filter.md) | Drop Extracted Entities Named After the Episode's Own Source ID or a Cited Note ID | 2026-11-21 |
 | [0828](0828-superseded-episode-retention.md) | Retention of Superseded Episodes — Measured Cost, Consumers, and a Decision Not to Prune Yet | 2026-11-22 |
 | [0851](0851-test-providers-mode.md) | Test-Providers Mode: Built-in Deterministic Embedder and Fact-Line Extractor | 2026-11-21 |
+| [0852](0852-published-response-json-schemas.md) | Published JSON Schemas for Response Shapes, Validated in lcg CI | 2026-11-22 |
 | [0853](0853-episode-source-identity-and-exact-source-matching.md) | Episode Source Identity and Exact Source Matching | 2026-11-21 |
 | [0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md) | `knowledge_capabilities` — Protocol Version, Feature Registry and a Self-Describing Socket | 2026-11-21 |
 | [0855](0855-health-check-ready-for-reads.md) | `health_check` Gains `ready_for_reads`; Documents `ok` / `healthy` / `ready_for_reads` Semantics | 2026-11-21 |
 | [0857](0857-find-entities-episode-provenance.md) | `find_entities` Episode Provenance and a `uuids` Filter on `get_episodes` | 2026-11-22 |
 | [0858](0858-unchanged-chunk-resubmission-noop.md) | `knowledge_process_chunk` No-Ops on an Identical Resubmission | 2026-11-21 |
+| [0872](0872-retrieval-run-comparability.md) | `lcg-eval retrieval` Run Comparability: Input Digests, Hard/Soft Inputs, `--compare` | 2026-11-22 |
 | [0880](0880-restatement-aware-corroboration.md) | Restatement-Aware Corroboration — Independent Sources, Not Documents | 2026-11-22 |
 | [0881](0881-eval-verifies-service-reported-ontology.md) | `lcg-eval` Verifies and Reports the Service-Reported Ontology | 2026-11-22 |
 | [0882](0882-dump-mentions-endpoint-keyed-uuidless.md) | `knowledge_dump_wal` Dumps uuid-less MENTIONS Edges, Keyed on `(episode, entity, group_id)` | 2026-11-22 |

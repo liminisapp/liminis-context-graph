@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Tests for scripts/assert-contract-changelog.sh (#852). Builds a throwaway git repository.
+#
+# Run: scripts/test-assert-contract-changelog.sh
+set -uo pipefail
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+guard="$here/assert-contract-changelog.sh"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+failures=0
+
+git -C "$tmp" init -q -b main
+git -C "$tmp" config user.email t@example.com
+git -C "$tmp" config user.name t
+git -C "$tmp" config commit.gpgsign false
+mkdir -p "$tmp/contract" "$tmp/docs"
+echo '{}' > "$tmp/contract/m.schema.json"
+echo 'x' > "$tmp/CHANGELOG.md"
+echo 'x' > "$tmp/contract/README.md"
+git -C "$tmp" add -A && git -C "$tmp" commit -qm base
+
+# expect <pass|fail> <description> <files to modify...>
+expect() {
+  local want="$1" why="$2" got f
+  shift 2
+  git -C "$tmp" checkout -q -B work main
+  for f in "$@"; do mkdir -p "$tmp/$(dirname "$f")"; echo "change $RANDOM" >> "$tmp/$f"; done
+  git -C "$tmp" add -A && git -C "$tmp" commit -qm change
+  if (cd "$tmp" && "$guard" main HEAD >/dev/null 2>&1); then got=pass; else got=fail; fi
+  if [ "$got" = "$want" ]; then printf '  ok    %-5s %s\n' "$want" "$why"
+  else printf '  FAIL  wanted %s, got %s: %s\n' "$want" "$got" "$why"; failures=$((failures + 1)); fi
+}
+
+expect fail 'schema changed, no changelog' contract/m.schema.json
+expect fail 'new schema added, no changelog' contract/new.schema.json
+expect pass 'schema changed with changelog' contract/m.schema.json CHANGELOG.md
+expect pass 'only the contract README changed' contract/README.md
+expect pass 'unrelated change' docs/a.md
+expect pass 'only the changelog changed' CHANGELOG.md
+
+if (cd "$tmp" && "$guard" >/dev/null 2>&1); then
+  echo "  FAIL  missing base-ref should fail"; failures=$((failures + 1))
+else
+  echo "  ok    missing base-ref fails"
+fi
+
+echo
+if [ "$failures" -ne 0 ]; then echo "$failures failure(s)"; exit 1; fi
+echo "all assert-contract-changelog checks passed"

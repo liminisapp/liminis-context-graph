@@ -110,6 +110,13 @@ pub struct RetrievalArgs {
     pub keep_workspace: Option<PathBuf>,
     /// `--anthropic-base-url` / `--anthropic-endpoint` for the judge (FR-019).
     pub anthropic: AnthropicCliArgs,
+    /// `--compare <FILE>` (#872): an earlier `report.json` to compare this run against.
+    pub compare: Option<PathBuf>,
+    /// `--strict` (#872): also refuse a `--compare` whose soft inputs differ. Requires `--compare`.
+    pub strict: bool,
+    /// `--record-ranked` (#872): write `ranked.jsonl` beside the report. Requires `--out`; refused
+    /// with `--private`.
+    pub record_ranked: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -176,6 +183,20 @@ OPTIONS:
     --out <DIR>                Write report.json and report.md here.
     --bootstrap-seed <N>       Base seed for the 95% bootstrap intervals (default 788).
     --bootstrap-resamples <N>  Per-question resamples per interval (default 10000, 100..=1000000).
+    --compare <FILE>           Compare against an earlier report.json: per-config and per-category
+                               nDCG@k deltas, printed (and written to compare.md beside the report).
+                               Exits 2, with no deltas, when corpus, questions or k differ, or when
+                               FILE has no `inputs` block (re-run it). A difference in a soft input
+                               (embedder model, service build, cassette, extractor, variants,
+                               service env, ontology) is printed as a banner above the deltas.
+                               This run's report is written before the comparison is judged.
+                               Exits 1 when FILE cannot be read or is not a report.
+    --strict                   With --compare: also refuse (exit 2) on a soft-input difference. An
+                               `unknown` input (e.g. a service that reports no embedder model)
+                               always counts as a difference. Requires --compare.
+    --record-ranked            Write ranked.jsonl beside the report: per config and question, the
+                               ranked passages with score, similarity and (hybrid) legs. Requires
+                               --out; refused with --private.
     --private                  Private-notebook run: the report carries metrics, counts and hashes
                                only (failed-query detail withheld). Requires --out, and
                                --judge-cache unless --no-grounded, and refuses any output path
@@ -232,6 +253,9 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
         ontology_mode: None,
         keep_workspace: None,
         anthropic: AnthropicCliArgs::default(),
+        compare: None,
+        strict: false,
+        record_ranked: false,
     };
     let mut judge_cache_explicit = false;
     let mut i = 0;
@@ -339,6 +363,9 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
                 a.ontology_mode = Some(crate::cli::parse_ontology_mode(&val("--ontology-mode")?)?)
             }
             "--keep-workspace" => a.keep_workspace = Some(PathBuf::from(val("--keep-workspace")?)),
+            "--compare" => a.compare = Some(PathBuf::from(val("--compare")?)),
+            "--strict" => a.strict = true,
+            "--record-ranked" => a.record_ranked = true,
             "--anthropic-base-url" => a.anthropic.base_url = Some(val("--anthropic-base-url")?),
             "--anthropic-endpoint" => a.anthropic.endpoint = Some(val("--anthropic-endpoint")?),
             other => return Err(format!("unknown argument '{other}'")),
@@ -384,6 +411,21 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
                 "--keep-workspace needs at least one lcg-* config in --configs; a qmd-only run \
                  ingests nothing into LCG, so there is no workspace to keep"
                     .into(),
+            );
+        }
+    }
+    if a.strict && a.compare.is_none() {
+        return Err(
+            "--strict requires --compare <FILE>; there is nothing to be strict about".into(),
+        );
+    }
+    if a.record_ranked {
+        if a.private {
+            return Err("--record-ranked cannot be combined with --private: ranked.jsonl holds per-question note pointers and scores, which a private run must not write".into());
+        }
+        if a.out.is_none() {
+            return Err(
+                "--record-ranked requires --out: ranked.jsonl is written beside the report".into(),
             );
         }
     }
@@ -632,6 +674,55 @@ mod tests {
         assert!(e.contains("--judge-cache"), "{e}");
         assert!(p(&["--private", "--out", "/x", "--judge-cache", "/y"]).is_ok());
         assert!(p(&["--private", "--out", "/x", "--no-grounded"]).is_ok());
+    }
+
+    #[test]
+    fn compare_strict_and_record_ranked_parse() {
+        let RetrievalMode::Run(a) = p(&["--compare", "/prev.json", "--strict"]).unwrap() else {
+            panic!()
+        };
+        assert_eq!(a.compare, Some(PathBuf::from("/prev.json")));
+        assert!(a.strict && !a.record_ranked);
+        let RetrievalMode::Run(a) = p(&["--out", "/o", "--record-ranked"]).unwrap() else {
+            panic!()
+        };
+        assert!(a.record_ranked && a.compare.is_none() && !a.strict);
+        let RetrievalMode::Run(a) = p(&[]).unwrap() else {
+            panic!()
+        };
+        assert!(a.compare.is_none() && !a.strict && !a.record_ranked);
+        assert!(p(&["--compare"]).is_err(), "--compare needs a value");
+        // `--private` with `--compare` is allowed: digests are hashes, not content.
+        assert!(p(&[
+            "--private",
+            "--out",
+            "/x",
+            "--no-grounded",
+            "--compare",
+            "/p.json"
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn strict_without_compare_is_a_usage_error() {
+        let e = p(&["--strict"]).unwrap_err();
+        assert!(e.contains("--compare"), "{e}");
+    }
+
+    #[test]
+    fn record_ranked_needs_out_and_refuses_private() {
+        let e = p(&["--record-ranked"]).unwrap_err();
+        assert!(e.contains("--out"), "{e}");
+        let e = p(&[
+            "--private",
+            "--out",
+            "/x",
+            "--no-grounded",
+            "--record-ranked",
+        ])
+        .unwrap_err();
+        assert!(e.contains("--private"), "{e}");
     }
 
     #[test]

@@ -126,6 +126,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          # Full history: the changelog guard diffs the PR against its merge base.
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -155,6 +157,22 @@ jobs:
       # #725: release.yml's `verify-plan` guard (empty / matrix-less plan output on a tag run).
       - name: plan-output guard self-test
         run: scripts/test-assert-plan-output.sh
+
+      # #852: release.yml's `host` job attaches contract/*.schema.json as release assets via
+      # this script. release.yml does not run on PRs (ADR-0639), so the staging is exercised
+      # here against synthetic inputs and the real contract/ directory.
+      - name: contract asset staging self-test
+        run: scripts/test-stage-contract-assets.sh
+
+      - name: contract changelog guard self-test
+        run: scripts/test-assert-contract-changelog.sh
+
+      # #852 (FR-011): a PR that changes a published response schema must say so in CHANGELOG.md.
+      - name: published schema changes are in the changelog
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: scripts/assert-contract-changelog.sh "origin/$BASE_REF"
 
       - name: check no ML runtime deps
         run: |

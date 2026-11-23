@@ -1,0 +1,743 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "CategorySummary": {
+      "description": "Per-category outcome in `summary.categories`.",
+      "properties": {
+        "count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "description": "Why the category is unavailable.",
+          "type": "string"
+        },
+        "skipped_blocks": {
+          "description": "`near_duplicate_entity` only, when it ran.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "skipped_subjects": {
+          "description": "`contradiction` only, when it ran.",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "description": "`ok` or `unavailable`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "count"
+      ],
+      "type": "object"
+    },
+    "Citations": {
+      "description": "Evidence for a finding; lists are capped, `*_total` carries the uncapped count.",
+      "properties": {
+        "documents": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "documents_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entities": {
+          "items": {
+            "$ref": "#/definitions/EntityRef"
+          },
+          "type": "array"
+        },
+        "entities_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "episodes": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "episodes_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "facts": {
+          "items": {
+            "$ref": "#/definitions/FactCitation"
+          },
+          "type": "array"
+        },
+        "facts_total": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "episodes",
+        "episodes_total",
+        "documents",
+        "documents_total",
+        "entities",
+        "entities_total",
+        "facts",
+        "facts_total"
+      ],
+      "type": "object"
+    },
+    "ContradictionDetails": {
+      "description": "`contradiction` details.",
+      "properties": {
+        "relation": {
+          "type": "string"
+        },
+        "sides": {
+          "items": {
+            "$ref": "#/definitions/ContradictionSide"
+          },
+          "type": "array"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "relation",
+        "source",
+        "sides"
+      ],
+      "type": "object"
+    },
+    "ContradictionReason": {
+      "enum": [
+        "single_valued_conflict"
+      ],
+      "type": "string"
+    },
+    "ContradictionSide": {
+      "properties": {
+        "corroboration": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "facts": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "support": {
+          "$ref": "#/definitions/Support"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "target",
+        "facts",
+        "support",
+        "corroboration"
+      ],
+      "type": "object"
+    },
+    "Effective": {
+      "description": "The parameters the report was computed with.",
+      "properties": {
+        "categories": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_mentions": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "near_duplicate_threshold": {
+          "type": "number"
+        },
+        "single_valued_relations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "categories",
+        "limit",
+        "near_duplicate_threshold",
+        "min_mentions",
+        "single_valued_relations"
+      ],
+      "type": "object"
+    },
+    "EntityRef": {
+      "description": "An entity cited by a finding.",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "uuid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uuid",
+        "name"
+      ],
+      "type": "object"
+    },
+    "FactCitation": {
+      "properties": {
+        "relation": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/definitions/EntityRef"
+        },
+        "target": {
+          "$ref": "#/definitions/EntityRef"
+        },
+        "uuid": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "uuid",
+        "source",
+        "target",
+        "relation"
+      ],
+      "type": "object"
+    },
+    "Finding": {
+      "description": "A finding, discriminated by `category`.",
+      "oneOf": [
+        {
+          "properties": {
+            "category": {
+              "const": "stale_derived_page",
+              "type": "string"
+            },
+            "citations": {
+              "$ref": "#/definitions/Citations"
+            },
+            "details": {
+              "$ref": "#/definitions/StaleDetails"
+            },
+            "group_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/definitions/StaleReason"
+            }
+          },
+          "required": [
+            "category",
+            "id",
+            "group_id",
+            "reason",
+            "details",
+            "citations"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "category": {
+              "const": "weak_support",
+              "type": "string"
+            },
+            "citations": {
+              "$ref": "#/definitions/Citations"
+            },
+            "details": {
+              "$ref": "#/definitions/WeakDetails"
+            },
+            "group_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/definitions/WeakReason"
+            }
+          },
+          "required": [
+            "category",
+            "id",
+            "group_id",
+            "reason",
+            "details",
+            "citations"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "category": {
+              "const": "contradiction",
+              "type": "string"
+            },
+            "citations": {
+              "$ref": "#/definitions/Citations"
+            },
+            "details": {
+              "$ref": "#/definitions/ContradictionDetails"
+            },
+            "group_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/definitions/ContradictionReason"
+            }
+          },
+          "required": [
+            "category",
+            "id",
+            "group_id",
+            "reason",
+            "details",
+            "citations"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "category": {
+              "const": "orphan_entity",
+              "type": "string"
+            },
+            "citations": {
+              "$ref": "#/definitions/Citations"
+            },
+            "details": {
+              "$ref": "#/definitions/OrphanDetails"
+            },
+            "group_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/definitions/OrphanReason"
+            }
+          },
+          "required": [
+            "category",
+            "id",
+            "group_id",
+            "reason",
+            "details",
+            "citations"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "category": {
+              "const": "near_duplicate_entity",
+              "type": "string"
+            },
+            "citations": {
+              "$ref": "#/definitions/Citations"
+            },
+            "details": {
+              "$ref": "#/definitions/NearDuplicateDetails"
+            },
+            "group_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/definitions/NearDuplicateReason"
+            }
+          },
+          "required": [
+            "category",
+            "id",
+            "group_id",
+            "reason",
+            "details",
+            "citations"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "`reason: unlinked_mention`; paired with `UnlinkedMentionDetails`.",
+          "properties": {
+            "category": {
+              "const": "unlinked_mention",
+              "type": "string"
+            },
+            "citations": {
+              "$ref": "#/definitions/Citations"
+            },
+            "details": {
+              "$ref": "#/definitions/UnlinkedMentionDetails"
+            },
+            "group_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/definitions/UnlinkedMentionReason"
+            }
+          },
+          "required": [
+            "category",
+            "id",
+            "group_id",
+            "reason",
+            "details",
+            "citations"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Same `category`, `reason: missing_page`; paired with `MissingPageDetails`.\nThe `reason` constant is what keeps the two detail shapes from being\ninterchangeable.",
+          "properties": {
+            "category": {
+              "const": "unlinked_mention",
+              "type": "string"
+            },
+            "citations": {
+              "$ref": "#/definitions/Citations"
+            },
+            "details": {
+              "$ref": "#/definitions/MissingPageDetails"
+            },
+            "group_id": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "reason": {
+              "$ref": "#/definitions/MissingPageReason"
+            }
+          },
+          "required": [
+            "category",
+            "id",
+            "group_id",
+            "reason",
+            "details",
+            "citations"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "FormerlySupporting": {
+      "properties": {
+        "cause": {
+          "type": "string"
+        },
+        "document": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "episode": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "episode",
+        "document",
+        "origin",
+        "cause"
+      ],
+      "type": "object"
+    },
+    "MissingPageDetails": {
+      "description": "`unlinked_mention` details when `reason` is `missing_page`.",
+      "properties": {
+        "mention_documents": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "min_mentions": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mention_documents",
+        "min_mentions"
+      ],
+      "type": "object"
+    },
+    "MissingPageReason": {
+      "enum": [
+        "missing_page"
+      ],
+      "type": "string"
+    },
+    "NearDuplicateDetails": {
+      "description": "`near_duplicate_entity` details.",
+      "properties": {
+        "embedding_cosine": {
+          "description": "Cosine of the stored name embeddings; `null` when unavailable.",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "names": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "score": {
+          "type": "number"
+        },
+        "signal": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "score",
+        "signal",
+        "kind",
+        "names",
+        "embedding_cosine"
+      ],
+      "type": "object"
+    },
+    "NearDuplicateReason": {
+      "enum": [
+        "similar_name"
+      ],
+      "type": "string"
+    },
+    "OrphanDetails": {
+      "description": "`orphan_entity` details.",
+      "properties": {
+        "superseded_mentions": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "superseded_mentions"
+      ],
+      "type": "object"
+    },
+    "OrphanReason": {
+      "enum": [
+        "support_lost",
+        "never_supported"
+      ],
+      "type": "string"
+    },
+    "StaleDetails": {
+      "description": "`stale_derived_page` details.",
+      "properties": {
+        "affected_facts": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "causes": {
+          "additionalProperties": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "description": "Count of formerly-supporting episodes per cause, keyed by cause.",
+          "type": "object"
+        },
+        "derived_document": {
+          "description": "The derived page's document id; `null` when it has none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "formerly_supporting": {
+          "items": {
+            "$ref": "#/definitions/FormerlySupporting"
+          },
+          "type": "array"
+        },
+        "total_facts": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "derived_document",
+        "affected_facts",
+        "total_facts",
+        "causes",
+        "formerly_supporting"
+      ],
+      "type": "object"
+    },
+    "StaleReason": {
+      "enum": [
+        "lost_corroboration"
+      ],
+      "type": "string"
+    },
+    "Summary": {
+      "properties": {
+        "categories": {
+          "additionalProperties": {
+            "$ref": "#/definitions/CategorySummary"
+          },
+          "description": "Keyed by category name.",
+          "type": "object"
+        },
+        "total": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "categories",
+        "total"
+      ],
+      "type": "object"
+    },
+    "Support": {
+      "description": "Distinct supporting documents per origin.",
+      "properties": {
+        "answer": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "derived": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "external": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "primary": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "primary",
+        "external",
+        "derived",
+        "answer"
+      ],
+      "type": "object"
+    },
+    "UnlinkedMentionDetails": {
+      "description": "`unlinked_mention` details when `reason` is `unlinked_mention`.",
+      "properties": {
+        "document": {
+          "type": "string"
+        },
+        "page": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "document",
+        "page"
+      ],
+      "type": "object"
+    },
+    "UnlinkedMentionReason": {
+      "enum": [
+        "unlinked_mention"
+      ],
+      "type": "string"
+    },
+    "WeakDetails": {
+      "description": "`weak_support` details; the kind (`derived_only` / `single_source`) is `finding.reason`.",
+      "properties": {
+        "corroboration": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "support": {
+          "$ref": "#/definitions/Support"
+        }
+      },
+      "required": [
+        "support",
+        "corroboration"
+      ],
+      "type": "object"
+    },
+    "WeakReason": {
+      "enum": [
+        "derived_only",
+        "single_source"
+      ],
+      "type": "string"
+    }
+  },
+  "description": "Result of knowledge_lint: findings discriminated by category (and reason).",
+  "properties": {
+    "count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "effective": {
+      "$ref": "#/definitions/Effective"
+    },
+    "findings": {
+      "items": {
+        "$ref": "#/definitions/Finding"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "description": "Opaque cursor for the next page; `null` on the last page.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "summary": {
+      "$ref": "#/definitions/Summary"
+    }
+  },
+  "required": [
+    "findings",
+    "count",
+    "next_cursor",
+    "summary",
+    "effective"
+  ],
+  "title": "knowledge_lint result",
+  "type": "object"
+}

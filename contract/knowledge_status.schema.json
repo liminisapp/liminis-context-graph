@@ -1,0 +1,921 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "anyOf": [
+    {
+      "$ref": "#/definitions/StatusDegraded"
+    },
+    {
+      "$ref": "#/definitions/StatusQueryable"
+    },
+    {
+      "$ref": "#/definitions/StatusNotQueryable"
+    }
+  ],
+  "definitions": {
+    "CrossGroupPointers": {
+      "properties": {
+        "ambiguous": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bound": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unbound": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bound",
+        "unbound",
+        "ambiguous"
+      ],
+      "type": "object"
+    },
+    "CrossGroupPointersNullable": {
+      "description": "Counts are `null` when the graph is open but not queryable.",
+      "properties": {
+        "ambiguous": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "bound": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unbound": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bound",
+        "unbound",
+        "ambiguous"
+      ],
+      "type": "object"
+    },
+    "EmbeddingInstructions": {
+      "description": "Effective embedding instruction profile (#790).",
+      "properties": {
+        "document_prefix": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "query_prefix": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile",
+        "source",
+        "query_prefix",
+        "document_prefix"
+      ],
+      "type": "object"
+    },
+    "EpisodeBreakdown": {
+      "description": "The opt-in `episode_breakdown` block; groups are sorted by `group_id`.",
+      "properties": {
+        "as_of_us": {
+          "description": "Instant (microseconds since the epoch) liveness was evaluated at.",
+          "type": "integer"
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/definitions/EpisodeBreakdownGroup"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "as_of_us",
+        "groups"
+      ],
+      "type": "object"
+    },
+    "EpisodeBreakdownGroup": {
+      "description": "One group's episode (and derived entity/edge) liveness counts (#884, ADR-0884).",
+      "properties": {
+        "group_id": {
+          "type": "string"
+        },
+        "live": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "only_superseded_edges": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "only_superseded_entities": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pending": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "superseded": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "group_id",
+        "live",
+        "superseded",
+        "pending",
+        "only_superseded_entities",
+        "only_superseded_edges"
+      ],
+      "type": "object"
+    },
+    "GroupIdentityRefusal": {
+      "properties": {
+        "group_id": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "group_id",
+        "message"
+      ],
+      "type": "object"
+    },
+    "GroupOntologyDrift": {
+      "properties": {
+        "drift_summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "drifted": {
+          "type": "boolean"
+        },
+        "group_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "group_id",
+        "drifted",
+        "drift_summary"
+      ],
+      "type": "object"
+    },
+    "OntologySummary": {
+      "description": "Workspace-wide ontology state.",
+      "properties": {
+        "drift_summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "drifted": {
+          "type": "boolean"
+        },
+        "entity_type_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "loaded": {
+          "type": "boolean"
+        },
+        "mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "present": {
+          "type": "boolean"
+        },
+        "relation_type_count": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "present",
+        "loaded",
+        "mode",
+        "entity_type_count",
+        "relation_type_count",
+        "drifted",
+        "drift_summary"
+      ],
+      "type": "object"
+    },
+    "Providers": {
+      "description": "Which providers the process runs: `test` (deterministic built-in), `real`, or `none`.",
+      "properties": {
+        "embedder": {
+          "description": "`test` or `real`.",
+          "type": "string"
+        },
+        "extractor": {
+          "description": "`test`, `real` or `none`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "embedder",
+        "extractor"
+      ],
+      "type": "object"
+    },
+    "StatusDegraded": {
+      "description": "Database not open (ADR-0009): counts and WAL blocks are absent.",
+      "properties": {
+        "connected": {
+          "type": "boolean"
+        },
+        "context_graph_initialized": {
+          "type": "boolean"
+        },
+        "cross_group_pointers": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CrossGroupPointers"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Always `null` in this shape."
+        },
+        "dedup_mode": {
+          "type": "string"
+        },
+        "degraded": {
+          "type": "boolean"
+        },
+        "episode_breakdown": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/EpisodeBreakdown"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "episode_breakdown_unavailable": {
+          "description": "Why the breakdown is unavailable; present only alongside `episode_breakdown: null`.",
+          "type": "string"
+        },
+        "fts_last_repair_unix_ms": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fts_repair_count": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "group_identity_refusals": {
+          "items": {
+            "$ref": "#/definitions/GroupIdentityRefusal"
+          },
+          "type": "array"
+        },
+        "group_ontology_drift": {
+          "items": {
+            "$ref": "#/definitions/GroupOntologyDrift"
+          },
+          "type": "array"
+        },
+        "indices_built": {
+          "type": "boolean"
+        },
+        "initializing": {
+          "type": "boolean"
+        },
+        "name_index_fallback_scans": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name_index_trusted": {
+          "description": "Always `null` in this shape.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ontology": {
+          "$ref": "#/definitions/OntologySummary"
+        },
+        "providers": {
+          "$ref": "#/definitions/Providers"
+        },
+        "queryable": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recovery_available": {
+          "description": "Recovery strategies currently offered (`drop_lbug_wal`, `rebuild_from_workspace_wal`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "running": {
+          "type": "boolean"
+        },
+        "search_min_score_default": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "running",
+        "degraded",
+        "reason",
+        "context_graph_initialized",
+        "connected",
+        "queryable",
+        "initializing",
+        "recovery_available",
+        "dedup_mode",
+        "ontology",
+        "group_ontology_drift",
+        "group_identity_refusals",
+        "indices_built",
+        "name_index_trusted",
+        "name_index_fallback_scans",
+        "fts_repair_count",
+        "fts_last_repair_unix_ms",
+        "cross_group_pointers",
+        "providers",
+        "search_min_score_default"
+      ],
+      "type": "object"
+    },
+    "StatusNotQueryable": {
+      "description": "Database open but a core table is missing (ADR-0325): counts are `null`, never `0`.",
+      "properties": {
+        "connected": {
+          "type": "boolean"
+        },
+        "context_graph_initialized": {
+          "type": "boolean"
+        },
+        "cross_group_pointers": {
+          "$ref": "#/definitions/CrossGroupPointersNullable"
+        },
+        "database_path": {
+          "type": "string"
+        },
+        "dedup_mode": {
+          "type": "string"
+        },
+        "embedding_dim": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "embedding_instructions": {
+          "$ref": "#/definitions/EmbeddingInstructions"
+        },
+        "embedding_model": {
+          "type": "string"
+        },
+        "entity_count": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "episode_breakdown": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/EpisodeBreakdown"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "episode_breakdown_unavailable": {
+          "description": "Why the breakdown is unavailable; present only alongside `episode_breakdown: null`.",
+          "type": "string"
+        },
+        "episode_count": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fts_last_repair_unix_ms": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fts_repair_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "group_identity_refusals": {
+          "items": {
+            "$ref": "#/definitions/GroupIdentityRefusal"
+          },
+          "type": "array"
+        },
+        "group_ontology_drift": {
+          "items": {
+            "$ref": "#/definitions/GroupOntologyDrift"
+          },
+          "type": "array"
+        },
+        "index_created_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "indices_built": {
+          "type": "boolean"
+        },
+        "initializing": {
+          "type": "boolean"
+        },
+        "last_index_time": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name_index_fallback_scans": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name_index_trusted": {
+          "type": "boolean"
+        },
+        "ontology": {
+          "$ref": "#/definitions/OntologySummary"
+        },
+        "providers": {
+          "$ref": "#/definitions/Providers"
+        },
+        "queryable": {
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Why the graph is not queryable.",
+          "type": "string"
+        },
+        "relationship_count": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "search_min_score_default": {
+          "type": "number"
+        },
+        "wal": {
+          "$ref": "#/definitions/Wal"
+        },
+        "wal_groups": {
+          "additionalProperties": {
+            "$ref": "#/definitions/WalGroup"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "database_path",
+        "embedding_model",
+        "embedding_dim",
+        "embedding_instructions",
+        "entity_count",
+        "relationship_count",
+        "episode_count",
+        "last_index_time",
+        "index_created_at",
+        "context_graph_initialized",
+        "connected",
+        "queryable",
+        "reason",
+        "initializing",
+        "wal",
+        "wal_groups",
+        "indices_built",
+        "name_index_trusted",
+        "name_index_fallback_scans",
+        "fts_repair_count",
+        "fts_last_repair_unix_ms",
+        "cross_group_pointers",
+        "ontology",
+        "group_ontology_drift",
+        "group_identity_refusals",
+        "dedup_mode",
+        "providers",
+        "search_min_score_default"
+      ],
+      "type": "object"
+    },
+    "StatusQueryable": {
+      "description": "Database open and every core table readable.",
+      "properties": {
+        "connected": {
+          "type": "boolean"
+        },
+        "context_graph_initialized": {
+          "type": "boolean"
+        },
+        "cross_group_pointers": {
+          "$ref": "#/definitions/CrossGroupPointers"
+        },
+        "database_path": {
+          "type": "string"
+        },
+        "dedup_mode": {
+          "type": "string"
+        },
+        "embedding_dim": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "embedding_instructions": {
+          "$ref": "#/definitions/EmbeddingInstructions"
+        },
+        "embedding_model": {
+          "type": "string"
+        },
+        "entity_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "episode_breakdown": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/EpisodeBreakdown"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "episode_breakdown_unavailable": {
+          "description": "Why the breakdown is unavailable; present only alongside `episode_breakdown: null`.",
+          "type": "string"
+        },
+        "episode_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fts_last_repair_unix_ms": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "fts_repair_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "group_identity_refusals": {
+          "items": {
+            "$ref": "#/definitions/GroupIdentityRefusal"
+          },
+          "type": "array"
+        },
+        "group_ontology_drift": {
+          "items": {
+            "$ref": "#/definitions/GroupOntologyDrift"
+          },
+          "type": "array"
+        },
+        "index_created_at": {
+          "description": "Absent on an empty graph.",
+          "type": "string"
+        },
+        "indices_built": {
+          "type": "boolean"
+        },
+        "initializing": {
+          "type": "boolean"
+        },
+        "last_index_time": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "legacy_edge_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name_index_fallback_scans": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name_index_trusted": {
+          "type": "boolean"
+        },
+        "ontology": {
+          "$ref": "#/definitions/OntologySummary"
+        },
+        "providers": {
+          "$ref": "#/definitions/Providers"
+        },
+        "queryable": {
+          "type": "boolean"
+        },
+        "relationship_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "search_min_score_default": {
+          "type": "number"
+        },
+        "wal": {
+          "$ref": "#/definitions/Wal"
+        },
+        "wal_groups": {
+          "additionalProperties": {
+            "$ref": "#/definitions/WalGroup"
+          },
+          "description": "Per-group WAL positions keyed by group id; empty when no WAL root is configured.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "database_path",
+        "embedding_model",
+        "embedding_dim",
+        "embedding_instructions",
+        "entity_count",
+        "relationship_count",
+        "legacy_edge_count",
+        "episode_count",
+        "last_index_time",
+        "context_graph_initialized",
+        "connected",
+        "queryable",
+        "initializing",
+        "wal",
+        "wal_groups",
+        "indices_built",
+        "name_index_trusted",
+        "name_index_fallback_scans",
+        "fts_repair_count",
+        "fts_last_repair_unix_ms",
+        "cross_group_pointers",
+        "ontology",
+        "group_ontology_drift",
+        "group_identity_refusals",
+        "dedup_mode",
+        "providers",
+        "search_min_score_default"
+      ],
+      "type": "object"
+    },
+    "Wal": {
+      "description": "The default group's WAL block (`wal`).",
+      "properties": {
+        "applied_seq": {
+          "description": "`null` = unknown, `0` = nothing applied.",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "byte_size": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "default_group": {
+          "description": "Present only when a WAL root is configured.",
+          "type": "string"
+        },
+        "embedding_dim": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "embedding_doc_prefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "embedding_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "embedding_model_status": {
+          "description": "`match`, `mismatch`, `unknown` or `not_applicable`.",
+          "type": "string"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "file_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation_status": {
+          "description": "`known`, `unknown` or `not_applicable`.",
+          "type": "string"
+        },
+        "hydration_status": {
+          "description": "`hydrated`, `wal_ahead` or `not_applicable`.",
+          "type": "string"
+        },
+        "max_seq": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scope": {
+          "description": "Present only when a WAL root is configured (`default_group`).",
+          "type": "string"
+        },
+        "see": {
+          "description": "Present only when a WAL root is configured (`wal_groups`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "exists",
+        "file_count",
+        "byte_size",
+        "applied_seq",
+        "max_seq",
+        "generation",
+        "generation_status",
+        "hydration_status",
+        "embedding_model",
+        "embedding_dim",
+        "embedding_doc_prefix",
+        "embedding_model_status"
+      ],
+      "type": "object"
+    },
+    "WalGroup": {
+      "description": "One group's entry in `wal_groups`.",
+      "properties": {
+        "applied_seq": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "embedding_dim": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "embedding_doc_prefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "embedding_model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "embedding_model_status": {
+          "type": "string"
+        },
+        "generation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation_status": {
+          "type": "string"
+        },
+        "hydration_status": {
+          "type": "string"
+        },
+        "max_seq": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "zero_vector_rows": {
+          "$ref": "#/definitions/ZeroVectorRows"
+        }
+      },
+      "required": [
+        "applied_seq",
+        "max_seq",
+        "generation",
+        "generation_status",
+        "hydration_status",
+        "embedding_model",
+        "embedding_dim",
+        "embedding_doc_prefix",
+        "embedding_model_status",
+        "zero_vector_rows"
+      ],
+      "type": "object"
+    },
+    "ZeroVectorByKind": {
+      "properties": {
+        "content": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fact": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "summary": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "fact",
+        "summary",
+        "content"
+      ],
+      "type": "object"
+    },
+    "ZeroVectorRows": {
+      "description": "Rows stored with a fallback zero vector because the embedder failed (#808).",
+      "properties": {
+        "by_kind": {
+          "$ref": "#/definitions/ZeroVectorByKind"
+        },
+        "total": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total",
+        "by_kind"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "Result of knowledge_status: degraded (database not open), queryable, or open-but-not-queryable.",
+  "title": "knowledge_status result"
+}
