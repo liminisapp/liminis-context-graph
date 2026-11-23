@@ -5,6 +5,7 @@
 pub mod chunker;
 pub mod context;
 pub mod diff;
+pub mod move_doc;
 
 /// One committed document revision (issue #785): the `DocRevision` row. Timestamps are RFC 3339.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]

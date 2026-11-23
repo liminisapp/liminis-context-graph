@@ -261,6 +261,7 @@ async fn handle(
         "knowledge_supersede_document" => handle_supersede_document(req, state).await,
         "knowledge_retire_document" => handle_retire_document(req, state).await,
         "knowledge_stamp_origin" => handle_stamp_origin(req, state).await,
+        "knowledge_move_document" => handle_move_document(req, state).await,
         "knowledge_delete_by_group" => handle_delete_by_group(req, state).await,
         "knowledge_reload_ontology" => handle_reload_ontology(req, state).await,
         "knowledge_clear_all" => handle_clear_all(req, state).await,
@@ -3703,6 +3704,144 @@ async fn handle_stamp_origin(req: &IpcRequest, state: Arc<AppState>) -> Result<V
         "changes": changes,
         "truncated": truncated,
     }))
+}
+
+/// Identity as a reply object: only the kinds the move names.
+fn move_identity_json(id: &crate::document::move_doc::Identity) -> Value {
+    let mut o = serde_json::Map::new();
+    if let Some(d) = &id.doc_id {
+        o.insert("doc_id".into(), json!(d));
+    }
+    if let Some(p) = &id.source_path {
+        o.insert("source_path".into(), json!(p));
+    }
+    Value::Object(o)
+}
+
+/// The refusal error of `knowledge_move_document`: stable `move_refused:` prefix, every
+/// offending move with its index and code. Nothing was changed.
+fn move_refused(refusals: &[crate::document::move_doc::Refusal]) -> Error {
+    let detail = refusals
+        .iter()
+        .map(|r| format!("moves[{}] {}: {}", r.index, r.code, r.message))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Error::Ipc(format!(
+        "move_refused: {} move(s) refused, nothing was changed: {detail}",
+        refusals
+            .iter()
+            .map(|r| r.index)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+    ))
+}
+
+/// Plans a move batch against the group's current live episodes (refusals classified).
+fn plan_move_batch(
+    conn: &crate::db::Conn<'_>,
+    group_id: &str,
+    specs: &[crate::document::move_doc::MoveSpec],
+) -> Result<crate::document::move_doc::MovePlan, Error> {
+    use crate::document::move_doc as md;
+    let live_at = crate::db::ingested_at_or_now("");
+    let live = conn.move_candidates(Some(group_id), &live_at)?;
+    md::plan_moves(specs, &live).map_err(|mut refusals| {
+        if refusals.iter().any(|r| r.code == md::code::UNKNOWN_SOURCE) {
+            // A different group is only consulted to tell a cross-group request from a typo.
+            if let Ok(all) = conn.move_candidates(None, &live_at) {
+                md::classify_cross_group(&mut refusals, specs, group_id, &all);
+            }
+        }
+        move_refused(&refusals)
+    })
+}
+
+/// `knowledge_move_document` (issue #903, ADR-0903): re-keys a document's live episodes from one
+/// identity (`doc_id` and/or source path) to another **without re-extraction** — no extractor,
+/// LLM or embedder call. Rewrites `doc_id`, `source_file`, `source_description` and (with a
+/// `chunk_id_prefix`) the chunk id on each live episode; re-keys the `DocRevision` and
+/// supersession state keyed by `doc_id` so the next ingest at the new identity finds its baseline.
+/// Entities, relationships, embeddings, belief history and origin are untouched.
+///
+/// Batch form: `moves` is validated as a whole against the state before the batch, under the
+/// per-document locks and the write lock, before the first write; any refusal changes nothing and
+/// writes nothing to the WAL. The writes are fixed-valued and uuid-keyed and flushed as one WAL
+/// chunk, so replay, overlapping tail replay and dump agree with the live graph.
+async fn handle_move_document(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let group_id = extract_required_group_id(&p["group_id"])?;
+    let specs = crate::document::move_doc::parse_moves(p)?;
+    let dry_run = match &p["dry_run"] {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        _ => return Err(Error::Ipc("dry_run must be a boolean".to_string())),
+    };
+    let db = load_db(&state)?;
+
+    let reply = |plan: &crate::document::move_doc::MovePlan, dry_run: bool| -> Value {
+        let moves: Vec<Value> = plan
+            .moves
+            .iter()
+            .map(|m| {
+                json!({
+                    "from": move_identity_json(&m.spec.from),
+                    "to": move_identity_json(&m.spec.to),
+                    "episodes": m.episodes.len(),
+                    "chunk_ids_rewritten": m.chunk_ids_rewritten,
+                })
+            })
+            .collect();
+        json!({
+            "success": true,
+            "dry_run": dry_run,
+            "group_id": group_id,
+            "moved": plan.moves.len(),
+            "episodes_rekeyed": plan.episodes_rekeyed(),
+            "moves": moves,
+        })
+    };
+
+    if dry_run {
+        let _guard = state.write_lock.read().await;
+        let gid = group_id.clone();
+        let plan = tokio::task::spawn_blocking(move || {
+            let conn = db.connect()?;
+            plan_move_batch(&conn, &gid, &specs)
+        })
+        .await??;
+        return Ok(reply(&plan, true));
+    }
+
+    // Pre-plan (read lock) to learn which documents to lock; the authoritative plan is re-made
+    // under the locks. Locks are taken in sorted order (document ingest takes one at a time).
+    let lock_ids = {
+        let _guard = state.write_lock.read().await;
+        let (db, gid, specs) = (Arc::clone(&db), group_id.clone(), specs.clone());
+        tokio::task::spawn_blocking(move || {
+            let conn = db.connect()?;
+            plan_move_batch(&conn, &gid, &specs).map(|plan| plan.lock_doc_ids())
+        })
+        .await??
+    };
+    let mut doc_guards = Vec::with_capacity(lock_ids.len());
+    for doc_id in &lock_ids {
+        doc_guards.push(crate::document::ingest::lock_document(&state, &group_id, doc_id).await);
+    }
+    let _guard = state.write_lock.write().await;
+    let (state_c, gid) = (Arc::clone(&state), group_id.clone());
+    let plan = tokio::task::spawn_blocking(move || -> Result<_, Error> {
+        let conn = db.connect()?;
+        let plan = plan_move_batch(&conn, &gid, &specs)?;
+        let applied = crate::document::move_doc::apply_plan(&conn, &gid, &plan);
+        // Flush whatever ran — also after a failure — so the WAL always matches the graph.
+        let seq = wal_exec::wal_flush_chunk(&state_c, &gid, conn.drain_mutations());
+        wal_exec::advance_wal_position(&conn, &gid, seq, &state_c);
+        applied.map(|()| plan)
+    })
+    .await??;
+    drop(_guard);
+    drop(doc_guards);
+    Ok(reply(&plan, false))
 }
 
 fn required_string_param(p: &Value, key: &str) -> Result<String, Error> {

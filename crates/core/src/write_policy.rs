@@ -202,6 +202,7 @@ pub const CLASSIFICATION: &[(&str, WriteClass)] = &[
     ("knowledge_supersede_document", WriteClass::GroupRequired),
     ("knowledge_retire_document", WriteClass::GroupRequired),
     ("knowledge_stamp_origin", WriteClass::GroupRequired),
+    ("knowledge_move_document", WriteClass::GroupRequired),
     (
         "knowledge_canonicalize_relations",
         WriteClass::GroupRequired,
