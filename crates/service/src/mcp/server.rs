@@ -76,7 +76,20 @@ impl<B: McpBackend> LcgMcpServer<B> {
             Value::Object(map) => map,
             other => unreachable!("tool schema must be a JSON object, got {other:?}"),
         };
-        Tool::new(spec.name, spec.description, Arc::new(schema_obj))
+        // Issue #856: a defaulting write that omits `group_id` writes to `liminis` and returns a
+        // `warnings` entry; say so in the one place every such tool description is surfaced.
+        let description =
+            if lcg_core::write_policy::implicit_default_group_applies(spec.name, &Value::Null) {
+                format!(
+                    "{} Omitting `group_id` writes to the default group `liminis` (the Liminis \
+                 app's own graph) and the result carries a `warnings` entry; third-party \
+                 writers should pass their own `group_id`.",
+                    spec.description
+                )
+            } else {
+                spec.description.to_string()
+            };
+        Tool::new(spec.name, description, Arc::new(schema_obj))
     }
 }
 
