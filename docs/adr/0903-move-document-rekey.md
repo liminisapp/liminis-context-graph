@@ -104,6 +104,15 @@ in-flight call of those chunks to finish before it plans and applies, failing wi
 one does not. A chunk ingest *into the destination* cannot be detected in chunk mode (its chunk id is
 not known yet) and is out of scope.
 
+The same limit applies to a move that names only a destination *path*. Document locks are taken for
+the destination `doc_id` only when the move names one (`MovePlan::lock_doc_ids`); for a path-only
+destination the `doc_id` that an ingest will use at that path is not known, so a
+`knowledge_process_document` still extracting into the path when the move commits is not serialized
+against it. Both documents would then carry the same `source_file`, and `knowledge_delete_by_source`
+on that path would delete both. It is documented in the reference rather than closed, because closing
+it would mean locking by path, which ingest does not do; a consumer that needs the guarantee names the
+destination `doc_id`.
+
 **8. Write scope, `GroupRequired`.** A rename is a routine consumer operation, unlike
 `knowledge_stamp_origin`, a one-off adoption tool. `--writable-groups` therefore applies to `group_id`.
 

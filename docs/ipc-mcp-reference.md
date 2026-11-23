@@ -1572,7 +1572,11 @@ nothing changed and the caller retries. The moving chunks are registered as in f
 call, so an identical resubmission that arrives meanwhile is not answered `unchanged` and then moved
 away. A chunk ingest *into the destination* that is still extracting when the move runs cannot be
 detected in chunk mode (its chunk id is not known yet): send moves while the affected notes are not
-being ingested.
+being ingested. The same gap exists for a move that names only a destination *path* (no `doc_id`): the
+`doc_id` a document ingest will use at that path is not known, so no document lock covers it, and a
+`knowledge_process_document` that is still extracting into that path when the move commits is not
+detected. Both documents then share the source path, and `knowledge_delete_by_source` on it deletes
+both. A move that names the destination `doc_id` is covered by the lock.
 
 ### Query variants: `knowledge_search_passages` `queries` (issue #802)
 
