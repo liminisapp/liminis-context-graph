@@ -694,7 +694,17 @@ async fn run(a: RetrievalArgs) -> Result<i32, String> {
             meta.ontology_hash = Some(guard.ontology.hash.clone());
             meta.ontology_mode = guard.ontology.mode.clone();
             embedders.push(guard.embedder.clone());
-            service_envs.push(lcg::effective_service_env(&opts, std::env::vars()));
+            // `vars_os`, not `vars`: `vars()` panics on a non-UTF-8 name or value anywhere in the
+            // operator's shell, and the child used to inherit the environment without eval reading it.
+            service_envs.push(lcg::effective_service_env(
+                &opts,
+                std::env::vars_os().map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                }),
+            ));
             service_bin = Some((opts.bin.clone(), guard.version.clone()));
             extractor_identity = Some(inputs::extractor_identity(
                 a.replay_cassette.is_some(),
