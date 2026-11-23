@@ -5895,7 +5895,13 @@ impl<'db> Conn<'db> {
 
     /// Page of MENTIONS edges for dump.
     /// Columns: [ep_uuid, en_uuid, r_uuid, r_group_id, r_created_at]
-    /// Rows with null r_uuid must be skipped by the caller (pre-migration edges).
+    /// `r_uuid` is NULL for edges written by native ingest (`insert_mentions_edge`); callers must
+    /// dump those too (ADR-0882). Ordered by every returned column, `(ep.uuid, en.uuid, r.group_id,
+    /// r.uuid, r.created_at)`: parallel duplicate edges tie on the endpoint keys, and SKIP/LIMIT
+    /// paging over a tie group can drop one edge and repeat another (including the uuid-bearing
+    /// one). lbug cannot `ORDER BY` the internal rel id, so the remaining columns are the
+    /// tiebreaker; rows that still tie are identical in every dumped column, so which of them
+    /// lands on which page cannot change the emitted set.
     pub(crate) fn dump_mentions_page(
         &self,
         group_id: Option<&str>,
@@ -5906,14 +5912,14 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (ep:Episodic)-[r:MENTIONS]->(en:Entity) WHERE r.group_id = $gid \
                  RETURN ep.uuid, en.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY ep.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY ep.uuid, en.uuid, r.group_id, r.uuid, r.created_at SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
         } else {
             self.query_params(
                 "MATCH (ep:Episodic)-[r:MENTIONS]->(en:Entity) \
                  RETURN ep.uuid, en.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY ep.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY ep.uuid, en.uuid, r.group_id, r.uuid, r.created_at SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
         }
@@ -5931,14 +5937,14 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (sg:Saga)-[r:HAS_EPISODE]->(ep:Episodic) WHERE r.group_id = $gid \
                  RETURN sg.uuid, ep.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY sg.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY sg.uuid, ep.uuid, r.uuid, r.group_id, r.created_at SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
         } else {
             self.query_params(
                 "MATCH (sg:Saga)-[r:HAS_EPISODE]->(ep:Episodic) \
                  RETURN sg.uuid, ep.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY sg.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY sg.uuid, ep.uuid, r.uuid, r.group_id, r.created_at SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
         }
@@ -5956,14 +5962,14 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (c:Community)-[r:HAS_MEMBER]->(e:Entity) WHERE r.group_id = $gid \
                  RETURN c.uuid, e.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY c.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY c.uuid, e.uuid, r.uuid, r.group_id, r.created_at SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
         } else {
             self.query_params(
                 "MATCH (c:Community)-[r:HAS_MEMBER]->(e:Entity) \
                  RETURN c.uuid, e.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY c.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY c.uuid, e.uuid, r.uuid, r.group_id, r.created_at SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
         }
@@ -5981,14 +5987,14 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (c:Community)-[r:HAS_MEMBER]->(m:Community) WHERE r.group_id = $gid \
                  RETURN c.uuid, m.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY c.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY c.uuid, m.uuid, r.uuid, r.group_id, r.created_at SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
         } else {
             self.query_params(
                 "MATCH (c:Community)-[r:HAS_MEMBER]->(m:Community) \
                  RETURN c.uuid, m.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY c.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY c.uuid, m.uuid, r.uuid, r.group_id, r.created_at SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
         }
@@ -6006,14 +6012,14 @@ impl<'db> Conn<'db> {
             self.query_params(
                 "MATCH (ep1:Episodic)-[r:NEXT_EPISODE]->(ep2:Episodic) WHERE r.group_id = $gid \
                  RETURN ep1.uuid, ep2.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY ep1.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY ep1.uuid, ep2.uuid, r.uuid, r.group_id, r.created_at SKIP $offset LIMIT $limit",
                 serde_json::json!({ "gid": gid, "offset": offset as i64, "limit": limit as i64 }),
             )
         } else {
             self.query_params(
                 "MATCH (ep1:Episodic)-[r:NEXT_EPISODE]->(ep2:Episodic) \
                  RETURN ep1.uuid, ep2.uuid, r.uuid, r.group_id, r.created_at \
-                 ORDER BY ep1.uuid SKIP $offset LIMIT $limit",
+                 ORDER BY ep1.uuid, ep2.uuid, r.uuid, r.group_id, r.created_at SKIP $offset LIMIT $limit",
                 serde_json::json!({ "offset": offset as i64, "limit": limit as i64 }),
             )
         }

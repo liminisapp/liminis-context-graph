@@ -321,6 +321,17 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   the ontology. The variable is now always set to the eval workspace, overriding any inherited
   value. Unreleased regression from #821 (#842); the service is unaffected.
 
+- **`knowledge_dump_wal` no longer drops every native-ingest MENTIONS edge (#882, ADR-0882).**
+  Native ingest creates MENTIONS edges without a `uuid`, and the dump skipped uuid-less rows, so a
+  dump→rebuild had zero MENTIONS and entity→episode provenance (`episode_uuids`,
+  `include_episodes`, `support`/`corroboration`) was lost. The dump now emits every MENTIONS edge,
+  keyed on `(episode, entity, group_id)` rather than the edge uuid, so existing graphs need no
+  backfill and replay stays idempotent (including legacy NULL-`group_id` edges, which are created
+  only when no NULL-group edge exists for the pair, and stay NULL-group). Edge-dump paging (MENTIONS, HAS_EPISODE, HAS_MEMBER,
+  NEXT_EPISODE) now orders by every dumped column, so a source with more than a page of edges can
+  no longer lose or repeat edges across a page boundary. Parallel duplicate
+  `(episode, entity, group_id)` edges collapse to one on rebuild.
+
 - **`knowledge_delete_by_source` no longer deletes other sources' episodes, and
   `knowledge_get_entities_by_source` returns only the requested source's live entities** (#829,
   #830, #853). Both matched the composed `source_description = "<source_file>:<chunk_id>"`
