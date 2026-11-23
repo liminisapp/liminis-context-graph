@@ -185,6 +185,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0855](0855-health-check-ready-for-reads.md) | `health_check` Gains `ready_for_reads`; Documents `ok` / `healthy` / `ready_for_reads` Semantics | 2026-11-21 |
 | [0857](0857-find-entities-episode-provenance.md) | `find_entities` Episode Provenance and a `uuids` Filter on `get_episodes` | 2026-11-22 |
 | [0858](0858-unchanged-chunk-resubmission-noop.md) | `knowledge_process_chunk` No-Ops on an Identical Resubmission | 2026-11-21 |
+| [0859](0859-retire-document-and-orphan-reporting.md) | `knowledge_retire_document`, and Hard Deletes Report (Optionally Prune) Orphaned Entities | 2026-11-23 |
 | [0872](0872-retrieval-run-comparability.md) | `lcg-eval retrieval` Run Comparability: Input Digests, Hard/Soft Inputs, `--compare` | 2026-11-22 |
 | [0880](0880-restatement-aware-corroboration.md) | Restatement-Aware Corroboration — Independent Sources, Not Documents | 2026-11-22 |
 | [0881](0881-eval-verifies-service-reported-ontology.md) | `lcg-eval` Verifies and Reports the Service-Reported Ontology | 2026-11-22 |
