@@ -67,7 +67,9 @@ The cancellation points already existed in `add_episode_with_opts` (the last one
   `protocol_version` bump: the change is additive.
 - **Heartbeats for streaming callers.** While a cooperative request that sent a
   `_progress_token` is silent (the LLM call between `extract` and `commit`), the connection writes
-  `{"type":"progress","phase":"heartbeat"}` every 10 s. Token-less requests never see a frame.
+  `{"type":"progress","phase":"heartbeat"}` every 10 s. This covers `knowledge_process_document` too,
+  so existing streaming `process_document` clients can now see a `heartbeat` phase (documented in
+  the IPC reference; clients ignore unknown phases). Token-less requests never see a frame.
 - **Attached MCP.** `AttachedBackend` drops its socket after 30 s with no line (per-line idle read
   timeout). With cancel-on-disconnect that would cancel every ingest slower than 30 s, and it can
   never be retried to success. So the backend always sends `_progress_token` for the two

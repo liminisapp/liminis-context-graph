@@ -112,8 +112,9 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   token**: a client that half-closes its write side after sending one of them
   (`shutdown(SHUT_WR)`, `printf ... | nc -U`) is indistinguishable from a hung-up client and has
   its request cancelled, so keep the write side open until the response arrives. The attached MCP
-  backend now requests progress frames for these methods (a streaming caller also gets a
-  `heartbeat` progress frame every 10 s while silent), so ingests slower than its 30 s idle
+  backend now requests progress frames for these methods (a streaming `process_chunk` or
+  `process_document` caller also gets a `heartbeat` progress frame every 10 s while silent; a
+  new `phase` value for existing `process_document` streaming clients), so ingests slower than its 30 s idle
   timeout are not dropped and cancelled. The IPC reference
   gains a "Connections, concurrency and timeouts" section: one request at a time per connection,
   use several connections for parallel ingest or reads alongside ingest, and timeout/retry

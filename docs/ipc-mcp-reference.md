@@ -1325,7 +1325,10 @@ Disconnecting cancels the call before its commit step
 (see [Connections, concurrency and timeouts](#connections-concurrency-and-timeouts-issue-861)).
 With `_progress_token`, progress lines stream before the result: `{"type":"progress","phase":
 "chunked"|"extracting"|"committing", "chunk_index", "chunk_count", "classification", "unit",
-"units", "extracted", "total"}`.
+"units", "extracted", "total"}`. While a call that sent a token is otherwise silent (an extraction
+slower than about 10 s), the service also writes `{"type":"progress","phase":"heartbeat"}` about
+every 10 s, a frame without the document fields above; ignore unknown `phase` values. Without the
+token no frame is sent.
 
 **Episode fields.** A document-mode episode read by `knowledge_get_episodes` also carries
 `revision_id`, `revision_committed_at` (absent while pending), `byte_start` / `byte_end` (its span
