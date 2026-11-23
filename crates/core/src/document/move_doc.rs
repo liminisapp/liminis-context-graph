@@ -566,8 +566,8 @@ pub fn classify_cross_group(
 
 /// Refuses a move whose destination `doc_id` holds no live episode but still carries document
 /// state outside `Episodic` — `DocRevision` rows (kept after a delete or a retirement) or a
-/// `DocSupersession` record. `apply_plan` re-keys the source's revision and supersession rows into
-/// that `doc_id`, so without this check the destination would hold two unrelated revision
+/// `DocSupersession` record, or is named as another document's superseding document. `apply_plan`
+/// re-keys the source's revision and supersession rows into that `doc_id`, so without this check the destination would hold two unrelated revision
 /// histories and the next `knowledge_process_document` could pick the wrong baseline.
 ///
 /// A failure to *read* that state is a database error (`Err`), not a refusal: only a real history
@@ -591,13 +591,22 @@ pub fn check_destination_history(
         let has_supersession = conn
             .doc_supersession_for(group_id, dest)
             .map(|r| r.is_some())?;
-        if has_revisions || has_supersession {
+        // The destination as the *superseding* side: records and episodes of other documents that
+        // name it would silently point at the moved document.
+        let is_superseding = !conn
+            .doc_supersessions_superseded_by(group_id, dest)?
+            .is_empty()
+            || !conn
+                .episode_uuids_superseded_by_doc(group_id, dest)?
+                .is_empty();
+        if has_revisions || has_supersession || is_superseding {
             refusals.push(Refusal {
                 index: m.index,
                 code: code::DESTINATION_HAS_HISTORY,
                 message: format!(
                     "doc_id '{dest}' holds no live episodes but still has document revision or \
-                     supersession state; moving into it would merge two histories"
+                     supersession state (including being named as another document's superseding \
+                     document); moving into it would merge two histories"
                 ),
             });
         }

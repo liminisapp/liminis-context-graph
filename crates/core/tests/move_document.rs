@@ -458,6 +458,65 @@ async fn destination_with_leftover_revision_history_is_refused() {
     );
 }
 
+/// A destination `doc_id` that is the *superseding* side of a leftover supersession record (its
+/// document was hard-deleted) must be refused: the record and the `superseded_by` values on the
+/// superseded document's episodes would otherwise silently point at the moved document.
+#[tokio::test]
+async fn destination_named_as_a_superseding_document_is_refused() {
+    let f = fx();
+    ingest(
+        &f.state,
+        "old",
+        "notes/old.md",
+        &NOTE.replace("cache", "memo"),
+    )
+    .await;
+    // The superseding document is chunk-ingested, so it never gets `DocRevision` rows: only the
+    // supersession record itself can mark its `doc_id` as occupied once it is deleted.
+    call(
+        "knowledge_process_chunk",
+        json!({"chunk_text": "the plan replaces the memo", "chunk_id": "new::0",
+               "source_file": "notes/new.md", "group_id": G, "doc_id": "new",
+               "reference_time": "2026-08-04T00:00:00Z"}),
+        &f.state,
+    )
+    .await;
+    // Effective in the future, so `old` stays live and the record is a plain leftover.
+    call(
+        "knowledge_supersede_document",
+        json!({"group_id": G, "superseding_doc_id": "new", "superseded_doc_id": "old",
+               "effective_at": "2099-01-01T00:00:00Z"}),
+        &f.state,
+    )
+    .await;
+    // `new` is hard-deleted; its supersession record and `old`'s `superseded_by` remain.
+    let del = call(
+        "knowledge_delete_by_source",
+        json!({"source_file": "notes/new.md", "group_ids": [G]}),
+        &f.state,
+    )
+    .await;
+    assert!(del["deleted_count"].as_u64().unwrap() >= 1, "{del}");
+    {
+        let conn = f.db.connect().unwrap();
+        assert!(conn.doc_revision_rows_for_doc(G, "new").unwrap().is_empty());
+        assert!(!conn
+            .doc_supersessions_superseded_by(G, "new")
+            .unwrap()
+            .is_empty());
+    }
+    ingest(&f.state, "x", "notes/x.md", &NOTE.replace("cache", "bus")).await;
+    let before = identity_snapshot(&f.db, G);
+
+    let r = move_docs(&f.state, vec![mv("x", "notes/x.md", "new", "moved/new.md")]).await;
+    assert!(error_message(&r).contains("destination_has_history"), "{r}");
+    assert_eq!(
+        identity_snapshot(&f.db, G),
+        before,
+        "a refusal changes nothing"
+    );
+}
+
 #[tokio::test]
 async fn prefix_rewrite_renames_chunk_ids_and_descriptions() {
     let f = fx();
