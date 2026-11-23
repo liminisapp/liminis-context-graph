@@ -165,8 +165,11 @@ during a rebuild and under any `--writable-groups` policy.
 
 ```json
 {"server_version": "0.19.1", "protocol_version": 1,
- "features": ["chunk_supersede", "entity_provenance", "hybrid_passage_search", "lint", "origin",
-              "process_document", "status_episode_breakdown", "unchanged_noop", "walk", "walk_provenance", "writable_groups"],
+ "features": ["chunk_supersede", "entity_provenance", "episode_source_fields",
+              "exact_source_match", "hybrid_passage_search", "implicit_default_group_warning",
+              "lint", "origin", "passage_legs", "process_document", "ready_for_reads",
+              "search_min_score_env", "status_episode_breakdown", "test_providers",
+              "unchanged_noop", "walk", "walk_provenance", "writable_groups", "zero_vector_record"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -180,6 +183,41 @@ during a rebuild and under any `--writable-groups` policy.
 **Old servers.** A server that predates this method answers `knowledge_capabilities` with its
 ordinary unknown-method error: JSON-RPC code `-32000` and a message beginning `Method not found:`.
 Treat that as "older than the capabilities method" and fall back to your own probing.
+
+#### Feature strings
+
+Every string in `features`, with the issue that introduced it. A string advertises that **this
+build supports** the capability; it never reports run-time state (whether a mode is active, what
+an operator configured) and does not promise a field is populated on every call. Strings added
+by #885 name capabilities that shipped in 0.19.2 without one.
+
+| Feature | Introduced | Meaning |
+|---|---|---|
+| `chunk_supersede` | closest known origin: #785 ([ADR-0292](adr/0292-chunk-ingest-never-supersedes-unattributed-episodes.md)); seeded by #854 | Chunk ingest can supersede earlier episodes of the same document. |
+| `entity_provenance` | #857 ([ADR-0857](adr/0857-find-entities-episode-provenance.md)) | `knowledge_find_entities` can return episode provenance and filter by `uuids`. |
+| `episode_source_fields` | #853 ([ADR-0853](adr/0853-episode-source-identity-and-exact-source-matching.md)) | Episodes carry stored `source_file` and `chunk_id`. Independent of `exact_source_match`. |
+| `exact_source_match` | #853 ([ADR-0853](adr/0853-episode-source-identity-and-exact-source-matching.md)) | `knowledge_delete_by_source` matches the source exactly, with the safe legacy rule for episodes that predate stored source fields. |
+| `hybrid_passage_search` | #789 ([ADR-0789](adr/0789-hybrid-passage-search-rrf-top-rank-bonus.md)) | Passage search offers the hybrid BM25 + vector mode. |
+| `implicit_default_group_warning` | #856 | A write that omits `group_id` gets a `warnings` entry; pass an explicit `group_id` to avoid it. |
+| `lint` | #755 ([ADR-0755](adr/0755-knowledge-lint-deterministic-health.md)) | `knowledge_lint` deterministic graph-health checks. |
+| `origin` | #752 ([ADR-0752](adr/0752-episode-origin-and-corroboration.md)) | Episodes record an `origin`, distinguishing primary sources from corroboration. |
+| `passage_legs` | #871 | Hybrid passage results carry `legs` (per-leg evidence). Present on hybrid results only; absent or null in other modes. |
+| `process_document` | #785 | `knowledge_process_document` document mode. |
+| `ready_for_reads` | #809, #855 ([ADR-0855](adr/0855-health-check-ready-for-reads.md)) | `health_check` carries `ready_for_reads`, present in every state. |
+| `search_min_score_env` | #812 ([ADR-0812](adr/0812-search-min-score-env-default.md)) | The default passage-search `min_score` floor can be set by the operator with `LCG_SEARCH_MIN_SCORE`. The configured value is not exposed. |
+| `status_episode_breakdown` | #884 ([ADR-0884](adr/0884-status-episode-breakdown-opt-in.md)) | `knowledge_status` can report a per-group live/superseded episode breakdown. |
+| `test_providers` | #851 ([ADR-0851](adr/0851-test-providers-mode.md)) | This build supports the built-in deterministic `--embedder test` / `--extractor test` mode. It does not mean the mode is active; the active providers are visible in `providers`. |
+| `unchanged_noop` | #858 ([ADR-0858](adr/0858-unchanged-chunk-resubmission-noop.md)) | Resubmitting an unchanged chunk is a no-op reported with status `unchanged`. |
+| `walk` | #820 ([ADR-0820](adr/0820-caller-plans-walk-no-lcg-llm.md)) | `knowledge_walk` follows typed relations from an entity. |
+| `walk_provenance` | #860 | `knowledge_walk` can include provenance episodes. |
+| `writable_groups` | #742 ([ADR-0742](adr/0742-per-group-write-allow-list.md)) | The `--writable-groups` per-group write allow-list policy. |
+| `zero_vector_record` | #808, #810 ([ADR-0808](adr/0808-replay-embed-retry-and-zero-vector-record.md)) | `knowledge_status` reports `wal_groups.<gid>.zero_vector_rows`, the record of rows stored with a zero vector. |
+
+#### Changes deliberately not advertised
+
+- **`knowledge_reembed_missing`** (#809, [ADR-0809](adr/0809-reembed-missing-zero-vectors.md), PR #826):
+  a new method is already visible by membership in `methods`, so a string adds nothing. The status
+  record it repairs has its own string, `zero_vector_record`.
 
 ### Health check contract
 

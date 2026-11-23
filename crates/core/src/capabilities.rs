@@ -12,6 +12,9 @@
 //!
 //! - Strings are `lower_snake_case`, carry no version suffix, and are kept **sorted** in the array
 //!   (a unit test enforces sorting, uniqueness and the format).
+//! - Every string must also get a row in the "Feature strings" table of
+//!   `docs/ipc-mcp-reference.md` (Capabilities section), with the issue that introduced it; a
+//!   test in `tests/capabilities.rs` fails when the registry and the table differ.
 //! - Strings are **append-only**: once released, a feature string is never renamed or removed.
 //!   Removing a capability is a breaking change and bumps [`PROTOCOL_VERSION`].
 //!
@@ -42,15 +45,23 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const FEATURES: &[&str] = &[
     "chunk_supersede",
     "entity_provenance",
+    "episode_source_fields",
+    "exact_source_match",
     "hybrid_passage_search",
+    "implicit_default_group_warning",
     "lint",
     "origin",
+    "passage_legs",
     "process_document",
+    "ready_for_reads",
+    "search_min_score_env",
     "status_episode_breakdown",
+    "test_providers",
     "unchanged_noop",
     "walk",
     "walk_provenance",
     "writable_groups",
+    "zero_vector_record",
 ];
 
 /// Sorted, de-duplicated names of every IPC method the dispatcher accepts.
