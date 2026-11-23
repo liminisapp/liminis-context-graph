@@ -62,8 +62,10 @@ write lock, and each connection has its own task), so:
 `knowledge_process_chunk` or `knowledge_process_document` request is running, the service watches
 its connection. If the client disconnects (the socket closes, errors, or a progress write fails),
 the request is cancelled at its next cancellation point **before commit** and the service logs
-`client disconnected; cancelling in-flight <method> (cause=client_disconnect)`. A cancelled request
-writes no episode, entity, edge or WAL record, releases its locks, and leaves the service healthy.
+`client disconnected; cancelling in-flight <method> (cause=client_disconnect)`. A cancelled
+`knowledge_process_chunk` writes no episode, entity, edge or WAL record; a cancelled
+`knowledge_process_document` leaves the units it had already committed in place (see below). Either
+way the request releases its locks and leaves the service healthy.
 **Once the commit has started it finishes**, whether or not the client is still there: the commit
 is never interrupted. This applies to streaming (`_progress_token`) and plain requests alike, and
 to requests queued behind another on the same connection (they do not start). Other methods are
