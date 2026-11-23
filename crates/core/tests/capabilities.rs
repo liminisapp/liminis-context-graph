@@ -102,6 +102,14 @@ async fn reports_version_protocol_and_seeded_features() {
         "entity_provenance",
         "status_episode_breakdown",
         "unchanged_noop",
+        "search_min_score_env",
+        "ready_for_reads",
+        "test_providers",
+        "exact_source_match",
+        "episode_source_fields",
+        "passage_legs",
+        "implicit_default_group_warning",
+        "zero_vector_record",
     ] {
         assert!(features.iter().any(|x| x == f), "missing feature {f}");
     }
@@ -174,4 +182,79 @@ async fn health_check_degraded_carries_version_fields() {
     assert_eq!(r["reason"], "corrupt wal");
     assert_eq!(r["server_version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(r["protocol_version"], 1);
+}
+
+// ── registry vs docs/ipc-mcp-reference.md (issue #885) ────────────────────────────────────────
+
+const REFERENCE: &str = include_str!("../../../docs/ipc-mcp-reference.md");
+
+/// Rows of the "Feature strings" table: `(feature, introduced cell)`.
+fn documented_features() -> Vec<(String, String)> {
+    let start = REFERENCE
+        .find("#### Feature strings")
+        .expect("`#### Feature strings` missing from docs/ipc-mcp-reference.md");
+    let section = &REFERENCE[start + 4..];
+    let end = section.find("\n#").unwrap_or(section.len());
+    section[..end]
+        .lines()
+        .filter_map(|l| {
+            let cells: Vec<&str> = l.split('|').map(str::trim).collect();
+            let f = cells.get(1)?.strip_prefix('`')?.strip_suffix('`')?;
+            Some((f.to_string(), cells.get(2)?.to_string()))
+        })
+        .collect()
+}
+
+#[test]
+fn reference_lists_every_feature_and_nothing_else() {
+    let rows = documented_features();
+    let documented: BTreeSet<String> = rows.iter().map(|(f, _)| f.clone()).collect();
+    assert_eq!(
+        documented.len(),
+        rows.len(),
+        "a feature is documented twice"
+    );
+    let registry: BTreeSet<String> = capabilities::FEATURES
+        .iter()
+        .map(|f| f.to_string())
+        .collect();
+    let undocumented: Vec<_> = registry.difference(&documented).collect();
+    let stale: Vec<_> = documented.difference(&registry).collect();
+    assert!(
+        undocumented.is_empty(),
+        "feature strings missing from the `#### Feature strings` table in \
+         docs/ipc-mcp-reference.md: {undocumented:?}"
+    );
+    assert!(
+        stale.is_empty(),
+        "docs/ipc-mcp-reference.md documents feature strings not in FEATURES: {stale:?}"
+    );
+}
+
+#[test]
+fn reference_rows_cite_an_introducing_issue() {
+    for (f, introduced) in documented_features() {
+        let cited = introduced
+            .split('#')
+            .skip(1)
+            .any(|t| t.starts_with(|c: char| c.is_ascii_digit()));
+        assert!(
+            cited,
+            "feature `{f}` has no `#<issue>` in its Introduced cell"
+        );
+    }
+}
+
+#[test]
+fn reference_example_response_shows_every_feature() {
+    let start = REFERENCE
+        .find("{\"server_version\"")
+        .expect("example capabilities response missing");
+    let example = &REFERENCE[start..start + REFERENCE[start..].find("```").unwrap()];
+    for f in capabilities::FEATURES {
+        assert!(
+            example.contains(&format!("\"{f}\"")),
+            "example `knowledge_capabilities` response in docs/ipc-mcp-reference.md omits `{f}`"
+        );
+    }
 }
