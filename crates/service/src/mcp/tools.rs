@@ -159,6 +159,14 @@ fn with_belief(mut props: Value) -> Value {
     props
 }
 
+/// The `prune_orphans` property shared by the two hard-delete tools (issue #859).
+fn prune_orphans_prop() -> Value {
+    json!({
+        "type": "boolean", "default": false,
+        "description": "If true, also delete the entities the delete left with no mentioning episode (superseded episodes still count as mentions), together with any edge left with no episodes. Default false: orphans are only reported."
+    })
+}
+
 /// The full, ordered registry — one entry per `knowledge_*` dispatch method (59 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
@@ -1146,7 +1154,11 @@ pub fn registry() -> Vec<ToolSpec> {
                            source identity was stored is deleted only when its composed \
                            `source_file:chunk_id` description provably names this source — \
                            use knowledge_delete_chunk_episode for one it cannot attribute. \
-                           Orphaned entities remain in the graph.",
+                           Entities left with no mentioning episode are reported as \
+                           `orphaned_entity_uuids` (+ `orphaned_entity_count`) and kept; pass \
+                           `prune_orphans: true` to delete them, with any edge left with no \
+                           episodes, in the same call (issue #859). To stop believing a \
+                           document without destroying it, use knowledge_retire_document.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -1156,7 +1168,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "group_ids": {
                             "type": "array", "items": {"type": "string"}, "minItems": 1,
                             "description": "Non-empty array of groups to restrict deletion to (required). An unscoped, all-groups delete is not supported."
-                        }
+                        },
+                        "prune_orphans": prune_orphans_prop()
                     },
                     "required": ["source_file", "group_ids"]
                 })
@@ -1164,8 +1177,11 @@ pub fn registry() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "knowledge_delete_chunk_episode",
-            description: "Delete all episodes for a given chunk ID. Orphaned entities remain \
-                           in the graph.",
+            description: "Delete all episodes for a given chunk ID. Entities left with no \
+                           mentioning episode are reported as `orphaned_entity_uuids` \
+                           (+ `orphaned_entity_count`) and kept; pass `prune_orphans: true` to \
+                           delete them, with any edge left with no episodes, in the same call \
+                           (issue #859).",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -1175,7 +1191,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "group_ids": {
                             "type": "array", "items": {"type": "string"}, "minItems": 1,
                             "description": "Non-empty array of groups to restrict deletion to (required). An unscoped, all-groups delete is not supported."
-                        }
+                        },
+                        "prune_orphans": prune_orphans_prop()
                     },
                     "required": ["chunk_id", "group_ids"]
                 })

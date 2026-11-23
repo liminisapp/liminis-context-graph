@@ -3353,7 +3353,8 @@ async fn handle_get_entities_by_source(
 }
 
 /// Deletes all Episodic nodes matching source_file, scoped to the required `group_ids`
-/// (issue #406 — an unscoped, all-groups delete is rejected outright).
+/// (issue #406 — an unscoped, all-groups delete is rejected outright). Orphaned entities are
+/// reported and optionally pruned, as in [`handle_delete_chunk_episode`] (issue #859).
 async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let source_file = p["source_file"]
@@ -3363,43 +3364,78 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
         .to_string();
 
     let group_ids_owned = extract_required_group_ids(&p["group_ids"])?;
+    let prune_orphans = prune_orphans_param(p)?;
 
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
-    let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
-        let conn = db.connect()?;
-        let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
-        let (uuids, grouped) = conn.remove_episodes_by_source(&source_file, &gid_refs)?;
-        // Each affected group's own deletions are already bucketed by the group whose data they
-        // actually modified (issue #402, following ADR-0385's precedent for
-        // handle_delete_by_group) — flush each bucket to its own group's writer, never the
-        // default group's, so a group-scoped rebuild of any named group sees its own deletion on
-        // its own WAL stream.
-        for (group_id, mutations) in grouped {
-            let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
-            wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
-        }
-        Ok(uuids)
-    })
-    .await??;
+    let outcome =
+        tokio::task::spawn_blocking(move || -> Result<crate::db::DeleteOutcome, Error> {
+            let conn = db.connect()?;
+            let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
+            let mut outcome =
+                conn.remove_episodes_by_source(&source_file, &gid_refs, prune_orphans)?;
+            let grouped = std::mem::take(&mut outcome.grouped);
+            // Each affected group's own deletions are already bucketed by the group whose data they
+            // actually modified (issue #402, following ADR-0385's precedent for
+            // handle_delete_by_group) — flush each bucket to its own group's writer, never the
+            // default group's, so a group-scoped rebuild of any named group sees its own deletion on
+            // its own WAL stream.
+            for (group_id, mutations) in grouped {
+                let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+                wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+            }
+            Ok(outcome)
+        })
+        .await??;
     drop(_guard);
 
-    Ok(json!({
+    let mut resp = json!({
         "success": true,
         "source_file": req.params["source_file"],
-        "deleted_count": deleted_uuids.len(),
-        "deleted_uuids": deleted_uuids,
-    }))
+        "deleted_count": outcome.uuids.len(),
+        "deleted_uuids": outcome.uuids,
+    });
+    add_orphan_fields(
+        &mut resp,
+        outcome.orphaned_entity_uuids,
+        outcome.pruned_entity_count,
+        outcome.pruned_edge_count,
+    );
+    Ok(resp)
+}
+
+/// Optional `prune_orphans` param of the hard deletes (issue #859): absent or null means `false`.
+fn prune_orphans_param(p: &Value) -> Result<bool, Error> {
+    match &p["prune_orphans"] {
+        Value::Null => Ok(false),
+        Value::Bool(b) => Ok(*b),
+        _ => Err(Error::Ipc("prune_orphans must be a boolean".to_string())),
+    }
+}
+
+/// Adds the orphan-report fields every hard delete returns (issue #859): the entities the delete
+/// left with no mentioning episode, and how many entities / edges `prune_orphans` deleted (0 when
+/// it was not requested).
+fn add_orphan_fields(
+    resp: &mut Value,
+    orphans: Vec<String>,
+    pruned_entities: usize,
+    pruned_edges: usize,
+) {
+    resp["orphaned_entity_count"] = json!(orphans.len());
+    resp["orphaned_entity_uuids"] = json!(orphans);
+    resp["pruned_entity_count"] = json!(pruned_entities);
+    resp["pruned_edge_count"] = json!(pruned_edges);
 }
 
 /// Deletes all Episodic nodes for the given chunk_id, scoped to the required `group_ids`
 /// (issue #406 — an unscoped, all-groups delete is rejected outright).
 ///
-/// Note: only the episode nodes are removed. Entity nodes that were extracted
-/// from this chunk and are connected solely to the deleted episodes become
-/// orphaned — they remain in the graph. Callers should be aware of this outcome.
-/// A future entity-GC method may clean up such orphans.
+/// Only the episode nodes are removed by default. Entities left with no mentioning episode are
+/// *reported* as `orphaned_entity_uuids` (issue #859, ADR-0859) and stay in the graph; with
+/// `prune_orphans: true` they are deleted in the same operation, together with the edges left
+/// with no episodes.
 async fn handle_delete_chunk_episode(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -3412,32 +3448,43 @@ async fn handle_delete_chunk_episode(
         .to_string();
 
     let group_ids_owned = extract_required_group_ids(&p["group_ids"])?;
+    let prune_orphans = prune_orphans_param(p)?;
 
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
-    let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
-        let conn = db.connect()?;
-        let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
-        let (uuids, grouped) = conn.remove_episodes_by_chunk_id(&chunk_id, &gid_refs)?;
-        // Same rationale as handle_delete_by_source above (issue #402): each affected group's
-        // own deletions are already bucketed by the group they actually modified — flush each
-        // bucket to its own group's writer, never the default group's.
-        for (group_id, mutations) in grouped {
-            let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
-            wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
-        }
-        Ok(uuids)
-    })
-    .await??;
+    let outcome =
+        tokio::task::spawn_blocking(move || -> Result<crate::db::DeleteOutcome, Error> {
+            let conn = db.connect()?;
+            let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
+            let mut outcome =
+                conn.remove_episodes_by_chunk_id(&chunk_id, &gid_refs, prune_orphans)?;
+            let grouped = std::mem::take(&mut outcome.grouped);
+            // Same rationale as handle_delete_by_source above (issue #402): each affected group's
+            // own deletions are already bucketed by the group they actually modified — flush each
+            // bucket to its own group's writer, never the default group's.
+            for (group_id, mutations) in grouped {
+                let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+                wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+            }
+            Ok(outcome)
+        })
+        .await??;
     drop(_guard);
 
-    Ok(json!({
+    let mut resp = json!({
         "success": true,
         "chunk_id": req.params["chunk_id"],
-        "deleted_count": deleted_uuids.len(),
-        "deleted_uuids": deleted_uuids,
-    }))
+        "deleted_count": outcome.uuids.len(),
+        "deleted_uuids": outcome.uuids,
+    });
+    add_orphan_fields(
+        &mut resp,
+        outcome.orphaned_entity_uuids,
+        outcome.pruned_entity_count,
+        outcome.pruned_edge_count,
+    );
+    Ok(resp)
 }
 
 /// `knowledge_mark_chunk_removed` (issue #705, FR-004): records that a chunk no longer exists in
