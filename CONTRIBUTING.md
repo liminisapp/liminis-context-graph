@@ -129,14 +129,34 @@ Two rules that follow:
 - **A storage migration ships alone.** Make it the only notable change in its release, so a user
   who hits trouble has one variable to consider and rollback is "go back one version".
 
+### Changelog fragments
+
+A PR with a user-visible change records it as **one new file**, `changelog.d/<issue>-<slug>.md`
+(the PR number when there is no issue) — it does **not** edit `CHANGELOG.md`. Every PR used to add
+to the same `## [Unreleased]` block, so concurrent PRs always overlapped and the merge train landed
+them one at a time ([ADR-0904](docs/adr/0904-changelog-fragments-and-generated-llms-full.md)).
+
+A fragment is the text you would have put under `[Unreleased]`, using `### <Section>` headings from
+this list: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`, `Response schemas`,
+`Documentation`, `Internal`, `Upgrading`, `Upgrade notes`, `Known issues`, `Windows notes`. Each
+heading needs at least one entry. The format and the assembly are documented in
+[`changelog.d/README.md`](changelog.d/README.md); `scripts/assemble-changelog.sh --check` validates
+fragments and runs on every PR. The release manager assembles them into `CHANGELOG.md` at release
+time (runbook step 4). The entry text still follows the rules below, and the published
+`CHANGELOG.md` and release notes are unchanged.
+
+*Transition:* a PR already in flight may keep editing `## [Unreleased]` in `CHANGELOG.md` directly;
+those entries stay where they are and are merged with the fragments at assembly.
+
 ### CHANGELOG rules for raw-socket clients
 
-The socket protocol is a public interface: the Electron app and third-party integrators talk to it
+These apply to the **text of the changelog fragment** (and to a direct `CHANGELOG.md` entry during
+the transition). The socket protocol is a public interface: the Electron app and third-party integrators talk to it
 directly, not through a generated client ([ADR-0854](docs/adr/0854-knowledge-capabilities-protocol-version-and-feature-registry.md)).
 
 - A change to a **default scope** or to **response semantics** (a field's meaning, type, default or
   ordering; an error code; what an empty result means) is flagged **BREAKING for raw-socket
-  clients** in the CHANGELOG entry, even when it is a patch-sized change in the code.
+  clients** in the changelog entry, even when it is a patch-sized change in the code.
 - A breaking change to the socket protocol bumps `PROTOCOL_VERSION` in
   `crates/core/src/capabilities.rs`. Purely additive changes (a new method, a new response field)
   do not.
@@ -161,7 +181,7 @@ never commit release prep directly to `main` — then tag the merge commit.
    is proceeding anyway — don't ship over a known-broken post-merge check silently the way
    `v0.11.0` did (#298). A `workflow:release` issue means release packaging (four-target build,
    pinned extension hashes, OpenSSL linkage) failed on `main` after merge — it is **not** checked
-   per PR (see step 7 and [ADR-0639](docs/adr/0639-post-merge-release-packaging-verification.md)),
+   per PR (see step 8 and [ADR-0639](docs/adr/0639-post-merge-release-packaging-verification.md)),
    so treat it as a blocker: fix forward before tagging.
 1. **Run the sidecar-gated tests, and record their output in the release PR.** Two tests in
    `crates/core/tests/real_corpus_replay_perf.rs` need a live embedding sidecar and **skip silently
@@ -239,10 +259,10 @@ never commit release prep directly to `main` — then tag the merge commit.
    `Cargo.toml` to `x.y.z` (all workspace crates inherit it via `version.workspace = true`), then run
    `cargo update -p lcg-core -p lcg-service -p lcg-eval` to sync the workspace entries in `Cargo.lock`.
    Add any newly-introduced workspace member to that command — a crate left out keeps a stale version
-   in the lockfile. Then run `scripts/generate-docs-llms-full.sh` to regenerate
-   `docs/llms-full.txt` — the docs-drift CI check fails the PR if it is left stale (see
-   [issue #295](https://github.com/verveguy/liminis-context-graph/issues/295)). There is no
-   second version to update any more: the docs site reads `Cargo.toml` directly.
+   in the lockfile. There is nothing to regenerate for the docs: `docs/llms-full.txt` is no longer
+   committed — `scripts/generate-docs-llms-full.sh` builds it when the docs site is published, from
+   the version in `Cargo.toml` (see [ADR-0904](docs/adr/0904-changelog-fragments-and-generated-llms-full.md)).
+   There is no second version to update any more: the docs site reads `Cargo.toml` directly.
 3. **Check feature-string coverage.** Confirm that every user-visible change in this release has a
    feature string or a stated reason it doesn't. List what shipped since the last tag
    (`gh pr list --state merged --search "merged:>=<last-release-date>"`) and, for each change a
@@ -254,13 +274,19 @@ never commit release prep directly to `main` — then tag the merge commit.
    the string (sorted, `lower_snake_case`, append-only) before tagging, or record the reason in the
    release PR and under "Changes deliberately not advertised" in the reference. Nothing enforces this
    mechanically; it is how 0.19.2 shipped eight changes without a string (#885).
-4. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`. If no
+4. **Assemble the changelog fragments.** Run `scripts/assemble-changelog.sh` in the release PR,
+   *before* the rename in the next step. It merges every `changelog.d/<issue>-<slug>.md` fragment into
+   `## [Unreleased]` together with any entries already there (one heading per section, in a fixed
+   order), then deletes the fragments; it validates all of them first and changes nothing if one is
+   malformed. Running it again with no fragments left is a no-op. Read the assembled section once
+   before continuing. See [`changelog.d/README.md`](changelog.d/README.md).
+5. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`. If no
    `[Unreleased]` section has been maintained, write the section from the merged PRs since the last
    tag (`gh pr list --state merged --search "merged:>=<last-release-date>"`).
-5. **Open a PR and merge it** to `main` once CI is green.
-6. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
+6. **Open a PR and merge it** to `main` once CI is green.
+7. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
    The tag (`vX.Y.Z`) must equal the `Cargo.toml` version, or cargo-dist's `plan` step fails.
-7. The release workflow builds all four targets and publishes the GitHub Release
+8. The release workflow builds all four targets and publishes the GitHub Release
    automatically. The same workflow also runs on every push to `main` (build and check only —
    it publishes nothing and never runs on PRs), which is where packaging is verified before
    you tag; only a pushed version tag publishes (~5–10 min in practice; `v0.12.0` took under six). Publishing that
@@ -271,14 +297,14 @@ never commit release prep directly to `main` — then tag the merge commit.
    created by hand.) See
    [`docs/release-process.md`](docs/release-process.md#docs-publishing) for what to
    check afterward and how to republish a correction without cutting a new release.
-8. **Announce it.** Post to the repository's **Announcements** discussion category once the
+9. **Announce it.** Post to the repository's **Announcements** discussion category once the
    release has published. cargo-dist creates the GitHub Release; nothing posts a discussion.
    Lead with what changed for a user rather than the issue list, and carry the CHANGELOG's
    upgrade note across if there is one. Precedent to match:
    [v0.10.0](https://github.com/verveguy/liminis-context-graph/discussions/200),
    [v0.11.0](https://github.com/verveguy/liminis-context-graph/discussions/338),
    [v0.12.0](https://github.com/verveguy/liminis-context-graph/discussions/337).
-8. **Confirm the previous release was announced too.** `v0.11.0` shipped with no announcement
+10. **Confirm the previous release was announced too.** `v0.11.0` shipped with no announcement
    and the gap went unnoticed for five days — nothing checks, and the release workflow is
    green either way. Before posting, list the Announcements category and confirm the prior
    tag has an entry; if it doesn't, backfill it and say so in the post rather than quietly
@@ -289,7 +315,7 @@ never commit release prep directly to `main` — then tag the merge commit.
    gh api graphql -f query='query { repository(owner:"liminisapp",name:"liminis-context-graph"){
      discussions(first:20){ nodes { title category{name} createdAt } } } }'
    ```
-9. **Close the community reports the release resolves.** Comment on each with what shipped and
+11. **Close the community reports the release resolves.** Comment on each with what shipped and
    a concrete reopen condition, then move it to **Shipped** on the OSS triage board (see the
    two-board note above). A report left open after its fix ships reads as unresolved to the
    person who filed it.
@@ -318,8 +344,9 @@ what one of those methods returns:
    produces it (a conditional field needs a call that triggers the condition) and, for a new field a
    consumer will read, add a drift check that renames or retypes it and asserts the schema rejects it.
    A response that no longer validates fails this suite, naming the method and the JSON path.
-4. **Record it in `CHANGELOG.md`** under `[Unreleased]`. CI fails a PR that touches `contract/` without
-   touching the changelog.
+4. **Record it in a changelog fragment**, `changelog.d/<issue>-<slug>.md`, under `### Response schemas`
+   (see "Changelog fragments" above). CI fails a PR that touches `contract/` without adding or editing
+   a fragment (or, during the transition, editing `CHANGELOG.md`).
 
 **What is breaking.** The schemas describe what lcg emits and consumers read it, so judge a change
 from the reader's side. Removing or renaming a field, widening a type (`string` to `string|null`,
