@@ -286,23 +286,27 @@ async fn shutdown_cancel_reaches_child_token_and_counts() {
 async fn cancel_before_commit_then_retry_extracts_once() {
     let fx = fixture_with(Duration::ZERO, None, true);
     let child = fx.state.cancel_token.child_token();
-    let (tx, mut rx) = unbounded_channel();
+    let (tx, _rx) = unbounded_channel();
     let s = Arc::clone(&fx.state);
     let c = child.clone();
     let handle = tokio::spawn(async move {
         let r = req("knowledge_process_chunk", chunk_params("retry chunk"));
         handlers::dispatch_cancellable(r, s, Some(tx), c).await
     });
-    // Wait for the `commit` frame: the request is now parked on the held write lock.
-    loop {
-        let f = tokio::time::timeout(Duration::from_secs(10), rx.recv())
-            .await
-            .expect("commit frame")
-            .expect("channel open");
-        if f["phase"] == "commit" {
+    // The extractor parks the group write lock; once it has, the request can only be heading for
+    // (or already waiting at) the commit's lock acquisition. The `commit` frame is NOT sent yet:
+    // it means "lock held, commit started" and this request never gets there.
+    for _ in 0..1000 {
+        if fx.held.lock().unwrap().is_some() {
             break;
         }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    assert!(
+        fx.held.lock().unwrap().is_some(),
+        "extractor parked the lock"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
     child.cancel();
     let resp = tokio::time::timeout(Duration::from_millis(500), handle)
         .await
@@ -334,12 +338,12 @@ async fn cancel_before_commit_then_retry_extracts_once() {
 
 // ── Commit, once started, finishes ────────────────────────────────────────────
 
-/// A token cancelled in the same instant the write lock becomes available does not stop the
-/// commit: the lock arm is `biased`, so a write that can proceed always finishes (FR-006).
-/// Current-thread runtime: dropping the guard and cancelling happen with no await in between.
+/// The `commit` frame is sent only once the write lock is held, so a cancel that arrives after
+/// the client has seen it cannot stop the commit: nothing after the guard checks the token
+/// (FR-006). Deterministic: the frame itself proves the commit has started.
 #[tokio::test]
-async fn cancel_at_commit_boundary_still_commits() {
-    let fx = fixture_with(Duration::ZERO, None, true);
+async fn cancel_after_commit_frame_still_commits() {
+    let fx = fixture_with(Duration::ZERO, None, false);
     let child = fx.state.cancel_token.child_token();
     let (tx, mut rx) = unbounded_channel();
     let s = Arc::clone(&fx.state);
@@ -357,7 +361,6 @@ async fn cancel_at_commit_boundary_still_commits() {
             break;
         }
     }
-    drop(fx.held.lock().unwrap().take());
     child.cancel();
     let resp = handle.await.unwrap();
     let v = serde_json::to_value(resp).unwrap();

@@ -82,10 +82,9 @@ not cancelled on disconnect and run to completion as before.
   half-closes its write side (`shutdown(SHUT_WR)`, as in `printf '{...}\n' | nc -U ...`) looks to
   the service exactly like a client that hung up, and its `process_chunk` / `process_document`
   request is cancelled. Python's `socket.close()` after a timeout is the case this exists for;
-  clients that want an answer must not close or half-close first. The same applies to a read error
-  on the connection while the request runs, including a pipelined line that is not valid UTF-8:
-  the service cannot tell it from a hang-up, so the in-flight request is cancelled and no response
-  is written. Send one well-formed request at a time.
+  clients that want an answer must not close or half-close first. A socket read error while the
+  request runs is treated the same way. (A pipelined line that is not valid UTF-8 is not: the
+  in-flight request finishes and is answered, then the connection closes.)
 
 **Choosing a timeout and retrying.** Ingest latency is dominated by the embedder and the LLM, so
 set the client timeout to the slowest chunk you expect (or stream with `_progress_token` and treat
@@ -94,7 +93,10 @@ new one:
 
 - If the timeout fired during embed or extract, the disconnect cancelled the original, so the retry
   extracts the chunk **once**, not twice.
-- If it fired during commit, the original finishes anyway and **may have succeeded**. The retry is
+- If it fired during commit, the original finishes anyway and **may have succeeded**. "During
+  commit" starts when the `commit` frame is sent (the group write lock is held). A request that is
+  still waiting for the lock behind another writer has not committed and is cancelled like one in
+  embed or extract. The retry is
   still safe: an identical resubmission is a no-op (`unchanged_noop`, issue #858) that returns the
   existing episode, and a changed one supersedes it as usual.
 
@@ -2357,13 +2359,18 @@ completely unaffected: pointers only ever exist on edges created through this to
 `knowledge_process_chunk` streams `{"type":"progress","phase":"embed"|"extract"|"commit"}` lines
 before the terminal result, in that order, each only if the phase runs. `embed` and `extract` are
 emitted together as start-of-phase markers (the service runs them concurrently); `commit` is sent
-immediately before the write lock is taken, after which the write cannot be cancelled. A request
+once the group write lock is held, after which the write cannot be cancelled: a request still
+waiting for the lock behind another writer has not sent `commit` and is still cancellable. A request
 that returns early sends no frame for a phase that never ran: an unchanged resubmission
 (`unchanged_noop`) or a validation error sends none, only the terminal response. Without the token
 nothing changes. These names are the single-chunk vocabulary; `knowledge_process_document` keeps
 its own (`chunked` / `extracting` / `committing`). The frames carry no token; correlate by
 connection (see [Connections, concurrency and timeouts](#connections-concurrency-and-timeouts-issue-861)).
 A client that disconnects mid-request cancels it before commit (feature `cancel_on_disconnect`).
+While a request that sent a token is otherwise silent (the LLM call between `extract` and
+`commit`), the service writes `{"type":"progress","phase":"heartbeat"}` about every 10 s, so a
+client with a per-line idle read timeout (as the attached MCP backend has, 30 s by default) keeps
+its connection and the ingest alive. Ignore unknown `phase` values; token-less requests get none.
 
 `knowledge_process_chunk` reports what it could not write, not only how much. Two additive
 result fields exist for that, both introduced in 0.13.2.

@@ -104,10 +104,17 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `chunk_progress`). When a client disconnects while a `process_chunk` or `process_document`
   request is in flight, the service cancels it at the next cancellation point before commit: no
   episode, no WAL record, locks released, and a retry on a new connection extracts once; a commit
-  that has started finishes (feature `cancel_on_disconnect`). **Additive**: no `protocol_version`
-  bump, no change for clients that send no token. One caveat: a client that half-closes its write
-  side after sending one of these two requests is indistinguishable from a hung-up client and has
-  its request cancelled; keep the write side open until the response arrives. The IPC reference
+  that has started finishes (feature `cancel_on_disconnect`). For `process_chunk` a cancel leaves
+  no episode and no WAL record; a cancelled `process_document` keeps the unit episodes it had
+  already committed (the revision itself retires nothing). The `commit` frame is sent once the
+  write lock is held. **Additive**: no `protocol_version` bump and no new request or response
+  fields, but **behaviour changes for every client of these two methods, with or without a
+  token**: a client that half-closes its write side after sending one of them
+  (`shutdown(SHUT_WR)`, `printf ... | nc -U`) is indistinguishable from a hung-up client and has
+  its request cancelled, so keep the write side open until the response arrives. The attached MCP
+  backend now requests progress frames for these methods (a streaming caller also gets a
+  `heartbeat` progress frame every 10 s while silent), so ingests slower than its 30 s idle
+  timeout are not dropped and cancelled. The IPC reference
   gains a "Connections, concurrency and timeouts" section: one request at a time per connection,
   use several connections for parallel ingest or reads alongside ingest, and timeout/retry
   guidance. `deadline_ms`, joining a duplicate in-flight resubmit and pipelining remain deferred.

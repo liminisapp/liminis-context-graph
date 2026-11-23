@@ -1688,7 +1688,6 @@ pub async fn add_episode_with_opts(
     // tokio::sync::RwLockWriteGuard is not 'static so it cannot move into the closure.
     // Cancellation is checked here — once the write guard is acquired the commit runs to
     // completion (FR-003: Phase C must not be torn mid-write).
-    emit_phase(&opts.progress, "commit");
     // `biased;` with the lock arm first: once the lock is obtainable the commit proceeds, so
     // "commit has started" is deterministic and a ready lock beats a ready cancel (issue #861).
     let _write_guard = tokio::select! {
@@ -1699,6 +1698,10 @@ pub async fn add_episode_with_opts(
             return Err(Error::Cancelled);
         }
     };
+    // The `commit` frame is sent only once the write lock is held: it means "the commit has
+    // started and will finish whatever the client does". A request still waiting for the lock
+    // behind another writer has not committed and is still cancellable (issue #861).
+    emit_phase(&opts.progress, "commit");
     // Re-run the D1 guard now that the write lock is held (issue #616). The check at the top ran
     // before extraction, lock-free; a `knowledge_delete_by_group` / `knowledge_clear_all` that
     // completed in between removed this group's stamp and dropped its cached ontology. Without

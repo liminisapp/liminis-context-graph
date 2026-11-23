@@ -30,10 +30,23 @@ pub const COOPERATIVE_CANCEL_METHODS: &[&str] =
 /// the cap bounds memory, and a well-behaved client sends one request at a time.
 const MAX_PENDING_LINES: usize = 8;
 
+/// How often a streaming cooperative request writes a `{"type":"progress","phase":"heartbeat"}`
+/// frame while it is otherwise silent (e.g. the long LLM call between the `extract` and `commit`
+/// frames). Clients that apply a per-line idle read timeout (the attached MCP backend, 30 s by
+/// default) would otherwise drop the connection mid-extraction, which now cancels the ingest.
+/// Only sent when the caller asked for progress; token-less requests never see a frame.
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// How a cooperative request ended.
+#[allow(clippy::large_enum_variant)]
 enum Served {
     /// Ran to completion; write the response (and any frames still queued) to the client.
-    Done(IpcResponse),
+    /// `reader_failed` means a pipelined line was unreadable (not valid UTF-8): the request is
+    /// still answered, then the connection closes, exactly as before #861.
+    Done {
+        resp: IpcResponse,
+        reader_failed: bool,
+    },
     /// The client went away. The request has already been cancelled and awaited; write nothing.
     Disconnected,
 }
@@ -45,6 +58,28 @@ pub async fn handle_connection_with<S, F, Fut>(
     parent: CancellationToken,
     dispatch: F,
     shutdown_notify: std::sync::Arc<Notify>,
+) where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+    F: Fn(IpcRequest, CancellationToken, Option<UnboundedSender<Value>>) -> Fut,
+    Fut: Future<Output = IpcResponse> + Send + 'static,
+{
+    serve_connection(
+        stream,
+        parent,
+        dispatch,
+        shutdown_notify,
+        HEARTBEAT_INTERVAL,
+    )
+    .await;
+}
+
+/// [`handle_connection_with`] with an explicit heartbeat period (tests use a short one).
+async fn serve_connection<S, F, Fut>(
+    stream: S,
+    parent: CancellationToken,
+    dispatch: F,
+    shutdown_notify: std::sync::Arc<Notify>,
+    heartbeat: std::time::Duration,
 ) where
     S: AsyncRead + AsyncWrite + Send + 'static,
     F: Fn(IpcRequest, CancellationToken, Option<UnboundedSender<Value>>) -> Fut,
@@ -83,6 +118,7 @@ pub async fn handle_connection_with<S, F, Fut>(
             .unwrap_or(false);
         let cooperative = COOPERATIVE_CANCEL_METHODS.contains(&req.method.as_str());
 
+        let mut close_after = false;
         let resp = if cooperative {
             let method = req.method.clone();
             let cancel = parent.child_token();
@@ -104,10 +140,17 @@ pub async fn handle_connection_with<S, F, Fut>(
                 &mut lines,
                 &mut pending,
                 &mut writer,
+                heartbeat,
             )
             .await
             {
-                Served::Done(resp) => Some(resp),
+                Served::Done {
+                    resp,
+                    reader_failed,
+                } => {
+                    close_after = reader_failed;
+                    Some(resp)
+                }
                 // Queued pipelined requests never start: the client is gone.
                 Served::Disconnected => return,
             }
@@ -120,6 +163,10 @@ pub async fn handle_connection_with<S, F, Fut>(
         if let Some(resp) = resp {
             let json = serde_json::to_string(&resp).unwrap_or_default();
             let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
+        }
+
+        if close_after {
+            return;
         }
 
         if is_close {
@@ -171,9 +218,11 @@ impl<Fut: Future<Output = IpcResponse>> Future for CatchPanic<Fut> {
 /// awaiting the future to completion: if Phase C has already started it must finish (never a
 /// torn write), and if it hasn't, the next pre-commit cancellation point ends it.
 ///
-/// A disconnect is read EOF, a read error, or a failed progress write. A client that half-closes
+/// A disconnect is read EOF, a socket read error, or a failed progress write (an unreadable,
+/// non-UTF-8 pipelined line is not: the request still completes). A client that half-closes
 /// its write side after sending a request is indistinguishable from one that closed fully, so
 /// clients must keep the write side open until they have the response (see the IPC reference).
+#[allow(clippy::too_many_arguments)]
 async fn serve_cooperative<Fut, R, W>(
     method: &str,
     fut: Fut,
@@ -182,6 +231,7 @@ async fn serve_cooperative<Fut, R, W>(
     lines: &mut tokio::io::Lines<BufReader<R>>,
     pending: &mut VecDeque<String>,
     writer: &mut W,
+    heartbeat: std::time::Duration,
 ) -> Served
 where
     Fut: Future<Output = IpcResponse>,
@@ -191,6 +241,10 @@ where
     tokio::pin!(fut);
     let mut disconnected = false;
     let mut reader_done = false;
+    let mut reader_failed = false;
+    // Keep-alive for streaming callers only (see `HEARTBEAT_INTERVAL`).
+    let mut beat = tokio::time::interval_at(tokio::time::Instant::now() + heartbeat, heartbeat);
+    beat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     let resp = loop {
         tokio::select! {
@@ -210,13 +264,24 @@ where
                 // Every sender dropped: no more frames, the future is about to finish.
                 None => rx = None,
             },
+            _ = beat.tick(), if rx.is_some() => {
+                let frame = "{\"type\":\"progress\",\"phase\":\"heartbeat\"}\n";
+                if writer.write_all(frame.as_bytes()).await.is_err() {
+                    disconnected = true;
+                }
+            }
             // `next_line` is cancel-safe: a line that arrives while the request runs is a
             // pipelined request and is kept for the loop to serve afterwards.
             line = lines.next_line(), if !reader_done && pending.len() < MAX_PENDING_LINES => {
                 match line {
                     Ok(Some(l)) => pending.push_back(l),
-                    // EOF or any read error (including a non-UTF-8 pipelined line, which
-                    // ended the loop before #861 too) counts as a disconnect.
+                    // EOF or a socket error is a disconnect. A non-UTF-8 pipelined line is a
+                    // malformed *request*, not a hang-up: finish the in-flight request, answer
+                    // it, then close (the pre-#861 behaviour for an unreadable line).
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                        reader_done = true;
+                        reader_failed = true;
+                    }
                     Ok(None) | Err(_) => {
                         reader_done = true;
                         disconnected = true;
@@ -238,7 +303,10 @@ where
                     let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
                 }
             }
-            Served::Done(resp)
+            Served::Done {
+                resp,
+                reader_failed,
+            }
         }
         None => {
             eprintln!(
@@ -409,6 +477,82 @@ mod tests {
 
     async fn settle() {
         tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    #[tokio::test]
+    async fn streaming_cooperative_request_sends_heartbeats_while_silent() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let probe = Arc::new(Probe::default());
+        let notify = Arc::new(Notify::new());
+        let h = tokio::spawn(serve_connection(
+            server,
+            CancellationToken::new(),
+            // 600 ms of silent work, no commit stage.
+            fake(Arc::clone(&probe), 600, 0),
+            notify,
+            Duration::from_millis(100),
+        ));
+        client
+            .write_all(line(1, "knowledge_process_chunk", true).as_bytes())
+            .await
+            .unwrap();
+        let out = read_lines(&mut client, 5).await;
+        let phases: Vec<&str> = out.iter().filter_map(|v| v["phase"].as_str()).collect();
+        assert_eq!(phases[0], "extract");
+        assert!(
+            phases.iter().filter(|p| **p == "heartbeat").count() >= 3,
+            "silence must be broken by heartbeats: {phases:?}"
+        );
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+    }
+
+    #[tokio::test]
+    async fn non_utf8_pipelined_line_does_not_cancel_the_inflight_request() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let probe = Arc::new(Probe::default());
+        let (h, _n) = spawn_conn(server, CancellationToken::new(), Arc::clone(&probe), 200, 0);
+        client
+            .write_all(line(1, "knowledge_process_chunk", false).as_bytes())
+            .await
+            .unwrap();
+        while probe.started.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Not valid UTF-8, while the client is still connected and waiting.
+        client.write_all(&[0xff, 0xfe, b'\n']).await.unwrap();
+        let out = read_lines(&mut client, 1).await;
+        assert_eq!(out[0]["result"]["method"], "knowledge_process_chunk");
+        assert_eq!(probe.saw_cancel.load(Ordering::SeqCst), 0, "not cancelled");
+        assert_eq!(probe.finished.load(Ordering::SeqCst), 1);
+        // Then the connection closes, as it did before #861.
+        tokio::time::timeout(Duration::from_secs(5), h)
+            .await
+            .expect("connection closes after answering")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn token_less_cooperative_request_gets_no_heartbeats() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let probe = Arc::new(Probe::default());
+        let notify = Arc::new(Notify::new());
+        let h = tokio::spawn(serve_connection(
+            server,
+            CancellationToken::new(),
+            fake(Arc::clone(&probe), 400, 0),
+            notify,
+            Duration::from_millis(50),
+        ));
+        client
+            .write_all(line(1, "knowledge_process_chunk", false).as_bytes())
+            .await
+            .unwrap();
+        // The first and only line is the terminal response.
+        let out = read_lines(&mut client, 1).await;
+        assert_eq!(out[0]["result"]["method"], "knowledge_process_chunk");
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
     }
 
     #[tokio::test]
