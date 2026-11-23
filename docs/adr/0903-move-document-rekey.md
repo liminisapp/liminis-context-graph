@@ -44,7 +44,7 @@ the old path delete history and leave lint citations naming the old `doc_id`. Th
 occupancy.)
 
 **5. Refusals are decided before the first write.** A destination that already holds live episodes is a
-merge and is refused, as is a destination `doc_id` that has no live episode but still carries `DocRevision` rows or a `DocSupersession` record, or is named as another document's superseding document (a hard delete keeps them; re-keying the source's rows into it would merge two histories — `destination_has_history`), as are an unknown source, a cross-group identity, a chunk-id collision (checked
+merge and is refused, as is a destination `doc_id` that has no live episode but still carries `DocRevision` rows or a `DocSupersession` record, or is named as another document's superseding document, or holds only retired or superseded episodes (a hard delete keeps the revision rows; re-keying the source's rows into it would merge two histories — `destination_has_history`), as are an unknown source, a cross-group identity, a chunk-id collision (checked
 group-wide against the post-batch names), an identical identity and batch conflicts (duplicate source,
 duplicate destination, a destination that is another move's source). The batch is validated against the
 state before the batch, so chains and swaps are refused rather than ordered. Any refusal changes nothing

@@ -368,6 +368,31 @@ pub fn plan_moves(specs: &[MoveSpec], live: &[MoveCandidate]) -> Result<MovePlan
                         spec.to.describe()
                     ),
                 );
+            } else if let Some(d) = spec.to.doc_id.as_deref().filter(|d| {
+                spec.from.doc_id.as_deref() != Some(*d)
+                    && !rows
+                        .iter()
+                        .any(|&ix| live[ix].doc_id.as_deref() == Some(*d))
+            }) {
+                // No live episode holds the destination `doc_id`, but retired or superseded ones
+                // may (e.g. a chunk-ingested document whose chunks were all marked removed, which
+                // leaves no `DocRevision` row): joining them would put two unrelated documents'
+                // histories under one `doc_id`.
+                if live
+                    .iter()
+                    .enumerate()
+                    .any(|(ix, r)| !own.contains(&ix) && !r.live && r.doc_id.as_deref() == Some(d))
+                {
+                    refuse(
+                        &mut refusals,
+                        i,
+                        code::DESTINATION_HAS_HISTORY,
+                        format!(
+                            "doc_id '{d}' holds no live episodes but still has retired or \
+                             superseded episodes; moving into it would merge two histories"
+                        ),
+                    );
+                }
             }
         }
         matched.push(rows);
@@ -567,8 +592,8 @@ pub fn classify_cross_group(
 /// Refuses a move whose destination `doc_id` holds no live episode but still carries document
 /// state outside `Episodic` — `DocRevision` rows (kept after a delete or a retirement) or a
 /// `DocSupersession` record, or is named as another document's superseding document. `apply_plan`
-/// re-keys the source's revision and supersession rows into that `doc_id`, so without this check the destination would hold two unrelated revision
-/// histories and the next `knowledge_process_document` could pick the wrong baseline.
+/// re-keys the source's revision and supersession rows into that `doc_id`, so without this check
+/// the destination would hold two unrelated revision histories and the next `knowledge_process_document` could pick the wrong baseline.
 ///
 /// A failure to *read* that state is a database error (`Err`), not a refusal: only a real history
 /// conflict is reported as `destination_has_history`.
@@ -944,9 +969,18 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(codes(&e), [code::UNKNOWN_SOURCE]);
-        // History at the destination does not occupy it.
+        // History at the destination `doc_id` does not *occupy* it, but it is still another
+        // document's history: the move is refused as `destination_has_history`, never merged.
         let live = vec![row("u1", Some("a"), "a.md", "a::1"), {
             let mut h = row("u2", Some("b"), "b.md", "b::1");
+            h.live = false;
+            h
+        }];
+        let e = plan_moves(&[mv(id(Some("a"), None), id(Some("b"), None))], &live).unwrap_err();
+        assert_eq!(codes(&e), [code::DESTINATION_HAS_HISTORY]);
+        // History under a different `doc_id` (or only at the destination path) is not a conflict.
+        let live = vec![row("u1", Some("a"), "a.md", "a::1"), {
+            let mut h = row("u2", Some("c"), "b.md", "c::1");
             h.live = false;
             h
         }];

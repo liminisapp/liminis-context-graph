@@ -517,6 +517,43 @@ async fn destination_named_as_a_superseding_document_is_refused() {
     );
 }
 
+/// A destination `doc_id` whose only episodes are retired (a chunk-ingested document whose chunks
+/// were all marked removed: no `DocRevision` row, no supersession record) still carries history,
+/// so a move into it is refused rather than merging two documents' histories under one `doc_id`.
+#[tokio::test]
+async fn destination_with_only_retired_episodes_is_refused() {
+    let f = fx();
+    call(
+        "knowledge_process_chunk",
+        json!({"chunk_text": "the old b fact", "chunk_id": "b::0", "source_file": "notes/b.md",
+               "group_id": G, "doc_id": "b", "reference_time": "2026-08-04T00:00:00Z"}),
+        &f.state,
+    )
+    .await;
+    let rm = call(
+        "knowledge_mark_chunk_removed",
+        json!({"chunk_id": "b::0", "group_ids": [G]}),
+        &f.state,
+    )
+    .await;
+    assert_eq!(rm["superseded_count"], 1, "{rm}");
+    {
+        let conn = f.db.connect().unwrap();
+        assert!(conn.doc_revision_rows_for_doc(G, "b").unwrap().is_empty());
+        assert!(conn.doc_supersession_for(G, "b").unwrap().is_none());
+    }
+    ingest(&f.state, "a", "notes/a.md", NOTE).await;
+    let before = identity_snapshot(&f.db, G);
+
+    let r = move_docs(&f.state, vec![mv("a", "notes/a.md", "b", "moved/b.md")]).await;
+    assert!(error_message(&r).contains("destination_has_history"), "{r}");
+    assert_eq!(
+        identity_snapshot(&f.db, G),
+        before,
+        "a refusal changes nothing"
+    );
+}
+
 #[tokio::test]
 async fn prefix_rewrite_renames_chunk_ids_and_descriptions() {
     let f = fx();
