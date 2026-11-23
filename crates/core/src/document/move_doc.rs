@@ -424,16 +424,12 @@ fn recompose_description(
                 .strip_suffix(old_name)
                 .and_then(|s| s.strip_suffix(':'))
                 .filter(|_| !old_name.is_empty());
-            match base {
-                Some(base) => {
-                    let base = match (old_source, new_source) {
-                        (Some(o), Some(n)) if base == o => n,
-                        _ => base,
-                    };
-                    format!("{base}:{new_name}")
-                }
-                None => return None,
-            }
+            let base = base?;
+            let base = match (old_source, new_source) {
+                (Some(o), Some(n)) if base == o => n,
+                _ => base,
+            };
+            format!("{base}:{new_name}")
         }
     };
     (new != sd).then_some(new)
