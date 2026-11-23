@@ -2324,13 +2324,14 @@ impl<'db> Conn<'db> {
         }
         let rows = self.query_params(
             "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids \
-             RETURN ep.uuid, coalesce(ep.origin, ''), ep.doc_id, ep.superseded_at, ep.group_id",
+             RETURN ep.uuid, coalesce(ep.origin, ''), ep.doc_id, ep.superseded_at, ep.group_id, \
+             ep.revision_id, ep.revision_committed_at",
             serde_json::json!({ "uuids": uuids }),
         )?;
         for r in rows {
             out.insert(
                 value_as_string(&r[0]),
-                episode_origin_info_from_cols(&r[1], &r[2], &r[3], &r[4]),
+                episode_origin_info_from_cols(&r[1], &r[2], &r[3], &r[4], &r[5], &r[6]),
             );
         }
         Ok(out)
@@ -2494,7 +2495,7 @@ impl<'db> Conn<'db> {
             "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) WHERE n.uuid IN $uuids \
              RETURN DISTINCT n.uuid, ep.uuid, coalesce(ep.origin, ''), ep.doc_id, \
              ep.superseded_at, ep.group_id, ep.source_description, ep.source_file, \
-             ep.created_at",
+             ep.created_at, ep.revision_id, ep.revision_committed_at",
             serde_json::json!({ "uuids": entity_uuids }),
         )?;
         Ok(rows
@@ -2502,7 +2503,7 @@ impl<'db> Conn<'db> {
             .map(|r| MentionRow {
                 entity_uuid: value_as_string(&r[0]),
                 episode_uuid: value_as_string(&r[1]),
-                info: episode_origin_info_from_cols(&r[2], &r[3], &r[4], &r[5]),
+                info: episode_origin_info_from_cols(&r[2], &r[3], &r[4], &r[5], &r[9], &r[10]),
                 source_description: value_as_string(&r[6]),
                 source_file: value_as_optional_string(&r[7]).filter(|f| !f.is_empty()),
                 created_at_us: value_as_timestamp_micros(&r[8]),
@@ -2520,7 +2521,10 @@ impl<'db> Conn<'db> {
         Ok(self
             .entity_mention_origins(entity_uuids)?
             .into_iter()
-            .filter(|(_, _, i)| i.origin.is_corroborating() && i.is_live(as_of_us))
+            // Write-side guard: deliberately the supersession-only predicate, so a *pending*
+            // primary revision (about to become live at commit) still shields the entity
+            // (issue #883, ADR-0857 addendum).
+            .filter(|(_, _, i)| i.origin.is_corroborating() && i.is_unsuperseded(as_of_us))
             .map(|(e, _, _)| e)
             .collect())
     }
@@ -6404,6 +6408,8 @@ fn episode_origin_info_from_cols(
     doc_id: &lbug::Value,
     superseded_at: &lbug::Value,
     group_id: &lbug::Value,
+    revision_id: &lbug::Value,
+    revision_committed_at: &lbug::Value,
 ) -> crate::origin::EpisodeOriginInfo {
     crate::origin::EpisodeOriginInfo {
         origin: crate::origin::Origin::from_stored(Some(&value_as_string(origin))),
@@ -6413,6 +6419,12 @@ fn episode_origin_info_from_cols(
             other => Some(value_as_timestamp_micros(other)),
         },
         group_id: value_as_string(group_id),
+        // Document mode (issue #785/#883): mirrors `get_episode_supersession`.
+        revision_id_present: value_as_optional_string(revision_id).is_some(),
+        revision_committed_at_us: match revision_committed_at {
+            lbug::Value::Null(_) => None,
+            other => Some(value_as_timestamp_micros(other)),
+        },
     }
 }
 
