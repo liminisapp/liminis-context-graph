@@ -8,7 +8,8 @@
 //!
 //! Each digest is computed from *only* its own input, so that changing one input changes exactly
 //! one entry (SC-002): the extractor identity carries no cassette path, and the effective-env
-//! digest excludes `LCG_REPLAY_LLM` / `LCG_RECORD_LLM` (the `cassette` digest owns those).
+//! digest excludes `LCG_REPLAY_LLM` / `LCG_RECORD_LLM` when `--replay-cassette` / `--record-cassette`
+//! set them (the `cassette` digest owns those); one inherited from the operator's shell is kept.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -225,9 +226,24 @@ fn is_service_var(name: &str) -> bool {
     name.starts_with("LCG_") || name.starts_with("GRAPHITI_")
 }
 
-/// Variables the `cassette` digest owns; excluded here so a changed cassette path changes one entry.
-fn is_cassette_var(name: &str) -> bool {
-    name == "LCG_REPLAY_LLM" || name == "LCG_RECORD_LLM"
+/// Drops from a child's effective environment the cassette variables that the `cassette` digest
+/// owns, so changing only the cassette file changes exactly one entry (SC-002). A variable is owned
+/// only when the matching flag set it (`replay` = `--replay-cassette`, `record` =
+/// `--record-cassette`). One merely inherited from the operator's shell is not covered by the
+/// `cassette` digest (that hashes the flag's file), so it stays in the environment digest rather
+/// than letting two runs on different shell-selected cassettes compare as identical.
+pub fn without_flag_owned_cassette_vars(
+    mut env: BTreeMap<String, String>,
+    replay: bool,
+    record: bool,
+) -> BTreeMap<String, String> {
+    if replay {
+        env.remove("LCG_REPLAY_LLM");
+    }
+    if record {
+        env.remove("LCG_RECORD_LLM");
+    }
+    env
 }
 
 /// Effective-environment digest over the `LCG_*` and legacy `GRAPHITI_*` variables in each child's environment (as
@@ -244,7 +260,7 @@ pub fn service_env_digest(envs: &[BTreeMap<String, String>]) -> (String, Vec<Str
     for env in envs {
         let lines: Vec<String> = env
             .iter()
-            .filter(|(k, _)| is_service_var(k) && !is_cassette_var(k))
+            .filter(|(k, _)| is_service_var(k))
             .map(|(k, v)| {
                 names.insert(k.clone());
                 if is_secret_name(k) {
@@ -382,6 +398,10 @@ mod tests {
             ("LCG_RERANK_TOP_N", "40"),
             ("LCG_REPLAY_LLM", "/b.json"),
         ])];
+        let own = |e: &[BTreeMap<String, String>; 1]| {
+            [without_flag_owned_cassette_vars(e[0].clone(), true, false)]
+        };
+        let (e, e2) = (own(&e), own(&e2));
         let a = build(Some(&c1), &e, &[emb(Some("m"))]);
         let b = build(Some(&c2), &e2, &[emb(Some("m"))]);
         let diff: Vec<&str> = KEYS.into_iter().filter(|k| a.get(k) != b.get(k)).collect();
@@ -390,6 +410,31 @@ mod tests {
         // The same contents at a different path digest identically.
         let c3 = fx.file("c.json", "one");
         assert_eq!(build(Some(&c3), &e, &[emb(Some("m"))]).cassette, a.cassette);
+    }
+
+    #[test]
+    fn a_cassette_variable_from_the_shell_changes_the_service_env_digest() {
+        // No cassette flag: `cassette` is `none` for both, so the inherited variable is the only
+        // thing that tells the two runs apart.
+        let own = |v: &str| {
+            [without_flag_owned_cassette_vars(
+                env(&[("LCG_REPLAY_LLM", v)]),
+                false,
+                false,
+            )]
+        };
+        let a = build(None, &own("/a.json"), &[emb(Some("m"))]);
+        let b = build(None, &own("/b.json"), &[emb(Some("m"))]);
+        assert_eq!(a.cassette, "none");
+        assert_ne!(a.service_env, b.service_env);
+        assert!(a.service_env_names.contains(&"LCG_REPLAY_LLM".to_string()));
+        // `--record-cassette` owns only `LCG_RECORD_LLM`; an inherited replay variable still counts.
+        let kept = without_flag_owned_cassette_vars(
+            env(&[("LCG_REPLAY_LLM", "/a.json"), ("LCG_RECORD_LLM", "/r.json")]),
+            false,
+            true,
+        );
+        assert!(kept.contains_key("LCG_REPLAY_LLM") && !kept.contains_key("LCG_RECORD_LLM"));
     }
 
     #[test]

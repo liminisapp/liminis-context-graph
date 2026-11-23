@@ -21,7 +21,9 @@ environment not at all. `graph-integrity --compare` already refuses incompatible
   unchanged.
 - **Each digest depends on its own input only**, so changing one input changes exactly one entry
   (the extractor identity carries no cassette path; the environment digest excludes
-  `LCG_REPLAY_LLM`/`LCG_RECORD_LLM`).
+  `LCG_REPLAY_LLM`/`LCG_RECORD_LLM` only when `--replay-cassette`/`--record-cassette` set them; one
+  inherited from the shell is not covered by the `cassette` digest, so it stays in the environment
+  digest).
 - **The environment digest is computed from the child's effective environment**, through the same
   function (`lcg::service_env_overrides`) `spawn_service` applies, so it cannot drift from what runs.
   Credential-bearing names (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, and names containing
