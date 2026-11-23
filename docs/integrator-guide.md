@@ -210,7 +210,7 @@ A minimal ingest, update and delete:
 call("knowledge_process_document", {
     "group_id": "my-app", "doc_id": "page-42", "title": "Release notes",
     "source_path": "https://example.com/notes", "content": page_text,
-    "attributes": '{"crawl": "2026-11-23"}',
+    "attributes": {"crawl": "2026-11-23"},   # an object, not a JSON string
 })
 call("knowledge_process_document", {   # later: the page changed, send it all again
     "group_id": "my-app", "doc_id": "page-42", "title": "Release notes",

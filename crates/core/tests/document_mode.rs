@@ -546,9 +546,18 @@ async fn one_and_a_half_mb_document_is_accepted_by_default() {
     let r = ingest(&f.state, "web-page", &doc).await;
     assert!(r.get("error").is_none(), "{r}");
     assert!(f.ex.call_count() > 100, "calls: {}", f.ex.call_count());
-    // The last paragraph (the document's tail) was extracted: nothing was truncated.
+    // The document's final paragraph (identified by its unique index) reached the extractor:
+    // nothing was truncated.
+    let tail_start = doc.rfind("Paragraph ").expect("doc has paragraphs");
+    let tail_marker: String = doc[tail_start..]
+        .split_inclusive(' ')
+        .take(3) // "Paragraph", "<index>", "describes"
+        .collect();
     let last = f.ex.calls().last().unwrap().body.clone();
-    assert!(last.contains("Paragraph"), "{last}");
+    assert!(
+        last.contains(&tail_marker),
+        "tail `{tail_marker}` missing from: {last}"
+    );
 }
 
 /// #862: `LCG_DOCUMENT_MAX_BYTES=4MiB` accepts the 3 MB document the default refuses. The
