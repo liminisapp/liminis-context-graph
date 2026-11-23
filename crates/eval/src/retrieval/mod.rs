@@ -707,7 +707,7 @@ async fn run(a: RetrievalArgs) -> Result<i32, String> {
                     .map(|p| format!(" with embedding profile '{p}'"))
                     .unwrap_or_default()
             );
-            let guard = lcg::spawn_service(&opts).await?;
+            let mut guard = lcg::spawn_service(&opts).await?;
             meta.lcg_build = guard.version.clone();
             // #881: report what the service loaded, not what the harness staged. With
             // `--ontology` the two are equal (verified in `spawn_service`); the report and the
@@ -760,10 +760,18 @@ async fn run(a: RetrievalArgs) -> Result<i32, String> {
             // #900: at N > 1 ingest gets its own pool of N connections (the service handles one
             // request per connection); queries below keep the single `transport`.
             let ingest_transport = guard.ingest_transport(ingest_concurrency_used);
-            let map = Arc::new(
-                lcg::ingest_with(ingest_transport.as_ref(), &fx, ingest_concurrency_used).await?,
-            );
+            let ingested =
+                lcg::ingest_with(ingest_transport.as_ref(), &fx, ingest_concurrency_used).await;
             drop(ingest_transport);
+            let map = match ingested {
+                Ok(m) => Arc::new(m),
+                Err(e) => {
+                    // #900: chunk calls may be abandoned in flight; let the service finish any
+                    // commit already started instead of SIGKILLing it mid-write on drop.
+                    guard.stop_gracefully().await;
+                    return Err(e);
+                }
+            };
             // FR-003: the cassette this ingest recorded carries the ontology it was recorded under
             // (also "none"), so a later replay can be checked either way.
             if let Some(c) = &a.record_cassette {
@@ -1019,6 +1027,8 @@ async fn run(a: RetrievalArgs) -> Result<i32, String> {
             extractor: meta.extractor.clone(),
             cassette: a.replay_cassette.clone().or(a.record_cassette.clone()),
             lcg_build: meta.lcg_build.clone(),
+            // #900: omitted at N = 1 so a sequential run's manifest is unchanged.
+            ingest_concurrency: (ingest_concurrency_used > 1).then_some(ingest_concurrency_used),
         };
         match guard.shutdown_and_keep(dest).await {
             Ok(()) => {

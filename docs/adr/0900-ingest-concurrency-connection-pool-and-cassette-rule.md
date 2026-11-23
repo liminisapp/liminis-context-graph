@@ -30,14 +30,28 @@ consolidation) run without a lock, and only Phase C commits under `write_lock`.
   .buffered(n)` keeps up to `n` calls in flight but yields results in input order, so `episode_note`,
   the counters and *which error is reported* do not depend on completion order. With several
   failures the earliest chunk in manifest order among those completed is reported. The first `Err`
-  drops the stream: no new call starts and in-flight ones are cancelled. Supersessions,
+  drops the stream: no new call starts and the client abandons the in-flight ones. The service
+  cancels an abandoned chunk that is not yet committing (cancel-on-disconnect, #861) and finishes
+  any commit already started, so on the error path `retrieval` and `retrieval-score-probe` stop the
+  service with `knowledge_close` and wait for it to exit (`ServiceGuard::stop_gracefully`, bounded
+  by `SHUTDOWN_GRACE`) instead of letting `kill_on_drop` SIGKILL it mid-commit, which would leave a
+  kept workspace with a torn write. Supersessions,
   `knowledge_build_indices` and the entity-link pass run after the stream is drained. `ingest(t, fx)`
   is `ingest_with(t, fx, 1)`, so N = 1 is byte-identical and no caller changed.
+- **The per-call timeout scales with N.** A call's 900 s clock also counts the time it queues
+  inside the service (the sidecar pools of `UDS_POOL_SIZE = 4`, ADR-0039/0042, and the Phase C write
+  lock), so a run that finishes at N = 1 could fail at N = 12 on queueing alone. A pool of `n`
+  connections uses `RPC_TIMEOUT * ceil(n / 4)` (`pool_call_timeout`); one connection keeps the plain
+  `RPC_TIMEOUT`.
 - **The flag is `--ingest-concurrency N`** (integer ≥ 1, default 1; 0, negative and non-numeric are
   usage errors) on `retrieval` and on `retrieval-score-probe`, the other caller of `ingest`. It is
   recorded as `ingest_concurrency` in `report.json` `meta` and in the `## Reproduction` block. It is
   **not** added to the `inputs` digest block (ADR-0872), so N = 1 digests and baselines are
-  unchanged.
+  unchanged. A kept workspace (`--keep-workspace`) records it as `ingest_concurrency` in its
+  `lcg-eval-workspace.json` manifest, only when above 1 (a sequential manifest is byte-identical),
+  and `graph-qa` prints a note for such a workspace, so an N > 1 graph is not read as an extraction
+  or dedup regression. `retrieval-score-probe` warns when it replays an `order_dependent` cassette,
+  as `retrieval` does.
 
 ### The cassette rule
 

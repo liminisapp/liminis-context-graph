@@ -548,7 +548,12 @@ manifest order, a failed chunk still fails the run with its note id and chunk in
 one in manifest order if several fail), and supersessions, the index build and the entity-link pass
 run only after every chunk has finished. At N = 1 nothing changes: same call order, same outputs,
 same digests. The value used is in `report.md` (Reproduction) and in `report.json`
-`meta.ingest_concurrency`; it is not part of the `inputs` digests.
+`meta.ingest_concurrency`; it is not part of the `inputs` digests. A pool's per-call timeout is
+900 s times `ceil(N / 4)`, because a call's clock also counts time queued inside the service. If a
+chunk fails, calls still in flight are abandoned: the service cancels those not yet committing and
+finishes any commit already started, and `lcg-eval` stops it with `knowledge_close` before exiting.
+With `--keep-workspace`, the manifest records `ingest_concurrency` when it was above 1 (and
+`graph-qa` notes it), so a workspace built concurrently is not compared as like for like.
 
 Caveats at N > 1:
 

@@ -51,6 +51,22 @@ pub struct UdsClient {
 /// stalling it forever.
 pub const RPC_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// How many calls the service's own sidecar connection pools (`--extractor-uds`,
+/// `--embedder-uds`) serve at once (`UDS_POOL_SIZE`, ADR-0039/0042). Beyond this, an ingest call
+/// queues inside the service.
+pub const SERVICE_SIDECAR_POOL: usize = 4;
+
+/// The per-call timeout for a pool of `size` connections (#900). A call's clock also counts the
+/// time it queues inside the service (sidecar pools, the Phase C write lock), so with `size`
+/// calls in flight over [`SERVICE_SIDECAR_POOL`] slots a call can legitimately wait behind
+/// `ceil(size / SERVICE_SIDECAR_POOL) - 1` others. Scales [`RPC_TIMEOUT`] by that factor so a run
+/// that finishes at N = 1 cannot fail only because it was run at N = 12. One connection keeps the
+/// plain [`RPC_TIMEOUT`].
+pub fn pool_call_timeout(size: usize) -> Duration {
+    let rounds = size.max(1).div_ceil(SERVICE_SIDECAR_POOL).max(1) as u32;
+    RPC_TIMEOUT * rounds
+}
+
 impl UdsClient {
     #[cfg(not(unix))]
     pub async fn connect(path: &Path) -> Result<Self, String> {
@@ -153,13 +169,18 @@ impl UdsPool {
             path: path.to_path_buf(),
             permits: tokio::sync::Semaphore::new(size.max(1)),
             idle: std::sync::Mutex::new(Vec::new()),
-            timeout: RPC_TIMEOUT,
+            timeout: pool_call_timeout(size),
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    /// The per-call timeout each pooled call runs under.
+    pub fn call_timeout(&self) -> Duration {
+        self.timeout
     }
 
     /// Connections currently parked for reuse.
@@ -350,6 +371,30 @@ impl ServiceGuard {
         }
         let sock = self._workspace.path().join(".lcg").join("service.sock");
         Arc::new(UdsPool::new(&sock, concurrency))
+    }
+
+    /// Asks the service to shut down (`knowledge_close`) and waits up to [`SHUTDOWN_GRACE`] for it
+    /// to exit, so lbug and the WAL are flushed and a commit in progress finishes instead of being
+    /// torn by `kill_on_drop`'s SIGKILL. For the error path (#900): after an ingest fails with
+    /// chunk calls abandoned in flight, call this before dropping the guard. A service that does
+    /// not exit in time is killed with a warning. Best effort: never fails.
+    pub async fn stop_gracefully(&mut self) {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(30),
+            self.client.call("knowledge_close", json!({})),
+        )
+        .await;
+        match tokio::time::timeout(SHUTDOWN_GRACE, self._child.wait()).await {
+            Ok(Ok(_)) => {}
+            _ => {
+                eprintln!(
+                    "lcg-eval: WARNING: the service did not exit within {}s of knowledge_close; \
+                     killing it",
+                    SHUTDOWN_GRACE.as_secs()
+                );
+                let _ = self._child.kill().await;
+            }
+        }
     }
 
     /// Shuts the service down gracefully (`knowledge_close`, then waits for it to exit so lbug and
@@ -859,7 +904,10 @@ pub async fn ingest_with(
             })
             .buffered(concurrency.max(1));
         // Returning early on the first `Err` drops `results`: no new chunk call starts and the
-        // in-flight ones are cancelled.
+        // client abandons the in-flight ones (their connections are closed). The service cancels
+        // an abandoned chunk that is not yet committing (cancel-on-disconnect, #861) and finishes
+        // any commit already started; callers on the error path should stop the service
+        // gracefully ([`ServiceGuard::stop_gracefully`]) rather than kill it mid-commit.
         while let Some((note_id, i, r)) = results.next().await {
             let r = r.map_err(|e| format!("ingest of note '{note_id}' chunk {i}: {e}"))?;
             map.rpc_calls += 1;
@@ -2631,6 +2679,29 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn pool_call_timeout_scales_with_concurrency_over_the_sidecar_pool() {
+        // One connection, and up to the sidecar pool size, keep the plain timeout.
+        assert_eq!(pool_call_timeout(1), RPC_TIMEOUT);
+        assert_eq!(pool_call_timeout(SERVICE_SIDECAR_POOL), RPC_TIMEOUT);
+        // 12 calls over 4 slots: a call can queue behind two rounds, so three times the budget.
+        assert_eq!(pool_call_timeout(12), RPC_TIMEOUT * 3);
+        assert_eq!(pool_call_timeout(5), RPC_TIMEOUT * 2);
+        // Never below the plain timeout, and never decreasing in N.
+        assert_eq!(pool_call_timeout(0), RPC_TIMEOUT);
+        let mut prev = Duration::ZERO;
+        for n in 1..=64 {
+            let t = pool_call_timeout(n);
+            assert!(t >= prev && t >= RPC_TIMEOUT);
+            prev = t;
+        }
+        // The pool applies it by default; an explicit override still wins.
+        let p = UdsPool::new(Path::new("/nonexistent.sock"), 12);
+        assert_eq!(p.call_timeout(), RPC_TIMEOUT * 3);
+        let p = p.with_timeout(Duration::from_secs(5));
+        assert_eq!(p.call_timeout(), Duration::from_secs(5));
+    }
+
     #[tokio::test]
     async fn pool_retires_a_connection_after_a_failed_or_cancelled_call() {
         let srv = echo_server();

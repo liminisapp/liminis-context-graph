@@ -130,7 +130,10 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   warns and marks the cassette sidecar `order_dependent`, because its `consolidate_summary` /
   `judge_duplicates` keys depend on commit order (measured: 3 of 3 `consolidate_summary` misses on a
   four-chunk shared-entity corpus replayed sequentially). Live N > 1 graphs can differ from run to
-  run (ADR-0029).
+  run (ADR-0029). A pool's per-call timeout scales with N (`900 s * ceil(N / 4)`); after a failed
+  chunk the service is stopped with `knowledge_close` rather than killed mid-commit;
+  `retrieval-score-probe` warns on an order-dependent cassette; a kept workspace's manifest records
+  the concurrency when above 1.
 
 - **`lcg-eval` verifies the ontology the service loaded, and reports that (#881, ADR-0881).**
   `knowledge_get_ontology` gains an additive `ontology_hash` (the semantic `content_hash` of the

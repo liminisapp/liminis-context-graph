@@ -675,7 +675,17 @@ async fn run(a: ProbeArgs) -> Result<(), String> {
         queries.len(),
         a.modes.len()
     );
-    let guard = lcg::spawn_service(&opts).await?;
+    // #900: a cassette recorded at ingest concurrency > 1 is order-dependent; say so before the
+    // service starts (replay itself always runs at concurrency 1).
+    if let Some(c) = &opts.replay_cassette {
+        // An unreadable sidecar is reported, not fatal: the probe never read it before.
+        match super::workspace::order_dependent_cassette_warning(Path::new(c)) {
+            Ok(Some(w)) => eprintln!("retrieval-score-probe: WARNING {w}"),
+            Ok(None) => {}
+            Err(e) => eprintln!("retrieval-score-probe: WARNING {e}"),
+        }
+    }
+    let mut guard = lcg::spawn_service(&opts).await?;
     let t: Arc<dyn RpcTransport> = guard.client.clone();
     eprintln!("retrieval-score-probe: ingesting {} notes", fx.notes.len());
     let (concurrency, note) =
@@ -684,8 +694,13 @@ async fn run(a: ProbeArgs) -> Result<(), String> {
         eprintln!("retrieval-score-probe: WARNING {note}");
     }
     let ingest_t = guard.ingest_transport(concurrency);
-    lcg::ingest_with(ingest_t.as_ref(), &fx, concurrency).await?;
+    let ingested = lcg::ingest_with(ingest_t.as_ref(), &fx, concurrency).await;
     drop(ingest_t);
+    if let Err(e) = ingested {
+        // #900: let the service finish any commit already started rather than SIGKILL it.
+        guard.stop_gracefully().await;
+        return Err(e);
+    }
 
     let mut obs = Vec::new();
     for q in &queries {
