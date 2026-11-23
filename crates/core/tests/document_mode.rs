@@ -493,7 +493,7 @@ fn big_doc(bytes: usize) -> String {
     let mut out = String::with_capacity(bytes + 1024);
     let mut i = 0usize;
     while out.len() < bytes {
-        if i % 8 == 0 {
+        if i.is_multiple_of(8) {
             out.push_str(&format!("## Section {}\n\n", i / 8));
         }
         out.push_str(&format!(
