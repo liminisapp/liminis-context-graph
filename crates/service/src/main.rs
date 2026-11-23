@@ -50,7 +50,7 @@ use tokio_util::sync::CancellationToken;
 /// or a Windows named pipe (`transport`, #581). The loop itself lives in [`connection`].
 async fn handle_connection<S>(stream: S, state: Arc<AppState>, shutdown_notify: Arc<Notify>)
 where
-    S: AsyncRead + AsyncWrite + Send + 'static,
+    S: AsyncRead + AsyncWrite + connection::PeerProbe + Send + 'static,
 {
     let parent = state.cancel_token.clone();
     connection::handle_connection_with(

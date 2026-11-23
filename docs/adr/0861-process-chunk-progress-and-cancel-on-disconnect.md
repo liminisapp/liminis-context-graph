@@ -49,19 +49,27 @@ The cancellation points already existed in `add_episode_with_opts` (the last one
   disconnect it cancels the token, **awaits the future to completion** (never drops it), discards
   the response and returns, so queued requests never start. All other methods, including the
   other streaming ones, keep the previous path, `abort()` included.
-- **Disconnect rule: read EOF, a socket read error or a failed progress write.** (A pipelined line
-  that is not valid UTF-8 is a malformed request, not a hang-up: the in-flight request finishes and
-  is answered, then the connection closes, as before #861.) A plain read cannot tell
-  `close()` from `shutdown(SHUT_WR)` on a generic stream, and a client's `close()` after a timeout
-  is exactly a clean EOF, so the feature cannot work otherwise; `POLLRDHUP`-style tricks are not
-  portable to macOS or Windows named pipes. This deliberately departs from the spec's assumption
-  that a half-close is not a disconnect. Consequence: a client that half-closes after sending a
-  `process_chunk`/`process_document` request has it cancelled, e.g. `printf ... | nc -U`. The IPC
-  reference says to keep the write side open until the response arrives. In-repo clients and tests
-  never half-close (searched); the Liminis app's Python client is outside this repository and was
-  not checked here, so that remains for a human to confirm.
+- **Disconnect rule: a socket read error, a failed or stalled progress write, or read EOF with
+  the peer fully closed.** (A pipelined line that is not valid UTF-8 is a malformed request, not a
+  hang-up: the in-flight request finishes and is answered, then the connection closes, as before
+  #861.) Read EOF alone cannot tell `close()` from `shutdown(SHUT_WR)`, and treating it as a
+  disconnect would silently cancel requests from `socat`, `nc -N` and any client that half-closes
+  after sending, which completed before #861 (changed after review). So after EOF the loop asks the
+  stream whether the peer can still receive (`PeerProbe`): on a Unix socket a zero-timeout
+  `poll(POLLOUT)` that reports `POLLHUP` once the peer has closed fully (Linux sets it when both
+  directions are shut down; macOS when the socket can neither send nor receive), and nothing but
+  `POLLOUT` after a bare `SHUT_WR`. No byte is written and no input is consumed. If the peer is
+  still reachable the request keeps running and is answered, and the loop re-checks every 100 ms so
+  a peer that closes fully later is cancelled then (a streaming request's failed frame write also
+  covers it). Windows named pipes have no half-close, so EOF there is a disconnect. `POLLHUP`
+  reporting is platform-specific, so the half-close and full-close tests drive a real
+  `UnixStream` pair and the binary-level `chunk_disconnect` test half-closes a real connection;
+  they run on the macOS and Linux CI jobs (the rule was verified locally on macOS only). If a
+  platform ever cannot tell the cases apart, the fallback is to cancel a streaming request only
+  when its next heartbeat or frame write fails and to keep EOF as a disconnect for token-less ones.
 - The connection loop moved to `crates/service/src/connection.rs`, generic over the stream and a
-  dispatch closure, so it is unit-tested with `tokio::io::duplex` and a fake dispatcher.
+  dispatch closure, so it is unit-tested with `tokio::io::duplex` (where EOF always means gone) and
+  a fake dispatcher, and with real Unix sockets for the half-close cases.
 - Features `chunk_progress` and `cancel_on_disconnect` are added to the
   [ADR-0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md) registry. No
   `protocol_version` bump: the change is additive.

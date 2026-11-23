@@ -218,3 +218,52 @@ fn progress_token_streams_phases_in_order_and_plain_request_is_unchanged() {
     assert_eq!(v["id"], 6);
     assert_eq!(v.pointer("/result/success"), Some(&json!(true)), "{v}");
 }
+
+/// A client that half-closes its write side after sending (`socat`, `nc -N`,
+/// `shutdown(SHUT_WR)`) is still waiting for the response: the request must run to completion
+/// and be answered, not be mistaken for a hung-up client. Runs on macOS and Linux CI, where
+/// hang-up reporting differs.
+#[test]
+fn half_closed_client_still_gets_its_response_and_the_episode_commits() {
+    let (extractor_port, cfg) = spawn_stub_extractor();
+    {
+        let mut c = cfg.lock().unwrap();
+        c.delay_ms = EXTRACT_DELAY_MS;
+        c.extraction.insert(
+            "HALF_MARKER".to_string(),
+            ExtractionFixture {
+                entities: vec![("Carol".into(), "Person".into(), "A person".into())],
+                edges: vec![],
+            },
+        );
+    }
+    let dir = TempDir::new().unwrap();
+    let socket = dir.path().join("service.sock");
+    let mut cmd = Command::new(binary_path());
+    cmd.env("LCG_DB_PATH", dir.path().join("test.db"))
+        .env("LCG_SOCKET_PATH", &socket)
+        .env("LCG_WAL_DIR", dir.path().join("wal"))
+        .env("LCG_SHUTDOWN_TIMEOUT_MS", "2000")
+        .args([
+            "--embedder-http",
+            &format!("http://127.0.0.1:{}/v1/embeddings", spawn_stub_embedder()),
+        ])
+        .args([
+            "--extractor-http",
+            &format!("http://127.0.0.1:{extractor_port}/v1/chat/completions"),
+        ]);
+    let _child = ChildGuard::spawn(cmd);
+    wait_healthy(&socket);
+
+    let mut c = Client::open(&socket).unwrap();
+    c.send(
+        2,
+        "knowledge_process_chunk",
+        chunk_params("HALF_MARKER text"),
+    );
+    c.writer.shutdown(std::net::Shutdown::Write).unwrap();
+    let v = c.read();
+    assert_eq!(v["id"], 2);
+    assert_eq!(v.pointer("/result/success"), Some(&json!(true)), "{v}");
+    assert_eq!(episode_count(&socket), 1, "half-closed request commits");
+}

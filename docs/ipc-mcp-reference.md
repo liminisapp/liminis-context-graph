@@ -78,13 +78,16 @@ not cancelled on disconnect and run to completion as before.
 - `knowledge_process_document` commits per extraction unit's episode as it goes; units that were
   already written stay written, and the revision itself is only committed in its final step, so a
   cancelled document ingest retires nothing. Resubmit the document to finish it.
-- **Keep the write side open until you have the response.** A client that sends a request and then
-  half-closes its write side (`shutdown(SHUT_WR)`, as in `printf '{...}\n' | nc -U ...`) looks to
-  the service exactly like a client that hung up, and its `process_chunk` / `process_document`
-  request is cancelled. Python's `socket.close()` after a timeout is the case this exists for;
-  clients that want an answer must not close or half-close first. A socket read error while the
-  request runs is treated the same way. (A pipelined line that is not valid UTF-8 is not: the
-  in-flight request finishes and is answered, then the connection closes.)
+- **A half-close is supported.** A client that sends its request and then half-closes its write
+  side (`shutdown(SHUT_WR)`, `socat`, `nc -N`, `printf '{...}\n' | nc -U ...`) can still receive,
+  so its `process_chunk` / `process_document` request runs to completion and is answered, and
+  the connection then closes. The service cancels only when the peer has *fully* closed (it can
+  no longer receive: Python's `socket.close()` after a timeout is the case this exists for), and
+  it keeps checking while the request runs, so a client that half-closes and later closes fully
+  is cancelled then. On a Windows named pipe there is no half-close: EOF means the client closed.
+  A socket read error while the request runs is treated as a disconnect. (A pipelined line that
+  is not valid UTF-8 is not: the in-flight request finishes and is answered, then the connection
+  closes.)
 - **Keep reading while a request runs.** Progress and heartbeat frames are written while the
   request executes, and a frame that cannot be written within 5 s (a client that has stopped
   reading and let its socket buffer fill) is treated as a disconnect, so the request is cancelled

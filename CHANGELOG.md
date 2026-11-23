@@ -108,10 +108,11 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   no episode and no WAL record; a cancelled `process_document` keeps the unit episodes it had
   already committed (the revision itself retires nothing). The `commit` frame is sent once the
   write lock is held. **Additive**: no `protocol_version` bump and no new request or response
-  fields, but **behaviour changes for every client of these two methods, with or without a
-  token**: a client that half-closes its write side after sending one of them
-  (`shutdown(SHUT_WR)`, `printf ... | nc -U`) is indistinguishable from a hung-up client and has
-  its request cancelled, so keep the write side open until the response arrives. The attached MCP
+  fields. Behaviour changes for every client of these two methods, with or without a token, in one
+  way only: a client that *fully* closes its connection mid-request now has the request cancelled
+  before commit. A client that merely half-closes its write side after sending (`socat`,
+  `nc -N`, `shutdown(SHUT_WR)`, `printf ... | nc -U`) is not affected: its request still runs and
+  is answered. The attached MCP
   backend now requests progress frames for these methods (a streaming `process_chunk` or
   `process_document` caller also gets a `heartbeat` progress frame every 10 s while silent; a
   new `phase` value for existing `process_document` streaming clients), so ingests slower than its 30 s idle
