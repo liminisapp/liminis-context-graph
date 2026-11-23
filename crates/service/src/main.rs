@@ -1514,6 +1514,23 @@ async fn async_main(
         }
     }
 
+    // Issue #862 / ADR-0862: resolve, validate, log and install the `knowledge_process_document`
+    // size cap (`LCG_DOCUMENT_MAX_BYTES`) once, before any database open or the socket bind.
+    // Strict like `LCG_SEARCH_MIN_SCORE`: an invalid value (including `0`) is fatal and names
+    // itself instead of silently falling back to the default.
+    match lcg_core::document_config::DocumentConfig::from_env() {
+        Ok(cfg) => {
+            lcg_core::document_config::install(cfg.max_bytes);
+            eprintln!("liminis-context-graph: {}", cfg.describe());
+        }
+        Err(e) => {
+            eprintln!("liminis-context-graph: FATAL {e}");
+            drop(telemetry_sink);
+            sink_drain_handle.await.ok();
+            return Err(e.to_string().into());
+        }
+    }
+
     // Issue #808 / ADR-0808: validate the replay embedding retry settings
     // (LCG_REPLAY_EMBED_RETRIES / LCG_REPLAY_EMBED_BACKOFF_MS / LCG_REPLAY_EMBED_BACKOFF_MAX_MS)
     // once at startup, same strict stance as the tuning knobs above: a bad value is fatal and
