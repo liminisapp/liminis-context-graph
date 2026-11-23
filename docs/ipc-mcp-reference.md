@@ -230,8 +230,8 @@ during a rebuild and under any `--writable-groups` policy.
 
 ```json
 {"server_version": "0.19.1", "protocol_version": 1,
- "features": ["cancel_on_disconnect", "chunk_progress", "chunk_supersede", "entity_provenance", "episode_source_fields",
-              "exact_source_match", "hybrid_passage_search", "implicit_default_group_warning",
+ "features": ["cancel_on_disconnect", "chunk_progress", "chunk_supersede", "document_max_bytes_env", "entity_provenance",
+              "episode_source_fields", "exact_source_match", "hybrid_passage_search", "implicit_default_group_warning",
               "lint", "origin", "passage_legs", "process_document", "ready_for_reads",
               "retire_document", "search_min_score_env", "status_episode_breakdown", "test_providers",
               "unchanged_noop", "walk", "walk_provenance", "writable_groups", "zero_vector_record"],
@@ -261,6 +261,7 @@ by #885 name capabilities that shipped in 0.19.2 without one.
 | `cancel_on_disconnect` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | A client disconnect cancels an in-flight `knowledge_process_chunk` or `knowledge_process_document` before commit; a commit that has started finishes. |
 | `chunk_progress` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | `knowledge_process_chunk` streams `embed`, `extract` and `commit` progress frames when given a `_progress_token`. |
 | `chunk_supersede` | closest known origin: #785 ([ADR-0292](adr/0292-chunk-ingest-never-supersedes-unattributed-episodes.md)); seeded by #854 | Chunk ingest can supersede earlier episodes of the same document. |
+| `document_max_bytes_env` | #862 ([ADR-0862](adr/0862-document-max-bytes-strict-2mib-default.md)) | `knowledge_process_document` accepts documents up to a 2 MiB default that the operator can change with `LCG_DOCUMENT_MAX_BYTES`, validated strictly at startup. The configured value is not exposed. |
 | `entity_provenance` | #857 ([ADR-0857](adr/0857-find-entities-episode-provenance.md)) | `knowledge_find_entities` can return episode provenance and filter by `uuids`. |
 | `episode_source_fields` | #853 ([ADR-0853](adr/0853-episode-source-identity-and-exact-source-matching.md)) | Episodes carry stored `source_file` and `chunk_id`. Independent of `exact_source_match`. |
 | `exact_source_match` | #853 ([ADR-0853](adr/0853-episode-source-identity-and-exact-source-matching.md)) | `knowledge_delete_by_source` matches the source exactly, with the safe legacy rule for episodes that predate stored source fields. |
@@ -1352,8 +1353,12 @@ unchanged section is not re-extracted, but each commit re-stamps its episodes wi
 superseded episode keeps the span of the last revision it was live in. Episodes from every other path carry none of these, so chunk-mode reads are unchanged.
 Its `write_path` is `document`, so a chunk-mode revise of the same name never touches it.
 
-**Limits.** A document over `LCG_DOCUMENT_MAX_BYTES` (default 512 KiB) is refused with
-`document_too_large` before any work. An empty, whitespace-only or headings-only document is refused
+**Limits.** A document over the size cap is refused with `document_too_large` before any work,
+and is never truncated: the cap is `LCG_DOCUMENT_MAX_BYTES` in UTF-8 **bytes** (default **2 MiB**,
+at most 256 MiB, a byte count or a `KiB`/`MiB` suffix such as `4MiB`), validated once at startup
+(an invalid value fails startup; see [Configuration](configuration.md) and
+[ADR-0862](adr/0862-document-max-bytes-strict-2mib-default.md)). The message names the cap and the
+variable. A document exactly at the cap is accepted. An empty, whitespace-only or headings-only document is refused
 with `empty_document`. To retire a whole document use `knowledge_retire_document` (or
 `knowledge_supersede_document` when a successor exists); for one chunk use
 `knowledge_mark_chunk_removed`; to destroy the record use `knowledge_delete_by_source`.
@@ -2474,8 +2479,11 @@ result fields exist for that, both introduced in 0.13.2.
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see
   [Configuration](configuration.md)) adds a `warning` field naming the actual and recommended
   character counts, and emits a `chunk_text_oversized` telemetry event. This is visibility only:
-  nothing is truncated, split, or rejected, and the call succeeds exactly as it did before.
-  Splitting oversized input is the caller's responsibility (issue #407).
+  nothing is truncated, split, or rejected, and the call succeeds exactly as it did before. The
+  `warning.message` points at `knowledge_process_document` (issue #862): send a whole document or
+  a long page there and the server chunks it for you (see
+  [Document mode](#document-mode-send-the-whole-document-the-server-does-the-diff-issue-785)).
+  The client is not asked to split it by hand (issue #407, reworded by #862).
 
 - **`dedup_paths` reports how this chunk's entities were resolved.** An additive object of
   per-path tallies for the chunk's Phase B entity resolution

@@ -62,6 +62,7 @@ every group in the database — treat the process boundary as the trust boundary
 ## Reference pages
 
 - **[Getting Started](getting-started.md)** — install, run, build from source, bundle in downstream apps.
+- **[Integrator Guide](integrator-guide.md)** — start here to build a client: the transport, the nine-method minimal client profile, groups, ingest/update/retire/delete, search, provenance and health checks.
 - **[Configuration](configuration.md)** — every environment variable and CLI flag.
 - **[Embedding Options](embedding-options.md)** — one capability matrix of local and remote embedding backends: platform, install, cost, and dimension.
 - **[IPC & MCP Reference](ipc-mcp-reference.md)** — the JSON-RPC and Model Context Protocol method surface.

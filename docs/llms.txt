@@ -9,6 +9,10 @@
 
 - [Getting Started](https://docs.liminis.app/liminis-context-graph/getting-started): Install, run, build from source, and bundle in downstream apps.
 
+## Integrator Guide
+
+- [Integrator Guide](https://docs.liminis.app/liminis-context-graph/integrator-guide): Building a client: the transport, the nine-method minimal client profile, groups, ingest/update/retire/delete, search and neighbours, provenance, and health checks.
+
 ## Configuration
 
 - [Configuration](https://docs.liminis.app/liminis-context-graph/configuration): Every environment variable and CLI flag, plus the embedder-sidecar and extractor local-vs-hosted selection rules.

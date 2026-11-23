@@ -487,12 +487,31 @@ async fn invalid_documents_are_refused_with_nothing_written() {
     assert!(episodes(&f.state).await.is_empty());
 }
 
-/// SC-011, FR-016: a document over the cap is refused before any extraction or write, and the
-/// error states the cap.
+/// A realistic markdown document of at least `bytes` bytes: numbered sections of prose
+/// paragraphs, each paragraph unique so every chunk is distinct.
+fn big_doc(bytes: usize) -> String {
+    let mut out = String::with_capacity(bytes + 1024);
+    let mut i = 0usize;
+    while out.len() < bytes {
+        if i.is_multiple_of(8) {
+            out.push_str(&format!("## Section {}\n\n", i / 8));
+        }
+        out.push_str(&format!(
+            "Paragraph {i} describes the subsystem and its behaviour at length. {}\n\n",
+            "The quick brown fox jumps over the lazy dog. ".repeat(24)
+        ));
+        i += 1;
+    }
+    out
+}
+
+/// SC-011, FR-016, #862 FR-015: a document over the cap is refused before any extraction or
+/// write, and the error names the effective cap (2 MiB by default) and `LCG_DOCUMENT_MAX_BYTES`.
 #[tokio::test]
 async fn oversized_document_is_rejected_before_any_work() {
     let f = fx();
-    let big = format!("# Big\n\n{}", "x".repeat(600 * 1024));
+    let big = big_doc(3 * 1000 * 1000);
+    assert!(big.len() > 2 * 1024 * 1024);
     let v = try_call(
         "knowledge_process_document",
         doc_params("big", &big),
@@ -501,9 +520,12 @@ async fn oversized_document_is_rejected_before_any_work() {
     .await;
     let msg = v["error"]["message"].as_str().unwrap();
     assert!(
-        msg.contains("document_too_large") && msg.contains("524288"),
+        msg.contains("document_too_large")
+            && msg.contains("2097152")
+            && msg.contains("LCG_DOCUMENT_MAX_BYTES"),
         "{msg}"
     );
+    assert!(!msg.contains("524288"), "{msg}");
     assert_eq!(f.ex.call_count(), 0);
     assert!(episodes(&f.state).await.is_empty());
     let preview = try_call(
@@ -513,6 +535,196 @@ async fn oversized_document_is_rejected_before_any_work() {
     )
     .await;
     assert!(preview.get("error").is_some());
+}
+
+/// #862: a 1.5 MB document (over the old 512 KiB cap, under the new default) is accepted and
+/// ingested in full — nothing truncated.
+#[tokio::test]
+async fn one_and_a_half_mb_document_is_accepted_by_default() {
+    let f = fx();
+    let doc = big_doc(1_500_000);
+    let r = ingest(&f.state, "web-page", &doc).await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert!(f.ex.call_count() > 100, "calls: {}", f.ex.call_count());
+    // The document's final paragraph (identified by its unique index) reached the extractor:
+    // nothing was truncated.
+    let tail_start = doc.rfind("Paragraph ").expect("doc has paragraphs");
+    let tail_marker: String = doc[tail_start..]
+        .split_inclusive(' ')
+        .take(3) // "Paragraph", "<index>", "describes"
+        .collect();
+    let last = f.ex.calls().last().unwrap().body.clone();
+    assert!(
+        last.contains(&tail_marker),
+        "tail `{tail_marker}` missing from: {last}"
+    );
+}
+
+/// #862: `LCG_DOCUMENT_MAX_BYTES=4MiB` accepts the 3 MB document the default refuses. The
+/// installed cap is process-wide and install-once, so this goes through the explicit-cap entry
+/// point (the same function the handler calls).
+#[test]
+fn three_mb_document_is_accepted_under_a_4mib_cap_and_refused_under_the_default() {
+    use lcg_core::document::ingest::chunk_for_ingest_with_cap;
+    use lcg_core::document_config::{parse_max_bytes, DEFAULT_MAX_BYTES};
+    let doc = big_doc(3 * 1000 * 1000);
+    let four_mib = parse_max_bytes("4MiB").unwrap();
+    assert!(chunk_for_ingest_with_cap(&doc, four_mib).is_ok());
+    let e = chunk_for_ingest_with_cap(&doc, DEFAULT_MAX_BYTES)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("document_too_large") && e.contains("LCG_DOCUMENT_MAX_BYTES"),
+        "{e}"
+    );
+}
+
+/// #862 edge cases: exactly at the cap is accepted, one byte over is refused, and the cap is in
+/// bytes, not characters.
+#[test]
+fn cap_boundary_is_inclusive_and_measured_in_bytes() {
+    use lcg_core::document::ingest::chunk_for_ingest_with_cap;
+    let at = "x".repeat(1000);
+    assert!(chunk_for_ingest_with_cap(&at, 1000).is_ok());
+    let over = "x".repeat(1001);
+    let e = chunk_for_ingest_with_cap(&over, 1000)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("document_too_large") && e.contains("1000 bytes"),
+        "{e}"
+    );
+    // 600 characters of 2-byte text is 1200 bytes: over a 1000-byte cap despite 600 < 1000 chars.
+    let multibyte = "é".repeat(600);
+    assert_eq!(multibyte.chars().count(), 600);
+    assert!(chunk_for_ingest_with_cap(&multibyte, 1000).is_err());
+}
+
+// ── #862 measurement: cost of a document at the default 2 MiB cap ───────────
+//
+// `#[ignore]`d: run on demand to record numbers for ADR-0862, e.g.
+//   cargo test -p lcg-core --test document_mode --no-run
+//   /usr/bin/time -l <test-binary> --ignored --nocapture --test-threads=1 measure_
+// Mock providers only (`ScriptExtractor`, `MockEmbedder`), so the cost shown is the server's own:
+// chunker, diff, per-episode writes and the WAL.
+
+const TWO_MIB: usize = 2 * 1024 * 1024;
+
+fn truncate_to(mut s: String, bytes: usize) -> String {
+    while s.len() > bytes {
+        s.pop();
+    }
+    s
+}
+
+async fn measure(label: &str, doc: String) {
+    assert!(doc.len() <= TWO_MIB, "{label}: {} bytes", doc.len());
+    let f = fx();
+    let t = std::time::Instant::now();
+    let chunk_t = std::time::Instant::now();
+    let chunked = lcg_core::document::ingest::chunk_for_ingest_with_cap(&doc, TWO_MIB);
+    let chunk_ms = chunk_t.elapsed().as_millis();
+    let units = chunked.as_ref().map(|c| c.chunks.len()).unwrap_or(0);
+    let r = try_call(
+        "knowledge_process_document",
+        doc_params("measure", &doc),
+        &f.state,
+    )
+    .await;
+    let total_ms = t.elapsed().as_millis();
+    println!(
+        "MEASURE {label}: bytes={} units={units} chunk_only_ms={chunk_ms} \
+         end_to_end_ms={total_ms} extractor_calls={} ok={}",
+        doc.len(),
+        f.ex.call_count(),
+        r.get("error").is_none()
+    );
+}
+
+#[tokio::test]
+#[ignore = "measurement: run on demand (ADR-0862)"]
+async fn measure_realistic_2mib_document() {
+    measure("realistic", truncate_to(big_doc(TWO_MIB), TWO_MIB)).await;
+}
+
+#[tokio::test]
+#[ignore = "measurement: run on demand (ADR-0862)"]
+async fn measure_unclosed_fence_2mib_document() {
+    let mut d = String::from("# Fence\n\n```\n");
+    while d.len() < TWO_MIB {
+        d.push_str("let x = 1; // line inside a fence that never closes\n");
+    }
+    measure("unclosed_fence", truncate_to(d, TWO_MIB)).await;
+}
+
+#[tokio::test]
+#[ignore = "measurement: run on demand (ADR-0862)"]
+async fn measure_many_tables_2mib_document() {
+    let mut d = String::from("# Tables\n\n");
+    let mut i = 0;
+    while d.len() < TWO_MIB {
+        d.push_str(&format!(
+            "| key | value |\n|-----|-------|\n| a{i} | b{i} |\n| c{i} | d{i} |\n\n"
+        ));
+        i += 1;
+    }
+    measure("many_tables", truncate_to(d, TWO_MIB)).await;
+}
+
+#[tokio::test]
+#[ignore = "measurement: run on demand (ADR-0862)"]
+async fn measure_single_long_line_2mib_document() {
+    let d = format!("# Line\n\n{}", "word ".repeat(TWO_MIB / 5));
+    measure("single_long_line", truncate_to(d, TWO_MIB)).await;
+}
+
+/// Chunker-only timing for every pathological shape, including many tiny sections (about
+/// 80 000 units, each of which would be one extractor call — a cost of the document, not a
+/// superlinear chunker, so it is timed here without ingesting).
+#[test]
+#[ignore = "measurement: run on demand (ADR-0862)"]
+fn measure_chunker_only_on_pathological_2mib_documents() {
+    let mut headings = String::new();
+    let mut i = 0;
+    while headings.len() < TWO_MIB {
+        headings.push_str(&format!("## H{i}\n\nShort body {i}.\n\n"));
+        i += 1;
+    }
+    let mut fence = String::from("# Fence\n\n```\n");
+    while fence.len() < TWO_MIB {
+        fence.push_str("let x = 1; // line inside a fence that never closes\n");
+    }
+    let mut tables = String::from("# Tables\n\n");
+    let mut j = 0;
+    while tables.len() < TWO_MIB {
+        tables.push_str(&format!(
+            "| key | value |\n|-----|-------|\n| a{j} | b{j} |\n\n"
+        ));
+        j += 1;
+    }
+    let mut front = String::from("---\ntitle: x\n");
+    while front.len() < TWO_MIB {
+        front.push_str("key: value line in a front-matter block that never closes\n");
+    }
+    let one_line = format!("# Line\n\n{}", "word ".repeat(TWO_MIB / 5));
+    for (label, d) in [
+        ("many_headings", headings),
+        ("unclosed_fence", fence),
+        ("many_tables", tables),
+        ("unclosed_front_matter", front),
+        ("single_long_line", one_line),
+        ("realistic", big_doc(TWO_MIB)),
+    ] {
+        let d = truncate_to(d, TWO_MIB);
+        let t = std::time::Instant::now();
+        let r = lcg_core::document::ingest::chunk_for_ingest_with_cap(&d, TWO_MIB);
+        println!(
+            "MEASURE chunker_only {label}: bytes={} units={} ms={}",
+            d.len(),
+            r.map(|c| c.chunks.len()).unwrap_or(0),
+            t.elapsed().as_millis()
+        );
+    }
 }
 
 // ── US2: the server applies the diff ────────────────────────────────────────

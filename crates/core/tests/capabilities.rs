@@ -94,6 +94,7 @@ async fn reports_version_protocol_and_seeded_features() {
         "process_document",
         "retire_document",
         "chunk_supersede",
+        "document_max_bytes_env",
         "walk",
         "walk_provenance",
         "origin",

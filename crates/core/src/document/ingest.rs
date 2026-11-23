@@ -32,8 +32,10 @@ use crate::error::Error;
 use crate::origin::Origin;
 use crate::types::SourceType;
 
-/// Default document-size cap: 512 KiB of UTF-8 (the document-level successor of #293's cap).
-pub const DOCUMENT_MAX_BYTES_DEFAULT: usize = 512 * 1024;
+/// Default document-size cap: 2 MiB of UTF-8 (raised from 512 KiB by #862, ADR-0862). The
+/// effective cap is `LCG_DOCUMENT_MAX_BYTES`, parsed strictly at startup by
+/// [`crate::document_config`].
+pub const DOCUMENT_MAX_BYTES_DEFAULT: usize = crate::document_config::DEFAULT_MAX_BYTES;
 /// Default per-unit size: below the 8000-char chunk advisory, so no unit ever trips it.
 pub const DOCUMENT_CHUNK_MAX_CHARS_DEFAULT: usize = 6_000;
 
@@ -53,11 +55,6 @@ fn positive_env(name: &str, default: usize) -> usize {
     }
 }
 
-/// `LCG_DOCUMENT_MAX_BYTES`, falling back (with a warning) to [`DOCUMENT_MAX_BYTES_DEFAULT`].
-pub fn resolve_document_max_bytes() -> usize {
-    positive_env("LCG_DOCUMENT_MAX_BYTES", DOCUMENT_MAX_BYTES_DEFAULT)
-}
-
 /// `LCG_DOCUMENT_CHUNK_MAX_CHARS`, falling back to [`DOCUMENT_CHUNK_MAX_CHARS_DEFAULT`].
 pub fn resolve_document_chunk_max_chars() -> usize {
     positive_env(
@@ -71,7 +68,12 @@ pub fn resolve_document_chunk_max_chars() -> usize {
 /// (FR-006). Rejects an over-cap document before anything else (FR-016) and a document that
 /// yields no chunk (empty, whitespace-only or headings-only).
 pub fn chunk_for_ingest(content: &str) -> Result<ChunkedDocument, Error> {
-    let cap = resolve_document_max_bytes();
+    chunk_for_ingest_with_cap(content, crate::document_config::document_max_bytes())
+}
+
+/// [`chunk_for_ingest`] with an explicit size cap in bytes (the installed cap is process-wide and
+/// install-once, so tests exercise other caps through this).
+pub fn chunk_for_ingest_with_cap(content: &str, cap: usize) -> Result<ChunkedDocument, Error> {
     if content.len() > cap {
         return Err(Error::Ipc(format!(
             "document_too_large: content is {} bytes, over the document-size cap of {cap} bytes \
