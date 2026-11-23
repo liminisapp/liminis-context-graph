@@ -369,7 +369,8 @@ impl ServiceGuard {
         if concurrency <= 1 {
             return self.client.clone();
         }
-        let sock = self._workspace.path().join(".lcg").join("service.sock");
+        // The same constant the spawn path binds, so the pool cannot drift from the guard's client.
+        let sock = self._workspace.path().join(super::workspace::SOCKET_FILE);
         Arc::new(UdsPool::new(&sock, concurrency))
     }
 
@@ -652,7 +653,7 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
             o.bin.display()
         )
     })?;
-    let sock = ws.path().join(".lcg").join("service.sock");
+    let sock = ws.path().join(super::workspace::SOCKET_FILE);
     let deadline = Instant::now() + Duration::from_secs(120);
     let ontology;
     let (client, embedder) = loop {
