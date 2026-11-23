@@ -16,9 +16,10 @@
 //!
 //! Policy: additional properties are tolerated (no `additionalProperties: false`), fields that
 //! are always emitted are `required`, fields that are sometimes omitted are optional, and fields
-//! that are always emitted as `null` are required **and** nullable. Removing or renaming a field,
-//! narrowing its type, or making an optional field required is a breaking change; adding an
-//! optional field is not.
+//! that are always emitted as `null` are required **and** nullable. The schemas describe what lcg
+//! emits, so breaking is judged from the reader's side: removing or renaming a field, widening a
+//! type, making a required field optional, or adding a union alternative is a breaking change;
+//! adding an optional field, narrowing a type, or making an optional field always present is not.
 
 mod find;
 mod health;

@@ -308,9 +308,12 @@ what one of those methods returns:
 4. **Record it in `CHANGELOG.md`** under `[Unreleased]`. CI fails a PR that touches `contract/` without
    touching the changelog.
 
-**What is breaking.** Removing or renaming a field, narrowing its type, or making an optional field
-required is breaking for consumers: say **BREAKING** in the changelog entry. Adding an optional field,
-widening a type or adding an alternative is not. Adding a method to the covered set is additive.
+**What is breaking.** The schemas describe what lcg emits and consumers read it, so judge a change
+from the reader's side. Removing or renaming a field, widening a type (`string` to `string|null`,
+`integer` to `number`), making an always-present field optional, or adding an alternative to a
+`oneOf`/`anyOf` is breaking for consumers: say **BREAKING** in the changelog entry. Adding an
+optional field, narrowing a type (`string|null` to `string`) or making an optional field always
+present is not. Adding a method to the covered set is additive.
 
 ## Questions
 

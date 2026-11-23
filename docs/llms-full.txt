@@ -1322,10 +1322,14 @@ What the schemas say, and do not say:
   still passes; do not turn on "additional properties: false" yourself unless you want every
   additive release to break you.
 
-**Compatibility policy.** Removing or renaming a field, narrowing its type (`string|null` to
-`string`, `number` to `integer`), or making an optional field required is a **breaking change** to
-a published schema and is announced in the release notes as such. Adding an optional field, widening
-a type or adding an alternative is not breaking. Every release that changes a schema lists the
+**Compatibility policy.** The schemas describe what lcg *emits*, so "breaking" is judged from the
+reader's side. Removing or renaming a field, widening a type (`string` to `string|null`, `integer`
+to `number`), making an always-present field optional, or adding an alternative to a `oneOf` /
+`anyOf` is a **breaking change** to a published schema and is announced in the release notes as
+such: a consumer that reads the old shape can crash or mis-parse the new one. Adding an optional
+field, narrowing a type (`string|null` to `string`) or making an optional field always present is
+not breaking: every response that validated against the new schema still validates for readers of
+the old one. Every release that changes a schema lists the
 change in the CHANGELOG. Contributors: see
 [CONTRIBUTING.md](https://github.com/liminisapp/liminis-context-graph/blob/main/CONTRIBUTING.md#published-response-schemas).
 
@@ -8384,8 +8388,8 @@ tag they pin; see the [response contract](ipc-mcp-reference.md#response-contract
 - **The committed schemas are already in sync.** CI's `committed_schemas_match_generated` test fails
   when `contract/*.schema.json` differ from what the source types generate, and a PR that changes a
   schema must also change `CHANGELOG.md` (`scripts/assert-contract-changelog.sh`). Before tagging,
-  confirm the `[Unreleased]` changelog entries for any schema change mark removed or renamed fields as
-  **BREAKING**, and that the section is renamed to the version being released.
+  confirm the `[Unreleased]` changelog entries for any schema change mark breaking changes (removed or
+  renamed fields, widened types, required fields made optional) as **BREAKING**, and that the section is renamed to the version being released.
 - **First check after a release publishes.** `release.yml` does not run on pull requests (ADR-0639), so
   the asset step is first exercised on a tag. Confirm the release lists the seven
   `*.schema.json` files and `contract-manifest.json`, and that `jq -r .lcg_version contract-manifest.json`

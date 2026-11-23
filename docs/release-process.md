@@ -76,8 +76,8 @@ tag they pin; see the [response contract](ipc-mcp-reference.md#response-contract
 - **The committed schemas are already in sync.** CI's `committed_schemas_match_generated` test fails
   when `contract/*.schema.json` differ from what the source types generate, and a PR that changes a
   schema must also change `CHANGELOG.md` (`scripts/assert-contract-changelog.sh`). Before tagging,
-  confirm the `[Unreleased]` changelog entries for any schema change mark removed or renamed fields as
-  **BREAKING**, and that the section is renamed to the version being released.
+  confirm the `[Unreleased]` changelog entries for any schema change mark breaking changes (removed or
+  renamed fields, widened types, required fields made optional) as **BREAKING**, and that the section is renamed to the version being released.
 - **First check after a release publishes.** `release.yml` does not run on pull requests (ADR-0639), so
   the asset step is first exercised on a tag. Confirm the release lists the seven
   `*.schema.json` files and `contract-manifest.json`, and that `jq -r .lcg_version contract-manifest.json`

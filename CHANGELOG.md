@@ -39,8 +39,10 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   - lcg's own tests validate real handler responses against the committed schemas, so renaming,
     removing or retyping a field fails lcg's CI first; a second test fails when the committed files are
     stale. A PR that changes a schema must update this changelog.
-  - Compatibility policy: removing or renaming a field, narrowing its type or making an optional field
-    required is **BREAKING**; adding an optional field is not. Additional properties are allowed.
+  - Compatibility policy, judged from the reader's side (the schemas describe what lcg emits): removing
+    or renaming a field, widening a type (`T` to `T|null`), making an always-present field optional or
+    adding a union alternative is **BREAKING**; adding an optional field, narrowing a type or making an
+    optional field always present is not. Additional properties are allowed.
   - No wire change: handlers are untouched and the schemas were written against the real responses
     (the shapes pinned include `derived_document`, the `causes` map and `finding.reason`).
   - `contract/knowledge_status.schema.json`: describes the opt-in `episode_breakdown` block (#884,

@@ -306,10 +306,14 @@ What the schemas say, and do not say:
   still passes; do not turn on "additional properties: false" yourself unless you want every
   additive release to break you.
 
-**Compatibility policy.** Removing or renaming a field, narrowing its type (`string|null` to
-`string`, `number` to `integer`), or making an optional field required is a **breaking change** to
-a published schema and is announced in the release notes as such. Adding an optional field, widening
-a type or adding an alternative is not breaking. Every release that changes a schema lists the
+**Compatibility policy.** The schemas describe what lcg *emits*, so "breaking" is judged from the
+reader's side. Removing or renaming a field, widening a type (`string` to `string|null`, `integer`
+to `number`), making an always-present field optional, or adding an alternative to a `oneOf` /
+`anyOf` is a **breaking change** to a published schema and is announced in the release notes as
+such: a consumer that reads the old shape can crash or mis-parse the new one. Adding an optional
+field, narrowing a type (`string|null` to `string`) or making an optional field always present is
+not breaking: every response that validated against the new schema still validates for readers of
+the old one. Every release that changes a schema lists the
 change in the CHANGELOG. Contributors: see
 [CONTRIBUTING.md](https://github.com/liminisapp/liminis-context-graph/blob/main/CONTRIBUTING.md#published-response-schemas).
 

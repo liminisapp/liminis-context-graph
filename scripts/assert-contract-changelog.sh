@@ -30,7 +30,8 @@ ERROR: this change modifies a published response schema under contract/ but not 
 
 Schema changes are part of the release notes. Add an entry under [Unreleased] (heading
 "### Response schemas" if present) naming the method and the field. Mark a removed or renamed
-field, a narrowed type, or an optional field made required as **BREAKING**. Adding an optional
-field is not breaking but still needs an entry. See CONTRIBUTING.md, "Published response schemas".
+field, a widened type (for example `string` to `string|null`), a required field made optional, or an
+added union alternative as **BREAKING**. Adding an optional field is not breaking but still needs an
+entry. See CONTRIBUTING.md, "Published response schemas".
 MSG
 exit 1
