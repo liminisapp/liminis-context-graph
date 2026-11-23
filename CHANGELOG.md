@@ -19,10 +19,10 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   call; entities, relationships, embeddings, belief history and origin are untouched. `moves` is a
   batch applied all-or-nothing (a folder rename is one call). Refused, with nothing changed and
   nothing logged: unknown source, a destination that already holds live episodes (a merge),
-  cross-group, chunk-id collision, identical identity and batch conflicts. Re-keys the
+  cross-group, a destination `doc_id` with leftover revision or supersession state, chunk-id collision, identical identity and batch conflicts. Re-keys the
   document-mode revision and document-supersession state too, so the next ingest at the new
   `doc_id` is still a no-op. Logged as fixed-valued, uuid-keyed updates, so rebuild, dump and
-  overlapping replay agree. `dry_run` supported. MCP tool count 58 → 59, IPC methods 59 → 60.
+  overlapping replay agree. `dry_run` supported. MCP tool count 59 → 60, IPC methods 60 → 61.
 
 ### Fixed
 

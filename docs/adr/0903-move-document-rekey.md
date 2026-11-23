@@ -75,4 +75,4 @@ to the moved `doc_id`.
 - A folder rename is one call whose cost does not depend on document size.
 - One statement per episode: a 900-document move is a few thousand statements in one WAL chunk, which
   replay batches by template.
-- `knowledge_capabilities` advertises `move_document`; MCP tools 58 → 59, IPC methods 59 → 60.
+- `knowledge_capabilities` advertises `move_document`; MCP tools 59 → 60, IPC methods 60 → 61.
