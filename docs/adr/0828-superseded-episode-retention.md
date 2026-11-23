@@ -377,8 +377,10 @@ workspace (these use the cost model above; at r ≈ 2 a group is ≈ 1.4× DB, �
 4. A measurement against the **demo notebook** or another production-scale WAL (ADR-0026's 43,821 files)
    that contradicts the linear model or the typical-regime assumption.
 
-None can be evaluated in production today because `knowledge_status` does not split live from
-superseded (`episode_count` is a total), which is follow-up 2.
+Trigger 1 is measured by `knowledge_status {"include_episode_breakdown": true}` (#884, ADR-0884):
+per group, `superseded / live` from `episode_breakdown.groups[]`, alongside
+`only_superseded_entities` and `only_superseded_edges`. Triggers 2 to 4 still need a rebuild timing,
+WAL bytes per live episode and a production-scale measurement.
 
 ## Follow-ups to file (none is part of this issue)
 
@@ -387,6 +389,7 @@ superseded (`episode_count` is a total), which is follow-up 2.
    currently loses entity→episode provenance).
 2. **Feature: split live / superseded / pending episode counts (and only-superseded entity and edge
    counts) in `knowledge_status`** (or a lint category), so the triggers above are measurable.
+   *Done by #884 (ADR-0884): opt-in `include_episode_breakdown` on `knowledge_status`.*
 3. *(Conditional, on a trigger)* **Measure "drop content and embeddings, keep rows"** against full
    pruning on the demo notebook or a production WAL.
 4. *(Conditional)* **`knowledge_prune_superseded`**: the rule and worked example above, per group,

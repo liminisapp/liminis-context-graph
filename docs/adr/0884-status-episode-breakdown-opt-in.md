@@ -57,16 +57,9 @@ Cypher. This ADR records the measurement surface. It adds no pruning or retentio
 - The scan cost at production scale is unmeasured; it is the reason for the opt-in. A `group_ids`
   filter is deliberately not offered yet.
 
-## ADR-0828 text to apply
+## ADR-0828 edit
 
-ADR-0828 was not on `main` when this landed (it lives on the #828 branch), so it is not edited
-here. Once it merges, replace the sentence "None can be evaluated in production today because
-`knowledge_status` does not split live from superseded (`episode_count` is a total), which is
-follow-up 2." in *Reopening triggers* with:
+ADR-0828's *Reopening triggers* section now points trigger 1 at
+`knowledge_status {"include_episode_breakdown": true}` (the "none can be evaluated in production
+today" sentence is gone), and its follow-up 2 is marked done by #884.
 
-> Trigger 1 is measured by `knowledge_status {"include_episode_breakdown": true}` (#884,
-> ADR-0884): per group, `superseded / live` from `episode_breakdown.groups[]`, alongside
-> `only_superseded_entities` and `only_superseded_edges`. Triggers 2 to 4 still need a rebuild
-> timing, WAL bytes per live episode and a production-scale measurement.
-
-and mark follow-up 2 as *done by #884*.
