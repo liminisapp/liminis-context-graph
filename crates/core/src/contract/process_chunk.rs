@@ -71,4 +71,8 @@ pub struct ProcessChunkResult {
     /// Present only when `chunk_text` is oversized.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<ChunkWarning>,
+    /// Human-readable advisories; present only when the write fell back to the default group
+    /// because `group_id` was omitted (#856).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
 }

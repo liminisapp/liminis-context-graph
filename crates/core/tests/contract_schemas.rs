@@ -382,6 +382,51 @@ async fn status_variants_validate() {
     nq["cross_group_pointers"] = json!({"bound": null, "unbound": null, "ambiguous": null});
     assert_valid("knowledge_status", &nq);
 
+    // Opt-in episode breakdown (#884): absent by default, a block when asked for, and `null`
+    // plus a reason when unavailable (degraded / not queryable).
+    assert!(full.get("episode_breakdown").is_none());
+    let with_bd = call(
+        "knowledge_status",
+        json!({"include_episode_breakdown": true}),
+        &state,
+    )
+    .await;
+    assert!(
+        with_bd["episode_breakdown"]["groups"].is_array(),
+        "{with_bd}"
+    );
+    assert_valid("knowledge_status", &with_bd);
+    let degraded_bd = call(
+        "knowledge_status",
+        json!({"include_episode_breakdown": true}),
+        &simple_state(None),
+    )
+    .await;
+    assert_eq!(degraded_bd["episode_breakdown"], Value::Null);
+    assert!(degraded_bd["episode_breakdown_unavailable"].is_string());
+    assert_valid("knowledge_status", &degraded_bd);
+    let mut nq_bd = nq.clone();
+    nq_bd["episode_breakdown"] = Value::Null;
+    nq_bd["episode_breakdown_unavailable"] = json!("database not queryable");
+    assert_valid("knowledge_status", &nq_bd);
+    let mut m = with_bd.clone();
+    rename_key(&mut m, "/episode_breakdown/groups/0", "live", "alive");
+    assert_invalid(
+        "knowledge_status",
+        "episode_breakdown group.live renamed",
+        &m,
+    );
+    let mut m = with_bd.clone();
+    set(&mut m, "/episode_breakdown", json!("none"));
+    assert_invalid("knowledge_status", "episode_breakdown as a string", &m);
+    let mut m = degraded_bd.clone();
+    set(&mut m, "/episode_breakdown_unavailable", Value::Null);
+    assert_invalid(
+        "knowledge_status",
+        "episode_breakdown_unavailable: null",
+        &m,
+    );
+
     // Drift.
     let mut m = full.clone();
     rename_key(&mut m, "/wal_groups/liminis", "applied_seq", "applied");
@@ -422,6 +467,26 @@ async fn process_chunk_validates_including_warning_and_dropped_edges() {
     let normal = call("knowledge_process_chunk", params.clone(), &state).await;
     assert!(normal.get("warning").is_none());
     assert_valid("knowledge_process_chunk", &normal);
+
+    // Omitting group_id falls back to the default group and says so in `warnings` (#856).
+    let (state_ig, _dbi, _di) = state_with(vec![fact("Alpha", "Beta", "Alpha uses Beta")], None);
+    let implicit = call(
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "Alpha uses Beta", "chunk_id": "c0", "source_file": "notes/a.md",
+            "reference_time": "2026-08-04T00:00:00Z",
+        }),
+        &state_ig,
+    )
+    .await;
+    assert!(implicit["warnings"].is_array(), "{implicit}");
+    assert_valid("knowledge_process_chunk", &implicit);
+    let mut m = implicit.clone();
+    m["warnings"] = json!("group_id omitted");
+    assert_invalid("knowledge_process_chunk", "warnings as a string", &m);
+    let mut m = implicit.clone();
+    m["warnings"] = Value::Null;
+    assert_invalid("knowledge_process_chunk", "warnings: null", &m);
 
     // Re-ingest under the same chunk id: superseded_episode_uuids is non-empty.
     let again = call("knowledge_process_chunk", params, &state).await;

@@ -90,6 +90,63 @@
       ],
       "type": "object"
     },
+    "EpisodeBreakdown": {
+      "description": "The opt-in `episode_breakdown` block; groups are sorted by `group_id`.",
+      "properties": {
+        "as_of_us": {
+          "description": "Instant (microseconds since the epoch) liveness was evaluated at.",
+          "type": "integer"
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/definitions/EpisodeBreakdownGroup"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "as_of_us",
+        "groups"
+      ],
+      "type": "object"
+    },
+    "EpisodeBreakdownGroup": {
+      "description": "One group's episode (and derived entity/edge) liveness counts (#884, ADR-0884).",
+      "properties": {
+        "group_id": {
+          "type": "string"
+        },
+        "live": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "only_superseded_edges": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "only_superseded_entities": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "pending": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "superseded": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "group_id",
+        "live",
+        "superseded",
+        "pending",
+        "only_superseded_entities",
+        "only_superseded_edges"
+      ],
+      "type": "object"
+    },
     "GroupIdentityRefusal": {
       "properties": {
         "group_id": {
@@ -214,6 +271,20 @@
         },
         "degraded": {
           "type": "boolean"
+        },
+        "episode_breakdown": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/EpisodeBreakdown"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "episode_breakdown_unavailable": {
+          "description": "Why the breakdown is unavailable; present only alongside `episode_breakdown: null`.",
+          "type": "string"
         },
         "fts_last_repair_unix_ms": {
           "minimum": 0,
@@ -345,6 +416,20 @@
             "integer",
             "null"
           ]
+        },
+        "episode_breakdown": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/EpisodeBreakdown"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "episode_breakdown_unavailable": {
+          "description": "Why the breakdown is unavailable; present only alongside `episode_breakdown: null`.",
+          "type": "string"
         },
         "episode_count": {
           "minimum": 0,
@@ -497,6 +582,20 @@
         "entity_count": {
           "minimum": 0,
           "type": "integer"
+        },
+        "episode_breakdown": {
+          "oneOf": [
+            {
+              "$ref": "#/definitions/EpisodeBreakdown"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "episode_breakdown_unavailable": {
+          "description": "Why the breakdown is unavailable; present only alongside `episode_breakdown: null`.",
+          "type": "string"
         },
         "episode_count": {
           "minimum": 0,

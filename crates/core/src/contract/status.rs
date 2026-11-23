@@ -6,6 +6,48 @@ use std::collections::BTreeMap;
 
 use super::health::Providers;
 
+/// One group's episode (and derived entity/edge) liveness counts (#884, ADR-0884).
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct EpisodeBreakdownGroup {
+    pub group_id: String,
+    pub live: u64,
+    pub superseded: u64,
+    pub pending: u64,
+    pub only_superseded_entities: u64,
+    pub only_superseded_edges: u64,
+}
+
+/// The opt-in `episode_breakdown` block; groups are sorted by `group_id`.
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct EpisodeBreakdown {
+    /// Instant (microseconds since the epoch) liveness was evaluated at.
+    pub as_of_us: i64,
+    pub groups: Vec<EpisodeBreakdownGroup>,
+}
+
+/// `episode_breakdown` is *optional and nullable*: absent unless the request passed
+/// `include_episode_breakdown: true`, then the block, or `null` when it is unavailable (see
+/// `episode_breakdown_unavailable`). Spelled as a `oneOf` so the omit-only null stripping in
+/// `contract::schema_of` leaves the `null` alternative in place.
+fn breakdown_or_null(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let inner = generator.subschema_for::<EpisodeBreakdown>();
+    schemars::json_schema!({ "oneOf": [inner, { "type": "null" }] })
+}
+
+/// The opt-in fields #884 adds to every `knowledge_status` shape.
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct EpisodeBreakdownOptIn {
+    #[serde(default)]
+    #[schemars(schema_with = "breakdown_or_null")]
+    pub episode_breakdown: Option<EpisodeBreakdown>,
+    /// Why the breakdown is unavailable; present only alongside `episode_breakdown: null`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub episode_breakdown_unavailable: Option<String>,
+}
+
 /// Rows stored with a fallback zero vector because the embedder failed (#808).
 #[derive(JsonSchema)]
 #[allow(dead_code)]
@@ -152,6 +194,8 @@ pub struct StatusDegraded {
     pub cross_group_pointers: Nullable<CrossGroupPointers>,
     pub providers: Providers,
     pub search_min_score_default: f64,
+    #[serde(flatten)]
+    pub episode_breakdown: EpisodeBreakdownOptIn,
 }
 
 /// Database open and every core table readable.
@@ -189,6 +233,8 @@ pub struct StatusQueryable {
     pub dedup_mode: String,
     pub providers: Providers,
     pub search_min_score_default: f64,
+    #[serde(flatten)]
+    pub episode_breakdown: EpisodeBreakdownOptIn,
 }
 
 /// Database open but a core table is missing (ADR-0325): counts are `null`, never `0`.
@@ -224,6 +270,8 @@ pub struct StatusNotQueryable {
     pub dedup_mode: String,
     pub providers: Providers,
     pub search_min_score_default: f64,
+    #[serde(flatten)]
+    pub episode_breakdown: EpisodeBreakdownOptIn,
 }
 
 /// The three `knowledge_status` shapes. They are told apart by their required keys and types

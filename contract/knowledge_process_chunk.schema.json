@@ -203,6 +203,13 @@
     "warning": {
       "$ref": "#/definitions/ChunkWarning",
       "description": "Present only when `chunk_text` is oversized."
+    },
+    "warnings": {
+      "description": "Human-readable advisories; present only when the write fell back to the default group\nbecause `group_id` was omitted (#856).",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
   "required": [
