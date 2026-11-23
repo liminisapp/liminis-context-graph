@@ -141,7 +141,9 @@ directly, not through a generated client ([ADR-0854](docs/adr/0854-knowledge-cap
   `crates/core/src/capabilities.rs`. Purely additive changes (a new method, a new response field)
   do not.
 - An issue that ships a new capability adds its own feature string to `FEATURES` in the same file
-  (sorted, `lower_snake_case`, append-only). Removing a feature string is itself a breaking change.
+  (sorted, `lower_snake_case`, append-only) and a row in the reference's "Feature strings" table.
+  Removing a feature string is itself a breaking change. The release runbook's feature-string
+  coverage step (step 3 below) audits this before each tag.
 
 The release version lives in `[workspace.package]` in `Cargo.toml`; cargo-dist derives the
 release from it and **requires the pushed tag to match that version**, so the bump and the tag
@@ -159,7 +161,7 @@ never commit release prep directly to `main` — then tag the merge commit.
    is proceeding anyway — don't ship over a known-broken post-merge check silently the way
    `v0.11.0` did (#298). A `workflow:release` issue means release packaging (four-target build,
    pinned extension hashes, OpenSSL linkage) failed on `main` after merge — it is **not** checked
-   per PR (see step 6 and [ADR-0639](docs/adr/0639-post-merge-release-packaging-verification.md)),
+   per PR (see step 7 and [ADR-0639](docs/adr/0639-post-merge-release-packaging-verification.md)),
    so treat it as a blocker: fix forward before tagging.
 1. **Run the sidecar-gated tests, and record their output in the release PR.** Two tests in
    `crates/core/tests/real_corpus_replay_perf.rs` need a live embedding sidecar and **skip silently
@@ -241,13 +243,24 @@ never commit release prep directly to `main` — then tag the merge commit.
    `docs/llms-full.txt` — the docs-drift CI check fails the PR if it is left stale (see
    [issue #295](https://github.com/verveguy/liminis-context-graph/issues/295)). There is no
    second version to update any more: the docs site reads `Cargo.toml` directly.
-3. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`. If no
+3. **Check feature-string coverage.** Confirm that every user-visible change in this release has a
+   feature string or a stated reason it doesn't. List what shipped since the last tag
+   (`gh pr list --state merged --search "merged:>=<last-release-date>"`) and, for each change a
+   raw-socket client could want to detect (a new response field, a changed default or behaviour, an
+   operator setting, a run-time mode), check that its string is in `FEATURES` in
+   `crates/core/src/capabilities.rs` and in the "Feature strings" table of
+   [`docs/ipc-mcp-reference.md`](docs/ipc-mcp-reference.md#feature-strings). A brand-new method
+   needs no string, since it is already visible in `methods`. For a change with neither, either add
+   the string (sorted, `lower_snake_case`, append-only) before tagging, or record the reason in the
+   release PR and under "Changes deliberately not advertised" in the reference. Nothing enforces this
+   mechanically; it is how 0.19.2 shipped eight changes without a string (#885).
+4. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`. If no
    `[Unreleased]` section has been maintained, write the section from the merged PRs since the last
    tag (`gh pr list --state merged --search "merged:>=<last-release-date>"`).
-4. **Open a PR and merge it** to `main` once CI is green.
-5. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
+5. **Open a PR and merge it** to `main` once CI is green.
+6. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
    The tag (`vX.Y.Z`) must equal the `Cargo.toml` version, or cargo-dist's `plan` step fails.
-6. The release workflow builds all four targets and publishes the GitHub Release
+7. The release workflow builds all four targets and publishes the GitHub Release
    automatically. The same workflow also runs on every push to `main` (build and check only —
    it publishes nothing and never runs on PRs), which is where packaging is verified before
    you tag; only a pushed version tag publishes (~5–10 min in practice; `v0.12.0` took under six). Publishing that
@@ -258,7 +271,7 @@ never commit release prep directly to `main` — then tag the merge commit.
    created by hand.) See
    [`docs/release-process.md`](docs/release-process.md#docs-publishing) for what to
    check afterward and how to republish a correction without cutting a new release.
-7. **Announce it.** Post to the repository's **Announcements** discussion category once the
+8. **Announce it.** Post to the repository's **Announcements** discussion category once the
    release has published. cargo-dist creates the GitHub Release; nothing posts a discussion.
    Lead with what changed for a user rather than the issue list, and carry the CHANGELOG's
    upgrade note across if there is one. Precedent to match:

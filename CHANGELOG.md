@@ -25,6 +25,18 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- **`knowledge_capabilities` advertises eight 0.19.2 capabilities that shipped without a feature
+  string (#885).** New `features` entries, all additive (`PROTOCOL_VERSION` stays 1, no runtime
+  behaviour changes): `search_min_score_env` (#812, `LCG_SEARCH_MIN_SCORE` default floor),
+  `ready_for_reads` (#809/#855, `health_check` field), `test_providers` (#851, built-in
+  deterministic embedder/extractor mode; build support, not "active"), `exact_source_match` (#853,
+  `knowledge_delete_by_source`), `episode_source_fields` (#853, stored `source_file` / `chunk_id`),
+  `passage_legs` (#871, hybrid-only `legs`), `implicit_default_group_warning` (#856) and
+  `zero_vector_record` (#808/#810, `knowledge_status`). `knowledge_reembed_missing` gets no string
+  because it is already visible in `methods`. `docs/ipc-mcp-reference.md` now lists every feature
+  string with the issue that introduced it (a test keeps it in sync with the registry), and the
+  release runbook gains a feature-string coverage step.
+
 - **`lcg-eval` verifies the ontology the service loaded, and reports that (#881, ADR-0881).**
   `knowledge_get_ontology` gains an additive `ontology_hash` (the semantic `content_hash` of the
   loaded ontology, `"none"` without one; independent of `include_asserted`). After startup,
