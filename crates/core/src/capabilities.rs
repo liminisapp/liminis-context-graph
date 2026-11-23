@@ -46,6 +46,7 @@ pub const FEATURES: &[&str] = &[
     "cancel_on_disconnect",
     "chunk_progress",
     "chunk_supersede",
+    "document_max_bytes_env",
     "entity_provenance",
     "episode_source_fields",
     "exact_source_match",

@@ -230,8 +230,8 @@ during a rebuild and under any `--writable-groups` policy.
 
 ```json
 {"server_version": "0.19.1", "protocol_version": 1,
- "features": ["cancel_on_disconnect", "chunk_progress", "chunk_supersede", "entity_provenance", "episode_source_fields",
-              "exact_source_match", "hybrid_passage_search", "implicit_default_group_warning",
+ "features": ["cancel_on_disconnect", "chunk_progress", "chunk_supersede", "document_max_bytes_env", "entity_provenance",
+              "episode_source_fields", "exact_source_match", "hybrid_passage_search", "implicit_default_group_warning",
               "lint", "origin", "passage_legs", "process_document", "ready_for_reads",
               "retire_document", "search_min_score_env", "status_episode_breakdown", "test_providers",
               "unchanged_noop", "walk", "walk_provenance", "writable_groups", "zero_vector_record"],
@@ -261,6 +261,7 @@ by #885 name capabilities that shipped in 0.19.2 without one.
 | `cancel_on_disconnect` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | A client disconnect cancels an in-flight `knowledge_process_chunk` or `knowledge_process_document` before commit; a commit that has started finishes. |
 | `chunk_progress` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | `knowledge_process_chunk` streams `embed`, `extract` and `commit` progress frames when given a `_progress_token`. |
 | `chunk_supersede` | closest known origin: #785 ([ADR-0292](adr/0292-chunk-ingest-never-supersedes-unattributed-episodes.md)); seeded by #854 | Chunk ingest can supersede earlier episodes of the same document. |
+| `document_max_bytes_env` | #862 ([ADR-0862](adr/0862-document-max-bytes-strict-2mib-default.md)) | `knowledge_process_document` accepts documents up to a 2 MiB default that the operator can change with `LCG_DOCUMENT_MAX_BYTES`, validated strictly at startup. The configured value is not exposed. |
 | `entity_provenance` | #857 ([ADR-0857](adr/0857-find-entities-episode-provenance.md)) | `knowledge_find_entities` can return episode provenance and filter by `uuids`. |
 | `episode_source_fields` | #853 ([ADR-0853](adr/0853-episode-source-identity-and-exact-source-matching.md)) | Episodes carry stored `source_file` and `chunk_id`. Independent of `exact_source_match`. |
 | `exact_source_match` | #853 ([ADR-0853](adr/0853-episode-source-identity-and-exact-source-matching.md)) | `knowledge_delete_by_source` matches the source exactly, with the safe legacy rule for episodes that predate stored source fields. |
