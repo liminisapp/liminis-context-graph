@@ -46,7 +46,9 @@ In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
 **One request at a time per connection.** The service handles the requests on a single connection
 strictly in order: it reads one line, runs it to completion, writes the response, then reads the
-next. Pipelined requests wait in the socket buffer. So a `knowledge_find_entities` sent on the same
+next. Pipelined requests wait unserved until the current one finishes (while a
+`knowledge_process_chunk` or `knowledge_process_document` is running, the service watches the socket
+and holds up to 8 pipelined lines in memory; it stops reading beyond that). So a `knowledge_find_entities` sent on the same
 connection as a slow `knowledge_process_chunk` **waits behind the ingest**; a read is only fast on
 a connection that is not busy ingesting. Connections do not block one another (reads never take the
 write lock, and each connection has its own task), so:
