@@ -91,6 +91,17 @@ pub struct ConfigRun {
     pub grounded: Grounded,
     /// Per-origin reading; `None` when the fixture declares no origins.
     pub origin: Option<OriginData>,
+    /// Passage-level hits per scored question, for `--record-ranked`. Collected for retrievers
+    /// that expose per-hit fields only; never serialised into `report.json`.
+    pub ranked: Vec<RankedQuestion>,
+}
+
+/// One question's passage-level hits (an empty list is a real answer: zero passages returned).
+#[derive(Debug, Clone)]
+pub struct RankedQuestion {
+    pub question: String,
+    pub category: Category,
+    pub hits: Vec<super::mapping::RankedHit>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +137,8 @@ pub struct Report {
     pub meta: RunMeta,
     pub ingest: IngestCost,
     pub configs: Vec<ConfigOutcome>,
+    /// Digests of every input (issue #872); `None` only for a report built by hand in a test.
+    pub inputs: Option<super::inputs::InputDigests>,
 }
 
 /// Suffix of a caller-supplied-variants passage config (#802): `lcg-passages-variants`,
@@ -886,6 +899,58 @@ impl Report {
         }
     }
 
+    /// `## Inputs`: the digests recorded in `report.json`'s `inputs`, first 16 hex each.
+    fn inputs_section(&self, o: &mut String) {
+        let Some(i) = &self.inputs else {
+            return;
+        };
+        let _ = writeln!(o, "\n## Inputs\n");
+        let _ = writeln!(
+            o,
+            "Digests of every input (schema {}; first {} hex, full in `report.json`). Two reports are comparable with `--compare` only when `corpus`, `questions` and `k` match.\n",
+            super::inputs::SCHEMA_VERSION,
+            super::inputs::DISPLAY_LEN
+        );
+        let _ = writeln!(o, "| input | digest |");
+        let _ = writeln!(o, "|---|---|");
+        for k in super::inputs::KEYS {
+            let d = i.get(k).unwrap_or(super::inputs::UNKNOWN);
+            let _ = writeln!(o, "| {k} | `{}` |", super::inputs::short(d));
+        }
+    }
+
+    /// Headline pair (issue #872): nDCG@k on `lexical` (the `direct` category) against
+    /// `paraphrase`, per config. Omitted when either category has no questions, or no scored
+    /// config has both figures — never shown with placeholders.
+    fn lexical_vs_paraphrase(&self, o: &mut String) {
+        let count = |c: Category| self.meta.category_counts.get(&c).copied().unwrap_or(0);
+        if count(Category::Direct) == 0 || count(Category::Paraphrase) == 0 {
+            return;
+        }
+        let rows: Vec<(&str, f64, f64)> = self
+            .ran()
+            .into_iter()
+            .filter_map(|(c, r)| {
+                let d = r.by_category.get(&Category::Direct)?.ndcg?;
+                let p = r.by_category.get(&Category::Paraphrase)?.ndcg?;
+                Some((c.id.as_str(), d, p))
+            })
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+        let _ = writeln!(
+            o,
+            "\n**Lexical vs paraphrase** (nDCG@{}; `lexical` is the `direct` category):\n",
+            self.meta.k
+        );
+        let _ = writeln!(o, "| config | lexical (direct) | paraphrase | gap |");
+        let _ = writeln!(o, "|---|---|---|---|");
+        for (id, d, p) in rows {
+            let _ = writeln!(o, "| `{id}` | {d:.3} | {p:.3} | {:+.3} |", d - p);
+        }
+    }
+
     pub fn render_markdown(&self) -> String {
         let m = &self.meta;
         let mut o = String::new();
@@ -918,6 +983,8 @@ impl Report {
             }
         }
 
+        self.inputs_section(&mut o);
+
         let _ = writeln!(o, "\n## Overall\n");
         self.table(&mut o, None);
         let _ = writeln!(o, "\n{}", self.verdict_line(None));
@@ -925,6 +992,7 @@ impl Report {
         if let Some(n) = self.ceiling_note(None) {
             let _ = writeln!(o, "\n{n}");
         }
+        self.lexical_vs_paraphrase(&mut o);
 
         if let Some(note) = self.false_positive_note() {
             let _ = writeln!(o, "\n{note}");
@@ -1552,7 +1620,7 @@ impl Report {
             .iter()
             .map(|c| (c.label().to_string(), self.winners(Some(*c))))
             .collect();
-        json!({
+        let mut j = json!({
             "meta": {
                 "corpus_version": m.corpus_version, "corpus_hash": m.corpus_hash,
                 "questions_version": m.questions_version, "questions_hash": m.questions_hash,
@@ -1586,7 +1654,11 @@ impl Report {
                 "h1_reading": h1.key(),
                 "h2_reading": h2.key(),
             },
-        })
+        });
+        if let Some(i) = &self.inputs {
+            j["inputs"] = i.to_json();
+        }
+        j
     }
 }
 
@@ -1650,6 +1722,7 @@ mod tests {
             query_errors: vec![],
             grounded: Grounded::Skipped("no judge".into()),
             origin: None,
+            ranked: vec![],
         }))
     }
 
@@ -1677,6 +1750,7 @@ mod tests {
         Report {
             meta,
             ingest: IngestCost::default(),
+            inputs: None,
             configs: vec![
                 ConfigOutcome {
                     id: "lcg-entities-facts-belief".into(),
@@ -2440,5 +2514,62 @@ mod tests {
             Some(false)
         );
         assert!(r.rerank_acceptance().is_some());
+    }
+
+    #[test]
+    fn inputs_block_is_added_to_json_and_shown_short_in_markdown() {
+        let mut r = report();
+        let full = "ab".repeat(32);
+        r.inputs = Some(crate::retrieval::inputs::InputDigests {
+            corpus: full.clone(),
+            questions: full.clone(),
+            variants: "none".into(),
+            cassette: "unknown".into(),
+            embedder_model: full.clone(),
+            extractor: full.clone(),
+            service_binary: full.clone(),
+            service_env: full.clone(),
+            service_env_names: vec!["LCG_X".into()],
+        });
+        let j = r.to_json();
+        assert_eq!(j["inputs"]["schema_version"], 1);
+        assert_eq!(j["inputs"]["corpus"], full.as_str());
+        assert_eq!(j["inputs"]["variants"], "none");
+        assert_eq!(j["inputs"]["service_env_names"][0], "LCG_X");
+        let md = r.render_markdown();
+        assert!(md.contains("## Inputs"));
+        assert!(md.contains(&format!("`{}`", &full[..16])));
+        assert!(!md.contains(&full), "markdown shows only the first 16 hex");
+        // A report with no inputs (hand-built) omits the key rather than writing null.
+        r.inputs = None;
+        assert!(r.to_json().get("inputs").is_none());
+        assert!(!r.render_markdown().contains("## Inputs"));
+    }
+
+    #[test]
+    fn lexical_vs_paraphrase_pair_is_shown_when_both_categories_exist() {
+        let mut r = report();
+        let mk = |d: f64, p: f64| {
+            let mut v = cat_scores(Category::Direct, N, d, None);
+            v.extend(cat_scores(Category::Paraphrase, N, p, None));
+            v
+        };
+        r.configs[0].status = run(mk(0.9, 0.5));
+        r.configs[1].status = run(mk(0.8, 0.7));
+        r.meta.category_counts.insert(Category::Direct, N);
+        let md = r.render_markdown();
+        assert!(md.contains("**Lexical vs paraphrase**"), "{md}");
+        assert!(md.contains("| config | lexical (direct) | paraphrase | gap |"));
+        // Skipped configs get no row.
+        let block = md.split("**Lexical vs paraphrase**").nth(1).unwrap();
+        let block = block.split("\n\n").nth(1).unwrap();
+        assert_eq!(block.matches("| `").count(), 2, "{block}");
+        assert!(block.contains("`lcg-entities-facts-belief`") && !block.contains("qmd-rerank"));
+    }
+
+    #[test]
+    fn lexical_vs_paraphrase_pair_is_omitted_when_a_category_is_absent() {
+        // `report()` has temporal + paraphrase questions but no direct ones.
+        assert!(!report().render_markdown().contains("Lexical vs paraphrase"));
     }
 }
