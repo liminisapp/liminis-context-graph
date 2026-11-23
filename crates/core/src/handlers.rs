@@ -222,6 +222,7 @@ async fn handle(
         "knowledge_delete_chunk_episode" => handle_delete_chunk_episode(req, state).await,
         "knowledge_mark_chunk_removed" => handle_mark_chunk_removed(req, state).await,
         "knowledge_supersede_document" => handle_supersede_document(req, state).await,
+        "knowledge_retire_document" => handle_retire_document(req, state).await,
         "knowledge_stamp_origin" => handle_stamp_origin(req, state).await,
         "knowledge_delete_by_group" => handle_delete_by_group(req, state).await,
         "knowledge_reload_ontology" => handle_reload_ontology(req, state).await,
@@ -3352,7 +3353,8 @@ async fn handle_get_entities_by_source(
 }
 
 /// Deletes all Episodic nodes matching source_file, scoped to the required `group_ids`
-/// (issue #406 — an unscoped, all-groups delete is rejected outright).
+/// (issue #406 — an unscoped, all-groups delete is rejected outright). Orphaned entities are
+/// reported and optionally pruned, as in [`handle_delete_chunk_episode`] (issue #859).
 async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
     let p = &req.params;
     let source_file = p["source_file"]
@@ -3362,43 +3364,78 @@ async fn handle_delete_by_source(req: &IpcRequest, state: Arc<AppState>) -> Resu
         .to_string();
 
     let group_ids_owned = extract_required_group_ids(&p["group_ids"])?;
+    let prune_orphans = prune_orphans_param(p)?;
 
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
-    let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
-        let conn = db.connect()?;
-        let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
-        let (uuids, grouped) = conn.remove_episodes_by_source(&source_file, &gid_refs)?;
-        // Each affected group's own deletions are already bucketed by the group whose data they
-        // actually modified (issue #402, following ADR-0385's precedent for
-        // handle_delete_by_group) — flush each bucket to its own group's writer, never the
-        // default group's, so a group-scoped rebuild of any named group sees its own deletion on
-        // its own WAL stream.
-        for (group_id, mutations) in grouped {
-            let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
-            wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
-        }
-        Ok(uuids)
-    })
-    .await??;
+    let outcome =
+        tokio::task::spawn_blocking(move || -> Result<crate::db::DeleteOutcome, Error> {
+            let conn = db.connect()?;
+            let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
+            let mut outcome =
+                conn.remove_episodes_by_source(&source_file, &gid_refs, prune_orphans)?;
+            let grouped = std::mem::take(&mut outcome.grouped);
+            // Each affected group's own deletions are already bucketed by the group whose data they
+            // actually modified (issue #402, following ADR-0385's precedent for
+            // handle_delete_by_group) — flush each bucket to its own group's writer, never the
+            // default group's, so a group-scoped rebuild of any named group sees its own deletion on
+            // its own WAL stream.
+            for (group_id, mutations) in grouped {
+                let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+                wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+            }
+            Ok(outcome)
+        })
+        .await??;
     drop(_guard);
 
-    Ok(json!({
+    let mut resp = json!({
         "success": true,
         "source_file": req.params["source_file"],
-        "deleted_count": deleted_uuids.len(),
-        "deleted_uuids": deleted_uuids,
-    }))
+        "deleted_count": outcome.uuids.len(),
+        "deleted_uuids": outcome.uuids,
+    });
+    add_orphan_fields(
+        &mut resp,
+        outcome.orphaned_entity_uuids,
+        outcome.pruned_entity_count,
+        outcome.pruned_edge_count,
+    );
+    Ok(resp)
+}
+
+/// Optional `prune_orphans` param of the hard deletes (issue #859): absent or null means `false`.
+fn prune_orphans_param(p: &Value) -> Result<bool, Error> {
+    match &p["prune_orphans"] {
+        Value::Null => Ok(false),
+        Value::Bool(b) => Ok(*b),
+        _ => Err(Error::Ipc("prune_orphans must be a boolean".to_string())),
+    }
+}
+
+/// Adds the orphan-report fields every hard delete returns (issue #859): the entities the delete
+/// left with no mentioning episode, and how many entities / edges `prune_orphans` deleted (0 when
+/// it was not requested).
+fn add_orphan_fields(
+    resp: &mut Value,
+    orphans: Vec<String>,
+    pruned_entities: usize,
+    pruned_edges: usize,
+) {
+    resp["orphaned_entity_count"] = json!(orphans.len());
+    resp["orphaned_entity_uuids"] = json!(orphans);
+    resp["pruned_entity_count"] = json!(pruned_entities);
+    resp["pruned_edge_count"] = json!(pruned_edges);
 }
 
 /// Deletes all Episodic nodes for the given chunk_id, scoped to the required `group_ids`
 /// (issue #406 — an unscoped, all-groups delete is rejected outright).
 ///
-/// Note: only the episode nodes are removed. Entity nodes that were extracted
-/// from this chunk and are connected solely to the deleted episodes become
-/// orphaned — they remain in the graph. Callers should be aware of this outcome.
-/// A future entity-GC method may clean up such orphans.
+/// Only the episode nodes are removed by default. Entities left with no mentioning episode are
+/// *reported* as `orphaned_entity_uuids` (issue #859, ADR-0859) and stay in the graph; with
+/// `prune_orphans: true` they are deleted in the same operation, together with the edges left
+/// with no episodes.
 async fn handle_delete_chunk_episode(
     req: &IpcRequest,
     state: Arc<AppState>,
@@ -3411,32 +3448,43 @@ async fn handle_delete_chunk_episode(
         .to_string();
 
     let group_ids_owned = extract_required_group_ids(&p["group_ids"])?;
+    let prune_orphans = prune_orphans_param(p)?;
 
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let _guard = state.write_lock.write().await;
-    let deleted_uuids = tokio::task::spawn_blocking(move || -> Result<Vec<String>, Error> {
-        let conn = db.connect()?;
-        let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
-        let (uuids, grouped) = conn.remove_episodes_by_chunk_id(&chunk_id, &gid_refs)?;
-        // Same rationale as handle_delete_by_source above (issue #402): each affected group's
-        // own deletions are already bucketed by the group they actually modified — flush each
-        // bucket to its own group's writer, never the default group's.
-        for (group_id, mutations) in grouped {
-            let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
-            wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
-        }
-        Ok(uuids)
-    })
-    .await??;
+    let outcome =
+        tokio::task::spawn_blocking(move || -> Result<crate::db::DeleteOutcome, Error> {
+            let conn = db.connect()?;
+            let gid_refs: Vec<&str> = group_ids_owned.iter().map(String::as_str).collect();
+            let mut outcome =
+                conn.remove_episodes_by_chunk_id(&chunk_id, &gid_refs, prune_orphans)?;
+            let grouped = std::mem::take(&mut outcome.grouped);
+            // Same rationale as handle_delete_by_source above (issue #402): each affected group's
+            // own deletions are already bucketed by the group they actually modified — flush each
+            // bucket to its own group's writer, never the default group's.
+            for (group_id, mutations) in grouped {
+                let seq = wal_exec::wal_flush_ungrouped(&state_c, &group_id, mutations);
+                wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+            }
+            Ok(outcome)
+        })
+        .await??;
     drop(_guard);
 
-    Ok(json!({
+    let mut resp = json!({
         "success": true,
         "chunk_id": req.params["chunk_id"],
-        "deleted_count": deleted_uuids.len(),
-        "deleted_uuids": deleted_uuids,
-    }))
+        "deleted_count": outcome.uuids.len(),
+        "deleted_uuids": outcome.uuids,
+    });
+    add_orphan_fields(
+        &mut resp,
+        outcome.orphaned_entity_uuids,
+        outcome.pruned_entity_count,
+        outcome.pruned_edge_count,
+    );
+    Ok(resp)
 }
 
 /// `knowledge_mark_chunk_removed` (issue #705, FR-004): records that a chunk no longer exists in
@@ -3760,6 +3808,125 @@ async fn handle_supersede_document(req: &IpcRequest, state: Arc<AppState>) -> Re
             "recorded_at": crate::belief::format_us(recorded_us),
             "superseded_count": uuids.len(),
             "superseded_uuids": uuids,
+        }))
+    })
+    .await??;
+    drop(_guard);
+    Ok(response)
+}
+
+/// `knowledge_retire_document` (issue #859, ADR-0859): records that a whole document no longer
+/// exists at its source and has no successor. Supersedes every live episode of `doc_id` in
+/// `group_id` with reason `document_removed` — the graph stops believing what they asserted, while
+/// the episodes and the edges they produced stay readable as history. Nothing is deleted and
+/// `valid_at` / `invalid_at` are never written. Un-retiring is out of scope.
+///
+/// `effective_at` (optional, RFC 3339 with an offset) follows `knowledge_supersede_document`: the
+/// episodes are superseded at `max(recorded, effective_at)`, so a future date keeps the fact
+/// believed and in force until then. Unlike a document supersession there is no durable record, so
+/// a past `effective_at` behaves as "removed now" rather than retroactively.
+///
+/// Idempotent: a document with no live episode (already retired, or superseded) is a no-op
+/// reporting `superseded_count: 0` and writing nothing to the WAL. Every check runs before any
+/// mutation, so a rejection (unknown document, bad `effective_at`, origin conflict) writes nothing.
+/// Takes the per-document ingest lock first, then the write lock — the order
+/// `knowledge_process_document` uses — so it cannot interleave with an in-flight ingest.
+async fn handle_retire_document(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let group_id = extract_required_group_id(&p["group_id"])?;
+    let doc_id = required_string_param(p, "doc_id")?;
+    let effective_us = match &p["effective_at"] {
+        Value::Null => None,
+        Value::String(s) if !s.is_empty() => Some(
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map_err(|_| {
+                    Error::Ipc(format!(
+                        "effective_at must be an RFC 3339 timestamp with a timezone offset: {s}"
+                    ))
+                })?
+                .timestamp_micros(),
+        ),
+        _ => {
+            return Err(Error::Ipc(
+                "effective_at must be an RFC 3339 timestamp with a timezone offset".to_string(),
+            ))
+        }
+    };
+    let effective_at = effective_us.map(crate::belief::format_us);
+    let acting_origin =
+        crate::origin::parse_origin_param(p)?.unwrap_or(crate::origin::Origin::Primary);
+
+    let db = load_db(&state)?;
+    let state_c = Arc::clone(&state);
+    let _doc_lock = crate::document::ingest::lock_document(&state, &group_id, &doc_id).await;
+    // Chunk-mode calls carrying this `doc_id` do not take the document lock, so register each of
+    // the document's chunks as in flight — as `knowledge_mark_chunk_removed` does — *before*
+    // waiting for the write lock: a concurrent identical resubmission that arrives while this call
+    // queues then sees another call in flight, skips the `unchanged` no-op and cannot be told its
+    // content is believed and then have its episode retired underneath it (issue #859, ADR-0858).
+    // The names are only used as in-flight keys, never to select what is retired (that read happens
+    // under the write lock below), so reading them without the shared lock is safe.
+    let chunk_names = {
+        let (db_c, gid, did) = (Arc::clone(&db), group_id.clone(), doc_id.clone());
+        tokio::task::spawn_blocking(move || db_c.connect()?.chunk_names_for_doc(&gid, &did))
+            .await??
+    };
+    let _inflight: Vec<_> = chunk_names
+        .iter()
+        .map(|n| state.chunk_inflight_enter(&group_id, n).0)
+        .collect();
+    let _guard = state.write_lock.write().await;
+    let response = tokio::task::spawn_blocking(move || -> Result<Value, Error> {
+        let conn = db.connect()?;
+        if !conn.doc_is_known(&group_id, &doc_id)? {
+            return Err(Error::Ipc(format!(
+                "doc_id '{doc_id}' is unknown in group '{group_id}' (no episode carries that doc_id)"
+            )));
+        }
+        // A derived/answer actor may not end belief in a primary/external document (ADR-0752).
+        if !acting_origin.is_corroborating() {
+            let origins = conn.origins_for_doc(&group_id, &doc_id)?;
+            if origins.iter().any(|o| o.is_corroborating()) {
+                return Err(crate::origin::conflict(format!(
+                    "document '{doc_id}' in group '{group_id}' has primary or external origin; \
+                     a {:?} retirement would end belief in it and is refused",
+                    acting_origin.as_str()
+                )));
+            }
+        }
+        let recorded_at = crate::db::ingested_at_or_now("");
+        let recorded_us = crate::db::parse_timestamp_str(&recorded_at)
+            .map(|d| (d.unix_timestamp_nanos() / 1_000) as i64)
+            .ok_or_else(|| Error::Ipc("service clock produced an unparseable instant".into()))?;
+        let superseded_at = match (&effective_at, effective_us) {
+            (Some(eff), Some(us)) if us > recorded_us => eff.clone(),
+            _ => recorded_at,
+        };
+        // Untouched episodes, plus those an earlier retirement scheduled for a later instant (a
+        // second retire moves the date earlier, never later). Nothing else is ever overwritten.
+        let uuids = conn.retirable_episode_uuids_for_doc(&group_id, &doc_id, &superseded_at)?;
+        let existing_retirement_at = if uuids.is_empty() {
+            conn.existing_retirement_at(&group_id, &doc_id)?
+                .map(crate::belief::format_us)
+        } else {
+            None
+        };
+        if !uuids.is_empty() {
+            conn.supersede_episodes_by_uuids(&uuids, &superseded_at, None, "document_removed")?;
+            let seq = wal_exec::wal_flush_chunk(&state_c, &group_id, conn.drain_mutations());
+            wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+        }
+        Ok(json!({
+            "success": true,
+            "group_id": group_id,
+            "doc_id": doc_id,
+            "superseded_count": uuids.len(),
+            "superseded_uuids": uuids,
+            "superseded_at": if uuids.is_empty() { Value::Null } else { json!(superseded_at) },
+            "effective_at": effective_at,
+            // On a no-op: when the document's retirement is (or was) already in effect or
+            // scheduled, the instant it carries, so the caller can see why nothing changed.
+            "existing_retirement_at": existing_retirement_at,
         }))
     })
     .await??;

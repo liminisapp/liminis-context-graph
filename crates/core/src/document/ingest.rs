@@ -85,7 +85,8 @@ pub fn chunk_for_ingest(content: &str) -> Result<ChunkedDocument, Error> {
         return Err(Error::Ipc(
             "empty_document: the document has no content to extract (it is empty, whitespace-only \
              or headings-only); nothing was written. To retire a whole document use \
-             knowledge_supersede_document, knowledge_mark_chunk_removed or \
+             knowledge_retire_document (or knowledge_supersede_document when a successor \
+             exists); for one chunk use knowledge_mark_chunk_removed; to destroy the record use \
              knowledge_delete_by_source"
                 .to_string(),
         ));
@@ -123,7 +124,7 @@ fn doc_locks() -> &'static DocLockMap {
     LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-struct DocLockGuard {
+pub(crate) struct DocLockGuard {
     key: DocLockKey,
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
@@ -142,7 +143,11 @@ impl Drop for DocLockGuard {
     }
 }
 
-async fn lock_document(state: &Arc<AppState>, group_id: &str, doc_id: &str) -> DocLockGuard {
+pub(crate) async fn lock_document(
+    state: &Arc<AppState>,
+    group_id: &str,
+    doc_id: &str,
+) -> DocLockGuard {
     let key = (
         Arc::as_ptr(state) as usize,
         group_id.to_string(),

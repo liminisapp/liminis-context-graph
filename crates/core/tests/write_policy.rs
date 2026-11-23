@@ -381,6 +381,7 @@ async fn required_group_methods_are_checked() {
     let p = policy("a");
     for method in [
         "knowledge_supersede_document",
+        "knowledge_retire_document",
         "knowledge_canonicalize_relations",
         "knowledge_backfill_relation_types",
         "knowledge_backfill_summary_embeddings",
@@ -813,4 +814,55 @@ async fn clear_all_counts_groups_present_only_in_aux_tables() {
     let list = policy("a");
     let v = call(&f, Some(&list), "knowledge_clear_all", json!({})).await;
     assert_refused(&v, "all_groups_required");
+}
+
+/// Issue #859: `prune_orphans` re-checks and rewrites other groups' cross-group pointer rows, so
+/// when it is set the foreign pointer owners must be writable too — exactly like
+/// `knowledge_delete_by_group`. Without it the call writes only the named groups.
+#[tokio::test]
+async fn prune_orphans_needs_foreign_pointer_owners_writable() {
+    for method in [
+        "knowledge_delete_by_source",
+        "knowledge_delete_chunk_episode",
+    ] {
+        let f = fixture();
+        seed_pointer_layer_into_a(&f);
+        let params = |prune: Value| {
+            json!({"source_file": "nope.md", "chunk_id": "nope", "group_ids": ["a"],
+                   "prune_orphans": prune})
+        };
+        let before = wal_lines(&f.wal_dir);
+        // Target `a` is listed, but `layer` owns a pointer into it and is not: refused.
+        let v = call(&f, Some(&policy("a")), method, params(json!(true))).await;
+        assert_refused(&v, "group_not_writable");
+        assert_eq!(v["error"]["data"]["group_ids"], json!(["layer"]), "{v}");
+        assert_eq!(wal_lines(&f.wal_dir), before, "a refusal writes nothing");
+        // Without the flag the call stays inside `a`, so it is allowed as before.
+        for p in [json!(false), Value::Null] {
+            let v = call(&f, Some(&policy("a")), method, params(p)).await;
+            assert_not_refused(&v);
+        }
+        // With the owner listed too, the prune is allowed.
+        let v = call(&f, Some(&policy("a,layer")), method, params(json!(true))).await;
+        assert_not_refused(&v);
+        // A target that is itself not listed is still refused first.
+        let v = call(
+            &f,
+            Some(&policy("layer")),
+            method,
+            json!({"source_file": "x", "chunk_id": "x", "group_ids": ["a"], "prune_orphans": true}),
+        )
+        .await;
+        assert_refused(&v, "group_not_writable");
+    }
+}
+
+#[test]
+fn hard_deletes_are_classified_as_delete_episodes() {
+    for m in [
+        "knowledge_delete_by_source",
+        "knowledge_delete_chunk_episode",
+    ] {
+        assert_eq!(write_policy::classify(m), Some(WriteClass::DeleteEpisodes));
+    }
 }

@@ -137,6 +137,10 @@ pub enum WriteClass {
     PointerRebind,
     /// `knowledge_delete_by_group`: target groups plus foreign pointer owners.
     DeleteByGroup,
+    /// `knowledge_delete_by_source` / `knowledge_delete_chunk_episode`: `params.group_ids`, plus —
+    /// only when `prune_orphans` is `true` — the foreign pointer owners, because a prune re-checks
+    /// and rewrites other groups' cross-group pointer rows (issue #859, ADR-0385/ADR-0859).
+    DeleteEpisodes,
     /// Changes every group present.
     AllGroups,
     /// `knowledge_recover`: exempt while the DB is degraded (a degraded database must stay
@@ -196,6 +200,7 @@ pub const CLASSIFICATION: &[(&str, WriteClass)] = &[
     ("knowledge_reprocess_relation_types", WriteClass::GroupParam),
     // ── single required group ──
     ("knowledge_supersede_document", WriteClass::GroupRequired),
+    ("knowledge_retire_document", WriteClass::GroupRequired),
     ("knowledge_stamp_origin", WriteClass::GroupRequired),
     (
         "knowledge_canonicalize_relations",
@@ -212,8 +217,8 @@ pub const CLASSIFICATION: &[(&str, WriteClass)] = &[
     ("knowledge_reembed_missing", WriteClass::GroupRequired),
     ("knowledge_reload_ontology", WriteClass::GroupRequired),
     // ── required group array ──
-    ("knowledge_delete_by_source", WriteClass::GroupsRequired),
-    ("knowledge_delete_chunk_episode", WriteClass::GroupsRequired),
+    ("knowledge_delete_by_source", WriteClass::DeleteEpisodes),
+    ("knowledge_delete_chunk_episode", WriteClass::DeleteEpisodes),
     ("knowledge_mark_chunk_removed", WriteClass::GroupsRequired),
     // ── DB-derived / multi-group ──
     ("knowledge_rebuild_from_wal", WriteClass::RebuildFromWal),
@@ -384,6 +389,18 @@ pub async fn check_write_allowed(
                 require_all(policy, method, gids.clone())?;
                 let owners = pointer_owners_of(state, gids.into_iter().collect()).await?;
                 require_all(policy, method, owners)
+            }
+            Err(_) => Ok(()),
+        },
+        WriteClass::DeleteEpisodes => match extract_required_group_ids(&p["group_ids"]) {
+            Ok(gids) => {
+                require_all(policy, method, gids.clone())?;
+                // Without `prune_orphans` the call writes only the targeted groups' own streams.
+                if p["prune_orphans"].as_bool() == Some(true) {
+                    let owners = pointer_owners_of(state, gids.into_iter().collect()).await?;
+                    require_all(policy, method, owners)?;
+                }
+                Ok(())
             }
             Err(_) => Ok(()),
         },

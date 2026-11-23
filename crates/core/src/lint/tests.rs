@@ -188,6 +188,7 @@ fn stale_page_cause_mapping() {
     for (reason, kind, want) in [
         ("revision", None, "corrected"),
         ("chunk_removed", None, "removed"),
+        ("document_removed", None, "removed"),
         (
             "document_superseded",
             Some("document"),

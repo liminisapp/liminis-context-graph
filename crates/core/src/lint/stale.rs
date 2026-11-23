@@ -26,7 +26,7 @@ fn cause(ep: &LintEpisode) -> &'static str {
     }
     match ep.supersession_reason.as_deref() {
         Some("revision") => "corrected",
-        Some("chunk_removed") => "removed",
+        Some("chunk_removed" | "document_removed") => "removed",
         _ => "superseded",
     }
 }

@@ -357,7 +357,7 @@ pub fn rebind_pointers(
     source_group_id: &str,
     ts: &str,
 ) -> Result<(RebindCounts, GroupedMutations), Error> {
-    rebind_pointers_impl(conn, source_group_id, ts, false)
+    rebind_pointers_impl(conn, source_group_id, ts, false, None)
 }
 
 /// Like [`rebind_pointers`], but bypasses the `bound_at_seq` staleness gate entirely — every
@@ -379,7 +379,22 @@ pub fn rebind_pointers_forced(
     source_group_id: &str,
     ts: &str,
 ) -> Result<(RebindCounts, GroupedMutations), Error> {
-    rebind_pointers_impl(conn, source_group_id, ts, true)
+    rebind_pointers_impl(conn, source_group_id, ts, true, None)
+}
+
+/// Like [`rebind_pointers_forced`], but re-checks **only** the pointers whose cached
+/// `resolved_uuid` is one of `entity_uuids` (issue #859, ADR-0859). Used by `prune_orphans`: a
+/// partial prune deletes a handful of entities, so a pointer into `source_group_id` that did not
+/// resolve to one of them must be left exactly as it is — a full forced pass would bypass the
+/// `bound_at_seq` staleness gate and could rebind or invalidate pointers the delete never touched.
+pub fn rebind_pointers_to_entities(
+    conn: &Conn,
+    source_group_id: &str,
+    ts: &str,
+    entity_uuids: &[String],
+) -> Result<(RebindCounts, GroupedMutations), Error> {
+    let only: std::collections::HashSet<String> = entity_uuids.iter().cloned().collect();
+    rebind_pointers_impl(conn, source_group_id, ts, true, Some(&only))
 }
 
 fn rebind_pointers_impl(
@@ -387,6 +402,7 @@ fn rebind_pointers_impl(
     source_group_id: &str,
     ts: &str,
     force: bool,
+    only_resolved: Option<&std::collections::HashSet<String>>,
 ) -> Result<(RebindCounts, GroupedMutations), Error> {
     // The staleness signal is source_group_id's own applied position (issue #378 FR-011) — the
     // group being pointed *into*, and whose replay is what should drive re-binding (User Story
@@ -418,6 +434,15 @@ fn rebind_pointers_impl(
             };
             if existing.source_group_id != source_group_id {
                 continue;
+            }
+            if let Some(only) = only_resolved {
+                if !existing
+                    .resolved_uuid
+                    .as_ref()
+                    .is_some_and(|u| only.contains(u))
+                {
+                    continue;
+                }
             }
             if !force && existing.binding_state == BindingState::Bound {
                 if let (Some(bound_at), Some(current)) = (existing.bound_at_seq, current_seq) {

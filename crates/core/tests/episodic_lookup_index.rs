@@ -255,7 +255,7 @@ fn removal_paths_leave_no_stale_lookup_results() {
         conn.insert_episodic(&row).unwrap();
     }
 
-    conn.remove_episodes_by_chunk_id("c-remove-chunk", &[GROUP])
+    conn.remove_episodes_by_chunk_id("c-remove-chunk", &[GROUP], false)
         .unwrap();
     assert!(conn
         .live_episode_uuids_for_chunk("c-remove-chunk", GROUP, &[], AS_OF)
@@ -270,7 +270,8 @@ fn removal_paths_leave_no_stale_lookup_results() {
         .is_empty());
     assert!(!conn.doc_is_known(GROUP, "d-remove-one").unwrap());
 
-    conn.remove_episodes_by_source("src-r3", &[GROUP]).unwrap();
+    conn.remove_episodes_by_source("src-r3", &[GROUP], false)
+        .unwrap();
     assert!(conn
         .live_episode_uuids_for_chunk("c-remove-uuid", GROUP, &[], AS_OF)
         .unwrap()

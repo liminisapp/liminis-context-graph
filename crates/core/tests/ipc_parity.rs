@@ -8157,3 +8157,183 @@ async fn test_knowledge_add_episode_without_reference_time_defaults_to_now() {
         );
     }
 }
+
+// ── #859: knowledge_retire_document and the hard deletes' orphan fields ─────────────────────
+
+fn insert_doc_episode(db: &Arc<Db>, uuid: &str, name: &str, group: &str, doc_id: &str) {
+    let conn = db.connect().unwrap();
+    conn.insert_episodic(&lcg_core::EpisodicRow {
+        ingested_at: String::new(),
+        uuid: uuid.to_string(),
+        name: name.to_string(),
+        group_id: group.to_string(),
+        created_at: "2026-08-04 00:00:00".to_string(),
+        source: "text".to_string(),
+        source_description: "doc.md".to_string(),
+        content: format!("content of {name}"),
+        content_embedding: vec![0.1, 0.2, 0.3, 0.4],
+        valid_at: "2026-08-04 00:00:00".to_string(),
+        entity_edges: vec![],
+        attributes: "{}".to_string(),
+        doc_id: Some(doc_id.to_string()),
+        ..Default::default()
+    })
+    .unwrap();
+}
+
+/// Tier 1a-style shape pin: the retire response carries exactly the documented fields, an unknown
+/// document and a missing group are errors, and a repeat call is an idempotent zero.
+#[tokio::test]
+async fn parity_retire_document_response_shape() {
+    let (db, _dir) = make_db(4);
+    insert_doc_episode(&db, "ep-r1", "c1", "g", "D");
+    insert_doc_episode(&db, "ep-r2", "c2", "g", "D");
+    let state = make_state(Arc::clone(&db));
+
+    let v = dispatch_val(
+        8590,
+        "knowledge_retire_document",
+        json!({"group_id": "g", "doc_id": "D"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 8590);
+    let r = &v["result"];
+    assert_eq!(r["success"], true, "{v}");
+    assert_eq!(r["group_id"], "g");
+    assert_eq!(r["doc_id"], "D");
+    assert_eq!(r["superseded_count"], 2);
+    assert_eq!(r["superseded_uuids"], json!(["ep-r1", "ep-r2"]));
+    assert!(r["superseded_at"].is_string(), "{v}");
+    assert!(r["effective_at"].is_null(), "{v}");
+    assert!(r["existing_retirement_at"].is_null(), "{v}");
+
+    let eps = dispatch_val(
+        8591,
+        "knowledge_get_episodes",
+        json!({"group_ids": ["g"], "last_n": 10}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&eps, 8591);
+    let listed = eps["result"]["episodes"]
+        .as_array()
+        .expect("episodes array");
+    assert_eq!(listed.len(), 2, "nothing is deleted: {eps}");
+    assert!(
+        listed
+            .iter()
+            .all(|e| e["supersession_reason"] == "document_removed"),
+        "{eps}"
+    );
+
+    // Idempotent: zero episodes, and it reports the retirement that already took effect.
+    let again = dispatch_val(
+        8592,
+        "knowledge_retire_document",
+        json!({"group_id": "g", "doc_id": "D"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&again, 8592);
+    assert_eq!(again["result"]["superseded_count"], 0, "{again}");
+    assert!(
+        again["result"]["existing_retirement_at"].is_string(),
+        "{again}"
+    );
+
+    // Unknown document and omitted group are errors.
+    let unknown = dispatch_val(
+        8593,
+        "knowledge_retire_document",
+        json!({"group_id": "g", "doc_id": "nope"}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert!(unknown.get("error").is_some(), "{unknown}");
+    let no_group = dispatch_val(
+        8594,
+        "knowledge_retire_document",
+        json!({"doc_id": "D"}),
+        state,
+    )
+    .await;
+    assert!(no_group.get("error").is_some(), "{no_group}");
+}
+
+/// Tier 1c-style shape pin: both hard deletes carry the new orphan / prune fields, always present
+/// (empty and zero when nothing was stranded or pruning was not requested).
+#[tokio::test]
+async fn parity_hard_deletes_carry_orphan_and_prune_fields() {
+    for (id, method, params) in [
+        (
+            8595,
+            "knowledge_delete_by_source",
+            json!({"source_file": "doc.md", "group_ids": ["g"]}),
+        ),
+        (
+            8596,
+            "knowledge_delete_chunk_episode",
+            json!({"chunk_id": "c1", "group_ids": ["g"]}),
+        ),
+        (
+            8597,
+            "knowledge_delete_by_source",
+            json!({"source_file": "doc.md", "group_ids": ["g"], "prune_orphans": true}),
+        ),
+        (
+            8598,
+            "knowledge_delete_chunk_episode",
+            json!({"chunk_id": "c1", "group_ids": ["g"], "prune_orphans": true}),
+        ),
+    ] {
+        let (db, _dir) = make_db(4);
+        insert_doc_episode(&db, "ep-d1", "c1", "g", "D");
+        let state = make_state(db);
+        let v = dispatch_val(id, method, params, state).await;
+        assert_ok_resp(&v, id);
+        let r = &v["result"];
+        assert_eq!(r["success"], true, "{method}: {v}");
+        assert_eq!(r["deleted_count"], 1, "{method}: {v}");
+        assert_eq!(r["deleted_uuids"], json!(["ep-d1"]), "{method}: {v}");
+        assert_eq!(r["orphaned_entity_uuids"], json!([]), "{method}: {v}");
+        assert_eq!(r["orphaned_entity_count"], 0, "{method}: {v}");
+        assert_eq!(r["pruned_entity_count"], 0, "{method}: {v}");
+        assert_eq!(r["pruned_edge_count"], 0, "{method}: {v}");
+    }
+}
+
+/// `prune_orphans` must be a boolean on both deletes, and a bad value deletes nothing.
+#[tokio::test]
+async fn parity_hard_delete_rejects_non_boolean_prune_orphans() {
+    let (db, _dir) = make_db(4);
+    insert_doc_episode(&db, "ep-d2", "c1", "g", "D");
+    let state = make_state(db);
+    for (id, method, params) in [
+        (
+            8599,
+            "knowledge_delete_by_source",
+            json!({"source_file": "doc.md", "group_ids": ["g"], "prune_orphans": "yes"}),
+        ),
+        (
+            8600,
+            "knowledge_delete_chunk_episode",
+            json!({"chunk_id": "c1", "group_ids": ["g"], "prune_orphans": 1}),
+        ),
+    ] {
+        let v = dispatch_val(id, method, params, Arc::clone(&state)).await;
+        assert!(v.get("error").is_some(), "{method}: {v}");
+    }
+    let eps = dispatch_val(
+        8601,
+        "knowledge_get_episodes",
+        json!({"group_ids": ["g"], "last_n": 10}),
+        state,
+    )
+    .await;
+    assert_eq!(
+        eps["result"]["episodes"].as_array().unwrap().len(),
+        1,
+        "{eps}"
+    );
+}

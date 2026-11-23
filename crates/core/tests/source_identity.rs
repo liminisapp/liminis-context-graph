@@ -851,9 +851,10 @@ async fn v0_19_1_database_upgrades_and_stays_readable_by_v0_19_1() {
         conn.insert_episodic(&new_row).unwrap();
         // Deleting `https://a.com` takes the new row and leaves the upgraded legacy row (which
         // the legacy rule attributes to `https://a.com:8443/x`) alone.
-        let (deleted, _) = conn
-            .remove_episodes_by_source("https://a.com", &[G])
-            .unwrap();
+        let deleted = conn
+            .remove_episodes_by_source("https://a.com", &[G], false)
+            .unwrap()
+            .uuids;
         assert_eq!(deleted, vec!["new-1".to_string()]);
         conn.insert_episodic(&new_row).unwrap();
     }

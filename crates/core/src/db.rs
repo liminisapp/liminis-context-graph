@@ -30,6 +30,21 @@ type EpisodeInfoMap = HashMap<String, (Vec<String>, Vec<String>)>;
 /// group's own WAL stream instead of all landing on one caller-named group (FR-001).
 pub type GroupedMutations = BTreeMap<String, Vec<(String, serde_json::Value)>>;
 
+/// What a hard delete (`remove_episodes_by_source` / `remove_episodes_by_chunk_id`) did (issue
+/// #859, ADR-0859).
+#[derive(Debug, Default)]
+pub struct DeleteOutcome {
+    /// UUIDs of the deleted episodes.
+    pub uuids: Vec<String>,
+    /// Deletion mutations bucketed by the `group_id` each one removed data from (issue #402).
+    pub grouped: GroupedMutations,
+    /// Entities that lost a mention in this delete and are now mentioned by no existing episode.
+    pub orphaned_entity_uuids: Vec<String>,
+    /// Entities / edges deleted by `prune_orphans`; always 0 without it.
+    pub pruned_entity_count: usize,
+    pub pruned_edge_count: usize,
+}
+
 pub struct Db {
     inner: lbug::Database,
     /// Observability for the `Entity.lookup_key` ART-index-backed lookup (issue #221,
@@ -1636,45 +1651,25 @@ impl<'db> Conn<'db> {
     /// for free — splitting into N queries needs the same explicit guard so a failure partway
     /// through doesn't leave a partial cross-group delete.
     ///
-    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes. See `remove_episode`.
+    /// Deletes `Episodic` nodes only, unless `prune_orphans` is set (issue #859, ADR-0859): the
+    /// orphaned entities are then reported *and* deleted with their episode-less edges. Without it
+    /// they are only reported in [`DeleteOutcome::orphaned_entity_uuids`]. See
+    /// [`Self::delete_episodes_per_group`].
     pub fn remove_episodes_by_source(
         &self,
         source_file: &str,
         group_ids: &[&str],
-    ) -> Result<(Vec<String>, GroupedMutations), Error> {
+        prune_orphans: bool,
+    ) -> Result<DeleteOutcome, Error> {
         if group_ids.is_empty() {
             return Err(Error::Ipc(
                 "remove_episodes_by_source requires a non-empty group_ids".to_string(),
             ));
         }
-        self.exec_transaction_control("BEGIN TRANSACTION")?;
-        let mut grouped: GroupedMutations = GroupedMutations::new();
-        let mut all_uuids: Vec<String> = Vec::new();
-        let mutate_result = (|| -> Result<(), Error> {
-            for gid in group_ids {
-                let single = [*gid];
-                let uuids = self.episode_uuids_for_source(source_file, Some(&single), None)?;
-                if !uuids.is_empty() {
-                    self.exec_params(
-                        "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
-                        serde_json::json!({ "uuids": uuids }),
-                    )?;
-                    self.drain_mutations_into(&mut grouped, gid);
-                    all_uuids.extend(uuids);
-                }
-            }
-            Ok(())
-        })();
-
-        match mutate_result {
-            Ok(()) => self.exec_transaction_control("COMMIT")?,
-            Err(e) => {
-                let _ = self.exec_transaction_control("ROLLBACK");
-                return Err(e);
-            }
-        }
-
-        Ok((all_uuids, grouped))
+        self.delete_episodes_per_group(group_ids, prune_orphans, |gid| {
+            let single = [gid];
+            self.episode_uuids_for_source(source_file, Some(&single), None)
+        })
     }
 
     /// Deletes all Episodic nodes whose name (chunk identifier) matches chunk_id, scoped to the
@@ -1683,8 +1678,7 @@ impl<'db> Conn<'db> {
     /// (issue #402).
     ///
     /// Matches on ep.name (which always stores chunk_id) rather than source_description.
-    /// Orphaned entities connected only to the deleted episodes are NOT removed — callers
-    /// should be aware that entity nodes may become disconnected after this call.
+    /// Entities left with no mentioning episode are reported, and only deleted on opt-in.
     ///
     /// group_ids is mandatory and must be non-empty (issue #406) — an unscoped, all-groups
     /// query is not representable here; callers must resolve a group scope before calling.
@@ -1694,12 +1688,13 @@ impl<'db> Conn<'db> {
     /// Runs one match+delete per `group_id`, wrapped in `BEGIN TRANSACTION`/`COMMIT` — see
     /// `remove_episodes_by_source`'s doc comment above for the full rationale (issue #402).
     ///
-    /// Only ever `DETACH DELETE`s `Episodic` nodes, never `Entity` nodes. See `remove_episode`.
+    /// Same orphan reporting / `prune_orphans` contract as [`Self::remove_episodes_by_source`].
     pub fn remove_episodes_by_chunk_id(
         &self,
         chunk_id: &str,
         group_ids: &[&str],
-    ) -> Result<(Vec<String>, GroupedMutations), Error> {
+        prune_orphans: bool,
+    ) -> Result<DeleteOutcome, Error> {
         if group_ids.is_empty() {
             return Err(Error::Ipc(
                 "remove_episodes_by_chunk_id requires a non-empty group_ids".to_string(),
@@ -1707,27 +1702,80 @@ impl<'db> Conn<'db> {
         }
         let match_sql =
             "MATCH (ep:Episodic) WHERE ep.name = $name AND ep.group_id IN $gids RETURN ep.uuid";
+        self.delete_episodes_per_group(group_ids, prune_orphans, |gid| {
+            let single = [gid];
+            let params = serde_json::json!({ "name": chunk_id, "gids": single });
+            Ok(self
+                .query_params(match_sql, params)?
+                .into_iter()
+                .map(|row| value_as_string(&row[0]))
+                .collect())
+        })
+    }
 
+    /// The shared per-group body of the two hard deletes (issue #859, ADR-0859). One
+    /// `BEGIN TRANSACTION`/`COMMIT` around a loop over `group_ids`; each group's own mutations are
+    /// drained into its own bucket immediately after (issue #402), so a pruned entity or edge lands
+    /// on the WAL stream of the group it was removed from.
+    ///
+    /// Per group: (1) `find` selects the episodes to delete; (2) the entities those episodes
+    /// mention are collected *before* the delete, since `DETACH DELETE` takes the `MENTIONS` rels
+    /// with it; (3) the episodes are deleted; (4) a collected entity that no remaining episode —
+    /// superseded ones included — mentions is an **orphan** and is reported. Only entities that lost
+    /// a mention here are candidates, so pre-existing orphans and asserted-only entities are never
+    /// reported or pruned. An unmentioned entity that a same-group edge still supports — an asserted
+    /// edge (no `episodes`) or one citing a surviving episode — is not an orphan either
+    /// ([`Self::split_supported`]). With `prune_orphans`, (5) the group's `RelatesToNode_` rows left
+    /// with no surviving episode, and those hopping to an orphan, are deleted, then (6) the orphans.
+    /// Edges go first so none is left dangling; a warranted edge (empty `episodes`) is never a
+    /// candidate. (7) Pruning ends with a cross-group pointer re-check limited to the pointers that
+    /// resolved to a pruned entity ([`crate::cross_group::rebind_pointers_to_entities`]), so another
+    /// group's pointer at one records `unbound` rather than going stale while every other pointer is
+    /// left alone. That re-check writes the pointer owners' WAL streams, which is why the write
+    /// policy requires them to be writable when `prune_orphans` is set.
+    fn delete_episodes_per_group(
+        &self,
+        group_ids: &[&str],
+        prune_orphans: bool,
+        find: impl Fn(&str) -> Result<Vec<String>, Error>,
+    ) -> Result<DeleteOutcome, Error> {
         self.exec_transaction_control("BEGIN TRANSACTION")?;
-        let mut grouped: GroupedMutations = GroupedMutations::new();
-        let mut all_uuids: Vec<String> = Vec::new();
+        let mut out = DeleteOutcome::default();
         let mutate_result = (|| -> Result<(), Error> {
             for gid in group_ids {
-                let single = [*gid];
-                let params = serde_json::json!({ "name": chunk_id, "gids": single });
-                let uuids: Vec<String> = self
-                    .query_params(match_sql, params)?
-                    .into_iter()
-                    .map(|row| value_as_string(&row[0]))
-                    .collect();
-                if !uuids.is_empty() {
-                    self.exec_params(
-                        "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
-                        serde_json::json!({ "uuids": uuids }),
-                    )?;
-                    self.drain_mutations_into(&mut grouped, gid);
-                    all_uuids.extend(uuids);
+                let uuids = find(gid)?;
+                if uuids.is_empty() {
+                    continue;
                 }
+                let candidates = self.entities_mentioned_by_episodes(gid, &uuids)?;
+                let edge_candidates = if prune_orphans {
+                    self.edges_citing_episodes(gid, &uuids)?
+                } else {
+                    Vec::new()
+                };
+                self.exec_params(
+                    "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids DETACH DELETE ep",
+                    serde_json::json!({ "uuids": uuids }),
+                )?;
+                self.drain_mutations_into(&mut out.grouped, gid);
+
+                let still_mentioned = self.entities_with_any_mention(&candidates)?;
+                let unmentioned: Vec<String> = candidates
+                    .into_iter()
+                    .filter(|u| !still_mentioned.contains(u))
+                    .collect();
+                let (orphans, orphan_edges) = self.split_supported(gid, unmentioned)?;
+                if prune_orphans {
+                    self.prune_after_delete(
+                        gid,
+                        &orphans,
+                        &orphan_edges,
+                        &edge_candidates,
+                        &mut out,
+                    )?;
+                }
+                out.uuids.extend(uuids);
+                out.orphaned_entity_uuids.extend(orphans);
             }
             Ok(())
         })();
@@ -1739,8 +1787,225 @@ impl<'db> Conn<'db> {
                 return Err(e);
             }
         }
+        Ok(out)
+    }
 
-        Ok((all_uuids, grouped))
+    /// Splits the entities no episode mentions into `(orphans, edges hopping to an orphan)`.
+    ///
+    /// An unmentioned entity is **not** an orphan while a same-group edge still supports it: an
+    /// edge with no `episodes` (asserted / warranted, ADR-0859) or one citing an episode that still
+    /// exists. Such an entity is neither reported nor pruned, so `prune_orphans` can never erase an
+    /// asserted relationship or an extracted edge a surviving episode cites. What remains of an
+    /// orphan's edges is, by construction, unsupported, and goes with it.
+    fn split_supported(
+        &self,
+        gid: &str,
+        unmentioned: Vec<String>,
+    ) -> Result<(Vec<String>, Vec<String>), Error> {
+        let hops = self.edge_hops_of_entities(gid, &unmentioned)?;
+        let cited: Vec<String> = hops
+            .iter()
+            .flat_map(|(_, _, eps)| eps.iter().cloned())
+            .collect();
+        let surviving = self.existing_episode_uuids(&cited)?;
+        let supported: std::collections::HashSet<&String> = hops
+            .iter()
+            .filter(|(_, _, eps)| eps.is_empty() || eps.iter().any(|e| surviving.contains(e)))
+            .map(|(entity, _, _)| entity)
+            .collect();
+        let orphans: Vec<String> = unmentioned
+            .iter()
+            .filter(|u| !supported.contains(u))
+            .cloned()
+            .collect();
+        let orphan_set: std::collections::HashSet<&String> = orphans.iter().collect();
+        let edges: BTreeSet<String> = hops
+            .iter()
+            .filter(|(entity, _, _)| orphan_set.contains(entity))
+            .map(|(_, edge, _)| edge.clone())
+            .collect();
+        Ok((orphans, edges.into_iter().collect()))
+    }
+
+    /// Steps (5)–(7) of [`Self::delete_episodes_per_group`] for one group.
+    fn prune_after_delete(
+        &self,
+        gid: &str,
+        orphans: &[String],
+        orphan_edges: &[String],
+        edge_candidates: &[(String, Vec<String>)],
+        out: &mut DeleteOutcome,
+    ) -> Result<(), Error> {
+        // An edge is left with no episodes when none of the episodes it cited still exists.
+        let cited: Vec<String> = edge_candidates
+            .iter()
+            .flat_map(|(_, eps)| eps.iter().cloned())
+            .collect();
+        let surviving = self.existing_episode_uuids(&cited)?;
+        let mut edges: BTreeSet<String> = edge_candidates
+            .iter()
+            .filter(|(_, eps)| !eps.iter().any(|e| surviving.contains(e)))
+            .map(|(u, _)| u.clone())
+            .collect();
+        // An edge hopping to a pruned entity must not outlive it.
+        edges.extend(orphan_edges.iter().cloned());
+        let edges: Vec<String> = edges.into_iter().collect();
+        if edges.is_empty() && orphans.is_empty() {
+            return Ok(());
+        }
+        self.delete_relates_to_direct_by_uuids(&edges)?;
+        self.delete_relates_to_by_uuids(&edges)?;
+        self.delete_entities_by_uuids(orphans)?;
+        self.drain_mutations_into(&mut out.grouped, gid);
+        out.pruned_edge_count += edges.len();
+        out.pruned_entity_count += orphans.len();
+        if !orphans.is_empty() {
+            let ts = ingested_at_or_now("");
+            let (_, rebind) =
+                crate::cross_group::rebind_pointers_to_entities(self, gid, &ts, orphans)?;
+            for (owning, mutations) in rebind {
+                out.grouped.entry(owning).or_default().extend(mutations);
+            }
+        }
+        Ok(())
+    }
+
+    /// UUIDs of the `group_id` entities mentioned by any of the given episodes. Sorted.
+    fn entities_mentioned_by_episodes(
+        &self,
+        group_id: &str,
+        episode_uuids: &[String],
+    ) -> Result<Vec<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) \
+             WHERE ep.uuid IN $uuids AND n.group_id = $gid RETURN DISTINCT n.uuid",
+            serde_json::json!({ "uuids": episode_uuids, "gid": group_id }),
+        )?;
+        let mut v: Vec<String> = rows.into_iter().map(|r| value_as_string(&r[0])).collect();
+        v.sort();
+        Ok(v)
+    }
+
+    /// The subset of `entity_uuids` mentioned by at least one existing episode — superseded
+    /// episodes count, so readable history is never pruned.
+    fn entities_with_any_mention(
+        &self,
+        entity_uuids: &[String],
+    ) -> Result<std::collections::HashSet<String>, Error> {
+        if entity_uuids.is_empty() {
+            return Ok(Default::default());
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic)-[:MENTIONS]->(n:Entity) WHERE n.uuid IN $uuids \
+             RETURN DISTINCT n.uuid",
+            serde_json::json!({ "uuids": entity_uuids }),
+        )?;
+        Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
+    }
+
+    /// `(uuid, episodes)` of the `group_id` edges that cite at least one of `episode_uuids`. A
+    /// group-scoped scan filtered in Rust: list membership has no index, and this runs only when
+    /// pruning was requested.
+    fn edges_citing_episodes(
+        &self,
+        group_id: &str,
+        episode_uuids: &[String],
+    ) -> Result<Vec<(String, Vec<String>)>, Error> {
+        let doomed: std::collections::HashSet<&String> = episode_uuids.iter().collect();
+        let rows = self.query_params(
+            "MATCH (rn:RelatesToNode_) WHERE rn.group_id = $gid RETURN rn.uuid, rn.episodes",
+            serde_json::json!({ "gid": group_id }),
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (value_as_string(&r[0]), value_as_str_list(&r[1])))
+            .filter(|(_, eps)| eps.iter().any(|e| doomed.contains(e)))
+            .collect())
+    }
+
+    /// The subset of `episode_uuids` that still exist.
+    fn existing_episode_uuids(
+        &self,
+        episode_uuids: &[String],
+    ) -> Result<std::collections::HashSet<String>, Error> {
+        if episode_uuids.is_empty() {
+            return Ok(Default::default());
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids RETURN ep.uuid",
+            serde_json::json!({ "uuids": episode_uuids }),
+        )?;
+        Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
+    }
+
+    /// `(entity uuid, edge uuid, edge episodes)` for every `group_id`-owned edge with a hop to or
+    /// from any of `entity_uuids`.
+    fn edge_hops_of_entities(
+        &self,
+        group_id: &str,
+        entity_uuids: &[String],
+    ) -> Result<Vec<(String, String, Vec<String>)>, Error> {
+        if entity_uuids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out = BTreeSet::new();
+        for q in [
+            "MATCH (rn:RelatesToNode_)-[:RELATES_TO]->(n:Entity) \
+             WHERE n.uuid IN $uuids AND rn.group_id = $gid RETURN DISTINCT n.uuid, rn.uuid, rn.episodes",
+            "MATCH (n:Entity)-[:RELATES_TO]->(rn:RelatesToNode_) \
+             WHERE n.uuid IN $uuids AND rn.group_id = $gid RETURN DISTINCT n.uuid, rn.uuid, rn.episodes",
+        ] {
+            let rows = self.query_params(
+                q,
+                serde_json::json!({ "uuids": entity_uuids, "gid": group_id }),
+            )?;
+            out.extend(rows.into_iter().map(|r| {
+                (
+                    value_as_string(&r[0]),
+                    value_as_string(&r[1]),
+                    value_as_str_list(&r[2]),
+                )
+            }));
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    /// `DETACH DELETE`s the `Entity` nodes with these uuids (issue #859). Uuid-keyed, so WAL replay
+    /// reproduces it and a zero-row replay is a harmless no-op. No index invalidation is needed
+    /// (ADR-0038/ADR-0221: `Entity.lookup_key` is maintained by lbug).
+    pub fn delete_entities_by_uuids(&self, uuids: &[String]) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (e:Entity) WHERE e.uuid IN $uuids DETACH DELETE e",
+            serde_json::json!({ "uuids": uuids }),
+        )
+    }
+
+    /// `DETACH DELETE`s the `RelatesToNode_` nodes with these uuids (issue #859). Removes their
+    /// two-hop `RELATES_TO` rels; the direct `Entity→Entity` compat rel is separate, see
+    /// [`Self::delete_relates_to_direct_by_uuids`].
+    pub fn delete_relates_to_by_uuids(&self, uuids: &[String]) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (rn:RelatesToNode_) WHERE rn.uuid IN $uuids DETACH DELETE rn",
+            serde_json::json!({ "uuids": uuids }),
+        )
+    }
+
+    /// Batched [`Self::delete_relates_to_direct`]: removes the direct `Entity→Entity` compat rels
+    /// carrying these edge uuids, which `DETACH DELETE` of the `RelatesToNode_` does not reach.
+    pub fn delete_relates_to_direct_by_uuids(&self, uuids: &[String]) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (src:Entity)-[r:RELATES_TO]->(dst:Entity) WHERE r.uuid IN $uuids DELETE r",
+            serde_json::json!({ "uuids": uuids }),
+        )
     }
 
     // ── Belief time: supersession and lookups (issue #705, ADR-0705) ───────────
@@ -1760,7 +2025,8 @@ impl<'db> Conn<'db> {
             "MATCH (ep:Episodic) \
              WHERE ep.name = $name AND ep.group_id = $gid \
              AND (ep.superseded_at IS NULL \
-                  OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+                  OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+                       AND ep.superseded_at > $live_at)) \
              RETURN ep.uuid",
             serde_json::json!({ "name": chunk_id, "gid": group_id, "live_at": as_of }),
         )?;
@@ -1786,7 +2052,8 @@ impl<'db> Conn<'db> {
             "MATCH (ep:Episodic) \
              WHERE ep.name = $name AND ep.group_id = $gid \
              AND (ep.superseded_at IS NULL \
-                  OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+                  OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+                       AND ep.superseded_at > $live_at)) \
              RETURN ep.uuid, ep.source_description, ep.write_path",
             serde_json::json!({ "name": chunk_id, "gid": group_id, "live_at": as_of }),
         )?;
@@ -1819,7 +2086,8 @@ impl<'db> Conn<'db> {
             "MATCH (ep:Episodic) \
              WHERE ep.name = $name AND ep.group_id = $gid \
              AND (ep.superseded_at IS NULL \
-                  OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+                  OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+                       AND ep.superseded_at > $live_at)) \
              RETURN ep.uuid, ep.content, ep.attributes, ep.origin, ep.source_file, \
              ep.source_description, ep.valid_at, ep.doc_id, ep.write_path, ep.chunk_hash, \
              ep.superseded_at",
@@ -1862,7 +2130,8 @@ impl<'db> Conn<'db> {
             return Ok(());
         }
         const GUARD: &str = "ep.uuid IN $uuids AND (ep.superseded_at IS NULL \
-             OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $superseded_at))";
+             OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+                  AND ep.superseded_at > $superseded_at))";
         match superseded_by {
             Some(by) => self.exec_params(
                 &format!(
@@ -1936,6 +2205,62 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
              AND ep.superseded_at IS NULL RETURN ep.uuid ORDER BY ep.uuid",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        )?;
+        Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
+    }
+
+    /// UUIDs of the episodes of `doc_id` in `group_id` that `knowledge_retire_document` would end at
+    /// `superseded_at` (issue #859): the untouched ones, plus those a retirement already scheduled
+    /// for a *later* instant, so a second retire can move the date earlier. Same predicate as the
+    /// guard of [`Self::supersede_episodes_by_uuids`], so listing and writing never disagree. An
+    /// episode a document supersession or a correction already ended is never included.
+    pub fn retirable_episode_uuids_for_doc(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+        superseded_at: &str,
+    ) -> Result<Vec<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             AND (ep.superseded_at IS NULL \
+                  OR (ep.supersession_reason = 'document_removed' \
+                      AND ep.superseded_at > $superseded_at)) \
+             RETURN ep.uuid ORDER BY ep.uuid",
+            serde_json::json!({
+                "gid": group_id,
+                "doc_id": doc_id,
+                "superseded_at": superseded_at,
+            }),
+        )?;
+        Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
+    }
+
+    /// The earliest `superseded_at` (µs since the epoch) any `document_removed` episode of `doc_id`
+    /// carries, past or scheduled — what a no-op retire reports so the caller can see why nothing
+    /// changed.
+    pub fn existing_retirement_at(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+    ) -> Result<Option<i64>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             AND ep.supersession_reason = 'document_removed' \
+             RETURN ep.superseded_at ORDER BY ep.superseded_at ASC LIMIT 1",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        )?;
+        Ok(rows
+            .first()
+            .and_then(|r| value_as_optional_timestamp_micros(&r[0])))
+    }
+
+    /// Distinct chunk names (`ep.name`) of `doc_id`'s episodes in `group_id`, whatever their
+    /// liveness — what a retire registers as in flight (issue #859, ADR-0858).
+    pub fn chunk_names_for_doc(&self, group_id: &str, doc_id: &str) -> Result<Vec<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             RETURN DISTINCT ep.name ORDER BY ep.name",
             serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
         )?;
         Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
@@ -2115,10 +2440,15 @@ impl<'db> Conn<'db> {
     ) -> Result<Vec<crate::document::diff::BaselineEpisode>, Error> {
         let rows = self.query_params(
             "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
-             AND ep.superseded_at IS NULL \
+             AND (ep.superseded_at IS NULL \
+                  OR (ep.supersession_reason = 'document_removed' AND ep.superseded_at > $live_at)) \
              RETURN ep.uuid, ep.name, ep.write_path, ep.revision_id, ep.revision_committed_at, \
              ep.heading_path, ep.chunk_hash, ep.byte_start, ep.content",
-            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+            serde_json::json!({
+                "gid": group_id,
+                "doc_id": doc_id,
+                "live_at": ingested_at_or_now(""),
+            }),
         )?;
         Ok(rows
             .into_iter()
@@ -3996,7 +4326,8 @@ impl<'db> Conn<'db> {
         if let Some(at) = live_at {
             cypher.push_str(
                 " AND (ep.superseded_at IS NULL \
-                   OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+                   OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+                       AND ep.superseded_at > $live_at)) \
                  AND (ep.revision_id IS NULL OR ep.revision_committed_at IS NOT NULL)",
             );
             params["live_at"] = serde_json::json!(at);

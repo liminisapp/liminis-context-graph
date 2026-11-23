@@ -1058,11 +1058,11 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
-## IPC methods (59)
+## IPC methods (60)
 
-The socket dispatch handles **59 methods**: 58 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **60 methods**: 59 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (59) and the MCP tool registry (58, below) differ by exactly one — `health_check` is
+surface (60) and the MCP tool registry (59, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool. MCP clients have no health tool; the `ok` / `healthy` /
 `ready_for_reads` semantics they would otherwise look for are in the
 [Health check contract](#health-check-contract) below
@@ -1082,7 +1082,7 @@ not exposed as an MCP tool. MCP clients have no health tool; the `ok` / `healthy
 | Correction reads | `knowledge_get_correction_changes`, `knowledge_get_affected_work` |
 | Notebook health | `knowledge_lint` |
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_delete_by_group`, `knowledge_clear_all` |
-| Supersession | `knowledge_mark_chunk_removed`, `knowledge_supersede_document` |
+| Supersession | `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_retire_document` |
 | Episode origin | `knowledge_stamp_origin` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
 | Ontology | `knowledge_reload_ontology` |
@@ -1184,7 +1184,7 @@ during a rebuild and under any `--writable-groups` policy.
  "features": ["chunk_supersede", "entity_provenance", "episode_source_fields",
               "exact_source_match", "hybrid_passage_search", "implicit_default_group_warning",
               "lint", "origin", "passage_legs", "process_document", "ready_for_reads",
-              "search_min_score_env", "status_episode_breakdown", "test_providers",
+              "retire_document", "search_min_score_env", "status_episode_breakdown", "test_providers",
               "unchanged_noop", "walk", "walk_provenance", "writable_groups", "zero_vector_record"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
@@ -1220,6 +1220,7 @@ by #885 name capabilities that shipped in 0.19.2 without one.
 | `passage_legs` | #871 | Hybrid passage results carry `legs` (per-leg evidence). Present on hybrid results only; absent or null in other modes. |
 | `process_document` | #785 | `knowledge_process_document` document mode. |
 | `ready_for_reads` | #809, #855 ([ADR-0855](adr/0855-health-check-ready-for-reads.md)) | `health_check` carries `ready_for_reads`, present in every state. |
+| `retire_document` | #859 ([ADR-0859](adr/0859-retire-document-and-orphan-reporting.md)) | `knowledge_retire_document` supersedes every live episode of a document with reason `document_removed`, deleting nothing. |
 | `search_min_score_env` | #812 ([ADR-0812](adr/0812-search-min-score-env-default.md)) | The default passage-search `min_score` floor can be set by the operator with `LCG_SEARCH_MIN_SCORE`. The configured value is not exposed. |
 | `status_episode_breakdown` | #884 ([ADR-0884](adr/0884-status-episode-breakdown-opt-in.md)) | `knowledge_status` can report a per-group live/superseded episode breakdown. |
 | `test_providers` | #851 ([ADR-0851](adr/0851-test-providers-mode.md)) | This build supports the built-in deterministic `--embedder test` / `--extractor test` mode. It does not mean the mode is active; the active providers are visible in `providers`. |
@@ -1446,7 +1447,7 @@ union of all active scopes.
 | Scope | Methods |
 |-------|---------|
 | `read` | `knowledge_status`, `knowledge_capabilities`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_ontology`, `knowledge_walk`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
-| `write` | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
+| `write` | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_retire_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |
 | `all` | every scope above (default) |
@@ -1489,8 +1490,9 @@ The check is made against the groups a call **actually changes**, not every grou
 | Tool(s) | Group(s) that must be listed |
 |---------|------------------------------|
 | `knowledge_add_episode`, `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_merge_entities`, `knowledge_add_cross_group_edge`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types` | `group_id` (default group if omitted) |
-| `knowledge_supersede_document`, `knowledge_stamp_origin`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing`, `knowledge_reload_ontology` | the required `group_id` |
-| `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed` | every entry of `group_ids` |
+| `knowledge_supersede_document`, `knowledge_retire_document`, `knowledge_stamp_origin`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing`, `knowledge_reload_ontology` | the required `group_id` |
+| `knowledge_delete_by_source`, `knowledge_delete_chunk_episode` | every entry of `group_ids`; with `prune_orphans: true`, **also** every group owning a cross-group pointer row into them (the prune re-checks and rewrites those rows — issue #859, ADR-0385) |
+| `knowledge_mark_chunk_removed` | every entry of `group_ids` |
 | `knowledge_delete_episode` | the group that owns the episode (looked up; a missing episode is a no-op) |
 | `knowledge_delete_by_group`, `knowledge_rebuild_from_wal` (every call, not just `force_clear`) | the target group(s) **and** every group owning a cross-group pointer row into them (ADR-0385: the purge/replay rebinds those rows) |
 | `knowledge_rebind_pointers` | every group that owns a pointer row into `source_group_id` (those rows are what it rewrites; `source_group_id` itself is not written) |
@@ -1865,6 +1867,7 @@ each method already did. The classes:
 | `knowledge_reprocess_entity_types` | default group + warning | `group_id`; write goes to `liminis` |
 | `knowledge_reprocess_relation_types` | default group + warning | `group_id`; write goes to `liminis` |
 | `knowledge_supersede_document` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_retire_document` | refused | `group_id` is required; an omitted one is an error |
 | `knowledge_stamp_origin` | refused | `group_id` is required; an omitted one is an error |
 | `knowledge_canonicalize_relations` | refused | `group_id` is required; an omitted one is an error |
 | `knowledge_backfill_relation_types` | refused | `group_id` is required; an omitted one is an error |
@@ -2175,13 +2178,47 @@ would form a cycle, when `effective_at` has no timezone, or when B is already su
 (`already_recorded: true`). `valid_at` / `invalid_at` are never written. The record is in the WAL, is
 carried by dump compaction and checkpoint restore, and is removed by `knowledge_delete_by_group`.
 
+**Retiring a whole document (issue #859).** `knowledge_retire_document {group_id, doc_id, effective_at?,
+origin?}` (write scope) says "this document no longer exists and nothing replaces it". It supersedes
+every live episode of `doc_id` in `group_id` with reason `document_removed` (no superseding document,
+no durable record beyond the episodes). Nothing is deleted: the episodes and the edges they produced
+stay readable as history, `knowledge_get_episodes` lists them as superseded with reason
+`document_removed`, `valid_at` / `invalid_at` are never written, and belief-filtered reads stop
+returning facts supported only by them. A fact another live document also asserts stays believed
+through that document's episode. `effective_at` is an RFC 3339 timestamp **with a timezone offset**
+and, as for `knowledge_supersede_document`, a future value keeps the facts believed and in force until
+then. Belief ends at `max(recorded, effective_at)`, so a *past* `effective_at` behaves as "removed
+now" — without a record there is no retroactive "in force until" date. `origin` follows
+`knowledge_mark_chunk_removed`: a `derived` or `answer` retirement of a `primary` / `external`
+document is refused (`origin_conflict:`).
+
+It returns `{success, group_id, doc_id, superseded_count, superseded_uuids, superseded_at,
+effective_at, existing_retirement_at}` (`superseded_at` is `null` when nothing was retired;
+`effective_at` echoes the request, or `null`). It is **idempotent**: a document with no live episode
+(already retired, or already superseded by another document) reports `superseded_count: 0`, changes
+nothing and writes nothing to the WAL; an earlier reason (`chunk_removed`, `document_superseded`) is
+never overwritten. On such a no-op `existing_retirement_at` carries the instant the document's
+retirement is, or was scheduled to be, in effect (`null` otherwise), so a caller can see why nothing
+changed. A **pending** (future-dated) retirement can be moved *earlier* by retiring again with an
+earlier or omitted `effective_at` (belief then ends at the earlier instant); a later or equal one is
+a no-op, and nothing is ever moved later. A pending retirement does not shield the document from
+correction: re-ingesting a chunk or the document with new content supersedes the old episodes at the
+correction, exactly as for a pending document supersession, so the old and the corrected fact are
+never both believed. While a retire waits for the write lock it registers each of the document's
+chunks as in flight ([ADR-0858](adr/0858-unchanged-chunk-resubmission-noop.md)), so a concurrent identical
+`knowledge_process_chunk` cannot return `unchanged` and then have its episode retired underneath it. An unknown
+`doc_id`, an omitted `group_id` or an `effective_at` with no timezone is rejected with no side
+effects. Episodes ingested under the same `doc_id` *after* retirement are live as usual; there is no
+un-retire. The statement is uuid-keyed and fixed-valued, so WAL replay, dump compaction and checkpoint
+restore reproduce the retired state. See [ADR-0859](adr/0859-retire-document-and-orphan-reporting.md).
+
 **Reading it.** On opted-in relationship reads (`believed_only` / `as_of`, above) the `belief` object
 gains:
 
 | Field | Meaning |
 |---|---|
 | `in_force` | Whether the fact was in force at the evaluated time, **independently of `believed`**. `false` once the superseding document's effective date has been reached; `true` otherwise; `null` for a fact that was corrected (it was never true, so it makes no validity claim). An edge is in force while any producing episode is. |
-| `supersession` | Present once the fact's producing episodes are all superseded; not time-dependent, so it classifies the fact from any read. `cause` is `corrected` (revision or removal) or `document_superseded`. For the latter it also carries `superseded_by_document`, `in_force_until` (the effective date) and `recorded_at`; `superseded_at` is when belief ended. |
+| `supersession` | Present once the fact's producing episodes are all superseded; not time-dependent, so it classifies the fact from any read. `cause` is `corrected` (revision or chunk removal), `document_superseded` or `document_removed`. `document_superseded` also carries `superseded_by_document`, `in_force_until` (the effective date) and `recorded_at`; `document_removed` carries `in_force_until` (equal to `superseded_at`). `superseded_at` is when belief ended. |
 
 So between the effective date and the recording date an as-of read shows the old fact `believed` with
 `in_force: false` — the graph had not yet learned otherwise. Believed-only filtering is unchanged: it
@@ -2255,8 +2292,9 @@ Its `write_path` is `document`, so a chunk-mode revise of the same name never to
 
 **Limits.** A document over `LCG_DOCUMENT_MAX_BYTES` (default 512 KiB) is refused with
 `document_too_large` before any work. An empty, whitespace-only or headings-only document is refused
-with `empty_document`. To retire a whole document use `knowledge_supersede_document`,
-`knowledge_mark_chunk_removed` or `knowledge_delete_by_source`.
+with `empty_document`. To retire a whole document use `knowledge_retire_document` (or
+`knowledge_supersede_document` when a successor exists); for one chunk use
+`knowledge_mark_chunk_removed`; to destroy the record use `knowledge_delete_by_source`.
 
 **`knowledge_preview_chunks`** (read scope) takes `content` and returns exactly the chunking
 `knowledge_process_document` would use — `chunks[]` with `heading_path`, `byte_start`, `byte_end`,
@@ -2616,7 +2654,8 @@ durable across restarts; additive, so a client that ignores unknown fields is un
 
 ### Deletion (`delete_chunk_episode`, `delete_by_source`)
 
-> For a chunk that merely disappeared from its document, prefer
+> To stop believing a whole document without destroying it, use `knowledge_retire_document`. For a
+> chunk that merely disappeared from its document, prefer
 > `knowledge_mark_chunk_removed` (see "Belief time" above), which ends belief without destroying the evidence. `knowledge_delete_chunk_episode` keeps its
 > explicit-deletion contract unchanged.
 
@@ -2652,6 +2691,32 @@ ID.
 > **Behaviour change.** A client that wrote `source_description = "file:section"` through
 > `knowledge_add_episode` and relied on `delete_by_source("file")` prefix-matching it will now get
 > `deleted_count: 0` for those rows. A raw episode matches only its exact `source_description`.
+
+**Orphaned entities are reported, and pruned only on request (issue #859).** Both delete methods
+delete episodes only. They now also return the entities the delete *stranded* — entities that lost a
+mention in this call and are mentioned by no remaining episode (superseded episodes count as
+mentions, so readable history is never reported):
+
+| Field | Meaning |
+|---|---|
+| `orphaned_entity_uuids`, `orphaned_entity_count` | The stranded entities. Always present; empty / `0` when nothing was stranded. Only entities that lost a mention here are considered — pre-existing orphans elsewhere, and asserted entities that were never mentioned, are not. |
+| `pruned_entity_count`, `pruned_edge_count` | What `prune_orphans` deleted; always `0` without it. |
+
+An entity that an *asserted* (`knowledge_assert_relationship`, no episodes) edge or an extracted edge
+that a *surviving* episode cites still touches is **not** an orphan, even with no mention left: it is
+neither reported nor pruned, and the edge stays.
+
+Without `prune_orphans` nothing beyond the episodes is deleted, so an orphan still comes back from
+`knowledge_find_entities`. Pass `"prune_orphans": true` (optional boolean, default `false`) to delete
+the orphans in the same call, together with the group's edges left with no surviving episode (a
+warranted edge, with no episodes, is never one) and any edge hopping to a pruned entity. It stays
+inside the groups named by `group_ids`, is written to each group's own WAL stream so a rebuild does not
+resurrect the rows, and re-checks only the cross-group pointers that resolved to a pruned entity (they
+record `unbound`; pointers to entities that were kept are untouched). Because that re-check rewrites
+pointer rows owned by *other* groups, a deployment using `--writable-groups` must list those owning
+groups too when `prune_orphans` is `true` — otherwise the call is refused with `group_not_writable`
+and nothing is written (without the flag only `group_ids` need be writable). This is a narrow, per-delete sibling of the group purge, not a retention policy; see
+[ADR-0859](adr/0859-retire-document-and-orphan-reporting.md).
 
 ### Source identity: `source_file` and `chunk_id` (issue #853)
 
@@ -8870,6 +8935,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0855](0855-health-check-ready-for-reads.md) | `health_check` Gains `ready_for_reads`; Documents `ok` / `healthy` / `ready_for_reads` Semantics | 2026-11-21 |
 | [0857](0857-find-entities-episode-provenance.md) | `find_entities` Episode Provenance and a `uuids` Filter on `get_episodes` | 2026-11-22 |
 | [0858](0858-unchanged-chunk-resubmission-noop.md) | `knowledge_process_chunk` No-Ops on an Identical Resubmission | 2026-11-21 |
+| [0859](0859-retire-document-and-orphan-reporting.md) | `knowledge_retire_document`, and Hard Deletes Report (Optionally Prune) Orphaned Entities | 2026-11-23 |
 | [0872](0872-retrieval-run-comparability.md) | `lcg-eval retrieval` Run Comparability: Input Digests, Hard/Soft Inputs, `--compare` | 2026-11-22 |
 | [0880](0880-restatement-aware-corroboration.md) | Restatement-Aware Corroboration — Independent Sources, Not Documents | 2026-11-22 |
 | [0881](0881-eval-verifies-service-reported-ontology.md) | `lcg-eval` Verifies and Reports the Service-Reported Ontology | 2026-11-22 |

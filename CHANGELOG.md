@@ -74,6 +74,30 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   string with the issue that introduced it (a test keeps it in sync with the registry), and the
   release runbook gains a feature-string coverage step.
 
+- **`knowledge_retire_document`: retire a whole document without deleting it (#859, ADR-0859).**
+  `{group_id, doc_id, effective_at?, origin?}` (write scope, gated by `--writable-groups`) supersedes
+  every live episode of the document with the new reason `document_removed`. Nothing is deleted: the
+  episodes stay listed by `knowledge_get_episodes`, belief-filtered reads stop returning facts only
+  they support (a fact another live document asserts stays believed), and a rebuild from the WAL
+  reproduces it. Idempotent: an already-retired (or document-superseded) document reports
+  `superseded_count: 0` and writes nothing. An unknown `doc_id`, a missing `group_id` or an
+  `effective_at` without a timezone is rejected with no side effects; a future `effective_at` keeps
+  the facts believed and in force until then, while a past one behaves as "removed now". Adds the
+  `retire_document` capabilities feature, `belief.supersession.cause: document_removed`, and one MCP
+  tool (59 total, 19 write); the `empty_document` error now points at it.
+- **Hard deletes report the entities they strand, and can prune them (#859, ADR-0859).**
+  `knowledge_delete_by_source` and `knowledge_delete_chunk_episode` return `orphaned_entity_uuids`,
+  `orphaned_entity_count`, `pruned_entity_count` and `pruned_edge_count`: the entities that lost a
+  mention in the delete and are mentioned by no remaining episode (superseded episodes count as
+  mentions). By default nothing extra is deleted. `prune_orphans: true` deletes those entities
+  together with the edges left with no episodes, in the same call, group-scoped and reproduced by WAL
+  replay. This is not a retention policy and does not replace `knowledge_delete_by_group`. An entity
+  an asserted edge, or an edge a surviving episode cites, still touches is not an orphan. With
+  `--writable-groups`, `prune_orphans: true` also requires the groups owning cross-group pointers into
+  the targeted groups to be writable (the prune re-checks those pointers, only the ones that resolved
+  to a pruned entity). A future-dated retire can be moved earlier by retiring again, does not block a
+  correction of the document, and a no-op retire reports `existing_retirement_at`.
+
 - **`lcg-eval` verifies the ontology the service loaded, and reports that (#881, ADR-0881).**
   `knowledge_get_ontology` gains an additive `ontology_hash` (the semantic `content_hash` of the
   loaded ontology, `"none"` without one; independent of `include_asserted`). After startup,
