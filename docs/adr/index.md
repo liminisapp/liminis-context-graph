@@ -186,6 +186,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0858](0858-unchanged-chunk-resubmission-noop.md) | `knowledge_process_chunk` No-Ops on an Identical Resubmission | 2026-11-21 |
 | [0880](0880-restatement-aware-corroboration.md) | Restatement-Aware Corroboration — Independent Sources, Not Documents | 2026-11-22 |
 | [0881](0881-eval-verifies-service-reported-ontology.md) | `lcg-eval` Verifies and Reports the Service-Reported Ontology | 2026-11-22 |
+| [0882](0882-dump-mentions-endpoint-keyed-uuidless.md) | `knowledge_dump_wal` Dumps uuid-less MENTIONS Edges, Keyed on `(episode, entity, group_id)` | 2026-11-22 |
 | [0884](0884-status-episode-breakdown-opt-in.md) | `knowledge_status` Opt-in Per-group Episode Breakdown | 2026-11-22 |
 
 ## Historical numbering

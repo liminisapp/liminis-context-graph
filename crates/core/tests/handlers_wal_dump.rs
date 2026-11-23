@@ -791,3 +791,471 @@ async fn test_dump_wal_preserves_episodic_attributes() {
         before_rows[0][0], after_rows[0][0]
     );
 }
+
+// ── #882: MENTIONS edges without a uuid (native ingest) must survive dump → rebuild ──────────
+
+use lcg_core::types::MentionsEdge;
+use std::collections::BTreeSet;
+
+/// `(episode uuid, entity uuid, group_id)` for every MENTIONS edge, sorted.
+fn mentions_tuples(db: &Db) -> BTreeSet<(String, String, String)> {
+    let conn = db.connect().unwrap();
+    conn.cypher_query(
+        "MATCH (ep:Episodic)-[r:MENTIONS]->(en:Entity) RETURN ep.uuid, en.uuid, r.group_id",
+    )
+    .unwrap()
+    .into_iter()
+    .map(|r| (r[0].clone(), r[1].clone(), r[2].clone()))
+    .collect()
+}
+
+/// Dumps `db` (via `knowledge_dump_wal`) into a fresh dir under `dir`, returning the dump dir
+/// and the `edges_dumped` count.
+async fn dump_to(
+    db: &Arc<Db>,
+    db_path: &std::path::Path,
+    dir: &std::path::Path,
+    name: &str,
+) -> (std::path::PathBuf, u64) {
+    let dump_dir = dir.join(name);
+    let state = make_state(Arc::clone(db), db_path.to_str().unwrap());
+    let v = dispatch(
+        900,
+        "knowledge_dump_wal",
+        json!({ "target_dir": dump_dir.to_str().unwrap() }),
+        state,
+    )
+    .await;
+    assert_eq!(v["result"]["success"], true, "dump must succeed: {v}");
+    let edges = v["result"]["edges_dumped"].as_u64().unwrap();
+    (dump_dir, edges)
+}
+
+fn replay_into(db: &Db, dump_dir: &std::path::Path) {
+    let conn = db.connect().unwrap();
+    let stats = WalReplayer::new(dump_dir)
+        .replay(&conn, lcg_core::zero_vector_embed_fn(4), 4)
+        .expect("dump replay must succeed");
+    assert_eq!(stats.failed_lines, 0, "zero replay failures");
+}
+
+fn seed_entity(db: &Db, uuid: &str, group: &str) {
+    db.connect()
+        .unwrap()
+        .insert_entity(&EntityRow {
+            uuid: uuid.into(),
+            name: format!("name-{uuid}"),
+            group_id: group.into(),
+            labels: vec!["Entity".into()],
+            created_at: "2026-01-01 00:00:00".into(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "seed".into(),
+            attributes: "{}".into(),
+            ..Default::default()
+        })
+        .unwrap();
+}
+
+fn seed_episode(db: &Db, uuid: &str, group: &str) {
+    db.connect()
+        .unwrap()
+        .insert_episodic(&EpisodicRow {
+            uuid: uuid.into(),
+            name: format!("name-{uuid}"),
+            group_id: group.into(),
+            created_at: "2026-01-01 00:00:00".into(),
+            source: "text".into(),
+            source_description: "seed source".into(),
+            content: "seed".into(),
+            content_embedding: vec![0.0, 1.0, 0.0, 0.0],
+            valid_at: "2026-01-01 00:00:00".into(),
+            attributes: "{}".into(),
+            ..Default::default()
+        })
+        .unwrap();
+}
+
+fn seed_native_mention(db: &Db, ep: &str, en: &str, group: &str) {
+    db.connect()
+        .unwrap()
+        .insert_mentions_edge(&MentionsEdge {
+            episodic_uuid: ep.into(),
+            entity_uuid: en.into(),
+            group_id: group.into(),
+        })
+        .unwrap();
+}
+
+/// Finding F1 of the #828 research (see ADR-0882 for the fix): a graph built through the real write path (`knowledge_add_episode`) has
+/// uuid-less MENTIONS edges; a dump → rebuild must preserve every one, and provenance readers
+/// must agree between the source and rebuilt graphs.
+#[tokio::test]
+async fn test_dump_wal_mentions_parity_native_ingest() {
+    let dir = TempDir::new().unwrap();
+    let db1_path = dir.path().join("native1.db");
+    let db1 = open_db(&db1_path);
+    let state1 = make_state(Arc::clone(&db1), db1_path.to_str().unwrap());
+
+    for i in 0..3 {
+        let v = dispatch(
+            i,
+            "knowledge_add_episode",
+            json!({
+                "name": format!("native-ep-{i}"),
+                "episode_body": format!("Alice works at Acme Corp ({i})."),
+                "source": "test",
+                "source_description": "native source",
+                "reference_time": "2024-06-01T12:00:00Z",
+                "group_id": "native-group",
+            }),
+            Arc::clone(&state1),
+        )
+        .await;
+        assert!(v.get("result").is_some(), "add_episode must succeed: {v}");
+    }
+
+    // Ingest can leave parallel duplicate `(episode, entity, group_id)` edges when two mentions
+    // resolve to one entity; the mock extractor does not, so add one by hand to exercise the
+    // collapse (ADR-0882: parity is on distinct tuples, not raw edge count).
+    let first = mentions_tuples(&db1)
+        .into_iter()
+        .next()
+        .expect("native ingest must create MENTIONS edges");
+    seed_native_mention(&db1, &first.0, &first.1, &first.2);
+
+    let before = mentions_tuples(&db1);
+    let raw_count_before = db1.connect().unwrap().count_mentions_edges().unwrap();
+    let count_before = before.len() as u64;
+    assert!(
+        count_before >= 3,
+        "native ingest must create MENTIONS edges"
+    );
+    assert_eq!(
+        raw_count_before,
+        count_before + 1,
+        "source graph must hold exactly one parallel duplicate"
+    );
+    // Native edges carry no uuid — the shape this issue is about.
+    let uuid_bearing = db1
+        .connect()
+        .unwrap()
+        .cypher_query("MATCH ()-[r:MENTIONS]->() WHERE r.uuid IS NOT NULL RETURN count(r)")
+        .unwrap();
+    assert_eq!(uuid_bearing[0][0], "0", "native MENTIONS must be uuid-less");
+
+    let (dump_dir, edges_dumped) = dump_to(&db1, &db1_path, dir.path(), "native-dump").await;
+    assert!(
+        edges_dumped >= raw_count_before,
+        "edges_dumped ({edges_dumped}) must include every MENTIONS edge ({raw_count_before})"
+    );
+
+    let db2 = open_db(&dir.path().join("native2.db"));
+    replay_into(&db2, &dump_dir);
+
+    assert_eq!(
+        db2.connect().unwrap().count_nodes("Entity").unwrap(),
+        db1.connect().unwrap().count_nodes("Entity").unwrap()
+    );
+    assert_eq!(
+        db2.connect().unwrap().count_mentions_edges().unwrap(),
+        count_before,
+        "rebuilt MENTIONS count must equal the number of distinct (episode, entity, group_id) tuples"
+    );
+    assert_eq!(mentions_tuples(&db2), before, "MENTIONS tuple set parity");
+
+    // Provenance readers agree on source and rebuilt graphs.
+    let state2 = make_state(
+        Arc::clone(&db2),
+        dir.path().join("native2.db").to_str().unwrap(),
+    );
+    let provenance = |v: &Value| -> BTreeSet<(String, Vec<String>)> {
+        v["result"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| {
+                let mut eps: Vec<String> = n["episode_uuids"]
+                    .as_array()
+                    .map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect())
+                    .unwrap_or_default();
+                eps.sort();
+                (n["uuid"].as_str().unwrap().to_string(), eps)
+            })
+            .collect()
+    };
+    let q = json!({ "source": "native source", "group_ids": ["native-group"] });
+    let p1 = provenance(&dispatch(1, "knowledge_get_entities_by_source", q.clone(), state1).await);
+    let p2 = provenance(&dispatch(2, "knowledge_get_entities_by_source", q, state2).await);
+    assert!(!p1.is_empty(), "source graph must report provenance");
+    assert!(p1.iter().all(|(_, eps)| !eps.is_empty()));
+    assert_eq!(p1, p2, "provenance must match after dump → rebuild");
+}
+
+/// uuid-bearing and uuid-less MENTIONS edges coexist; all survive, none duplicated, and the
+/// uuid on uuid-bearing edges is preserved while uuid-less edges stay uuid-less.
+#[tokio::test]
+async fn test_dump_wal_mentions_mixed_uuid_and_legacy() {
+    let dir = TempDir::new().unwrap();
+    let db1_path = dir.path().join("mixed1.db");
+    let db1 = open_db(&db1_path);
+    seed_episode(&db1, "ep-1", "g");
+    for e in ["en-1", "en-2", "en-3"] {
+        seed_entity(&db1, e, "g");
+    }
+    seed_native_mention(&db1, "ep-1", "en-1", "g");
+    seed_native_mention(&db1, "ep-1", "en-2", "g");
+    db1.connect()
+        .unwrap()
+        .run_cypher(
+            "MATCH (ep:Episodic {uuid:'ep-1'}), (en:Entity {uuid:'en-3'}) \
+             CREATE (ep)-[:MENTIONS {uuid:'m-with-uuid', group_id:'g'}]->(en)",
+        )
+        .unwrap();
+    let before = mentions_tuples(&db1);
+    assert_eq!(before.len(), 3);
+
+    let (dump_dir, edges_dumped) = dump_to(&db1, &db1_path, dir.path(), "mixed-dump").await;
+    assert!(edges_dumped >= 3);
+    let db2 = open_db(&dir.path().join("mixed2.db"));
+    replay_into(&db2, &dump_dir);
+
+    assert_eq!(db2.connect().unwrap().count_mentions_edges().unwrap(), 3);
+    assert_eq!(mentions_tuples(&db2), before);
+    let uuids = db2
+        .connect()
+        .unwrap()
+        .cypher_query(
+            "MATCH (:Episodic)-[r:MENTIONS]->(en:Entity) RETURN en.uuid, r.uuid ORDER BY en.uuid",
+        )
+        .unwrap();
+    assert_eq!(uuids[0][1], "", "uuid-less edge stays uuid-less (NULL)");
+    assert_eq!(uuids[1][1], "", "uuid-less edge stays uuid-less (NULL)");
+    assert_eq!(uuids[2][1], "m-with-uuid", "edge uuid preserved");
+}
+
+/// More than PAGE_SIZE (500) uuid-less edges, with one episode's tie group straddling the page
+/// boundary — a non-total `ORDER BY ep.uuid` could drop or repeat rows there.
+#[tokio::test]
+async fn test_dump_wal_mentions_exceeds_page_size() {
+    let dir = TempDir::new().unwrap();
+    let db1_path = dir.path().join("big1.db");
+    let db1 = open_db(&db1_path);
+    seed_episode(&db1, "ep-a", "g");
+    seed_episode(&db1, "ep-b", "g");
+    for i in 0..520 {
+        let en = format!("en-{i:04}");
+        seed_entity(&db1, &en, "g");
+        seed_native_mention(&db1, "ep-a", &en, "g");
+        if i < 200 {
+            seed_native_mention(&db1, "ep-b", &en, "g");
+        }
+    }
+    let before = mentions_tuples(&db1);
+    assert_eq!(before.len(), 720);
+
+    let (dump_dir, edges_dumped) = dump_to(&db1, &db1_path, dir.path(), "big-dump").await;
+    assert!(edges_dumped >= 720, "edges_dumped={edges_dumped}");
+    let db2 = open_db(&dir.path().join("big2.db"));
+    replay_into(&db2, &dump_dir);
+    assert_eq!(db2.connect().unwrap().count_mentions_edges().unwrap(), 720);
+    assert_eq!(mentions_tuples(&db2), before);
+}
+
+/// Replaying the dump twice into one DB leaves the MENTIONS count unchanged; the same
+/// `(episode, entity)` in two groups stays two edges; a duplicated native edge collapses to one
+/// (parity is defined on distinct `(episode, entity, group_id)` tuples — ADR-0882).
+#[tokio::test]
+async fn test_dump_wal_mentions_replay_idempotent_groups_and_duplicates() {
+    let dir = TempDir::new().unwrap();
+    let db1_path = dir.path().join("idem1.db");
+    let db1 = open_db(&db1_path);
+    seed_episode(&db1, "ep-1", "g1");
+    seed_entity(&db1, "en-1", "g1");
+    seed_entity(&db1, "en-2", "g1");
+    seed_native_mention(&db1, "ep-1", "en-1", "g1");
+    seed_native_mention(&db1, "ep-1", "en-1", "g2"); // distinct group
+    seed_native_mention(&db1, "ep-1", "en-2", "g1");
+    seed_native_mention(&db1, "ep-1", "en-2", "g1"); // parallel duplicate
+    let before = mentions_tuples(&db1);
+    assert_eq!(before.len(), 3);
+
+    let (dump_dir, _) = dump_to(&db1, &db1_path, dir.path(), "idem-dump").await;
+    let db2 = open_db(&dir.path().join("idem2.db"));
+    replay_into(&db2, &dump_dir);
+    assert_eq!(mentions_tuples(&db2), before);
+    assert_eq!(db2.connect().unwrap().count_mentions_edges().unwrap(), 3);
+
+    replay_into(&db2, &dump_dir);
+    assert_eq!(
+        db2.connect().unwrap().count_mentions_edges().unwrap(),
+        3,
+        "second replay must not duplicate MENTIONS edges"
+    );
+    assert_eq!(mentions_tuples(&db2), before);
+}
+
+/// A graph with episodes and entities but zero MENTIONS dumps and rebuilds to zero.
+#[tokio::test]
+async fn test_dump_wal_mentions_zero_edges() {
+    let dir = TempDir::new().unwrap();
+    let db1_path = dir.path().join("zero1.db");
+    let db1 = open_db(&db1_path);
+    seed_episode(&db1, "ep-1", "g");
+    seed_entity(&db1, "en-1", "g");
+    let (dump_dir, _) = dump_to(&db1, &db1_path, dir.path(), "zero-dump").await;
+    let db2 = open_db(&dir.path().join("zero2.db"));
+    replay_into(&db2, &dump_dir);
+    assert_eq!(db2.connect().unwrap().count_mentions_edges().unwrap(), 0);
+}
+
+/// A legacy MENTIONS edge with a NULL `group_id` round-trips as NULL, and replaying the dump
+/// over a graph that still holds that edge does not add a second one (FR-004).
+#[tokio::test]
+async fn test_dump_wal_mentions_null_group_replay_idempotent() {
+    let dir = TempDir::new().unwrap();
+    let db1_path = dir.path().join("nullg1.db");
+    let db1 = open_db(&db1_path);
+    seed_episode(&db1, "ep-1", "g");
+    seed_entity(&db1, "en-1", "g");
+    seed_entity(&db1, "en-2", "g");
+    db1.connect()
+        .unwrap()
+        .run_cypher(
+            "MATCH (ep:Episodic {uuid:'ep-1'}), (en:Entity {uuid:'en-1'}) \
+             CREATE (ep)-[:MENTIONS]->(en)",
+        )
+        .unwrap();
+    db1.connect()
+        .unwrap()
+        .run_cypher(
+            "MATCH (ep:Episodic {uuid:'ep-1'}), (en:Entity {uuid:'en-2'}) \
+             CREATE (ep)-[:MENTIONS {uuid:'m-null-group'}]->(en)",
+        )
+        .unwrap();
+    let null_group_count = |db: &Db| -> String {
+        db.connect()
+            .unwrap()
+            .cypher_query("MATCH ()-[r:MENTIONS]->() WHERE r.group_id IS NULL RETURN count(r)")
+            .unwrap()[0][0]
+            .clone()
+    };
+    assert_eq!(db1.connect().unwrap().count_mentions_edges().unwrap(), 2);
+    assert_eq!(null_group_count(&db1), "2", "fixture edges are NULL-group");
+
+    let (dump_dir, _) = dump_to(&db1, &db1_path, dir.path(), "nullg-dump").await;
+
+    // Fresh rebuild: both edges present, still NULL-group, uuid preserved where it existed.
+    let db2 = open_db(&dir.path().join("nullg2.db"));
+    replay_into(&db2, &dump_dir);
+    assert_eq!(db2.connect().unwrap().count_mentions_edges().unwrap(), 2);
+    assert_eq!(
+        null_group_count(&db2),
+        "2",
+        "NULL group_id must be preserved"
+    );
+    let uuids = db2
+        .connect()
+        .unwrap()
+        .cypher_query("MATCH ()-[r:MENTIONS]->(en:Entity) RETURN en.uuid, r.uuid ORDER BY en.uuid")
+        .unwrap();
+    assert_eq!(uuids[0][1], "");
+    assert_eq!(uuids[1][1], "m-null-group");
+
+    // Replay over the source graph, which already holds both NULL-group edges.
+    replay_into(&db1, &dump_dir);
+    assert_eq!(
+        db1.connect().unwrap().count_mentions_edges().unwrap(),
+        2,
+        "replay over existing NULL-group edges must not duplicate them"
+    );
+    // And a second replay into the rebuilt graph.
+    replay_into(&db2, &dump_dir);
+    assert_eq!(db2.connect().unwrap().count_mentions_edges().unwrap(), 2);
+}
+
+/// A NULL-group edge and a grouped edge on the same `(episode, entity)` pair are distinct
+/// identities: replaying a NULL-group edge onto a graph that already holds only the grouped one
+/// must still create the NULL-group edge (and must not touch the grouped edge's uuid).
+#[tokio::test]
+async fn test_dump_wal_mentions_null_group_replay_over_grouped_edge() {
+    let dir = TempDir::new().unwrap();
+    let db1_path = dir.path().join("mixg1.db");
+    let db1 = open_db(&db1_path);
+    seed_episode(&db1, "ep-1", "g");
+    seed_entity(&db1, "en-1", "g");
+    db1.connect()
+        .unwrap()
+        .run_cypher(
+            "MATCH (ep:Episodic {uuid:'ep-1'}), (en:Entity {uuid:'en-1'}) \
+             CREATE (ep)-[:MENTIONS {uuid:'m-null'}]->(en)",
+        )
+        .unwrap();
+    let (dump_dir, _) = dump_to(&db1, &db1_path, dir.path(), "mixg-dump").await;
+
+    // Target graph holds only a grouped edge on the same pair.
+    let db2 = open_db(&dir.path().join("mixg2.db"));
+    seed_episode(&db2, "ep-1", "g");
+    seed_entity(&db2, "en-1", "g");
+    db2.connect()
+        .unwrap()
+        .run_cypher(
+            "MATCH (ep:Episodic {uuid:'ep-1'}), (en:Entity {uuid:'en-1'}) \
+             CREATE (ep)-[:MENTIONS {uuid:'m-grouped', group_id:'g'}]->(en)",
+        )
+        .unwrap();
+    replay_into(&db2, &dump_dir);
+    replay_into(&db2, &dump_dir);
+    let conn = db2.connect().unwrap();
+    assert_eq!(conn.count_mentions_edges().unwrap(), 2);
+    let null_uuid = conn
+        .cypher_query("MATCH ()-[r:MENTIONS]->() WHERE r.group_id IS NULL RETURN r.uuid")
+        .unwrap();
+    assert_eq!(null_uuid.len(), 1, "exactly one NULL-group edge");
+    assert_eq!(null_uuid[0][0], "m-null");
+    let grouped = conn
+        .cypher_query("MATCH ()-[r:MENTIONS {group_id:'g'}]->() RETURN r.uuid")
+        .unwrap();
+    assert_eq!(grouped.len(), 1);
+    assert_eq!(grouped[0][0], "m-grouped", "grouped edge left untouched");
+}
+
+/// More than one page of HAS_EPISODE edges on a single saga: the dump pages order only by the
+/// source uuid unless a tiebreaker is applied, which can drop or repeat edges across pages.
+#[tokio::test]
+async fn test_dump_wal_has_episode_exceeds_page_size() {
+    let dir = TempDir::new().unwrap();
+    let db1_path = dir.path().join("hep1.db");
+    let db1 = open_db(&db1_path);
+    let conn = db1.connect().unwrap();
+    conn.run_cypher(
+        "CREATE (:Saga {uuid:'sg-1', name:'saga', group_id:'g', \
+         created_at: timestamp('2026-01-01 00:00:00')})",
+    )
+    .unwrap();
+    const N: usize = 620;
+    for i in 0..N {
+        let ep = format!("ep-{i:04}");
+        seed_episode(&db1, &ep, "g");
+        conn.run_cypher(&format!(
+            "MATCH (sg:Saga {{uuid:'sg-1'}}), (ep:Episodic {{uuid:'{ep}'}}) \
+             CREATE (sg)-[:HAS_EPISODE {{uuid:'he-{i:04}', group_id:'g'}}]->(ep)"
+        ))
+        .unwrap();
+    }
+    let tuples = |db: &Db| -> BTreeSet<(String, String)> {
+        db.connect()
+            .unwrap()
+            .cypher_query("MATCH (sg:Saga)-[:HAS_EPISODE]->(ep:Episodic) RETURN sg.uuid, ep.uuid")
+            .unwrap()
+            .into_iter()
+            .map(|r| (r[0].clone(), r[1].clone()))
+            .collect()
+    };
+    let before = tuples(&db1);
+    assert_eq!(before.len(), N);
+
+    let (dump_dir, _) = dump_to(&db1, &db1_path, dir.path(), "hep-dump").await;
+    let db2 = open_db(&dir.path().join("hep2.db"));
+    replay_into(&db2, &dump_dir);
+    assert_eq!(tuples(&db2), before, "every HAS_EPISODE edge must survive");
+}

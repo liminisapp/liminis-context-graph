@@ -169,12 +169,29 @@ pub struct EpisodeOriginInfo {
     /// Microseconds since the epoch; `None` while no supersession has touched the episode.
     pub superseded_at_us: Option<i64>,
     pub group_id: String,
+    /// Whether the episode carries a document-mode `revision_id` (ADR-0785).
+    pub revision_id_present: bool,
+    /// Microseconds since the epoch of the revision's commit; `None` while it is pending.
+    pub revision_committed_at_us: Option<i64>,
 }
 
 impl EpisodeOriginInfo {
-    /// Whether the episode is believed at `t_us` — the same predicate `belief::evaluate` uses, so
-    /// a document supersession still pending at a future date counts as live.
+    /// Whether the episode is live at `t_us` — exactly `EpisodeSupersession::live_at`, the
+    /// belief/search predicate: visible (not part of an uncommitted document revision) and not
+    /// superseded by `t_us`. A document supersession still pending at a future date counts as
+    /// live; an episode of a pending revision does not (issue #883).
     pub fn is_live(&self, t_us: i64) -> bool {
+        crate::belief::revision_visible_at(
+            self.revision_id_present,
+            self.revision_committed_at_us,
+            t_us,
+        ) && self.is_unsuperseded(t_us)
+    }
+
+    /// Not superseded at `t_us`, regardless of revision state. Used only by the ingest veto
+    /// (`entities_with_corroborating_mention`), where a pending primary revision must still
+    /// shield its entity from derived rewrites.
+    pub fn is_unsuperseded(&self, t_us: i64) -> bool {
         self.superseded_at_us.is_none_or(|s| s > t_us)
     }
 }
@@ -542,5 +559,44 @@ mod tests {
     #[test]
     fn conflict_error_carries_prefix() {
         assert!(conflict("x").to_string().contains("origin_conflict: x"));
+    }
+    /// SC-001 (issue #883): the entity read and the belief/search predicate classify every
+    /// episode identically, over the whole revision × supersession grid.
+    #[test]
+    fn is_live_matches_episode_supersession_live_at() {
+        use crate::belief::EpisodeSupersession;
+        let t = 100;
+        let revisions = [
+            (false, None),
+            (true, None),
+            (true, Some(50)),
+            (true, Some(500)),
+        ];
+        let superseded = [None, Some(50), Some(500)];
+        for (present, committed) in revisions {
+            for s in superseded {
+                let info = EpisodeOriginInfo {
+                    origin: Origin::Primary,
+                    doc_id: None,
+                    superseded_at_us: s,
+                    group_id: "g".into(),
+                    revision_id_present: present,
+                    revision_committed_at_us: committed,
+                };
+                let sup = EpisodeSupersession {
+                    superseded_at_us: s,
+                    revision_id_present: present,
+                    revision_committed_at_us: committed,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    info.is_live(t),
+                    sup.live_at(t),
+                    "revision=({present},{committed:?}) superseded={s:?}"
+                );
+                // The veto predicate ignores revision state.
+                assert_eq!(info.is_unsuperseded(t), s.is_none_or(|x| x > t));
+            }
+        }
     }
 }

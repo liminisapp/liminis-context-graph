@@ -9,6 +9,20 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`find_entities` `include_episodes` no longer reports episodes of a pending document revision
+  (#883, ADR-0857 addendum).** The entity provenance read used a supersession-only liveness check,
+  so an episode written by an uncommitted `knowledge_process_document` revision was cited as a
+  live mention while `knowledge_walk` `include_provenance`, search and belief treated it as not
+  live. It now uses the belief/search predicate (`live_at`): the episode is absent before commit
+  and present after. `support`, `corroboration` and edge `support` (plus the `origins` filter) on
+  `find_entities` / `find_relationships` follow the same predicate, so **their values change while
+  a document revision is pending** (pending content is not counted until it commits); nothing
+  changes otherwise, and no response shape changes. The ingest veto for derived/answer content is
+  deliberately unchanged. The reference now states why the per-entity cap (50) and the per-edge
+  walk cap (20) differ.
+
 ### Added
 
 - **`lcg-eval` verifies the ontology the service loaded, and reports that (#881, ADR-0881).**
@@ -314,6 +328,17 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   ontology, so `retrieval --ontology` and `graph-qa` extracted free-form while the output claimed
   the ontology. The variable is now always set to the eval workspace, overriding any inherited
   value. Unreleased regression from #821 (#842); the service is unaffected.
+
+- **`knowledge_dump_wal` no longer drops every native-ingest MENTIONS edge (#882, ADR-0882).**
+  Native ingest creates MENTIONS edges without a `uuid`, and the dump skipped uuid-less rows, so a
+  dump→rebuild had zero MENTIONS and entity→episode provenance (`episode_uuids`,
+  `include_episodes`, `support`/`corroboration`) was lost. The dump now emits every MENTIONS edge,
+  keyed on `(episode, entity, group_id)` rather than the edge uuid, so existing graphs need no
+  backfill and replay stays idempotent (including legacy NULL-`group_id` edges, which are created
+  only when no NULL-group edge exists for the pair, and stay NULL-group). Edge-dump paging (MENTIONS, HAS_EPISODE, HAS_MEMBER,
+  NEXT_EPISODE) now orders by every dumped column, so a source with more than a page of edges can
+  no longer lose or repeat edges across a page boundary. Parallel duplicate
+  `(episode, entity, group_id)` edges collapse to one on rebuild.
 
 - **`knowledge_delete_by_source` no longer deletes other sources' episodes, and
   `knowledge_get_entities_by_source` returns only the requested source's live entities** (#829,

@@ -1516,15 +1516,18 @@ object — and it acts before fusion and per path rather than as a post-filter o
 | Method | `episode_uuids` / `source_descriptions` | `source_files` | Superseded episodes |
 |---|---|---|---|
 | `knowledge_find_entities` (default) | **Always `[]`** — not computed | absent | n/a |
-| `knowledge_find_entities` with `include_episodes: true` | Filled | Filled | **Excluded** (live only) |
+| `knowledge_find_entities` with `include_episodes: true` | Filled | Filled | **Excluded** (live only; pending document revisions excluded too) |
 | `knowledge_get_entity_neighbors` | Filled | absent | **Included** |
 | `knowledge_get_entities_by_source` | Filled | absent | Included |
 
 `knowledge_find_entities` takes an opt-in boolean **`include_episodes`** (default `false`; any
 non-boolean is a validation error). Without it the response is byte-for-byte what it was before:
 `episode_uuids` and `source_descriptions` are `[]` and no new keys appear. With it, each node's
-fields come from the entity's **live** mentioning episodes — the same predicate `support` uses
-(not superseded at the read instant) — computed from the single batched mention query that
+fields come from the entity's **live** mentioning episodes — the belief/search predicate
+(`EpisodeSupersession::live_at`) that `knowledge_walk` `include_provenance` also uses: not
+superseded, not deleted, and not part of a document revision that is written but not yet
+committed ([ADR-0785](adr/0785-document-mode-revisions-and-commit-boundary.md)), evaluated at the
+read instant — computed from the single batched mention query that
 already produces `support`, so there is no extra query per hit:
 
 - `episode_uuids` — newest first (`created_at` descending, `uuid` descending as tiebreaker, the
@@ -1534,15 +1537,26 @@ already produces `support`, so there is no extra query per hit:
   appearance. Episodes with no recorded source file (older data) are omitted, so this list is
   **not** index-aligned with `episode_uuids`. Present only with the flag.
 - `episodes_truncated` — `true` only when the per-entity cap (fixed at **50**, not a request
-  parameter) removed at least one live episode; absent otherwise.
+  parameter) removed at least one live episode; absent otherwise. The cap is applied after the
+  liveness filter, so excluded episodes never consume a slot.
 
-`support` and `corroboration` are unchanged by the flag and always count **every** live document,
-not just the capped list; because `support` counts distinct documents and the list counts
-episodes, the two need not agree. `get_entity_neighbors` and `get_entities_by_source` do not
-filter superseded episodes (unchanged), so a `find_entities` hit's `episode_uuids` equals the
-**live subset** of what `get_entity_neighbors` reports for the same entity. Also note that the
-live predicate here does not exclude pending document revisions, which
-`get_entities_by_source` does.
+An episode of a pending document revision is therefore absent until the revision commits, and
+present afterwards — exactly as search and belief treat it. While a revision replaces an earlier
+one, the earlier revision's episodes stay listed until the commit boundary.
+
+**Caps differ on purpose.** `knowledge_walk` `include_provenance` returns at most **20** episodes
+*per edge*, in the edge's recorded order, and always emits `episodes_truncated` (`false` when
+nothing was cut). `find_entities` returns at most **50** *per entity*, newest first, and emits
+`episodes_truncated` only when `true`. The units (edge vs. entity) and orderings differ, and an
+entity is typically mentioned by far more episodes than an edge has producers, so a single value
+would change shipped behaviour for one of them. Neither cap is request-tunable.
+
+`support` and `corroboration` are unchanged by the flag and always count **every** live document
+(live in the same sense as above, so a pending revision does not count), not just the capped
+list; because `support` counts distinct documents and the list counts episodes, the two need not
+agree. `get_entity_neighbors` and `get_entities_by_source` do not filter superseded episodes
+(unchanged), so a `find_entities` hit's `episode_uuids` equals the **live subset** of what
+`get_entity_neighbors` reports for the same entity.
 
 To turn the UUIDs into episodes, call `knowledge_get_episodes` with `uuids` (see the paging
 table below) — two calls from a free-text query to every mentioning episode.
@@ -2176,9 +2190,11 @@ recorded).
 `support` counts **distinct source documents** per origin: a `doc_id` is one document, however many
 chunks it was split into, and an episode with no `doc_id` counts as its own document. `corroboration`
 is `primary + external`; a `derived` or `answer` episode is a *citation* (it stays linked for
-provenance) and never adds to it. Counts are over episodes that are live now, so a corrected episode
-stops contributing. On `knowledge_find_relationships`, when a belief query (`as_of`) is given, liveness
-(for both `support` and the `origins` filter) is evaluated at that `as_of` instant instead, so it agrees
+provenance) and never adds to it. Counts are over episodes that are live now (the belief/search
+predicate: not superseded and not part of an uncommitted document revision), so a corrected
+episode stops contributing and a pending document revision does not count until it commits. On
+`knowledge_find_relationships`, when a belief query (`as_of`) is given, liveness (for both
+`support` and the `origins` filter) is evaluated at that `as_of` instant instead, so it agrees
 with the `belief` block. For a relationship, `support` is derived from the edge's producing `episodes` and
 those of its **same-fact siblings** — edges with the same endpoints and relation name. (Ingest does
 not deduplicate edges, [ADR-0705](adr/0705-belief-time-separate-from-validity.md), so a page that
@@ -8631,6 +8647,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0858](0858-unchanged-chunk-resubmission-noop.md) | `knowledge_process_chunk` No-Ops on an Identical Resubmission | 2026-11-21 |
 | [0880](0880-restatement-aware-corroboration.md) | Restatement-Aware Corroboration — Independent Sources, Not Documents | 2026-11-22 |
 | [0881](0881-eval-verifies-service-reported-ontology.md) | `lcg-eval` Verifies and Reports the Service-Reported Ontology | 2026-11-22 |
+| [0882](0882-dump-mentions-endpoint-keyed-uuidless.md) | `knowledge_dump_wal` Dumps uuid-less MENTIONS Edges, Keyed on `(episode, entity, group_id)` | 2026-11-22 |
 | [0884](0884-status-episode-breakdown-opt-in.md) | `knowledge_status` Opt-in Per-group Episode Breakdown | 2026-11-22 |
 
 ## Historical numbering

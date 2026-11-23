@@ -92,11 +92,37 @@ const RELATES_TO_CYPHER: &str = "\
     (dst:Entity {uuid: $dst_uuid}) \
     MERGE (src)-[:RELATES_TO]->(rn) MERGE (rn)-[:RELATES_TO]->(dst)";
 
+// MENTIONS identity is `(episode, entity, group_id)`; the edge uuid is NOT part of the key
+// (native ingest creates MENTIONS edges with no uuid — ADR-0882). Four templates, chosen per row:
+// uuid-bearing vs uuid-less (the latter leaves `r.uuid` NULL on the rebuilt edge), and
+// non-NULL vs NULL `group_id`. A NULL `group_id` cannot be a `{group_id: $group_id}` MERGE key
+// (the dump would bind `""`, which never matches a stored NULL and would add a second edge on
+// replay), so NULL-group edges are created only when no NULL-group edge already exists between the pair
+// (`WHERE NOT EXISTS … CREATE`), and never SET `group_id`. A plain endpoint-only MERGE would
+// instead match a grouped edge on the same pair and silently skip the NULL-group one.
 const MENTIONS_CYPHER: &str = "\
     MATCH (ep:Episodic {uuid: $ep_uuid}), (en:Entity {uuid: $en_uuid}) \
-    MERGE (ep)-[r:MENTIONS]->(en) \
-    SET r.uuid = $uuid, r.group_id = $group_id, \
+    MERGE (ep)-[r:MENTIONS {group_id: $group_id}]->(en) \
+    SET r.uuid = $uuid, \
     r.created_at = CASE WHEN $created_at IS NULL THEN NULL ELSE timestamp($created_at) END";
+
+const MENTIONS_NO_UUID_CYPHER: &str = "\
+    MATCH (ep:Episodic {uuid: $ep_uuid}), (en:Entity {uuid: $en_uuid}) \
+    MERGE (ep)-[r:MENTIONS {group_id: $group_id}]->(en) \
+    SET r.created_at = CASE WHEN $created_at IS NULL THEN NULL ELSE timestamp($created_at) END";
+
+const MENTIONS_NULL_GROUP_CYPHER: &str = "\
+    MATCH (ep:Episodic {uuid: $ep_uuid}), (en:Entity {uuid: $en_uuid}) \
+    WHERE NOT EXISTS { MATCH (ep)-[x:MENTIONS]->(en) WHERE x.group_id IS NULL } \
+    CREATE (ep)-[r:MENTIONS]->(en) \
+    SET r.uuid = $uuid, \
+    r.created_at = CASE WHEN $created_at IS NULL THEN NULL ELSE timestamp($created_at) END";
+
+const MENTIONS_NULL_GROUP_NO_UUID_CYPHER: &str = "\
+    MATCH (ep:Episodic {uuid: $ep_uuid}), (en:Entity {uuid: $en_uuid}) \
+    WHERE NOT EXISTS { MATCH (ep)-[x:MENTIONS]->(en) WHERE x.group_id IS NULL } \
+    CREATE (ep)-[r:MENTIONS]->(en) \
+    SET r.created_at = CASE WHEN $created_at IS NULL THEN NULL ELSE timestamp($created_at) END";
 
 const HAS_EPISODE_CYPHER: &str = "\
     MATCH (sg:Saga {uuid: $sg_uuid}), (ep:Episodic {uuid: $ep_uuid}) \
@@ -653,24 +679,29 @@ fn dump_mentions_edges(
                     let ep_uuid = value_as_string(&row[0]);
                     let en_uuid = value_as_string(&row[1]);
                     let r_uuid = value_as_string(&row[2]);
-                    // Skip MENTIONS edges with null uuid (pre-migration edges — can't produce
-                    // a valid MERGE key; the edge loses no meaningful data since uuid is internal).
-                    if r_uuid.is_empty() {
-                        eprintln!(
-                            "liminis-context-graph: [DUMP WARN] MENTIONS ep={ep_uuid} en={en_uuid} has null uuid — skipping"
-                        );
-                        continue;
-                    }
-                    let r_group_id = value_as_string(&row[3]);
                     let r_created_at = dump_opt_ts_json(&row[4]);
-                    let params = serde_json::json!({
+                    let null_group = matches!(row[3], lbug::Value::Null(_));
+                    let uuid_less = r_uuid.is_empty();
+                    let mut params = serde_json::json!({
                         "ep_uuid": ep_uuid,
                         "en_uuid": en_uuid,
-                        "uuid": r_uuid,
-                        "group_id": r_group_id,
                         "created_at": r_created_at,
                     });
-                    w.log_mutation(MENTIONS_CYPHER, params, "")?;
+                    // Native ingest writes MENTIONS with no uuid; those edges are dumped with
+                    // a template that does not SET r.uuid (ADR-0882).
+                    if !uuid_less {
+                        params["uuid"] = serde_json::Value::String(r_uuid);
+                    }
+                    if !null_group {
+                        params["group_id"] = serde_json::Value::String(value_as_string(&row[3]));
+                    }
+                    let cypher = match (uuid_less, null_group) {
+                        (false, false) => MENTIONS_CYPHER,
+                        (true, false) => MENTIONS_NO_UUID_CYPHER,
+                        (false, true) => MENTIONS_NULL_GROUP_CYPHER,
+                        (true, true) => MENTIONS_NULL_GROUP_NO_UUID_CYPHER,
+                    };
+                    w.log_mutation(cypher, params, "")?;
                     page_written += 1;
                 }
                 Ok(())
