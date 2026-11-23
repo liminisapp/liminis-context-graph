@@ -130,6 +130,10 @@ http-body-util = "0.1"
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 futures = "0.3"
 serde_yaml = "0.9"
+# JSON Schema contract (#852): schemars derives the published response schemas; jsonschema
+# (dev-dependency of lcg-core only) validates real responses against them.
+schemars = { version = "1", default-features = false, features = ["derive", "std"] }
+jsonschema = { version = "0.63", default-features = false }
 sha2 = "0.11"
 tokio-util = "0.7"
 rmcp = { version = "3.5.0", default-features = false, features = ["server", "transport-io"] }

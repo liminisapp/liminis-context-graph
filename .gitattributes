@@ -8,3 +8,8 @@ crates/core/tests/fixtures/** -text
 # lookup of a pinned sha256 does not strip \r, so a CRLF-rewritten checkout on Windows would
 # corrupt every pinned hash with a trailing carriage return and fail every comparison.
 LBUG_EXTENSION_HASHES -text
+
+# Published response schemas (#852) are byte-compared against generator output by
+# `contract::committed_schemas_match_generated`, and sha256-pinned in the release manifest; CRLF
+# conversion on a Windows checkout would make the drift test report them stale.
+contract/*.json -text

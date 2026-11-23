@@ -33,7 +33,10 @@
 #     green having verified nothing;
 #   - the `verify-plan` job (#725) and the `host.needs` / `host.if` that require it and
 #     require BOTH build jobs to be `success` (generated `host.if` accepts `skipped`);
-#   - the `dispatch-docs` job (#626) and the OpenSSL / extension-pin / linkage steps.
+#   - the `dispatch-docs` job (#626) and the OpenSSL / extension-pin / linkage steps;
+#   - the `host` job's "Stage response JSON Schemas" step (#852), which copies contract/*.schema.json
+#     plus a generated contract-manifest.json into `artifacts/` before `gh release create`, so the
+#     published response schemas ride along as release assets.
 #
 # The secret-masking trap (#725, ADR-0725): the runner silently DROPS a job output that
 # looks like a credential ("Skip output 'val' since it may contain secret"). `plan`'s `val`
@@ -583,6 +586,12 @@ jobs:
         run: |
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json
+      # HAND-EDITED (issue #852, ADR-0852): publish the response JSON Schemas as release assets.
+      # `gh release create` below attaches `artifacts/*`, so staging them here is all it takes.
+      # The script fails the job if contract/ is empty or a schema is malformed, so a release can
+      # never ship without its contract. The checkout above is the tagged commit.
+      - name: Stage response JSON Schemas
+        run: scripts/stage-contract-assets.sh "${{ needs.plan.outputs.tag }}" artifacts
       - name: Create GitHub Release
         env:
           PRERELEASE_FLAG: "${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease && '--prerelease' || '' }}"

@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Passage": {
+      "description": "One passage (episode) hit.",
+      "properties": {
+        "attributes": {
+          "description": "Episode metadata: a JSON object serialized as a string.",
+          "type": "string"
+        },
+        "belief": {
+          "description": "`current` or `superseded`; only on a reranked passage.",
+          "type": "string"
+        },
+        "chunk_id": {
+          "description": "Omitted for a legacy episode.",
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "group_id": {
+          "type": "string"
+        },
+        "legs": {
+          "$ref": "#/definitions/PassageLegs",
+          "description": "Which hybrid retrieval legs found the passage (#871): `dense`, `lexical` or `both`.\nOnly on hybrid passage search."
+        },
+        "lexical_score": {
+          "description": "Raw BM25 value of the lexical leg (#871); only on single-query hybrid search where the\nlexical leg matched.",
+          "type": "number"
+        },
+        "matched_queries": {
+          "description": "Indices into `[query, ...queries]` that retrieved this passage; only with `queries`.",
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "origin": {
+          "description": "`primary`, `external`, `derived` or `answer`.",
+          "type": "string"
+        },
+        "rerank_score": {
+          "description": "Cross-encoder relevance logit; only on a reranked passage.",
+          "type": "number"
+        },
+        "score": {
+          "type": "number"
+        },
+        "similarity": {
+          "description": "Cosine similarity of a vector hit (hybrid mode only).",
+          "type": "number"
+        },
+        "source_description": {
+          "type": "string"
+        },
+        "source_file": {
+          "description": "Omitted for a legacy episode without stored source identity.",
+          "type": "string"
+        },
+        "uuid": {
+          "type": "string"
+        },
+        "valid_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "uuid",
+        "name",
+        "content",
+        "source_description",
+        "group_id",
+        "created_at",
+        "valid_at",
+        "score",
+        "attributes",
+        "origin"
+      ],
+      "type": "object"
+    },
+    "PassageLegs": {
+      "enum": [
+        "dense",
+        "lexical",
+        "both"
+      ],
+      "type": "string"
+    }
+  },
+  "description": "Result of knowledge_search_passages.",
+  "properties": {
+    "count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "expansion": {
+      "description": "Query-expansion report; present only when expansion ran. Free-form.",
+      "type": "object"
+    },
+    "passages": {
+      "items": {
+        "$ref": "#/definitions/Passage"
+      },
+      "type": "array"
+    },
+    "rerank": {
+      "description": "Rerank stage report; present only when reranking ran. Free-form.",
+      "type": "object"
+    }
+  },
+  "required": [
+    "passages",
+    "count"
+  ],
+  "title": "knowledge_search_passages result",
+  "type": "object"
+}

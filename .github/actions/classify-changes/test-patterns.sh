@@ -62,6 +62,8 @@ expect code '.github/actions/classify-changes/action.yml' 'the classifier itself
 expect code 'scripts/stage-openssl-rpath.sh' 'a script the build runs'
 expect code 'scripts/assert-openssl-linkage.sh' 'the OpenSSL linkage guard'
 expect code 'crates/eval/scripts/test-scripts.sh' 'a script the test job runs'
+expect code 'contract/knowledge_lint.schema.json' 'a published response schema (#852)'
+expect code 'contract/README.md' 'anything under contract/'
 expect code 'docs/configuration.md
 crates/core/src/db.rs' 'docs alongside code'
 expect code 'scripts/generate-docs-llms-full.sh
