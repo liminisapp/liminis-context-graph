@@ -373,7 +373,7 @@ async fn merged_summary_for(
             let reply = tokio::select! {
                 r = state.extractor.consolidate_summary(entity_name, current, incoming) => r,
                 _ = cancel.cancelled() => {
-                    note_cancelled(&state);
+                    note_cancelled(state);
                     return Err(Error::Cancelled);
                 }
             };

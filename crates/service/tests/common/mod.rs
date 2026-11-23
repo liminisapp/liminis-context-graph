@@ -176,6 +176,12 @@ pub struct StubExtractorConfig {
     /// Relation classification verdicts, keyed by exact edge `fact` text. Missing key ⇒ empty
     /// string (abstain ⇒ caller writes the literal `UNCLASSIFIED` sentinel).
     pub relation_verdicts: std::collections::HashMap<String, String>,
+    /// Milliseconds the stub sleeps before answering each request (issue #861): a deterministic
+    /// slow LLM for cancellation tests. The stub serves one request at a time, so an abandoned
+    /// request keeps the stub busy for this long. `0` (the default) answers immediately.
+    pub delay_ms: u64,
+    /// Count of HTTP requests the stub has received (issue #861).
+    pub requests: usize,
 }
 
 /// Spawns the stub extraction server on a random OS-assigned port and returns
@@ -221,6 +227,15 @@ pub fn spawn_stub_extractor() -> (u16, std::sync::Arc<std::sync::Mutex<StubExtra
                 continue;
             }
             let req: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+
+            let delay_ms = {
+                let mut cfg = config_thread.lock().unwrap_or_else(|e| e.into_inner());
+                cfg.requests += 1;
+                cfg.delay_ms
+            };
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
 
             let content = build_stub_response_content(&req, &config_thread);
             let resp_body = json!({
