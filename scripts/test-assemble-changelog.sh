@@ -273,7 +273,11 @@ fence_case "inline triple-backtick code is not a fence" \
 fresh realcopy
 cp "$here/../CHANGELOG.md" "$cl"
 printf '### Added\n\n- fragment entry for the real-changelog copy\n\n### Upgrading\n\n- fragment upgrade note\n' > "$fd/999999-real.md"
-if run >/dev/null 2>"$tmp/err"; then
+# A live CHANGELOG.md with no [Unreleased] heading is the state right after a release rename, before
+# the fresh empty heading is added (CONTRIBUTING release runbook, step 5): not a test failure.
+if ! grep -q '^## \[Unreleased\]' "$cl"; then
+  pass "real-copy case skipped: CHANGELOG.md has no [Unreleased] heading (add one: release runbook step 5)"
+elif run >/dev/null 2>"$tmp/err"; then
   body="$(awk '/^## \[Unreleased\]/{f=1;next} f && /^## /{exit} f' "$cl")"
   # canonical index of a known section name, -1 for a non-standard heading kept after them
   idx() {
@@ -299,7 +303,7 @@ EOF2
      && printf '%s' "$body" | grep -q 'fragment upgrade note'; then
     pass "real [Unreleased] + fragment: one heading per known section, canonical order"
   else fail "real-copy order: $(printf '%s\n' "$body" | grep '^### ' | tr '\n' '|')"; fi
-else fail "real-copy assemble failed: $(cat "$tmp/err")"; fi
+else fail "real-copy assemble failed (the live CHANGELOG.md [Unreleased] section is malformed, e.g. an unclosed code fence): $(cat "$tmp/err")"; fi
 
 # --- 14. usage -----------------------------------------------------------------------------------
 if "$script" --bogus >/dev/null 2>&1; then fail "unknown flag should fail"; else pass "unknown flag fails"; fi
