@@ -178,6 +178,8 @@ where
             line = lines.next_line(), if !reader_done && pending.len() < MAX_PENDING_LINES => {
                 match line {
                     Ok(Some(l)) => pending.push_back(l),
+                    // EOF or any read error (including a non-UTF-8 pipelined line, which
+                    // ended the loop before #861 too) counts as a disconnect.
                     Ok(None) | Err(_) => {
                         reader_done = true;
                         disconnected = true;

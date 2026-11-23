@@ -82,7 +82,10 @@ not cancelled on disconnect and run to completion as before.
   half-closes its write side (`shutdown(SHUT_WR)`, as in `printf '{...}\n' | nc -U ...`) looks to
   the service exactly like a client that hung up, and its `process_chunk` / `process_document`
   request is cancelled. Python's `socket.close()` after a timeout is the case this exists for;
-  clients that want an answer must not close or half-close first.
+  clients that want an answer must not close or half-close first. The same applies to a read error
+  on the connection while the request runs, including a pipelined line that is not valid UTF-8:
+  the service cannot tell it from a hang-up, so the in-flight request is cancelled and no response
+  is written. Send one well-formed request at a time.
 
 **Choosing a timeout and retrying.** Ingest latency is dominated by the embedder and the LLM, so
 set the client timeout to the slowest chunk you expect (or stream with `_progress_token` and treat
