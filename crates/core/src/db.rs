@@ -3084,12 +3084,12 @@ impl<'db> Conn<'db> {
         )
     }
 
-    /// `(uuid, source_path, chunk_names)` of every `DocRevision` row of `(group_id, doc_id)`.
+    /// The identity-bearing columns of every `DocRevision` row of `(group_id, doc_id)`.
     pub fn doc_revision_rows_for_doc(
         &self,
         group_id: &str,
         doc_id: &str,
-    ) -> Result<Vec<(String, Option<String>, Vec<String>)>, Error> {
+    ) -> Result<Vec<DocRevisionKeys>, Error> {
         let rows = match self.query_params(
             "MATCH (r:DocRevision) WHERE r.group_id = $gid AND r.doc_id = $doc_id \
              RETURN r.uuid, r.source_path, r.chunk_names ORDER BY r.uuid",
@@ -3100,12 +3100,10 @@ impl<'db> Conn<'db> {
         };
         Ok(rows
             .into_iter()
-            .map(|r| {
-                (
-                    value_as_string(&r[0]),
-                    value_as_optional_string(&r[1]),
-                    value_as_str_list(&r[2]),
-                )
+            .map(|r| DocRevisionKeys {
+                uuid: value_as_string(&r[0]),
+                source_path: value_as_optional_string(&r[1]),
+                chunk_names: value_as_str_list(&r[2]),
             })
             .collect())
     }
@@ -3218,7 +3216,9 @@ impl<'db> Conn<'db> {
         superseded_doc_id: &str,
     ) -> Result<Option<crate::belief::DocSupersessionRecord>, Error> {
         let key = (group_id.to_string(), superseded_doc_id.to_string());
-        Ok(self.get_doc_supersessions(&[key.clone()])?.remove(&key))
+        Ok(self
+            .get_doc_supersessions(std::slice::from_ref(&key))?
+            .remove(&key))
     }
 
     // ── Notebook lint scans (issue #755, ADR-0755) ────────────────────────────
@@ -7015,6 +7015,14 @@ pub struct MoveCandidate {
     pub name: String,
     pub chunk_id: Option<String>,
     pub write_path: Option<String>,
+}
+
+/// The identity-bearing columns of a `DocRevision` row (#903).
+#[derive(Debug, Clone)]
+pub struct DocRevisionKeys {
+    pub uuid: String,
+    pub source_path: Option<String>,
+    pub chunk_names: Vec<String>,
 }
 
 /// The final values of the identity columns one move changes on one episode (#903). A `None`

@@ -578,9 +578,9 @@ pub fn apply_plan(conn: &Conn<'_>, group_id: &str, plan: &MovePlan) -> Result<()
     for m in &plan.moves {
         for old in &m.old_doc_ids {
             let new = renames.get(old).map(String::as_str).unwrap_or(old);
-            for (rev_uuid, source_path, chunk_names) in
-                conn.doc_revision_rows_for_doc(group_id, old)?
-            {
+            for rev in conn.doc_revision_rows_for_doc(group_id, old)? {
+                let (rev_uuid, source_path, chunk_names) =
+                    (rev.uuid, rev.source_path, rev.chunk_names);
                 let new_sp = match (&m.spec.to.source_path, &source_path) {
                     (Some(p), _) => Some(p.clone()),
                     (None, Some(sp)) if sp == old && new != old.as_str() => Some(new.to_string()),
