@@ -140,8 +140,8 @@ A consumer can detect support for the move method from the capabilities reply an
 
 ### Functional Requirements
 
-- **FR-001**: The service MUST provide a write method, `knowledge_move_document`, that re-keys the live episodes of a document from an old identity to a new identity within one group.
-- **FR-002**: A move MUST rewrite the `doc_id` and `source_description` of every live episode of the document, so they reflect the new identity.
+- **FR-001**: The service MUST provide a write method, `knowledge_move_document`, that re-keys a document from an old identity to a new identity within one group. A document is identified by its live episodes, and its superseded revisions are re-keyed with it.
+- **FR-002**: A move MUST rewrite the `doc_id` and `source_description` of every episode of the document (its live episodes and its superseded revisions), so they reflect the new identity.
 - **FR-003**: When a chunk-id prefix rewrite (old prefix, new prefix) is supplied, a move MUST rewrite the chunk ids of the document's episodes that start with the old prefix. When none is supplied, chunk ids MUST be left unchanged.
 - **FR-004**: A move MUST NOT invoke the extractor, any LLM, or the embedder.
 - **FR-005**: A move MUST leave entities, relationships, embeddings and belief history (supersession, invalidation, corroboration) unchanged. Their links to the document's episodes MUST still resolve.
@@ -166,7 +166,7 @@ A consumer can detect support for the move method from the capabilities reply an
 
 ### Key Entities
 
-- **Document**: The set of live episodes sharing one identity, which is a `doc_id` or, absent that, a source path. It is the unit that a move re-keys.
+- **Document**: The set of episodes sharing one identity, which is a `doc_id` or, absent that, a source path. The document is identified by its live episodes, and its superseded revisions are re-keyed with it. It is the unit that a move re-keys.
 - **Episode**: The stored record of an ingested chunk. A move rewrites its `doc_id`, `source_description` and chunk id, and leaves its uuid, content, origin and links unchanged.
 - **Move**: One old-identity to new-identity re-key, with an optional chunk-id prefix rewrite. A batch is a list of moves applied as one unit.
 
