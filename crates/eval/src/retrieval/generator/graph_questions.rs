@@ -200,6 +200,16 @@ pub fn parse_prose_facts(text: &str, sk: &Skeleton) -> Result<Vec<ProseFact>, St
         serde_json::from_str(text).map_err(|e| format!("{PROSE_FACTS_FILE}: {e}"))?;
     for (i, f) in facts.iter().enumerate() {
         let at = format!("{PROSE_FACTS_FILE} entry {i} ({:?})", f.entity);
+        // One entry per (entity, attribute): two entries for the same project, whatever their
+        // owners or statuses, would put it under both owners and make the gold contradictory.
+        if let Some(j) = facts[..i]
+            .iter()
+            .position(|g| g.entity == f.entity && g.attribute == f.attribute)
+        {
+            return Err(format!(
+                "{at}: duplicates entry {j}; each (entity, attribute) may appear only once"
+            ));
+        }
         if f.entity.trim().is_empty() || f.value.trim().is_empty() {
             return Err(format!("{at}: `entity` and `value` must be non-empty"));
         }
@@ -1162,6 +1172,14 @@ mod tests {
         assert!(parse_prose_facts(&one(&bad), &sk)
             .unwrap_err()
             .contains("already states an Owner"));
+        // The same (entity, attribute) twice is rejected, even with a different owner or status.
+        let mut other = good.clone();
+        other.value = "Priya Varga".into();
+        other.status = ProseStatus::Ambiguous;
+        let dup = serde_json::to_string(&[&good, &other]).unwrap();
+        assert!(parse_prose_facts(&dup, &sk)
+            .unwrap_err()
+            .contains("duplicates entry 0"));
         // Unknown status and unknown fields.
         let json = r#"[{"entity":"X","attribute":"Owner","value":"Marcus Haddad","notes":["journal-04"],"status":"maybe"}]"#;
         assert!(parse_prose_facts(json, &sk).is_err());
