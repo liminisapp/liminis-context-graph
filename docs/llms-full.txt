@@ -1182,7 +1182,7 @@ during a rebuild and under any `--writable-groups` policy.
 ```json
 {"server_version": "0.19.1", "protocol_version": 1,
  "features": ["chunk_supersede", "entity_provenance", "hybrid_passage_search", "lint", "origin",
-              "process_document", "unchanged_noop", "walk", "walk_provenance", "writable_groups"],
+              "process_document", "status_episode_breakdown", "unchanged_noop", "walk", "walk_provenance", "writable_groups"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 

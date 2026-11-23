@@ -75,6 +75,7 @@ fn make_state(
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -220,9 +221,10 @@ async fn scenario() -> (Arc<AppState>, Arc<Db>, TempDir) {
         extraction(&[("Zed", "Quux", "Zed knows Quux")]),
         extraction(&[("Bob", "Initech", "Bob works at Initech")]),
     ]);
-    chunk(&state, G, "x", json!({})).await;
-    chunk(&state, G, "x", json!({})).await;
-    chunk(&state, G, "x", json!({})).await;
+    // Each revision carries distinct text: an identical resubmission is a no-op (#858).
+    chunk(&state, G, "x", json!({"chunk_text": "revision 1 of x"})).await;
+    chunk(&state, G, "x", json!({"chunk_text": "revision 2 of x"})).await;
+    chunk(&state, G, "x", json!({"chunk_text": "revision 3 of x"})).await;
     chunk(&state, G, "y", json!({})).await;
     call(
         "knowledge_mark_chunk_removed",
@@ -332,8 +334,8 @@ async fn shared_entity_with_a_live_mention_is_not_counted() {
         extraction(&[("Alice", "Acme", "Alice works at Acme")]),
         extraction(&[("Alice", "Acme", "Alice leads Acme")]),
     ]);
-    chunk(&state, G, "x", json!({})).await;
-    chunk(&state, G, "x", json!({})).await;
+    chunk(&state, G, "x", json!({"chunk_text": "revision 1 of x"})).await;
+    chunk(&state, G, "x", json!({"chunk_text": "revision 2 of x"})).await;
     let s = status(&state).await;
     let g = group(&s["episode_breakdown"], G);
     assert_eq!(counts(g).0, 1);
