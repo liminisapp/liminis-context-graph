@@ -1539,6 +1539,7 @@ by index with one of these codes:
 | `unknown_source` | The old identity matches no live episode in the group. Re-sending a move that was already applied is refused this way. |
 | `occupied_destination` | The new `doc_id` or source path already holds live episodes. **That is a merge, not a move, and is always refused.** |
 | `cross_group` | The old identity has live episodes only in a different group. Moves never cross groups. |
+| `destination_has_history` | The new `doc_id` holds no live episode but still has document revision rows (a hard delete keeps them) or a supersession record; moving into it would merge two revision histories. |
 | `chunk_id_collision` | A prefix rewrite would give an episode a chunk id another live episode (in the batch or not) already has. |
 | `identical` | `from` and `to` are the same identity. |
 | `duplicate_source`, `duplicate_destination` | Two moves in the batch name the same source or destination. |

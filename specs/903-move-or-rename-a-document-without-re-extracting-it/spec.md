@@ -125,7 +125,8 @@ A consumer can detect support for the move method from the capabilities reply an
 ### Edge Cases
 
 - **Origin is unchanged by a move.** If the new location implies a different origin, the consumer calls `knowledge_stamp_origin` afterwards. The move does not re-evaluate origin rules.
-- **Only live episodes move.** Episodes that are deleted, or already superseded or removed, are not re-keyed. A destination counts as "holding episodes" only when it holds live ones.
+- **Live episodes identify and occupy; superseded history moves with the document.** A document is identified by its live episodes, and a destination counts as "holding episodes" only when it holds live ones. Superseded revisions of the moved document are re-keyed with it (otherwise `knowledge_delete_by_source` on the old path would still find them and lint citations would still name the old `doc_id`). Deleted episodes do not exist and are not touched.
+- **Leftover document state at the destination.** A destination `doc_id` that holds no live episode but still has document revision rows (a hard delete keeps them) or a supersession record is refused (`destination_has_history`), because moving into it would merge two revision histories.
 - **Chunk-id prefix rewrite is optional.** When it is given, only chunk ids that start with the old prefix are rewritten. If a rewritten chunk id would collide with a live chunk id elsewhere, the move is refused.
 - **A document with no `doc_id`.** A document ingested without a `doc_id` is identified by its source path, so it can still be moved.
 - **Identical old and new identity.** This is refused as a no-op or invalid request, and nothing is written.
@@ -186,7 +187,7 @@ A consumer can detect support for the move method from the capabilities reply an
 - The method is a `write`-scope method, not `admin`. A rename is a routine consumer operation, unlike `knowledge_stamp_origin`, which is a one-off adoption tool. Planning can revisit this.
 - A "batch" is a list of move items in one request, and a single move is the same request with one item.
 - When no chunk-id prefix rewrite is supplied, chunk ids are left unchanged. The consumer decides whether chunk ids embed the path, and supplies the rewrite if they do.
-- Only live episodes count, both for what moves and for whether a destination is occupied.
+- Live episodes identify a document and occupy a destination. Superseded revisions of the moved document are re-keyed with it, and a destination with leftover revision or supersession state is refused.
 - No upper bound on batch size is specified. A folder rename of about 900 documents must work.
 - Dry run follows the shape that `knowledge_stamp_origin` uses.
 - The destination must be free of live episodes before the batch. Chains and swaps within a batch are not supported, and a consumer that needs them issues separate calls.

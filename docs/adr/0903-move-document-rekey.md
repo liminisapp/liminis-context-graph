@@ -44,7 +44,7 @@ the old path delete history and leave lint citations naming the old `doc_id`. Th
 occupancy.)
 
 **5. Refusals are decided before the first write.** A destination that already holds live episodes is a
-merge and is refused, as are an unknown source, a cross-group identity, a chunk-id collision (checked
+merge and is refused, as is a destination `doc_id` that has no live episode but still carries `DocRevision` rows or a `DocSupersession` record (a hard delete keeps them; re-keying the source's rows into it would merge two histories — `destination_has_history`), as are an unknown source, a cross-group identity, a chunk-id collision (checked
 group-wide against the post-batch names), an identical identity and batch conflicts (duplicate source,
 duplicate destination, a destination that is another move's source). The batch is validated against the
 state before the batch, so chains and swaps are refused rather than ordered. Any refusal changes nothing
@@ -61,7 +61,7 @@ the finished moves as `unknown_source`. The spike confirmed lbug 0.21.2 accepts 
 
 **7. Locks.** Document ingest takes a per-`(group, doc_id)` lock before reading its baseline. A move
 takes the same locks for every old and new `doc_id` in the batch, in sorted order, then the write lock,
-and re-plans under them, so a destination claimed by an ingest cannot end in a silent merge.
+and re-plans under them, so a destination claimed by an ingest cannot end in a silent merge. The lock set comes from a pre-plan, so the authoritative re-plan checks that its own lock set is covered (an ingest can add a `doc_id` at a path-only move's source between the two); if it grew, all locks are released and the move retries with the larger set, up to five attempts, then fails with nothing changed.
 
 **8. Write scope, `GroupRequired`.** A rename is a routine consumer operation, unlike
 `knowledge_stamp_origin`, a one-off adoption tool. `--writable-groups` therefore applies to `group_id`.

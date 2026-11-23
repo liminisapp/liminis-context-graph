@@ -433,6 +433,31 @@ async fn move_keeps_document_mode_baseline_so_reingest_does_not_re_extract() {
     assert_eq!(f.ex.count(), calls + 1);
 }
 
+/// A destination `doc_id` with no live episode but leftover `DocRevision` rows (a hard delete
+/// keeps them) must be refused: the move would otherwise merge two revision histories there.
+#[tokio::test]
+async fn destination_with_leftover_revision_history_is_refused() {
+    let f = fx();
+    ingest(&f.state, "b", "notes/b.md", NOTE).await;
+    let del = call(
+        "knowledge_delete_by_source",
+        json!({"source_file": "notes/b.md", "group_ids": [G]}),
+        &f.state,
+    )
+    .await;
+    assert!(del["deleted_count"].as_u64().unwrap() >= 1, "{del}");
+    ingest(&f.state, "a", "notes/a.md", &NOTE.replace("cache", "bus")).await;
+    let before = identity_snapshot(&f.db, G);
+
+    let r = move_docs(&f.state, vec![mv("a", "notes/a.md", "b", "moved/b.md")]).await;
+    assert!(error_message(&r).contains("destination_has_history"), "{r}");
+    assert_eq!(
+        identity_snapshot(&f.db, G),
+        before,
+        "a refusal changes nothing"
+    );
+}
+
 #[tokio::test]
 async fn prefix_rewrite_renames_chunk_ids_and_descriptions() {
     let f = fx();

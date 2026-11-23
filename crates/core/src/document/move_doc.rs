@@ -67,6 +67,7 @@ pub mod code {
     pub const DUPLICATE_SOURCE: &str = "duplicate_source";
     pub const DUPLICATE_DESTINATION: &str = "duplicate_destination";
     pub const DESTINATION_IS_SOURCE: &str = "destination_is_source";
+    pub const DESTINATION_HAS_HISTORY: &str = "destination_has_history";
 }
 
 /// A refused move: the index into the request's `moves`, a stable `code` and a message.
@@ -561,6 +562,58 @@ pub fn classify_cross_group(
             );
         }
     }
+}
+
+/// Refuses a move whose destination `doc_id` holds no live episode but still carries document
+/// state outside `Episodic` — `DocRevision` rows (kept after a delete or a retirement) or a
+/// `DocSupersession` record. `apply_plan` re-keys the source's revision and supersession rows into
+/// that `doc_id`, so without this check the destination would hold two unrelated revision
+/// histories and the next `knowledge_process_document` could pick the wrong baseline.
+pub fn check_destination_history(
+    conn: &Conn<'_>,
+    group_id: &str,
+    plan: &MovePlan,
+) -> Result<(), Vec<Refusal>> {
+    let mut refusals = Vec::new();
+    for m in &plan.moves {
+        let Some(dest) = &m.spec.to.doc_id else {
+            continue;
+        };
+        if m.old_doc_ids.contains(dest) {
+            continue;
+        }
+        let has_revisions = conn
+            .doc_revision_rows_for_doc(group_id, dest)
+            .map(|r| !r.is_empty())
+            .map_err(|e| db_refusal(m.index, e))?;
+        let has_supersession = conn
+            .doc_supersession_for(group_id, dest)
+            .map(|r| r.is_some())
+            .map_err(|e| db_refusal(m.index, e))?;
+        if has_revisions || has_supersession {
+            refusals.push(Refusal {
+                index: m.index,
+                code: code::DESTINATION_HAS_HISTORY,
+                message: format!(
+                    "doc_id '{dest}' holds no live episodes but still has document revision or \
+                     supersession state; moving into it would merge two histories"
+                ),
+            });
+        }
+    }
+    if refusals.is_empty() {
+        Ok(())
+    } else {
+        Err(refusals)
+    }
+}
+
+fn db_refusal(index: usize, e: Error) -> Vec<Refusal> {
+    vec![Refusal {
+        index,
+        code: code::DESTINATION_HAS_HISTORY,
+        message: format!("could not read the destination's document state: {e}"),
+    }]
 }
 
 /// Writes a validated plan through the recording `Conn` helpers. All statements are uuid- or

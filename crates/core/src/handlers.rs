@@ -3745,7 +3745,7 @@ fn plan_move_batch(
     use crate::document::move_doc as md;
     let live_at = crate::db::ingested_at_or_now("");
     let live = conn.move_candidates(Some(group_id), &live_at)?;
-    md::plan_moves(specs, &live).map_err(|mut refusals| {
+    let plan = md::plan_moves(specs, &live).map_err(|mut refusals| {
         if refusals.iter().any(|r| r.code == md::code::UNKNOWN_SOURCE) {
             // A different group is only consulted to tell a cross-group request from a typo.
             if let Ok(all) = conn.move_candidates(None, &live_at) {
@@ -3753,7 +3753,9 @@ fn plan_move_batch(
             }
         }
         move_refused(&refusals)
-    })
+    })?;
+    md::check_destination_history(conn, group_id, &plan).map_err(|r| move_refused(&r))?;
+    Ok(plan)
 }
 
 /// `knowledge_move_document` (issue #903, ADR-0903): re-keys a document's live episodes from one
@@ -3813,8 +3815,12 @@ async fn handle_move_document(req: &IpcRequest, state: Arc<AppState>) -> Result<
     }
 
     // Pre-plan (read lock) to learn which documents to lock; the authoritative plan is re-made
-    // under the locks. Locks are taken in sorted order (document ingest takes one at a time).
-    let lock_ids = {
+    // under the locks. Locks are taken in sorted order (document ingest takes one at a time, and
+    // never while holding the write lock). An ingest can land between the pre-plan and the locks
+    // (e.g. a path-only move picking up a new `doc_id` at that path), so after the write lock is
+    // held the re-plan's lock set must be covered by the locks already held; if it grew, release
+    // everything and retry with the larger set.
+    let mut lock_ids = {
         let _guard = state.write_lock.read().await;
         let (db, gid, specs) = (Arc::clone(&db), group_id.clone(), specs.clone());
         tokio::task::spawn_blocking(move || {
@@ -3823,25 +3829,56 @@ async fn handle_move_document(req: &IpcRequest, state: Arc<AppState>) -> Result<
         })
         .await??
     };
-    let mut doc_guards = Vec::with_capacity(lock_ids.len());
-    for doc_id in &lock_ids {
-        doc_guards.push(crate::document::ingest::lock_document(&state, &group_id, doc_id).await);
+    const MAX_LOCK_ATTEMPTS: usize = 5;
+    for attempt in 1..=MAX_LOCK_ATTEMPTS {
+        let mut doc_guards = Vec::with_capacity(lock_ids.len());
+        for doc_id in &lock_ids {
+            doc_guards
+                .push(crate::document::ingest::lock_document(&state, &group_id, doc_id).await);
+        }
+        let _guard = state.write_lock.write().await;
+        let (state_c, gid, specs_c, db_c) = (
+            Arc::clone(&state),
+            group_id.clone(),
+            specs.clone(),
+            Arc::clone(&db),
+        );
+        let held = lock_ids.clone();
+        let outcome = tokio::task::spawn_blocking(move || -> Result<_, Error> {
+            let conn = db_c.connect()?;
+            let plan = plan_move_batch(&conn, &gid, &specs_c)?;
+            let needed = plan.lock_doc_ids();
+            if !needed.is_subset(&held) {
+                return Ok(Err(needed));
+            }
+            let applied = crate::document::move_doc::apply_plan(&conn, &gid, &plan);
+            // Flush whatever ran — also after a failure — so the WAL always matches the graph.
+            let seq = wal_exec::wal_flush_chunk(&state_c, &gid, conn.drain_mutations());
+            wal_exec::advance_wal_position(&conn, &gid, seq, &state_c);
+            applied.map(|()| Ok(plan))
+        })
+        .await??;
+        match outcome {
+            Ok(plan) => {
+                drop(_guard);
+                drop(doc_guards);
+                return Ok(reply(&plan, false));
+            }
+            Err(needed) => {
+                drop(_guard);
+                drop(doc_guards);
+                if attempt == MAX_LOCK_ATTEMPTS {
+                    return Err(Error::Ipc(
+                        "knowledge_move_document: documents kept changing while the move was \
+                         being prepared; nothing was changed, retry the call"
+                            .to_string(),
+                    ));
+                }
+                lock_ids.extend(needed);
+            }
+        }
     }
-    let _guard = state.write_lock.write().await;
-    let (state_c, gid) = (Arc::clone(&state), group_id.clone());
-    let plan = tokio::task::spawn_blocking(move || -> Result<_, Error> {
-        let conn = db.connect()?;
-        let plan = plan_move_batch(&conn, &gid, &specs)?;
-        let applied = crate::document::move_doc::apply_plan(&conn, &gid, &plan);
-        // Flush whatever ran — also after a failure — so the WAL always matches the graph.
-        let seq = wal_exec::wal_flush_chunk(&state_c, &gid, conn.drain_mutations());
-        wal_exec::advance_wal_position(&conn, &gid, seq, &state_c);
-        applied.map(|()| plan)
-    })
-    .await??;
-    drop(_guard);
-    drop(doc_guards);
-    Ok(reply(&plan, false))
+    unreachable!("the loop returns on success or on its last attempt")
 }
 
 fn required_string_param(p: &Value, key: &str) -> Result<String, Error> {
