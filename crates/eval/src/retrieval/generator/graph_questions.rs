@@ -564,8 +564,8 @@ fn e13(sk: &Skeleton, f: &Facts, ov: &Overlay) -> Vec<Draft> {
                 } else {
                     (Vec::new(), Vec::new())
                 };
-                let n_gold = xs.iter().chain(st.iter()).collect::<BTreeSet<_>>().len();
-                if n_gold < min.max(1) {
+                // Selection gates on skeleton answers only: the overlay never creates a question.
+                if xs.len() < min.max(1) {
                     return None;
                 }
                 Some(
@@ -635,7 +635,8 @@ fn e13(sk: &Skeleton, f: &Facts, ov: &Overlay) -> Vec<Draft> {
                 .filter(|p| f.cur2(f.cur(p, OW), LO) == Some(c))
                 .collect();
             let (st, am) = ov.projects(|o| f.cur(o, LO) == Some(c));
-            if ps.is_empty() && st.is_empty() {
+            // Selection gates on skeleton answers only: the overlay never creates a question.
+            if ps.is_empty() {
                 return None;
             }
             let hops = ps
@@ -834,7 +835,8 @@ fn inverse_family(sk: &Skeleton, f: &Facts, ov: &Overlay) -> Vec<Draft> {
                 .filter(|p| f.cur2(f.cur(p, "Owner"), "Reports to") == Some(h))
                 .collect();
             let (st, am) = ov.projects(|o| f.cur(o, "Reports to") == Some(h));
-            if ps.is_empty() && st.is_empty() {
+            // Selection gates on skeleton answers only: the overlay never creates a question.
+            if ps.is_empty() {
                 return None;
             }
             let hops = ps
@@ -1034,6 +1036,26 @@ mod tests {
             let mut a2 = a.clone();
             a2.optional_answers.clear();
             assert_eq!(&a2, b, "{}", a.id);
+        }
+    }
+
+    #[test]
+    fn a_stated_fact_creates_no_new_question_and_moves_no_other() {
+        let sk = sk();
+        let plain = generate(&sk, &[]).unwrap();
+        // Whoever the stated owner is (so every city and manager is covered, including ones
+        // with no skeleton-owned project), the question set keeps its ids, text and order.
+        for person in sk.entities.iter().filter(|e| e.kind == "person") {
+            let qs = generate(
+                &sk,
+                &[fact("Ghost project", &person.name, ProseStatus::Stated)],
+            )
+            .unwrap();
+            assert_eq!(qs.len(), plain.len(), "{}", person.name);
+            for (a, b) in qs.iter().zip(&plain) {
+                assert_eq!((&a.id, &a.text, &a.split), (&b.id, &b.text, &b.split));
+                assert!(a.answers.len() >= b.answers.len(), "{}", a.id);
+            }
         }
     }
 
