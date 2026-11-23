@@ -6992,7 +6992,7 @@ target/release/lcg-eval retrieval \
 | `--replay-cassette <PATH>` / `--record-cassette <PATH>` | Replay or record ingest extraction ([cassettes](testing-and-evaluation.md#recordreplay-cassettes)) for a free, repeatable LCG ingest. |
 | `--qmd-bin`, `--qmd-index` | qmd executable and named index. The default index name includes the corpus hash (`lcg-eval-<corpus_version>-<hash8>`), so a changed corpus gets a fresh index. qmd keeps a collection's original directory: if you pass your own `--qmd-index` and reuse it after changing `--corpus` or editing notes, the run warns, and you must remove the old collection or pick a new name. |
 | `--judge-model`, `--judge-cache`, `--no-grounded` | Grounded-evidence judge (needs `ANTHROPIC_API_KEY`); verdicts are cached so re-runs cost nothing. Without a key the grounded columns are **skipped**, not zero. |
-| `--out <DIR>` | Write `report.md` and `report.json` (and `compare.md` / `ranked.jsonl` when those flags are used). |
+| `--out <DIR>` | Write `report.md` and `report.json` (and `compare.md` / `ranked.jsonl` when those flags are used). A stale `compare.md` or `ranked.jsonl` left by an earlier run in the same directory is removed first, so the directory never mixes runs. |
 | `--compare <FILE>` | Compare against an earlier `report.json`; see [Comparing two runs](#comparing-two-runs). |
 | `--strict` | With `--compare`, also refuse a run whose soft inputs differ. Requires `--compare`. |
 | `--record-ranked` | Write `ranked.jsonl` beside the report; see [Per-question ranked lists](#per-question-ranked-lists). Requires `--out`; refused with `--private`. |

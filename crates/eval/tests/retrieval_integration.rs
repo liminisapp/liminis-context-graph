@@ -806,6 +806,43 @@ async fn ranked_jsonl_joins_dense_and_hybrid_configs_on_question_id_with_no_miss
 }
 
 #[test]
+fn a_reused_out_dir_does_not_keep_a_stale_compare_md_or_ranked_jsonl() {
+    let d = tempfile::tempdir().unwrap();
+    let ok = previous_report(d.path(), |_| {});
+    let out = d.path().join("reused");
+    // First run: a compatible compare plus ranked output leaves both files behind.
+    let o = cli_run(&[
+        "--compare",
+        ok.to_str().unwrap(),
+        "--record-ranked",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(out.join("compare.md").exists() && out.join("ranked.jsonl").exists());
+    // Second run in the same directory: refused comparison, no --record-ranked.
+    // `previous_report` always writes `<dir>/prev.json`, so give the second one its own directory.
+    let other = d.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let bad = previous_report(&other, |j| {
+        j["inputs"]["questions"] = json!("0".repeat(64));
+    });
+    let o = cli_run(&[
+        "--compare",
+        bad.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&o), 2);
+    assert!(out.join("report.json").exists());
+    assert!(!out.join("compare.md").exists(), "stale compare.md cleared");
+    assert!(
+        !out.join("ranked.jsonl").exists(),
+        "stale ranked.jsonl cleared"
+    );
+}
+
+#[test]
 fn ranked_jsonl_is_not_written_without_the_flag() {
     let d = tempfile::tempdir().unwrap();
     let out = d.path().join("o");

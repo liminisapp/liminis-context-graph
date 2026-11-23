@@ -1050,6 +1050,17 @@ async fn run(a: RetrievalArgs) -> Result<i32, String> {
     };
 
     let mut written = write_report(&report, a.out.as_deref());
+    // A reused `--out` must not leave a `compare.md` / `ranked.jsonl` from an earlier run beside this
+    // run's `report.json`: clear both here; each is rewritten below only when this run produces it.
+    if let Some(dir) = a.out.as_deref() {
+        for name in ["compare.md", "ranked.jsonl"] {
+            if let Err(e) = std::fs::remove_file(dir.join(name)) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    written = written.and(Err(format!("cannot clear stale {name}: {e}")));
+                }
+            }
+        }
+    }
     if let (true, Some(dir)) = (a.record_ranked, a.out.as_deref()) {
         match ranked::write_ranked(dir, &report.configs) {
             Ok(p) => eprintln!("lcg-eval retrieval: wrote {}", p.display()),
