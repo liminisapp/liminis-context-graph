@@ -89,6 +89,9 @@ pub struct RetrievalArgs {
     pub expander_uds: Option<String>,
     pub replay_cassette: Option<String>,
     pub record_cassette: Option<String>,
+    /// `--ingest-concurrency N` (#900): `knowledge_process_chunk` calls kept in flight during
+    /// ingest (default 1). Forced to 1 under `--replay-cassette`.
+    pub ingest_concurrency: usize,
     pub qmd_bin: PathBuf,
     pub qmd_index: Option<String>,
     pub judge_model: String,
@@ -174,6 +177,11 @@ OPTIONS:
     --extractor-uds <SOCKET>   own default, e.g. ANTHROPIC_API_KEY).
     --replay-cassette <PATH>   Serve ingest extraction from a recorded cassette (LCG_REPLAY_LLM).
     --record-cassette <PATH>   Record ingest extraction to a cassette (LCG_RECORD_LLM).
+    --ingest-concurrency <N>   Keep up to N knowledge_process_chunk calls in flight during ingest
+                               (default 1: sequential, unchanged). Each call gets its own socket
+                               connection. Live runs at N > 1 can differ from run to run, and a
+                               cassette recorded at N > 1 is marked order-dependent. Ignored (forced
+                               to 1) with --replay-cassette; the report states the value used.
     --qmd-bin <PATH>           qmd executable (default: qmd). Installed out of band; if it cannot
                                run, the qmd configurations are reported as skipped.
     --qmd-index <NAME>         qmd named index to create (default: lcg-eval-<corpus_version>-<corpus_hash8>).
@@ -239,6 +247,7 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
         expander_uds: None,
         replay_cassette: None,
         record_cassette: None,
+        ingest_concurrency: 1,
         qmd_bin: PathBuf::from("qmd"),
         qmd_index: None,
         judge_model: DEFAULT_JUDGE_MODEL.to_string(),
@@ -350,6 +359,10 @@ pub fn parse_args(args: &[String]) -> Result<RetrievalMode, String> {
             "--expander-uds" => a.expander_uds = Some(val("--expander-uds")?),
             "--replay-cassette" => a.replay_cassette = Some(val("--replay-cassette")?),
             "--record-cassette" => a.record_cassette = Some(val("--record-cassette")?),
+            "--ingest-concurrency" => {
+                a.ingest_concurrency =
+                    super::lcg::parse_ingest_concurrency(&val("--ingest-concurrency")?)?;
+            }
             "--qmd-bin" => a.qmd_bin = PathBuf::from(val("--qmd-bin")?),
             "--qmd-index" => a.qmd_index = Some(val("--qmd-index")?),
             "--judge-model" => a.judge_model = val("--judge-model")?,
@@ -638,6 +651,25 @@ mod tests {
         assert!(p(&["--embedding-profile", ","]).is_err());
         assert!(p(&["--bootstrap-resamples", "5"]).is_err());
         assert!(p(&["--bootstrap-seed", "-1"]).is_err());
+    }
+
+    #[test]
+    fn ingest_concurrency_parses_defaults_to_one_and_rejects_bad_values() {
+        match p(&[]).unwrap() {
+            RetrievalMode::Run(a) => assert_eq!(a.ingest_concurrency, 1),
+            other => panic!("{other:?}"),
+        }
+        match p(&["--ingest-concurrency", "4"]).unwrap() {
+            RetrievalMode::Run(a) => assert_eq!(a.ingest_concurrency, 4),
+            other => panic!("{other:?}"),
+        }
+        for bad in ["0", "-1", "abc"] {
+            let e = p(&["--ingest-concurrency", bad]).unwrap_err();
+            assert!(e.contains("--ingest-concurrency"), "{bad}: {e}");
+        }
+        assert!(p(&["--ingest-concurrency"])
+            .unwrap_err()
+            .contains("requires a value"));
     }
 
     #[test]

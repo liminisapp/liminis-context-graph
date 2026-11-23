@@ -768,6 +768,36 @@ pub async fn ingest(t: &dyn RpcTransport, fx: &Fixture) -> Result<IngestMap, Str
     ingest_with(t, fx, 1).await
 }
 
+/// Parses `--ingest-concurrency` (#900): a positive integer. Zero, negative and non-numeric values
+/// are a usage error rather than silently becoming 1.
+pub fn parse_ingest_concurrency(v: &str) -> Result<usize, String> {
+    match v.trim().parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!(
+            "--ingest-concurrency must be an integer >= 1, got '{v}'"
+        )),
+    }
+}
+
+/// The ingest concurrency a run actually uses (#900), and a note when that is not what was asked
+/// for. A replayed cassette is always ingested sequentially: its `consolidate_summary` and
+/// `judge_duplicates` keys hash graph state, so which state each concurrent call sees would vary
+/// with timing and the replay would not be deterministic.
+pub fn effective_ingest_concurrency(requested: usize, replaying: bool) -> (usize, Option<String>) {
+    let requested = requested.max(1);
+    if replaying && requested > 1 {
+        return (
+            1,
+            Some(format!(
+                "--ingest-concurrency {requested} is ignored under a replayed cassette: replay \
+                 always ingests sequentially (effective ingest concurrency 1) so it stays \
+                 deterministic"
+            )),
+        );
+    }
+    (requested, None)
+}
+
 /// One `knowledge_process_chunk` call to make, in manifest order.
 struct ChunkJob {
     note_id: String,
@@ -2296,6 +2326,28 @@ mod tests {
             .await
             .unwrap_err()
             .contains("nope"));
+    }
+
+    #[test]
+    fn ingest_concurrency_flag_values_are_validated() {
+        assert_eq!(parse_ingest_concurrency("1").unwrap(), 1);
+        assert_eq!(parse_ingest_concurrency("8").unwrap(), 8);
+        for bad in ["0", "-1", "abc", "", "1.5"] {
+            let e = parse_ingest_concurrency(bad).unwrap_err();
+            assert!(
+                e.contains("--ingest-concurrency") && e.contains(&format!("'{bad}'")),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_forces_sequential_ingest_and_says_so() {
+        assert_eq!(effective_ingest_concurrency(4, false), (4, None));
+        assert_eq!(effective_ingest_concurrency(1, true), (1, None));
+        let (n, note) = effective_ingest_concurrency(4, true);
+        assert_eq!(n, 1);
+        assert!(note.unwrap().contains("--ingest-concurrency 4"));
     }
 
     // ---- #900: --ingest-concurrency -------------------------------------------------------

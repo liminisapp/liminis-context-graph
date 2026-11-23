@@ -597,6 +597,23 @@ async fn run(a: RetrievalArgs) -> Result<i32, String> {
             eprintln!("lcg-eval retrieval: WARNING {w}");
         }
     }
+    // #900: how many chunk calls ingest keeps in flight. A replayed cassette is always ingested
+    // sequentially (its state-keyed entries are only exact in recorded order); say so up front.
+    let (ingest_concurrency_used, ingest_concurrency_note) =
+        lcg::effective_ingest_concurrency(a.ingest_concurrency, a.replay_cassette.is_some());
+    if let Some(note) = &ingest_concurrency_note {
+        eprintln!("lcg-eval retrieval: WARNING {note}");
+    }
+    if a.record_cassette.is_some() && ingest_concurrency_used > 1 {
+        eprintln!(
+            "lcg-eval retrieval: WARNING --record-cassette with --ingest-concurrency \
+             {ingest_concurrency_used} records an order-dependent cassette: its \
+             consolidate_summary and judge_duplicates keys hash graph state that depends on the \
+             order chunks commit in, so a replay can miss them (the service degrades those misses \
+             silently). The cassette sidecar is marked order_dependent; replay always runs \
+             sequentially"
+        );
+    }
     // Query variants (#802): validated before the service is spawned or anything is ingested. A
     // missing file makes the config a skipped row; a stale or leaking one aborts the run.
     let query_variants = if a
@@ -634,6 +651,10 @@ async fn run(a: RetrievalArgs) -> Result<i32, String> {
         ontology_mode: onto.mode.clone(),
         ontology_file: a.ontology.as_ref().map(|p| p.display().to_string()),
         kept_workspace: None,
+        ingest_concurrency: ingest_concurrency_used,
+        ingest_concurrency_requested: ingest_concurrency_note
+            .as_ref()
+            .map(|_| a.ingest_concurrency),
     };
     let mut ingest_cost = IngestCost::default();
     let mut lcg_slots: BTreeMap<String, Slot> = BTreeMap::new();
@@ -736,7 +757,13 @@ async fn run(a: RetrievalArgs) -> Result<i32, String> {
                 plan.notes
             );
             let transport: Arc<dyn lcg::RpcTransport> = guard.client.clone();
-            let map = Arc::new(lcg::ingest(transport.as_ref(), &fx).await?);
+            // #900: at N > 1 ingest gets its own pool of N connections (the service handles one
+            // request per connection); queries below keep the single `transport`.
+            let ingest_transport = guard.ingest_transport(ingest_concurrency_used);
+            let map = Arc::new(
+                lcg::ingest_with(ingest_transport.as_ref(), &fx, ingest_concurrency_used).await?,
+            );
+            drop(ingest_transport);
             // FR-003: the cassette this ingest recorded carries the ontology it was recorded under
             // (also "none"), so a later replay can be checked either way.
             if let Some(c) = &a.record_cassette {
@@ -744,7 +771,12 @@ async fn run(a: RetrievalArgs) -> Result<i32, String> {
                     hash: guard.ontology.hash.clone(),
                     mode: guard.ontology.mode.clone(),
                 };
-                workspace::write_cassette_meta(std::path::Path::new(c), &served, &guard.version)?;
+                workspace::write_cassette_meta(
+                    std::path::Path::new(c),
+                    &served,
+                    &guard.version,
+                    ingest_concurrency_used,
+                )?;
             }
             // Ingest cost accumulates across profile runs (each re-ingests the corpus).
             ingest_cost.lcg_seconds = Some(ingest_cost.lcg_seconds.unwrap_or(0.0) + map.seconds);

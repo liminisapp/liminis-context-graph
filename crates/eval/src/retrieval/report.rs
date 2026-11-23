@@ -62,6 +62,18 @@ pub struct RunMeta {
     pub ontology_file: Option<String>,
     /// `--keep-workspace` destination, when the ingested workspace was kept.
     pub kept_workspace: Option<String>,
+    /// `knowledge_process_chunk` calls kept in flight during ingest (#900): the **effective**
+    /// value, after a replayed cassette forced it to 1. `0` (the `Default`) reads as 1.
+    pub ingest_concurrency: usize,
+    /// What `--ingest-concurrency` asked for, only when the run used something else (replay).
+    pub ingest_concurrency_requested: Option<usize>,
+}
+
+impl RunMeta {
+    /// The ingest concurrency to report; a `Default`-built meta (0) means sequential.
+    pub fn effective_ingest_concurrency(&self) -> usize {
+        self.ingest_concurrency.max(1)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1148,6 +1160,20 @@ impl Report {
                 _ => "none (free-form extraction; hash `none`)".to_string(),
             }
         );
+        let _ = writeln!(
+            o,
+            "- Ingest concurrency: {}{}",
+            m.effective_ingest_concurrency(),
+            match m.ingest_concurrency_requested {
+                Some(r) =>
+                    format!(" (requested {r}; a replayed cassette is always ingested sequentially)"),
+                None if m.effective_ingest_concurrency() > 1 =>
+                    " (live extraction at this concurrency is order-dependent: graphs can differ \
+                     from run to run)"
+                        .to_string(),
+                None => String::new(),
+            }
+        );
         if let Some(k) = &m.kept_workspace {
             let _ = writeln!(o, "- Kept workspace: `{k}`");
         }
@@ -1629,6 +1655,7 @@ impl Report {
                 "qmd_models": m.qmd_models, "judge_model": m.judge_model,
                 "ontology_hash": m.ontology_hash, "ontology_mode": m.ontology_mode,
                 "ontology_file": m.ontology_file, "kept_workspace": m.kept_workspace,
+                "ingest_concurrency": m.effective_ingest_concurrency(),
                 "category_counts": cat_counts, "latency_convention": "warm",
             },
             "bootstrap": {
@@ -1655,6 +1682,9 @@ impl Report {
                 "h2_reading": h2.key(),
             },
         });
+        if let Some(r) = m.ingest_concurrency_requested {
+            j["meta"]["ingest_concurrency_requested"] = json!(r);
+        }
         if let Some(i) = &self.inputs {
             j["inputs"] = i.to_json();
         }
@@ -2571,5 +2601,51 @@ mod tests {
     fn lexical_vs_paraphrase_pair_is_omitted_when_a_category_is_absent() {
         // `report()` has temporal + paraphrase questions but no direct ones.
         assert!(!report().render_markdown().contains("Lexical vs paraphrase"));
+    }
+
+    #[test]
+    fn report_states_the_ingest_concurrency_in_json_and_markdown() {
+        // A default-built meta is sequential, and the requested key is absent.
+        let r = report();
+        let j = r.to_json();
+        assert_eq!(j["meta"]["ingest_concurrency"], 1);
+        assert!(j["meta"].get("ingest_concurrency_requested").is_none());
+        let md = r.render_markdown();
+        assert!(md.contains("- Ingest concurrency: 1\n"), "{md}");
+
+        let mut r = report();
+        r.meta.ingest_concurrency = 4;
+        assert_eq!(r.to_json()["meta"]["ingest_concurrency"], 4);
+        let md = r.render_markdown();
+        assert!(
+            md.contains("- Ingest concurrency: 4 (live extraction")
+                && md.contains("order-dependent"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn report_records_when_replay_overrode_the_requested_concurrency() {
+        let mut r = report();
+        r.meta.ingest_concurrency = 1;
+        r.meta.ingest_concurrency_requested = Some(4);
+        let j = r.to_json();
+        assert_eq!(j["meta"]["ingest_concurrency"], 1);
+        assert_eq!(j["meta"]["ingest_concurrency_requested"], 4);
+        assert!(r
+            .render_markdown()
+            .contains("- Ingest concurrency: 1 (requested 4;"));
+    }
+
+    #[test]
+    fn ingest_concurrency_does_not_touch_the_metrics_or_the_inputs_block() {
+        // N = 1 metrics are what they were: only `meta.ingest_concurrency` differs.
+        let a = report().to_json();
+        let mut r = report();
+        r.meta.ingest_concurrency = 4;
+        let b = r.to_json();
+        assert_eq!(a["configs"], b["configs"]);
+        assert_eq!(a["comparisons"], b["comparisons"]);
+        assert_eq!(a["inputs"], b["inputs"]);
     }
 }

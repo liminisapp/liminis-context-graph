@@ -489,6 +489,9 @@ pub struct ProbeArgs {
     /// service default.
     pub embedding_profile: Option<String>,
     pub replay_cassette: Option<String>,
+    /// `--ingest-concurrency N` (#900), default 1. Only takes effect with `--extractor-http`:
+    /// a replayed cassette (explicit or the corpus default) is always ingested sequentially.
+    pub ingest_concurrency: usize,
     pub offtopic: Option<PathBuf>,
     pub k: usize,
     pub modes: Vec<String>,
@@ -515,6 +518,9 @@ OPTIONS:
     --replay-cassette <F>    Extraction cassette (default <corpus>/cassette.jsonl when present and no
                              --extractor-http). Recorded cassettes go stale when the extraction
                              prompt changes; a miss aborts the ingest.
+    --ingest-concurrency <N> Keep up to N knowledge_process_chunk calls in flight (default 1).
+                             Forced to 1 whenever a cassette is replayed, so it matters only
+                             with --extractor-http.
     --offtopic <FILE>        Off-topic queries (default <corpus>/offtopic-queries.jsonl).
     --k <N>                  Hits per query (default 10).
     --modes <LIST>           Subset of vector,hybrid,hybrid-belief (default: all three). A mode may
@@ -536,6 +542,7 @@ pub fn parse_args(args: &[String]) -> Result<Option<ProbeArgs>, String> {
         extractor_http: None,
         embedding_profile: None,
         replay_cassette: None,
+        ingest_concurrency: 1,
         offtopic: None,
         k: 10,
         modes: vec!["vector".into(), "hybrid".into(), "hybrid-belief".into()],
@@ -561,6 +568,9 @@ pub fn parse_args(args: &[String]) -> Result<Option<ProbeArgs>, String> {
             "--extractor-http" => a.extractor_http = Some(val("--extractor-http")?),
             "--embedding-profile" => a.embedding_profile = Some(val("--embedding-profile")?),
             "--replay-cassette" => a.replay_cassette = Some(val("--replay-cassette")?),
+            "--ingest-concurrency" => {
+                a.ingest_concurrency = lcg::parse_ingest_concurrency(&val("--ingest-concurrency")?)?
+            }
             "--offtopic" => a.offtopic = Some(PathBuf::from(val("--offtopic")?)),
             "--k" => {
                 a.k = val("--k")?
@@ -668,7 +678,14 @@ async fn run(a: ProbeArgs) -> Result<(), String> {
     let guard = lcg::spawn_service(&opts).await?;
     let t: Arc<dyn RpcTransport> = guard.client.clone();
     eprintln!("retrieval-score-probe: ingesting {} notes", fx.notes.len());
-    lcg::ingest(t.as_ref(), &fx).await?;
+    let (concurrency, note) =
+        lcg::effective_ingest_concurrency(a.ingest_concurrency, opts.replay_cassette.is_some());
+    if let Some(note) = note {
+        eprintln!("retrieval-score-probe: WARNING {note}");
+    }
+    let ingest_t = guard.ingest_transport(concurrency);
+    lcg::ingest_with(ingest_t.as_ref(), &fx, concurrency).await?;
+    drop(ingest_t);
 
     let mut obs = Vec::new();
     for q in &queries {
@@ -900,6 +917,16 @@ mod tests {
         assert!(parse_args(&["--modes".into(), "nope".into()]).is_err());
         assert!(parse_args(&["--k".into(), "0".into()]).is_err());
         assert!(parse_args(&["--bogus".into()]).is_err());
+        assert_eq!(a.ingest_concurrency, 1);
+        let c = parse_args(&["--ingest-concurrency".into(), "4".into()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.ingest_concurrency, 4);
+        for bad in ["0", "-2", "x"] {
+            assert!(parse_args(&["--ingest-concurrency".into(), bad.into()])
+                .unwrap_err()
+                .contains("--ingest-concurrency"));
+        }
         let f = parse_args(&["--fts-check".into(), "cedar,zzqx".into()])
             .unwrap()
             .unwrap();
