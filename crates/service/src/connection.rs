@@ -400,7 +400,14 @@ where
                 while let Ok(val) = r.try_recv() {
                     let json = serde_json::to_string(&val).unwrap_or_default();
                     if !write_frame(writer, format!("{json}\n").as_bytes(), write_timeout).await {
-                        break;
+                        // The client stopped reading (or is gone). A timed-out write may have
+                        // left half a line on the socket, so nothing more may be written to it:
+                        // the request already ran to completion, so just end the connection.
+                        eprintln!(
+                            "liminis-context-graph: frame write failed after {method} finished; \
+                             closing connection without a response"
+                        );
+                        return Served::Disconnected;
                     }
                 }
             }
@@ -762,6 +769,49 @@ mod tests {
             .unwrap();
         assert_eq!(probe.saw_cancel.load(Ordering::SeqCst), 1);
         assert_eq!(probe.finished.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_drain_write_closes_without_appending_response_to_partial_line() {
+        // The request finishes instantly with several frames queued; a 16-byte buffer and a
+        // client that never reads make a frame write stall. The connection must end instead of
+        // blocking on the response write or gluing the response onto a partial frame line.
+        let (mut client, server) = tokio::io::duplex(16);
+        let notify = Arc::new(Notify::new());
+        let h = tokio::spawn(serve_connection(
+            server,
+            CancellationToken::new(),
+            |req: IpcRequest, _cancel: CancellationToken, tx: Option<UnboundedSender<Value>>| {
+                Box::pin(async move {
+                    if let Some(tx) = &tx {
+                        for _ in 0..4 {
+                            let _ = tx.send(
+                                serde_json::json!({"type":"progress","phase":"extract","pad":"xxxxxxxxxxxxxxxx"}),
+                            );
+                        }
+                    }
+                    IpcResponse::ok(req.id, serde_json::json!({"done": true}))
+                }) as BoxedFut
+            },
+            notify,
+            Duration::from_secs(60),
+            Duration::from_millis(100),
+            always_gone(),
+        ));
+        client
+            .write_all(line(1, "knowledge_process_chunk", true).as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), h)
+            .await
+            .expect("a stalled drain write must not hang the connection")
+            .unwrap();
+        let mut rest = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(2), client.read_to_end(&mut rest)).await;
+        assert!(
+            !String::from_utf8_lossy(&rest).contains("\"result\""),
+            "no response may follow a partial frame"
+        );
     }
 
     #[tokio::test]
