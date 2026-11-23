@@ -1151,8 +1151,9 @@ pub fn registry() -> Vec<ToolSpec> {
         ToolSpec {
             name: "knowledge_move_document",
             description: "Rename or move a document WITHOUT re-extracting it (issue #903): re-keys \
-                           the document's LIVE episodes from one identity (`doc_id` and/or source \
-                           path) to another. No extractor, LLM or embedder call. Rewrites \
+                           the document's episodes from one identity (`doc_id` and/or source \
+                           path) to another — live episodes identify it and occupy a destination, \
+                           superseded revisions move with it. No extractor, LLM or embedder call. Rewrites \
                            `doc_id`, the stored source file, `source_description` and — with an \
                            optional `chunk_id_prefix` {from, to} — the chunk ids that start with \
                            the old prefix; also re-keys the document-mode revision and document \
