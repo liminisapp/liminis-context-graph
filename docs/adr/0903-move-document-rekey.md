@@ -54,23 +54,30 @@ episode in the footprint is `occupied_destination` (a merge, not a move); anythi
 `destination_has_history`. Reading the footprint can fail with a database error, which is an error, not
 a refusal. This replaced a series of one-case checks (revision rows, then a supersession record, then
 retired chunks, then the superseding side, then path-only history): each fix had left the next special
-case, because "what does the destination hold?" had no single answer. A path or `doc_id` that still has
-history is cleared with `knowledge_delete_by_source` first.
+case, because "what does the destination hold?" had no single answer. `knowledge_delete_by_source` removes the *episodes* at a path, which clears path-level history; it does not remove a `doc_id`'s `DocRevision` rows or `DocSupersession` records (a hard delete keeps them), so a `doc_id` that has any of that cannot be a destination and the consumer picks another. Two details of the footprint follow from this: "live" is the canonical predicate shared with `delete_by_source` (a note between `knowledge_retire_document(effective_at: future)` and that date is live), and a `doc_id`-only move of a document whose source file is its `doc_id` also stores the new `doc_id` as its source file, so that string is a destination path too.
 
 The other refusals are an unknown source, a cross-group identity, a chunk-id collision *between* moves
-of one batch (an existing chunk id is already under the destination), an identical identity and batch
+of one batch (an existing chunk id is already under the destination; the units of one split chunk
+share a chunk id and are one owner of it, so only two different moves, or a move and an episode that
+is not moving, can collide), an identical identity and batch
 conflicts (duplicate source, duplicate destination, a destination that is another move's source). The
 batch is validated against the state before the batch, so chains and swaps are refused rather than
 ordered. Any refusal changes nothing and writes nothing to the WAL.
 
-**6. Validate-then-apply, not a transaction.** lbug auto-commits per statement (ADR-0705), and an
-explicit transaction would disable the statement-level FTS backstop (`repair_fts_after`), which matters
-because `source_description` is FTS-indexed. Atomicity comes from full validation under the
-per-document locks and the write lock, then one fixed-valued statement per row, flushed as a single
-`wal_flush_chunk`. If an unexpected database error interrupts the apply, the statements that ran are
-still flushed so the WAL equals the graph, and the error is returned; re-sending the batch then reports
-the finished moves as `unknown_source`. The spike confirmed lbug 0.21.2 accepts `SET` on the ART-indexed
-`doc_id` / `name` and the FTS-indexed `source_description`, and a rebuild from the WAL reproduces them.
+**6. Validate, then apply in one transaction.** Everything is validated under the per-document locks
+and the write lock before the first write, and the writes — one fixed-valued statement per episode,
+plus the `DocRevision` and supersession re-keys — run in **one database transaction**, as document
+ingest's commit step does. On any failure the transaction is rolled back and the recorded WAL
+statements are discarded; on success they are flushed as a single `wal_flush_chunk`. A failure part-way
+therefore leaves no trace in the graph or the WAL, and re-sending the batch just works. (An earlier
+design applied statement by statement because lbug auto-commits per statement (ADR-0705); a failure
+after the k-th write then left a document split across two identities that a re-send could not
+repair.) The cost is that an explicit transaction cannot use the statement-level FTS backstop
+(`repair_fts_after`), and `source_description` is FTS-indexed: a graph whose index is stale fails the
+whole move with an index error instead of repairing it in place, and the remedy is to rebuild the
+indexes and retry. A test failpoint (`set_apply_failpoint`) injects a failure after the k-th write to
+prove the rollback. The spike confirmed lbug 0.21.2 accepts `SET` on the ART-indexed `doc_id` / `name`
+and the FTS-indexed `source_description`, and a rebuild from the WAL reproduces them.
 
 **7. Locks.** Document ingest takes a per-`(group, doc_id)` lock before it reads its baseline and keeps
 it until it has committed; only its commit step runs under the global write lock, so the write lock
@@ -85,6 +92,17 @@ that its own lock set is covered (an ingest can add a `doc_id` at a path-only mo
 two); if it grew, all locks are released and the move retries with the larger set, up to five attempts,
 then fails with nothing changed. That loop exists to discover the lock set, not to repair a read-lock
 gap, and cannot be dropped while the ingest baseline is read outside the write lock.
+
+`knowledge_process_chunk` takes no document lock and matches the episodes it revises by chunk id
+alone, so the document locks do not cover it. A move re-keying a chunk while its ingest is still
+extracting would let that ingest commit afterwards, supersede the moved episode and write a new one at
+the old path — one document split across two identities. The move therefore registers the moving
+chunk ids in the chunk in-flight registry for the whole call, as `knowledge_retire_document` does
+(#859) — which also stops an identical resubmission being answered `unchanged` and then moved away —
+and, outside the write lock (the ingest needs it to commit), waits up to 30 seconds for any other
+in-flight call of those chunks to finish before it plans and applies, failing with nothing changed if
+one does not. A chunk ingest *into the destination* cannot be detected in chunk mode (its chunk id is
+not known yet) and is out of scope.
 
 **8. Write scope, `GroupRequired`.** A rename is a routine consumer operation, unlike
 `knowledge_stamp_origin`, a one-off adoption tool. `--writable-groups` therefore applies to `group_id`.

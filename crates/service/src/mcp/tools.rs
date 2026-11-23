@@ -1172,6 +1172,9 @@ pub fn registry() -> Vec<ToolSpec> {
                            `duplicate_destination`, `destination_is_source`. \
                            `from` and `to` must name the same identity kinds. Pages that link to \
                            the moved `doc_id` in `attributes.links` are not rewritten. \
+                           The batch is applied in one transaction (a failure leaves \
+                           nothing changed or logged) and waits for in-flight chunk ingests of \
+                           the moving chunks. Refusals are also in `error.data.refusals`. \
                            `dry_run: true` validates and reports without writing. `group_id` is \
                            required. Recorded in the WAL as fixed-valued, uuid-keyed updates, so \
                            a rebuild gives an identical graph.",

@@ -1531,8 +1531,10 @@ entries that point at the moved `doc_id` are *not* rewritten; re-send the pages 
 
 **Refusals.** Everything is validated against the state before the batch, under the per-document
 locks and the write lock, before the first write. If any move is refused, **nothing is applied and
-nothing is written to the WAL**; the error (`move_refused:`, code `-32000`) names each offending move
-by index with one of these codes:
+nothing is written to the WAL**; the error (message prefixed `move_refused:`, code `-32000`) names each
+offending move by index with one of these codes, and carries them as structured data:
+`error.data` is `{"reason": "move_refused", "refusals": [{"index": 1, "code": "unknown_source",
+"message": "…"}, …]}` (over MCP it is the same `data` on the tool error).
 
 | Code | Meaning |
 |---|---|
@@ -1547,17 +1549,30 @@ by index with one of these codes:
 
 An empty `moves` array and mismatched `from` / `to` kinds are request errors.
 
-**The destination must be empty.** A move's destination has to have **no episodes and no document state of any kind** in the group: no episode of any liveness (live, superseded or retired) at the new `doc_id`, at the new source path, or under the rewritten chunk-id prefix; no `DocRevision` row and no `DocSupersession` record for the new `doc_id`, on either side; and no episode whose `superseded_by` names it. The moving document's own rows do not count. Anything live in the way is `occupied_destination`; anything else is `destination_has_history`. The check is the same for a move that names a `doc_id`, a path or both, and a failure to read the database is an error, never a refusal. To reuse a path or `doc_id` that still has history, delete that history first with `knowledge_delete_by_source`.
+**The destination must be empty.** A move's destination has to have **no episodes and no document state of any kind** in the group: no episode of any liveness (live, superseded or retired) at the new `doc_id`, at the new source path, or under the rewritten chunk-id prefix; no `DocRevision` row and no `DocSupersession` record for the new `doc_id`, on either side; and no episode whose `superseded_by` names it. The moving document's own rows do not count. A `doc_id`-only move of a document whose source file is its `doc_id` (document mode with no `source_path`) also stores the new `doc_id` as its source file, so that string counts as a destination path too. Anything live in the way is `occupied_destination`; anything else is `destination_has_history`. "Live" is the same test `knowledge_delete_by_source` uses, so a document between `knowledge_retire_document(effective_at: <future>)` and that date is still live. The check is the same whether the move names a `doc_id`, a path or both, and a failure to read the database is an error, never a refusal. **Clearing a destination:** `knowledge_delete_by_source` removes the *episodes* at a source path, which clears an `occupied_destination` / path-level `destination_has_history`; it does **not** remove a `doc_id`'s `DocRevision` rows or `DocSupersession` records (a hard delete keeps them). A `doc_id` that has any of that cannot be used as a move destination: pick a different `doc_id`.
 
 **Reply.** `{success, dry_run, group_id, moved, episodes_rekeyed, moves: [{from, to, episodes,
-chunk_ids_rewritten}]}`; there is no per-episode list, because a folder rename covers hundreds of
-documents.
+chunk_ids_rewritten}]}`. `episodes` counts episodes; `chunk_ids_rewritten` counts distinct chunk ids
+(the units of one split chunk are several episodes that share one chunk id). There is no per-episode
+list, because a folder rename covers hundreds of documents.
 
-**Durability.** Each episode is one fixed-valued, uuid-keyed `SET`, flushed as one WAL chunk, so a
-rebuild from the WAL, a dump and an overlapping tail replay give the same graph (the same approach
-as `knowledge_stamp_origin`). A batch is applied after full validation; if an unexpected
-database error interrupts it, the statements that ran are still logged so the WAL matches the
-graph, and re-sending the batch reports the finished moves as `unknown_source`.
+**Durability and atomicity.** Each episode is one fixed-valued, uuid-keyed `SET`, flushed as one WAL
+chunk, so a rebuild from the WAL, a dump and an overlapping tail replay give the same graph (the same
+approach as `knowledge_stamp_origin`). A batch is applied after full validation **in one database
+transaction**: if anything fails part-way, the transaction is rolled back and nothing is logged, so
+neither the graph nor the WAL has a trace of the move, and re-sending the same batch simply works. (A
+graph whose full-text index is stale fails the whole move with an index error rather than
+half-applying it; rebuild the indexes and retry.)
+
+**Concurrent ingest.** A move takes the per-document locks that `knowledge_process_document` holds, so
+it waits for an ingest of the same `doc_id` (source or destination) and the two never interleave.
+`knowledge_process_chunk` takes no document lock, so the move instead waits, for up to 30 seconds, for
+any in-flight chunk call of the moving chunks to finish; if one is still running it fails with
+nothing changed and the caller retries. The moving chunks are registered as in flight for the whole
+call, so an identical resubmission that arrives meanwhile is not answered `unchanged` and then moved
+away. A chunk ingest *into the destination* that is still extracting when the move runs cannot be
+detected in chunk mode (its chunk id is not known yet): send moves while the affected notes are not
+being ingested.
 
 ### Query variants: `knowledge_search_passages` `queries` (issue #802)
 

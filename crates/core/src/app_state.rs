@@ -233,6 +233,18 @@ impl AppState {
         )
     }
 
+    /// How many chunk calls are currently in flight for `(group_id, chunk_id)` (see
+    /// [`AppState::chunk_inflight_enter`]). `knowledge_move_document` (issue #903) waits for the
+    /// calls other than its own registration to finish before it re-keys a document.
+    pub fn chunk_inflight_count(&self, group_id: &str, chunk_id: &str) -> usize {
+        self.chunk_inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(group_id.to_string(), chunk_id.to_string()))
+            .copied()
+            .unwrap_or(0)
+    }
+
     /// Installs the passage-search stage configuration and service handles (issue #796).
     pub fn set_search_stages(&self, stages: crate::search_stages::SearchStages) {
         self.search_stages.store(Some(Arc::new(stages)));

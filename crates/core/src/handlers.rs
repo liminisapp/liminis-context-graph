@@ -153,6 +153,17 @@ async fn dispatch_inner(
                         ),
                         false,
                     ),
+                    // `knowledge_move_document` refusals (issue #903): code `-32000` as before, now
+                    // with every refused move's index and stable code as structured data.
+                    Error::MoveRefused { ref refusals, .. } => (
+                        IpcResponse::err_with_data(
+                            req.id,
+                            -32000,
+                            e.to_string(),
+                            json!({"reason": "move_refused", "refusals": refusals}),
+                        ),
+                        false,
+                    ),
                     // A write refused by the daemon-wide `--writable-groups` allow-list (issue #742).
                     Error::WriteRefused {
                         reason,
@@ -3726,14 +3737,20 @@ fn move_refused(refusals: &[crate::document::move_doc::Refusal]) -> Error {
         .map(|r| format!("moves[{}] {}: {}", r.index, r.code, r.message))
         .collect::<Vec<_>>()
         .join("; ");
-    Error::Ipc(format!(
-        "move_refused: {} move(s) refused, nothing was changed: {detail}",
-        refusals
+    Error::MoveRefused {
+        message: format!(
+            "move_refused: {} move(s) refused, nothing was changed: {detail}",
+            refusals
+                .iter()
+                .map(|r| r.index)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        ),
+        refusals: refusals
             .iter()
-            .map(|r| r.index)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len()
-    ))
+            .map(crate::document::move_doc::Refusal::to_json)
+            .collect(),
+    }
 }
 
 /// Plans a move batch against the group's current episodes and the destinations' footprints
@@ -3819,27 +3836,58 @@ async fn handle_move_document(req: &IpcRequest, state: Arc<AppState>) -> Result<
         return Ok(reply(&plan, true));
     }
 
-    // Pre-plan (read lock) to learn which documents to lock; the authoritative plan is re-made
-    // under the locks. Locks are taken in sorted order (document ingest takes one at a time, and
-    // never while holding the write lock). An ingest can land between the pre-plan and the locks
-    // (e.g. a path-only move picking up a new `doc_id` at that path), so after the write lock is
-    // held the re-plan's lock set must be covered by the locks already held; if it grew, release
-    // everything and retry with the larger set.
-    let mut lock_ids = {
+    // Pre-plan (read lock) to learn which documents to lock and which chunk ids are moving; the
+    // authoritative plan is re-made under the locks. Locks are taken in sorted order (document
+    // ingest takes one at a time, and never while holding the write lock). Two things can change
+    // between the pre-plan and the write lock, and each sends the call round the loop again:
+    //
+    // * the lock set grows (e.g. a path-only move picking up a new `doc_id` at its source) — all
+    //   locks are released and retried with the larger set, up to `MAX_LOCK_ATTEMPTS` times;
+    // * a `knowledge_process_chunk` of one of the moving chunks is in flight. Chunk mode takes no
+    //   document lock and matches the episodes it revises by chunk id alone, so re-keying a chunk
+    //   that is still being extracted would let the ingest commit afterwards, supersede the moved
+    //   episode and write a new one at the old path: one document split across two identities.
+    //   The call waits (outside the write lock, which that ingest needs to commit) until none is in
+    //   flight, up to `MOVE_INFLIGHT_WAIT`, then fails with nothing changed.
+    //
+    // The moving chunk ids are registered as in flight for the whole call, like
+    // `knowledge_retire_document` does (#859), so an identical resubmission arriving meanwhile sees
+    // another call in flight, skips the `unchanged` no-op and cannot be told its episode is believed
+    // and then have it moved away.
+    let (mut lock_ids, mut chunk_names) = {
         let _guard = state.write_lock.read().await;
         let (db, gid, specs) = (Arc::clone(&db), group_id.clone(), specs.clone());
         tokio::task::spawn_blocking(move || {
             let conn = db.connect()?;
-            plan_move_batch(&conn, &gid, &specs).map(|plan| plan.lock_doc_ids())
+            plan_move_batch(&conn, &gid, &specs).map(|p| (p.lock_doc_ids(), p.chunk_names()))
         })
         .await??
     };
     const MAX_LOCK_ATTEMPTS: usize = 5;
-    for attempt in 1..=MAX_LOCK_ATTEMPTS {
+    const MOVE_INFLIGHT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+    let started = std::time::Instant::now();
+    let mut lock_attempts = 0usize;
+    let mut registered: HashMap<String, crate::app_state::ChunkInflightGuard> = HashMap::new();
+    enum Step {
+        Done(crate::document::move_doc::MovePlan),
+        /// The authoritative plan needs more locks / more registered names than were held.
+        Grew(
+            std::collections::BTreeSet<String>,
+            std::collections::BTreeSet<String>,
+        ),
+        /// Another chunk call of a moving chunk is in flight.
+        ChunkInFlight,
+    }
+    loop {
         let mut doc_guards = Vec::with_capacity(lock_ids.len());
         for doc_id in &lock_ids {
             doc_guards
                 .push(crate::document::ingest::lock_document(&state, &group_id, doc_id).await);
+        }
+        for n in &chunk_names {
+            registered
+                .entry(n.clone())
+                .or_insert_with(|| state.chunk_inflight_enter(&group_id, n).0);
         }
         let _guard = state.write_lock.write().await;
         let (state_c, gid, specs_c, db_c) = (
@@ -3848,31 +3896,36 @@ async fn handle_move_document(req: &IpcRequest, state: Arc<AppState>) -> Result<
             specs.clone(),
             Arc::clone(&db),
         );
-        let held = lock_ids.clone();
-        let outcome = tokio::task::spawn_blocking(move || -> Result<_, Error> {
+        let (held, mine): (_, std::collections::BTreeSet<String>) =
+            (lock_ids.clone(), registered.keys().cloned().collect());
+        let step = tokio::task::spawn_blocking(move || -> Result<Step, Error> {
             let conn = db_c.connect()?;
             let plan = plan_move_batch(&conn, &gid, &specs_c)?;
-            let needed = plan.lock_doc_ids();
-            if !needed.is_subset(&held) {
-                return Ok(Err(needed));
+            let (needed, names) = (plan.lock_doc_ids(), plan.chunk_names());
+            if !needed.is_subset(&held) || !names.is_subset(&mine) {
+                return Ok(Step::Grew(needed, names));
             }
-            let applied = crate::document::move_doc::apply_plan(&conn, &gid, &plan);
-            // Flush whatever ran — also after a failure — so the WAL always matches the graph.
+            // Calls other than this move's own registration.
+            if names
+                .iter()
+                .any(|n| state_c.chunk_inflight_count(&gid, n) > 1)
+            {
+                return Ok(Step::ChunkInFlight);
+            }
+            // All-or-nothing: one transaction, rolled back and never logged on failure.
+            crate::document::move_doc::apply_plan(&conn, &gid, &plan)?;
             let seq = wal_exec::wal_flush_chunk(&state_c, &gid, conn.drain_mutations());
             wal_exec::advance_wal_position(&conn, &gid, seq, &state_c);
-            applied.map(|()| Ok(plan))
+            Ok(Step::Done(plan))
         })
         .await??;
-        match outcome {
-            Ok(plan) => {
-                drop(_guard);
-                drop(doc_guards);
-                return Ok(reply(&plan, false));
-            }
-            Err(needed) => {
-                drop(_guard);
-                drop(doc_guards);
-                if attempt == MAX_LOCK_ATTEMPTS {
+        drop(_guard);
+        drop(doc_guards);
+        match step {
+            Step::Done(plan) => return Ok(reply(&plan, false)),
+            Step::Grew(needed, names) => {
+                lock_attempts += 1;
+                if lock_attempts >= MAX_LOCK_ATTEMPTS {
                     return Err(Error::Ipc(
                         "knowledge_move_document: documents kept changing while the move was \
                          being prepared; nothing was changed, retry the call"
@@ -3880,10 +3933,20 @@ async fn handle_move_document(req: &IpcRequest, state: Arc<AppState>) -> Result<
                     ));
                 }
                 lock_ids.extend(needed);
+                chunk_names.extend(names);
+            }
+            Step::ChunkInFlight => {
+                if started.elapsed() >= MOVE_INFLIGHT_WAIT {
+                    return Err(Error::Ipc(
+                        "knowledge_move_document: a chunk ingest of this document is still in \
+                         flight; nothing was changed, retry the call when it has finished"
+                            .to_string(),
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
         }
     }
-    unreachable!("the loop returns on success or on its last attempt")
 }
 
 fn required_string_param(p: &Value, key: &str) -> Result<String, Error> {

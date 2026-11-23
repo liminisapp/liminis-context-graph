@@ -901,6 +901,23 @@ async fn refusals_leave_graph_and_wal_unchanged() {
     )
     .await;
 
+    // The refusals are also structured `error.data` for raw-socket clients: index and stable code.
+    let r = move_docs(
+        &f.state,
+        vec![
+            mv("a", "notes/a.md", "a2", "moved/a.md"),
+            mv("nope", "nope.md", "z", "z.md"),
+        ],
+    )
+    .await;
+    assert_eq!(r["error"]["code"], -32000, "{r}");
+    assert_eq!(r["error"]["data"]["reason"], "move_refused", "{r}");
+    let refusals = r["error"]["data"]["refusals"].as_array().unwrap();
+    assert_eq!(refusals.len(), 1, "{r}");
+    assert_eq!(refusals[0]["index"], 1);
+    assert_eq!(refusals[0]["code"], "unknown_source");
+    assert!(refusals[0]["message"].as_str().unwrap().contains("nope"));
+
     // Request-shape errors: empty batch, missing group, mismatched kinds.
     let r = move_docs(&f.state, vec![]).await;
     assert!(error_message(&r).contains("empty_batch"), "{r}");
@@ -1196,6 +1213,277 @@ async fn a_folder_rename_is_one_call() {
         .all(|l| !l.contains("old/")));
     let (_s, db2, _d) = replayed(f.wal.path()).await;
     assert_eq!(identity_snapshot(&db2, G), identity_snapshot(&f.db, G));
+}
+
+// ── Review round: split units, source-path takeover, retirement, atomicity, chunk races ─────
+
+/// The units of one split chunk are separate live episodes that share one chunk id. A prefix rewrite
+/// must move them together: they are one owner of that name, not a collision, and the reply counts
+/// chunk ids, not episodes.
+#[tokio::test]
+async fn a_split_chunk_moves_with_a_prefix_rewrite() {
+    let f = fx();
+    let para = "A sentence about the cache layer and how it behaves under load. ".repeat(30);
+    let doc = format!(
+        "# Big\n\nIntro.\n\n## Long\n\n{p}\n\n{p}\n\n{p}\n\n{p}\n\n## Short\n\nDone.\n",
+        p = para.trim()
+    );
+    ingest(&f.state, "a.md", "a.md", &doc).await;
+    let names = |db: &Db| -> Vec<String> {
+        let conn = db.connect().unwrap();
+        conn.move_candidates(Some(G), &live_at())
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.live)
+            .map(|c| c.name)
+            .collect()
+    };
+    let before = names(&f.db);
+    let distinct: BTreeSet<_> = before.iter().cloned().collect();
+    assert!(
+        before.len() > distinct.len(),
+        "the long section split into units that share a chunk id: {before:?}"
+    );
+
+    let r = move_docs(
+        &f.state,
+        vec![json!({
+            "from": {"doc_id": "a.md", "source_path": "a.md"},
+            "to": {"doc_id": "b.md", "source_path": "b.md"},
+            "chunk_id_prefix": {"from": "a.md::", "to": "b.md::"},
+        })],
+    )
+    .await;
+    assert_eq!(r["result"]["success"], true, "{r}");
+    assert_eq!(
+        r["result"]["moves"][0]["chunk_ids_rewritten"]
+            .as_u64()
+            .unwrap() as usize,
+        distinct.len(),
+        "chunk ids, not episodes: {r}"
+    );
+    assert_eq!(
+        r["result"]["episodes_rekeyed"].as_u64().unwrap() as usize,
+        before.len()
+    );
+    let after = names(&f.db);
+    assert_eq!(after.len(), before.len());
+    assert!(after.iter().all(|n| n.starts_with("b.md::")), "{after:?}");
+    // Re-ingesting the same bytes at the new identity is a no-op: the manifest followed the names.
+    let calls = f.ex.count();
+    ingest(&f.state, "b.md", "b.md", &doc).await;
+    assert_eq!(f.ex.count(), calls);
+}
+
+/// A document ingested without a `source_path` carries its `doc_id` as its source file. A
+/// `doc_id`-only move rewrites that source file to the new `doc_id`, so another document already
+/// using that string as its source path is in the way — otherwise both would share it and
+/// `delete_by_source` of it would delete both.
+#[tokio::test]
+async fn a_doc_id_only_move_cannot_take_over_another_documents_source_path() {
+    let f = fx();
+    // `x` lives at source path "B".
+    ingest(&f.state, "x", "B", NOTE).await;
+    // `A` has no source path, so its source file is its doc_id.
+    call(
+        "knowledge_process_document",
+        json!({"doc_id": "A", "group_id": G, "content": NOTE.replace("cache", "bus"),
+               "title": "Note", "reference_time": "2026-11-01T00:00:00Z"}),
+        &f.state,
+    )
+    .await;
+    assert!(
+        identity_snapshot(&f.db, G)
+            .iter()
+            .any(|l| l.contains("doc=Some(\"A\")") && l.contains("sf=Some(\"A\")")),
+        "{:?}",
+        identity_snapshot(&f.db, G)
+    );
+
+    assert_refused(
+        &f,
+        vec![json!({"from": {"doc_id": "A"}, "to": {"doc_id": "B"}})],
+        "occupied_destination",
+    )
+    .await;
+    // Nothing is in the way of a name nobody uses, and the stored source follows it.
+    let r = move_docs(
+        &f.state,
+        vec![json!({"from": {"doc_id": "A"}, "to": {"doc_id": "C"}})],
+    )
+    .await;
+    assert_eq!(r["result"]["success"], true, "{r}");
+    assert!(lines_of(&f.db, "C")
+        .iter()
+        .all(|l| l.contains("sf=Some(\"C\")")));
+}
+
+/// A note that is between `knowledge_retire_document(effective_at: future)` and that date is still
+/// live (#859): it can be moved, and as a destination it is *occupied* (a merge), not merely
+/// "has history".
+#[tokio::test]
+async fn a_document_with_a_future_dated_retirement_is_still_live() {
+    let f = fx();
+    ingest(&f.state, "a", "notes/a.md", NOTE).await;
+    ingest(&f.state, "c", "notes/c.md", &NOTE.replace("cache", "bus")).await;
+    ingest(&f.state, "d", "notes/d.md", &NOTE.replace("cache", "queue")).await;
+    for doc in ["a", "c"] {
+        call(
+            "knowledge_retire_document",
+            json!({"group_id": G, "doc_id": doc, "effective_at": "2099-01-01T00:00:00Z"}),
+            &f.state,
+        )
+        .await;
+    }
+    // As a destination: live, so occupied.
+    assert_refused(
+        &f,
+        vec![mv("d", "notes/d.md", "c", "moved/c.md")],
+        "occupied_destination",
+    )
+    .await;
+    // As a source: addressable, so the rename works between the retirement and its date.
+    let r = move_docs(&f.state, vec![mv("a", "notes/a.md", "a2", "moved/a.md")]).await;
+    assert_eq!(r["result"]["success"], true, "{r}");
+    assert!(lines_of(&f.db, "a").is_empty());
+    assert!(!lines_of(&f.db, "a2").is_empty());
+}
+
+/// A failure part-way through leaves nothing behind — graph and WAL — so re-sending the same batch
+/// just works. The failure is injected after the k-th write, once inside the episode re-keys and
+/// once at the first document-revision write.
+#[tokio::test]
+async fn a_failure_part_way_through_rolls_everything_back_and_a_resend_completes() {
+    const GF: &str = "gf";
+    let f = fx();
+    for d in ["a1", "a2"] {
+        ingest_in(
+            &f.state,
+            GF,
+            d,
+            &format!("old/{d}.md"),
+            &NOTE.replace("cache", d),
+        )
+        .await;
+    }
+    let episodes = identity_snapshot(&f.db, GF).len();
+    assert!(episodes >= 8, "{episodes}");
+    let batch = |to: &str| {
+        json!({"group_id": GF, "moves": [
+            mv("a1", "old/a1.md", &format!("{to}1"), &format!("new/{to}1.md")),
+            mv("a2", "old/a2.md", &format!("{to}2"), &format!("new/{to}2.md")),
+        ]})
+    };
+    for after_writes in [3, episodes] {
+        let snap = identity_snapshot(&f.db, GF);
+        let wal = wal_bytes(f.wal.path());
+        let revisions = {
+            let conn = f.db.connect().unwrap();
+            ["a1", "a2"].map(|d| conn.doc_revision_rows_for_doc(GF, d).unwrap().len())
+        };
+        lcg_core::document::move_doc::set_apply_failpoint(GF, after_writes);
+        let r = try_call("knowledge_move_document", batch("n"), &f.state).await;
+        lcg_core::document::move_doc::clear_apply_failpoint();
+        assert!(
+            error_message(&r).contains("injected failure"),
+            "failpoint after {after_writes}: {r}"
+        );
+        assert_eq!(
+            identity_snapshot(&f.db, GF),
+            snap,
+            "graph after {after_writes}"
+        );
+        assert_eq!(wal_bytes(f.wal.path()), wal, "WAL after {after_writes}");
+        let conn = f.db.connect().unwrap();
+        assert_eq!(
+            ["a1", "a2"].map(|d| conn.doc_revision_rows_for_doc(GF, d).unwrap().len()),
+            revisions,
+            "revision rows after {after_writes}"
+        );
+        assert!(conn.doc_revision_rows_for_doc(GF, "n1").unwrap().is_empty());
+    }
+
+    // The same batch, re-sent, completes; a rebuild from the WAL agrees with the live graph.
+    let r = try_call("knowledge_move_document", batch("n"), &f.state).await;
+    assert_eq!(r["result"]["success"], true, "{r}");
+    let live = identity_snapshot(&f.db, GF);
+    assert!(
+        live.iter()
+            .all(|l| l.contains("new/n") && !l.contains("old/")),
+        "{live:?}"
+    );
+    // Non-default groups log into their own sub-directory of the WAL root.
+    let gf_wal = f.wal.path().join(GF);
+    assert!(
+        gf_wal.is_dir(),
+        "{:?}",
+        std::fs::read_dir(f.wal.path()).unwrap().collect::<Vec<_>>()
+    );
+    let (_s, db2, _d) = replayed(&gf_wal).await;
+    assert_eq!(identity_snapshot(&db2, GF), live);
+}
+
+/// Chunk mode takes no document lock, so a move must wait for an in-flight chunk ingest of the
+/// moving chunk: otherwise the ingest commits afterwards, supersedes the moved episode by chunk id
+/// and writes its new episode at the old path, splitting the document across two identities.
+#[tokio::test]
+async fn a_move_waits_for_an_in_flight_chunk_ingest_of_its_document() {
+    let f = fx();
+    let chunk = |text: &str| {
+        json!({"chunk_text": text, "chunk_id": "c::0", "source_file": "p.md", "group_id": G,
+               "reference_time": "2026-08-04T00:00:00Z"})
+    };
+    call(
+        "knowledge_process_chunk",
+        chunk("the first version"),
+        &f.state,
+    )
+    .await;
+    let (entered, release) = f.ex.arm_gate();
+
+    // A revision of the chunk is mid-extraction (holding no lock of any kind) ...
+    let st = Arc::clone(&f.state);
+    let edit = chunk("the edited version");
+    let ing = tokio::spawn(async move { call("knowledge_process_chunk", edit, &st).await });
+    within(
+        10,
+        "the chunk ingest reaching its extractor",
+        entered.notified(),
+    )
+    .await;
+
+    // ... when the move of its source path arrives. It must wait.
+    let st = Arc::clone(&f.state);
+    let mut mv_task = tokio::spawn(async move {
+        try_call(
+            "knowledge_move_document",
+            json!({"group_id": G, "moves": [
+                {"from": {"source_path": "p.md"}, "to": {"source_path": "q.md"}}]}),
+            &st,
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), &mut mv_task)
+            .await
+            .is_err(),
+        "the move must wait for the in-flight chunk ingest"
+    );
+
+    release.notify_one();
+    ing.await.unwrap();
+    let r = mv_task.await.unwrap();
+    assert_eq!(r["result"]["success"], true, "{r}");
+
+    // Exact final state: the whole document (old revision and the edit) is at the new path, and
+    // nothing was written at the old one.
+    let snap = identity_snapshot(&f.db, G);
+    assert_eq!(snap.len(), 2, "{snap:?}");
+    assert!(
+        snap.iter()
+            .all(|l| l.contains("sf=Some(\"q.md\")") && !l.contains("p.md")),
+        "{snap:?}"
+    );
 }
 
 // ── Ingest and move, in each order — forced, not raced ──────────────────────

@@ -12,6 +12,10 @@
   `occupied_destination` (a merge, not a move), anything else `destination_has_history`. Also
   refused, with nothing changed and nothing logged: unknown source, cross-group, a chunk-id
   collision between moves of one batch, identical identity and batch conflicts.
+  The batch is applied in one database transaction, so a failure part-way leaves nothing changed or
+  logged and re-sending works; the refusals are also returned as structured `error.data.refusals`
+  (`{index, code, message}`); and a move waits (up to 30 s) for an in-flight `knowledge_process_chunk`
+  of the moving chunks.
   Re-keys the document-mode revision and document-supersession state too, so the next ingest at the
   new `doc_id` is still a no-op. Logged as fixed-valued, uuid-keyed updates, so rebuild, dump and
   overlapping replay agree. `dry_run` supported. MCP tool count 59 → 60, IPC methods 60 → 61.

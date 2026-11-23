@@ -97,6 +97,9 @@ pub struct PlannedMove {
     pub chunk_ids_rewritten: usize,
     /// Distinct old `doc_id`s of the matched episodes.
     pub old_doc_ids: BTreeSet<String>,
+    /// Distinct chunk ids (`name`s) of the matched episodes, before the move — what an in-flight
+    /// `knowledge_process_chunk` of this document would be keyed by.
+    pub old_names: BTreeSet<String>,
 }
 
 /// A fully validated batch.
@@ -120,6 +123,14 @@ impl MovePlan {
             }
         }
         out
+    }
+
+    /// Every chunk id of every moving episode (see [`PlannedMove::old_names`]).
+    pub fn chunk_names(&self) -> BTreeSet<String> {
+        self.moves
+            .iter()
+            .flat_map(|m| m.old_names.iter().cloned())
+            .collect()
     }
 
     /// `old doc_id -> new doc_id` for every document whose `doc_id` changes.
@@ -342,6 +353,17 @@ pub fn episode_footprint(snapshot: &[MoveCandidate], spec: &MoveSpec) -> Vec<(St
         .as_ref()
         .map(|(_, to)| to.as_str())
         .filter(|t| !t.is_empty());
+    // Every source path the move will *store* — the named one, and the one the planner derives for
+    // a `doc_id`-only move of a document whose source file is its `doc_id` — is a destination
+    // path: another document already using it would end up sharing it, and a later
+    // `delete_by_source` of that path would delete both.
+    let mut dest_paths: BTreeSet<String> = spec.to.source_path.iter().cloned().collect();
+    for row in snapshot.iter().filter(|r| row_matches(r, &spec.from)) {
+        let (old, new) = source_change(row, spec);
+        if let Some(n) = new.filter(|n| Some(n.as_str()) != old) {
+            dest_paths.insert(n);
+        }
+    }
     snapshot
         .iter()
         .filter(|row| {
@@ -349,7 +371,7 @@ pub fn episode_footprint(snapshot: &[MoveCandidate], spec: &MoveSpec) -> Vec<(St
                 .doc_id
                 .as_deref()
                 .is_some_and(|d| row.doc_id.as_deref() == Some(d))
-                || spec.to.source_path.as_deref().is_some_and(|p| {
+                || dest_paths.iter().any(|p| {
                     episode_matches_source(
                         row.source_file.as_deref(),
                         &row.source_description,
@@ -398,6 +420,28 @@ pub fn destination_footprints(
                 .unwrap_or_default(),
         })
         .collect())
+}
+
+/// The stored source file of `row` before a move and after it: the new source path when the move
+/// names one; otherwise, for a document identified only by `doc_id` that carries it as its source
+/// file too (document mode with no `source_path`), the new `doc_id`; otherwise unchanged. Shared by
+/// the planner and the destination footprint, so the footprint covers exactly the source the
+/// planner is about to write.
+fn source_change<'a>(row: &'a MoveCandidate, spec: &MoveSpec) -> (Option<&'a str>, Option<String>) {
+    let old_source = episode_source_file(
+        row.source_file.as_deref(),
+        &row.source_description,
+        &row.name,
+        row.write_path.as_deref(),
+    );
+    let new_source = match (&spec.to.source_path, &spec.to.doc_id) {
+        (Some(p), _) => Some(p.clone()),
+        (None, Some(d)) if old_source.is_some() && old_source == row.doc_id.as_deref() => {
+            Some(d.clone())
+        }
+        _ => old_source.map(str::to_string),
+    };
+    (old_source, new_source)
 }
 
 fn rewrite_prefix(value: &str, prefix: &Option<(String, String)>) -> Option<String> {
@@ -583,36 +627,25 @@ pub fn plan_moves(
     let mut moves: Vec<PlannedMove> = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
         let mut episodes = Vec::new();
-        let mut renamed = 0usize;
+        let mut renamed: HashSet<String> = HashSet::new();
         let mut old_doc_ids = BTreeSet::new();
+        let mut old_names = BTreeSet::new();
         for &ix in &matched[i] {
             let row = &live[ix];
+            old_names.insert(row.name.clone());
             if let Some(d) = &row.doc_id {
                 old_doc_ids.insert(d.clone());
             }
-            let old_source = episode_source_file(
-                row.source_file.as_deref(),
-                &row.source_description,
-                &row.name,
-                row.write_path.as_deref(),
-            );
-            let new_source: Option<String> = match (&spec.to.source_path, &spec.to.doc_id) {
-                (Some(p), _) => Some(p.clone()),
-                // A document identified only by `doc_id` carries it as its source file too
-                // (document mode with no `source_path`): keep the two consistent.
-                (None, Some(d)) if old_source.is_some() && old_source == row.doc_id.as_deref() => {
-                    Some(d.clone())
-                }
-                _ => old_source.map(str::to_string),
-            };
+            let (old_source, new_source) = source_change(row, spec);
             let source_changed = new_source.as_deref() != old_source;
             let new_name = rewrite_prefix(&row.name, &spec.chunk_id_prefix);
             let new_chunk = row
                 .chunk_id
                 .as_deref()
                 .and_then(|c| rewrite_prefix(c, &spec.chunk_id_prefix));
-            if new_name.is_some() {
-                renamed += 1;
+            // Units of one split chunk share a name: count chunk ids, not episodes.
+            if let Some(n) = &new_name {
+                renamed.insert(n.clone());
             }
             let change = EpisodeRekey {
                 doc_id: spec
@@ -644,23 +677,32 @@ pub fn plan_moves(
             index: i,
             spec: spec.clone(),
             episodes,
-            chunk_ids_rewritten: renamed,
+            chunk_ids_rewritten: renamed.len(),
             old_doc_ids,
+            old_names,
         });
     }
 
     // ── Chunk-id collisions, group-wide, against the post-batch names ─────────────────────────
-    let changing: HashMap<&str, &EpisodeRekey> = moves
+    // The units of one split chunk are separate live episodes that legitimately share one chunk id,
+    // so a name is claimed by *owners*, not by episodes: a moving episode is owned by its move, any
+    // other episode by "nobody". A collision is a final name claimed by two different moves, or by
+    // a move and an episode that is not moving.
+    let changing: HashMap<&str, (usize, &EpisodeRekey)> = moves
         .iter()
-        .flat_map(|m| m.episodes.iter().map(|(u, c)| (u.as_str(), c)))
+        .flat_map(|m| {
+            m.episodes
+                .iter()
+                .map(move |(u, c)| (u.as_str(), (m.index, c)))
+        })
         .collect();
-    let mut final_names: HashMap<&str, usize> = HashMap::new();
+    let mut final_names: HashMap<&str, HashSet<Option<usize>>> = HashMap::new();
     for r in live.iter().filter(|r| r.live) {
-        let n = changing
-            .get(r.uuid.as_str())
-            .and_then(|c| c.name.as_deref())
-            .unwrap_or(&r.name);
-        *final_names.entry(n).or_default() += 1;
+        let (owner, name) = match changing.get(r.uuid.as_str()) {
+            Some((idx, c)) => (Some(*idx), c.name.as_deref().unwrap_or(&r.name)),
+            None => (None, r.name.as_str()),
+        };
+        final_names.entry(name).or_default().insert(owner);
     }
     for m in &moves {
         // An existing episode under the rewritten prefix is already a footprint refusal (the
@@ -675,7 +717,7 @@ pub fn plan_moves(
         let collide = m.episodes.iter().find_map(|(_, c)| {
             c.name
                 .as_deref()
-                .filter(|n| final_names.get(n).copied().unwrap_or(0) > 1)
+                .filter(|n| final_names.get(n).is_some_and(|owners| owners.len() > 1))
         });
         if let Some(n) = collide {
             refuse(
@@ -723,11 +765,75 @@ pub fn classify_cross_group(
     }
 }
 
-/// Writes a validated plan through the recording `Conn` helpers. All statements are uuid- or
-/// key-keyed and fixed-valued, so replay (also over an overlapping tail) converges.
+/// Test-only failure injection for [`apply_plan`]: fail the write after `remaining` more writes of
+/// the named group. A `Mutex`, keyed by group, so tests running in parallel threads cannot trip
+/// each other's moves. Disabled (`None`) in production.
+static APPLY_FAILPOINT: std::sync::Mutex<Option<(String, usize)>> = std::sync::Mutex::new(None);
+
+/// Arms the failpoint: the move's `after_writes + 1`-th write in `group_id` fails. Hidden: it
+/// exists so the integration tests can prove a failure part-way through leaves nothing behind.
+#[doc(hidden)]
+pub fn set_apply_failpoint(group_id: &str, after_writes: usize) {
+    *APPLY_FAILPOINT.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((group_id.to_string(), after_writes));
+}
+
+/// Disarms [`set_apply_failpoint`].
+#[doc(hidden)]
+pub fn clear_apply_failpoint() {
+    *APPLY_FAILPOINT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn failpoint_tick(group_id: &str) -> Result<(), Error> {
+    let mut g = APPLY_FAILPOINT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((gid, remaining)) = g.as_mut() {
+        if gid == group_id {
+            if *remaining == 0 {
+                *g = None;
+                return Err(Error::QueryFailed(
+                    "injected failure while applying a move".to_string(),
+                ));
+            }
+            *remaining -= 1;
+        }
+    }
+    Ok(())
+}
+
+/// Writes a validated plan **as one transaction**: either every statement commits or none does. On
+/// any failure the transaction is rolled back and the recorded WAL statements are discarded, so
+/// neither the graph nor the WAL has a trace of the move and re-sending the same batch simply
+/// works. (A transaction cannot use the statement-level FTS backstop, ADR-0649; a graph whose
+/// index is stale fails the whole move with an index error rather than half-applying it.)
+///
+/// All statements are uuid- or key-keyed and fixed-valued, so replay (also over an overlapping
+/// tail) converges. The caller flushes `conn.drain_mutations()` to the WAL only on `Ok`.
 pub fn apply_plan(conn: &Conn<'_>, group_id: &str, plan: &MovePlan) -> Result<(), Error> {
+    conn.exec_transaction_control("BEGIN TRANSACTION")?;
+    let result = apply_statements(conn, group_id, plan);
+    match result {
+        Ok(()) => match conn.exec_transaction_control("COMMIT") {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let _ = conn.exec_transaction_control("ROLLBACK");
+                let _ = conn.drain_mutations();
+                Err(e)
+            }
+        },
+        Err(e) => {
+            // An execute-time failure may already have rolled the engine back; a ROLLBACK then
+            // errors, which is harmless.
+            let _ = conn.exec_transaction_control("ROLLBACK");
+            let _ = conn.drain_mutations();
+            Err(e)
+        }
+    }
+}
+
+fn apply_statements(conn: &Conn<'_>, group_id: &str, plan: &MovePlan) -> Result<(), Error> {
     for m in &plan.moves {
         for (uuid, change) in &m.episodes {
+            failpoint_tick(group_id)?;
             conn.rekey_episode(uuid, change)?;
         }
     }
@@ -755,6 +861,7 @@ pub fn apply_plan(conn: &Conn<'_>, group_id: &str, plan: &MovePlan) -> Result<()
                 if new == old.as_str() && new_sp == source_path && new_names == chunk_names {
                     continue;
                 }
+                failpoint_tick(group_id)?;
                 conn.rekey_doc_revision(&rev_uuid, new, new_sp.as_deref(), &new_names)?;
             }
         }
@@ -1291,5 +1398,58 @@ mod tests {
         let live = vec![row("u1", None, "a.md", "c1")];
         let plan = planned(&[mv(id(None, Some("a.md")), id(None, Some("b.md")))], &live).unwrap();
         assert!(plan.lock_doc_ids().is_empty());
+    }
+
+    #[test]
+    fn units_of_one_split_chunk_share_a_name_without_colliding() {
+        // Two live units of one chunk: same name, same document.
+        let live = vec![
+            row("u1", Some("a"), "a.md", "a::1"),
+            row("u2", Some("a"), "a.md", "a::1"),
+            row("u3", Some("a"), "a.md", "a::2"),
+        ];
+        let mut spec = mv(id(Some("a"), Some("a.md")), id(Some("b"), Some("b.md")));
+        spec.chunk_id_prefix = Some(("a::".into(), "b::".into()));
+        let plan = planned(&[spec], &live).unwrap();
+        assert_eq!(plan.episodes_rekeyed(), 3);
+        // Chunk ids, not episodes.
+        assert_eq!(plan.moves[0].chunk_ids_rewritten, 2);
+    }
+
+    #[test]
+    fn two_moves_rewriting_into_one_name_still_collide() {
+        let live = vec![
+            row("u1", Some("a"), "a.md", "p::0"),
+            row("u2", Some("a"), "a.md", "p::0"),
+            row("u3", Some("b"), "b.md", "q::0"),
+        ];
+        let mut m1 = mv(id(Some("a"), None), id(Some("x"), None));
+        m1.chunk_id_prefix = Some(("p::".into(), "n::".into()));
+        let mut m2 = mv(id(Some("b"), None), id(Some("y"), None));
+        m2.chunk_id_prefix = Some(("q::".into(), "n::".into()));
+        let e = planned(&[m1, m2], &live).unwrap_err();
+        assert!(codes(&e).contains(&code::CHUNK_ID_COLLISION), "{e:?}");
+    }
+
+    #[test]
+    fn a_doc_id_only_move_is_blocked_by_another_documents_source_path() {
+        // `A` has no source path, so its source file is its doc_id; moving it to doc_id `B` stores
+        // source file "B", which document `x` already uses.
+        let live = vec![
+            row("u1", Some("A"), "A", "A::1"),
+            row("u2", Some("x"), "B", "x::1"),
+        ];
+        let e = planned(&[mv(id(Some("A"), None), id(Some("B"), None))], &live).unwrap_err();
+        assert_eq!(codes(&e), [code::OCCUPIED_DESTINATION]);
+        // With nothing at that path, the same move is fine and the stored source follows the doc_id.
+        let live = vec![
+            row("u1", Some("A"), "A", "A::1"),
+            row("u2", Some("x"), "z", "x::1"),
+        ];
+        let plan = planned(&[mv(id(Some("A"), None), id(Some("B"), None))], &live).unwrap();
+        assert_eq!(
+            plan.moves[0].episodes[0].1.source_file.as_deref(),
+            Some("B")
+        );
     }
 }

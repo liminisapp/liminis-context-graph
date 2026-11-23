@@ -3015,10 +3015,7 @@ impl<'db> Conn<'db> {
         let live: HashSet<String> = self
             .query_params(
                 &format!(
-                    "MATCH (ep:Episodic) WHERE {group_pred}\
-                     (ep.superseded_at IS NULL \
-                      OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
-                     AND (ep.revision_id IS NULL OR ep.revision_committed_at IS NOT NULL) \
+                    "MATCH (ep:Episodic) WHERE {group_pred}{LIVE_EPISODE_PREDICATE} \
                      RETURN ep.uuid"
                 ),
                 params.clone(),
@@ -4603,12 +4600,8 @@ impl<'db> Conn<'db> {
             params["gids"] = serde_json::json!(gids);
         }
         if let Some(at) = live_at {
-            cypher.push_str(
-                " AND (ep.superseded_at IS NULL \
-                   OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
-                       AND ep.superseded_at > $live_at)) \
-                 AND (ep.revision_id IS NULL OR ep.revision_committed_at IS NOT NULL)",
-            );
+            cypher.push_str(" AND ");
+            cypher.push_str(LIVE_EPISODE_PREDICATE);
             params["live_at"] = serde_json::json!(at);
         }
         cypher.push_str(
@@ -7065,6 +7058,16 @@ pub struct MoveCandidate {
     pub chunk_id: Option<String>,
     pub write_path: Option<String>,
 }
+
+/// The canonical "believed now" test on an `ep` `Episodic` row (binds `$live_at`): never
+/// superseded, or superseded only at a *future* instant by a document supersession (#707) or a
+/// document retirement (#859, `document_removed`), and not part of an uncommitted document
+/// revision. `delete_by_source` and `knowledge_move_document` share it, so a note that is between
+/// `knowledge_retire_document(effective_at: future)` and that date is live to both.
+pub(crate) const LIVE_EPISODE_PREDICATE: &str = "(ep.superseded_at IS NULL \
+     OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+         AND ep.superseded_at > $live_at)) \
+     AND (ep.revision_id IS NULL OR ep.revision_committed_at IS NOT NULL)";
 
 /// What a `doc_id` carries outside `Episodic` (#903): see [`Conn::destination_doc_state`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
