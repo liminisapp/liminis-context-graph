@@ -272,6 +272,14 @@ pub async fn run_on_workspace(
             workspace::MANIFEST_FILE
         );
     }
+    if let Some(n) = info.manifest.as_ref().and_then(|m| m.ingest_concurrency) {
+        eprintln!(
+            "lcg-eval graph-qa: NOTE {} was ingested at --ingest-concurrency {n}: its graph can \
+             differ from a sequential ingest (order-dependent summaries, extra duplicate \
+             entities), so compare results only against workspaces built at the same concurrency",
+            a.workspace.display()
+        );
+    }
     let qpath = a
         .questions
         .clone()

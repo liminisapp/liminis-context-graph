@@ -520,6 +520,7 @@ target/release/lcg-eval retrieval \
 | `--service-bin`, `--embedder-http/--embedder-uds`, `--extractor-http/--extractor-uds` | How the spawned LCG service is configured. |
 | `--embedding-profile <LIST>` | Embedding [instruction profile(s)](configuration.md#embedding-instruction-profiles) to measure, e.g. `none,bge-v1.5`. See [Comparing embedding profiles](#comparing-embedding-profiles). |
 | `--replay-cassette <PATH>` / `--record-cassette <PATH>` | Replay or record ingest extraction ([cassettes](testing-and-evaluation.md#recordreplay-cassettes)) for a free, repeatable LCG ingest. |
+| `--ingest-concurrency <N>` | Keep up to N `knowledge_process_chunk` calls in flight during ingest (integer ≥ 1, default 1 — sequential, unchanged). Each call has its own socket connection. Applies to every embedding profile's ingest. Forced to 1 under `--replay-cassette`. See [Ingest concurrency](#ingest-concurrency). |
 | `--qmd-bin`, `--qmd-index` | qmd executable and named index. The default index name includes the corpus hash (`lcg-eval-<corpus_version>-<hash8>`), so a changed corpus gets a fresh index. qmd keeps a collection's original directory: if you pass your own `--qmd-index` and reuse it after changing `--corpus` or editing notes, the run warns, and you must remove the old collection or pick a new name. |
 | `--judge-model`, `--judge-cache`, `--no-grounded` | Grounded-evidence judge (needs `ANTHROPIC_API_KEY`); verdicts are cached so re-runs cost nothing. Without a key the grounded columns are **skipped**, not zero. |
 | `--out <DIR>` | Write `report.md` and `report.json` (and `compare.md` / `ranked.jsonl` when those flags are used). A stale `compare.md` or `ranked.jsonl` left by an earlier run in the same directory is removed first, so the directory never mixes runs. |
@@ -533,6 +534,47 @@ target/release/lcg-eval retrieval \
 The extraction backend for LCG ingestion (live Anthropic, a local OpenAI-compatible endpoint,
 or a cassette) and the ontology are whatever the spawned service uses; the report records the
 choice.
+
+## Ingest concurrency
+
+A live extraction of the v2 corpus takes hours because the harness used to
+send one `knowledge_process_chunk` at a time, while the extractor endpoint sat mostly idle.
+`--ingest-concurrency N` (also accepted by `retrieval-score-probe`) keeps up to N calls in flight,
+each on its own connection to the service (it serves one request at a time per connection). A
+re-extraction takes roughly 1/N of the time, bounded by the endpoint's capacity; through
+`--extractor-uds` / `--embedder-uds` the service's own sidecar pools hold 4 connections, so N above
+4 gains nothing there. Results do not depend on completion order: per-chunk results are folded in
+manifest order, a failed chunk still fails the run with its note id and chunk index (the earliest
+one in manifest order if several fail), and supersessions, the index build and the entity-link pass
+run only after every chunk has finished. At N = 1 the run is unchanged: same call order, same metrics,
+same digests (`report.json` `meta` only gains the `ingest_concurrency` key). The value used is in `report.md` (Reproduction) and in `report.json`
+`meta.ingest_concurrency`; it is not part of the `inputs` digests. A pool's per-call timeout is
+900 s times `ceil(N / 4)`, because a call's clock also counts time queued inside the service. If a
+chunk fails, calls still in flight are abandoned: the service cancels those not yet committing and
+finishes any commit already started, and `lcg-eval` stops it with `knowledge_close` before exiting.
+With `--keep-workspace`, the manifest records `ingest_concurrency` when it was above 1 (and
+`graph-qa` notes it), so a workspace built concurrently is not compared as like for like.
+
+Caveats at N > 1:
+
+- **Live graphs can differ from run to run, and from N = 1.** Entity summaries are consolidated
+  against whatever the graph holds when a chunk is processed, and the service resolves entities
+  without a lock between chunks, so two chunks that mention the same new entity can each insert it
+  (ADR-0029). Expect order-dependent summaries and the occasional extra duplicate entity. Do not
+  compare an N > 1 run against an N = 1 baseline as like for like.
+- **A cassette recorded at N > 1 is order-dependent.** `--record-cassette` still works, warns, and
+  marks the sidecar `C.meta.json` with `ingest_concurrency` and `order_dependent: true`. The
+  `extract` and `classify_*` entries replay exactly, but the `consolidate_summary` and
+  `judge_duplicates` keys hash graph state that depended on commit order. Measured offline (ADR-0900:
+  four chunks sharing one entity, recorded with all in flight, replayed one at a time): 0 `extract`
+  misses, 0 `classify_*` misses, 3 of 3 `consolidate_summary` misses. The service swallows those
+  misses (bounded fallback, an stderr line), so such a replay finishes with exit 0 and a possibly
+  different graph; the eval has no miss counter. Record at the default N = 1 when you need a
+  cassette that replays exactly.
+- **Replay always runs at N = 1.** With `--replay-cassette`, `--ingest-concurrency` is overridden
+  with a warning, and the report states the value actually used (`meta.ingest_concurrency`) next to
+  what you asked for (`meta.ingest_concurrency_requested`). Replaying an `order_dependent` cassette
+  also warns.
 
 ## Input digests (`inputs`)
 

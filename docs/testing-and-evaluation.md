@@ -55,6 +55,21 @@ stale cassette (or point `LCG_RECORD_LLM` at a fresh path), re-run the affected 
 recording enabled against a live provider, then switch back to `LCG_REPLAY_LLM` to confirm the
 new cassette replays cleanly.
 
+### Recording with several chunks in flight
+
+`lcg-eval retrieval --ingest-concurrency N` (N > 1) records a cassette while chunks are processed
+concurrently. Not every key is independent of that. `extract` and `classify_*` hash only the chunk
+and call arguments, so they replay exactly in any order. `consolidate_summary` hashes the entity's
+*existing* summary and `judge_duplicates` hashes the candidate pairs, so both depend on the order
+chunks committed in. `crates/core/tests/cassette_concurrent_record_replay.rs` measures it with a
+stub extractor: a cassette recorded with four chunks in flight and replayed one at a time had 0
+`extract` and 0 `classify_*` misses and 3 of 3 `consolidate_summary` misses (a sequential cassette
+replayed sequentially had none). A `consolidate_summary` or `judge_duplicates` miss does not fail
+the replay; the service degrades it silently, so the harness marks the cassette's
+`.meta.json` sidecar `order_dependent: true` and always replays at concurrency 1. See
+[ADR-0900](adr/0900-ingest-concurrency-connection-pool-and-cassette-rule.md) and
+[Ingest concurrency](retrieval-quality-evaluation.md#ingest-concurrency).
+
 ### Format
 
 A cassette is plain, uncompressed JSONL — one JSON object per line, no envelope. Each record

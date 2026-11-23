@@ -192,6 +192,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0881](0881-eval-verifies-service-reported-ontology.md) | `lcg-eval` Verifies and Reports the Service-Reported Ontology | 2026-11-22 |
 | [0882](0882-dump-mentions-endpoint-keyed-uuidless.md) | `knowledge_dump_wal` Dumps uuid-less MENTIONS Edges, Keyed on `(episode, entity, group_id)` | 2026-11-22 |
 | [0884](0884-status-episode-breakdown-opt-in.md) | `knowledge_status` Opt-in Per-group Episode Breakdown | 2026-11-22 |
+| [0900](0900-ingest-concurrency-connection-pool-and-cassette-rule.md) | `lcg-eval` Ingest Concurrency — a Connection Pool, Ordered Folding, and the Cassette Rule | 2026-11-23 |
 
 ## Historical numbering
 

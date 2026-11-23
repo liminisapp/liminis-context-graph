@@ -103,6 +103,15 @@ pub struct CassetteMeta {
     pub ontology_hash: String,
     pub ontology_mode: Option<String>,
     pub lcg_build: String,
+    /// `--ingest-concurrency` the cassette was recorded at (#900). Absent for a sequential
+    /// recording, so an N = 1 sidecar is byte-identical to one written before the flag existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_concurrency: Option<usize>,
+    /// Recorded with more than one chunk in flight (#900). The `consolidate_summary` and
+    /// `judge_duplicates` keys hash graph state, which depends on commit order, so a replay can
+    /// miss them; the service swallows those misses and degrades silently.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub order_dependent: bool,
 }
 
 /// `<cassette>.meta.json`.
@@ -116,12 +125,16 @@ pub fn write_cassette_meta(
     cassette: &Path,
     id: &OntologyIdentity,
     lcg_build: &str,
+    ingest_concurrency: usize,
 ) -> Result<(), String> {
+    let concurrent = ingest_concurrency > 1;
     let m = CassetteMeta {
         format: 1,
         ontology_hash: id.hash.clone(),
         ontology_mode: id.mode.clone(),
         lcg_build: lcg_build.to_string(),
+        ingest_concurrency: concurrent.then_some(ingest_concurrency),
+        order_dependent: concurrent,
     };
     let p = cassette_meta_path(cassette);
     std::fs::write(
@@ -140,6 +153,30 @@ pub fn read_cassette_meta(cassette: &Path) -> Result<Option<CassetteMeta>, Strin
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("{}: {e}", p.display())),
     }
+}
+
+/// The warning for replaying a cassette recorded at ingest concurrency > 1 (#900), whose
+/// graph-state-keyed calls can miss on replay and degrade silently.
+fn order_dependent_warning(cassette: &Path, m: &CassetteMeta) -> String {
+    format!(
+        "--replay-cassette {} was recorded with --ingest-concurrency {} and is order-dependent: \
+         its consolidate_summary and judge_duplicates keys hash graph state that depended on \
+         the order chunks committed in, so some may miss on replay, and the service degrades \
+         those misses silently (no error, a possibly different graph). Replay always runs at \
+         ingest concurrency 1",
+        cassette.display(),
+        m.ingest_concurrency
+            .map_or_else(|| "> 1".to_string(), |n| n.to_string()),
+    )
+}
+
+/// The order-dependence warning for `cassette`, if its sidecar marks it so (#900). For callers
+/// with no ontology to verify (`retrieval-score-probe`), where [`preflight_cassette`] does not
+/// apply. `Ok(None)` for a cassette recorded sequentially or with no sidecar.
+pub fn order_dependent_cassette_warning(cassette: &Path) -> Result<Option<String>, String> {
+    Ok(read_cassette_meta(cassette)?
+        .filter(|m| m.order_dependent)
+        .map(|m| order_dependent_warning(cassette, &m)))
 }
 
 /// What replaying `cassette` under `run` means (FR-004, FR-005): `Err` names both hashes when the
@@ -161,6 +198,7 @@ pub fn preflight_cassette(
                 None => "no --ontology".to_string(),
             }
         )),
+        Some(m) if m.order_dependent => Ok(Some(order_dependent_warning(cassette, &m))),
         Some(_) => Ok(None),
         None if run.mode.is_some() => Ok(Some(format!(
             "--replay-cassette {} has no {} sidecar (recorded before ontology hashes were \
@@ -192,6 +230,12 @@ pub struct WorkspaceManifest {
     pub extractor: String,
     pub cassette: Option<String>,
     pub lcg_build: String,
+    /// The ingest concurrency the workspace was built with (#900), recorded only when it was above
+    /// 1 so a sequential run's manifest stays byte-identical. A graph built at N > 1 can differ
+    /// from run to run and can hold extra duplicate entities (ADR-0029), which `graph-qa` should
+    /// not mistake for an extraction regression.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest_concurrency: Option<usize>,
 }
 
 pub fn write_manifest(ws: &Path, m: &WorkspaceManifest) -> Result<(), String> {
@@ -362,7 +406,7 @@ mod tests {
             .contains("cannot be verified"));
         assert!(preflight_cassette(&c, &none).unwrap().is_none());
         // Recorded under h1: same passes, different / none fails naming both.
-        write_cassette_meta(&c, &h1, "lcg 1").unwrap();
+        write_cassette_meta(&c, &h1, "lcg 1", 1).unwrap();
         assert!(cassette_meta_path(&c).ends_with("c.jsonl.meta.json"));
         assert!(preflight_cassette(&c, &h1).unwrap().is_none());
         let e = preflight_cassette(&c, &none).unwrap_err();
@@ -374,9 +418,50 @@ mod tests {
         let e = preflight_cassette(&c, &h2).unwrap_err();
         assert!(e.contains("aaaa") && e.contains("bbbb"), "{e}");
         // Recorded with no ontology: an ontology run fails.
-        write_cassette_meta(&c, &none, "lcg 1").unwrap();
+        write_cassette_meta(&c, &none, "lcg 1", 1).unwrap();
         let e = preflight_cassette(&c, &h1).unwrap_err();
         assert!(e.contains("none") && e.contains("aaaa"), "{e}");
+    }
+
+    #[test]
+    fn sequential_sidecar_bytes_are_unchanged_and_old_sidecars_still_parse() {
+        let d = tempfile::tempdir().unwrap();
+        let c = d.path().join("c.jsonl");
+        let id = OntologyIdentity::none();
+        write_cassette_meta(&c, &id, "lcg 1", 1).unwrap();
+        let text = std::fs::read_to_string(cassette_meta_path(&c)).unwrap();
+        // Exactly the pre-#900 shape: neither new key is written at N = 1.
+        assert!(
+            !text.contains("ingest_concurrency") && !text.contains("order_dependent"),
+            "{text}"
+        );
+        // A sidecar written before the keys existed reads back with the defaults.
+        let old = r#"{"format":1,"ontology_hash":"none","ontology_mode":null,"lcg_build":"x"}"#;
+        std::fs::write(cassette_meta_path(&c), old).unwrap();
+        let m = read_cassette_meta(&c).unwrap().unwrap();
+        assert!(!m.order_dependent && m.ingest_concurrency.is_none());
+        assert!(preflight_cassette(&c, &id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_concurrent_recording_is_marked_order_dependent_and_replay_warns() {
+        let d = tempfile::tempdir().unwrap();
+        let c = d.path().join("c.jsonl");
+        let id = OntologyIdentity::none();
+        write_cassette_meta(&c, &id, "lcg 1", 4).unwrap();
+        let m = read_cassette_meta(&c).unwrap().unwrap();
+        assert_eq!((m.ingest_concurrency, m.order_dependent), (Some(4), true));
+        let w = preflight_cassette(&c, &id).unwrap().unwrap();
+        assert!(
+            w.contains("order-dependent") && w.contains("--ingest-concurrency 4"),
+            "{w}"
+        );
+        // An ontology mismatch is still an error, not a warning.
+        let other = OntologyIdentity {
+            hash: "zzzz".into(),
+            mode: Some("open".into()),
+        };
+        assert!(preflight_cassette(&c, &other).is_err());
     }
 
     #[test]
@@ -392,6 +477,52 @@ mod tests {
         };
         write_manifest(d.path(), &m).unwrap();
         assert_eq!(read_manifest(d.path()).unwrap(), Some(m));
+    }
+
+    #[test]
+    fn manifest_records_ingest_concurrency_only_above_one() {
+        let d = tempfile::tempdir().unwrap();
+        let seq = WorkspaceManifest {
+            format: 1,
+            ..Default::default()
+        };
+        write_manifest(d.path(), &seq).unwrap();
+        let text = std::fs::read_to_string(d.path().join(MANIFEST_FILE)).unwrap();
+        assert!(!text.contains("ingest_concurrency"), "{text}");
+        // An older manifest (no key) still parses.
+        assert_eq!(
+            read_manifest(d.path()).unwrap().unwrap().ingest_concurrency,
+            None
+        );
+
+        let par = WorkspaceManifest {
+            format: 1,
+            ingest_concurrency: Some(4),
+            ..Default::default()
+        };
+        write_manifest(d.path(), &par).unwrap();
+        assert_eq!(read_manifest(d.path()).unwrap(), Some(par));
+    }
+
+    #[test]
+    fn order_dependent_warning_is_for_marked_sidecars_only() {
+        let d = tempfile::tempdir().unwrap();
+        let c = d.path().join("c.jsonl");
+        std::fs::write(&c, "").unwrap();
+        let id = OntologyIdentity {
+            hash: "none".into(),
+            mode: None,
+        };
+        // No sidecar, and a sequential one: nothing to say.
+        assert!(order_dependent_cassette_warning(&c).unwrap().is_none());
+        write_cassette_meta(&c, &id, "b", 1).unwrap();
+        assert!(order_dependent_cassette_warning(&c).unwrap().is_none());
+        write_cassette_meta(&c, &id, "b", 4).unwrap();
+        let w = order_dependent_cassette_warning(&c).unwrap().unwrap();
+        assert!(
+            w.contains("--ingest-concurrency 4") && w.contains("order-dependent"),
+            "{w}"
+        );
     }
 
     #[test]

@@ -51,6 +51,22 @@ pub struct UdsClient {
 /// stalling it forever.
 pub const RPC_TIMEOUT: Duration = Duration::from_secs(900);
 
+/// How many calls the service's own sidecar connection pools (`--extractor-uds`,
+/// `--embedder-uds`) serve at once (`UDS_POOL_SIZE`, ADR-0039/0042). Beyond this, an ingest call
+/// queues inside the service.
+pub const SERVICE_SIDECAR_POOL: usize = 4;
+
+/// The per-call timeout for a pool of `size` connections (#900). A call's clock also counts the
+/// time it queues inside the service (sidecar pools, the Phase C write lock), so with `size`
+/// calls in flight over [`SERVICE_SIDECAR_POOL`] slots a call can legitimately wait behind
+/// `ceil(size / SERVICE_SIDECAR_POOL) - 1` others. Scales [`RPC_TIMEOUT`] by that factor so a run
+/// that finishes at N = 1 cannot fail only because it was run at N = 12. One connection keeps the
+/// plain [`RPC_TIMEOUT`].
+pub fn pool_call_timeout(size: usize) -> Duration {
+    let rounds = size.max(1).div_ceil(SERVICE_SIDECAR_POOL).max(1) as u32;
+    RPC_TIMEOUT * rounds
+}
+
 impl UdsClient {
     #[cfg(not(unix))]
     pub async fn connect(path: &Path) -> Result<Self, String> {
@@ -129,6 +145,73 @@ impl RpcTransport for UdsClient {
                         self.timeout.as_secs_f64()
                     ))
                 })
+        })
+    }
+}
+
+/// A pool of up to `size` Unix-socket connections to one service, for `--ingest-concurrency`
+/// (#900). The service reads and dispatches one request at a time per connection, so a single
+/// socket cannot carry more than one call in flight; N calls in flight need N connections.
+///
+/// A connection goes back to the idle list only after an `Ok` call. A failed call, or one whose
+/// future is dropped mid-flight (a sibling chunk failed), may leave a partial write or an unread
+/// response on its socket, so that connection is dropped rather than reused.
+pub struct UdsPool {
+    path: PathBuf,
+    permits: tokio::sync::Semaphore,
+    idle: std::sync::Mutex<Vec<UdsClient>>,
+    timeout: Duration,
+}
+
+impl UdsPool {
+    pub fn new(path: &Path, size: usize) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            permits: tokio::sync::Semaphore::new(size.max(1)),
+            idle: std::sync::Mutex::new(Vec::new()),
+            timeout: pool_call_timeout(size),
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// The per-call timeout each pooled call runs under.
+    pub fn call_timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Connections currently parked for reuse.
+    pub fn idle_connections(&self) -> usize {
+        self.idle.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+impl RpcTransport for UdsPool {
+    fn call<'a>(&'a self, method: &'a str, params: Value) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            let _permit = self
+                .permits
+                .acquire()
+                .await
+                .map_err(|e| format!("{method}: connection pool closed: {e}"))?;
+            let parked = self.idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
+            let client = match parked {
+                Some(c) => c,
+                None => UdsClient::connect(&self.path)
+                    .await?
+                    .with_timeout(self.timeout),
+            };
+            let r = client.call(method, params).await;
+            if r.is_ok() {
+                self.idle
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(client);
+            }
+            r
         })
     }
 }
@@ -277,6 +360,42 @@ impl ServiceGuard {
     /// The (temporary) workspace the service runs in.
     pub fn workspace_path(&self) -> &Path {
         self._workspace.path()
+    }
+
+    /// The transport to ingest through at `concurrency` calls in flight (#900). One is the
+    /// guard's own single connection, exactly as before; more is a [`UdsPool`] of that size.
+    /// Retrievers keep using [`Self::client`], so queries stay serialised.
+    pub fn ingest_transport(&self, concurrency: usize) -> Arc<dyn RpcTransport> {
+        if concurrency <= 1 {
+            return self.client.clone();
+        }
+        // The same constant the spawn path binds, so the pool cannot drift from the guard's client.
+        let sock = self._workspace.path().join(super::workspace::SOCKET_FILE);
+        Arc::new(UdsPool::new(&sock, concurrency))
+    }
+
+    /// Asks the service to shut down (`knowledge_close`) and waits up to [`SHUTDOWN_GRACE`] for it
+    /// to exit, so lbug and the WAL are flushed and a commit in progress finishes instead of being
+    /// torn by `kill_on_drop`'s SIGKILL. For the error path (#900): after an ingest fails with
+    /// chunk calls abandoned in flight, call this before dropping the guard. A service that does
+    /// not exit in time is killed with a warning. Best effort: never fails.
+    pub async fn stop_gracefully(&mut self) {
+        let _ = tokio::time::timeout(
+            Duration::from_secs(30),
+            self.client.call("knowledge_close", json!({})),
+        )
+        .await;
+        match tokio::time::timeout(SHUTDOWN_GRACE, self._child.wait()).await {
+            Ok(Ok(_)) => {}
+            _ => {
+                eprintln!(
+                    "lcg-eval: WARNING: the service did not exit within {}s of knowledge_close; \
+                     killing it",
+                    SHUTDOWN_GRACE.as_secs()
+                );
+                let _ = self._child.kill().await;
+            }
+        }
     }
 
     /// Shuts the service down gracefully (`knowledge_close`, then waits for it to exit so lbug and
@@ -534,7 +653,7 @@ pub async fn spawn_service(o: &ServiceOpts) -> Result<ServiceGuard, String> {
             o.bin.display()
         )
     })?;
-    let sock = ws.path().join(".lcg").join("service.sock");
+    let sock = ws.path().join(super::workspace::SOCKET_FILE);
     let deadline = Instant::now() + Duration::from_secs(120);
     let ontology;
     let (client, embedder) = loop {
@@ -692,10 +811,62 @@ pub fn check_supersede_response(
 }
 
 pub async fn ingest(t: &dyn RpcTransport, fx: &Fixture) -> Result<IngestMap, String> {
+    ingest_with(t, fx, 1).await
+}
+
+/// Parses `--ingest-concurrency` (#900): a positive integer. Zero, negative and non-numeric values
+/// are a usage error rather than silently becoming 1.
+pub fn parse_ingest_concurrency(v: &str) -> Result<usize, String> {
+    match v.trim().parse::<usize>() {
+        Ok(n) if n >= 1 => Ok(n),
+        _ => Err(format!(
+            "--ingest-concurrency must be an integer >= 1, got '{v}'"
+        )),
+    }
+}
+
+/// The ingest concurrency a run actually uses (#900), and a note when that is not what was asked
+/// for. A replayed cassette is always ingested sequentially: its `consolidate_summary` and
+/// `judge_duplicates` keys hash graph state, so which state each concurrent call sees would vary
+/// with timing and the replay would not be deterministic.
+pub fn effective_ingest_concurrency(requested: usize, replaying: bool) -> (usize, Option<String>) {
+    let requested = requested.max(1);
+    if replaying && requested > 1 {
+        return (
+            1,
+            Some(format!(
+                "--ingest-concurrency {requested} is ignored under a replayed cassette: replay \
+                 always ingests sequentially (effective ingest concurrency 1) so it stays \
+                 deterministic"
+            )),
+        );
+    }
+    (requested, None)
+}
+
+/// One `knowledge_process_chunk` call to make, in manifest order.
+struct ChunkJob {
+    note_id: String,
+    chunk_idx: usize,
+    params: Value,
+}
+
+/// [`ingest`] with up to `concurrency` chunk calls in flight (#900). Results are folded in
+/// manifest order (`buffered`, not `buffer_unordered`), so the per-chunk accumulation, the
+/// `episode_note` map and which error is reported do not depend on completion order. The
+/// supersession, index-build and entity-link passes run only after every chunk has finished.
+pub async fn ingest_with(
+    t: &dyn RpcTransport,
+    fx: &Fixture,
+    concurrency: usize,
+) -> Result<IngestMap, String> {
+    use futures::StreamExt;
+
     let started = Instant::now();
     let mut map = IngestMap::default();
     let mut note_episodes: HashMap<String, BTreeSet<String>> = HashMap::new();
 
+    let mut jobs: Vec<ChunkJob> = Vec::new();
     for n in &fx.manifest.notes {
         let body = &fx.notes[&n.id];
         for (i, chunk) in chunk_markdown(body, fx.manifest.max_chunk_tokens)
@@ -718,10 +889,28 @@ pub async fn ingest(t: &dyn RpcTransport, fx: &Fixture) -> Result<IngestMap, Str
             if let Some(o) = &n.origin {
                 params["origin"] = json!(o);
             }
-            let r = t
-                .call("knowledge_process_chunk", params)
-                .await
-                .map_err(|e| format!("ingest of note '{}' chunk {i}: {e}", n.id))?;
+            jobs.push(ChunkJob {
+                note_id: n.id.clone(),
+                chunk_idx: i,
+                params,
+            });
+        }
+    }
+
+    {
+        let mut results = futures::stream::iter(jobs)
+            .map(|job| async move {
+                let r = t.call("knowledge_process_chunk", job.params).await;
+                (job.note_id, job.chunk_idx, r)
+            })
+            .buffered(concurrency.max(1));
+        // Returning early on the first `Err` drops `results`: no new chunk call starts and the
+        // client abandons the in-flight ones (their connections are closed). The service cancels
+        // an abandoned chunk that is not yet committing (cancel-on-disconnect, #861) and finishes
+        // any commit already started; callers on the error path should stop the service
+        // gracefully ([`ServiceGuard::stop_gracefully`]) rather than kill it mid-commit.
+        while let Some((note_id, i, r)) = results.next().await {
+            let r = r.map_err(|e| format!("ingest of note '{note_id}' chunk {i}: {e}"))?;
             map.rpc_calls += 1;
             // An `unchanged` resubmission (issue #858) makes no extraction call.
             if r["status"].as_str() != Some("unchanged") {
@@ -730,10 +919,10 @@ pub async fn ingest(t: &dyn RpcTransport, fx: &Fixture) -> Result<IngestMap, Str
             map.chunks += 1;
             let ep = r["episode_uuid"]
                 .as_str()
-                .ok_or_else(|| format!("ingest of '{}': response has no episode_uuid", n.id))?;
-            map.episode_note.insert(ep.to_string(), n.id.clone());
+                .ok_or_else(|| format!("ingest of '{note_id}': response has no episode_uuid"))?;
+            map.episode_note.insert(ep.to_string(), note_id.clone());
             note_episodes
-                .entry(n.id.clone())
+                .entry(note_id)
                 .or_default()
                 .insert(ep.to_string());
         }
@@ -2186,5 +2375,361 @@ mod tests {
             .await
             .unwrap_err()
             .contains("nope"));
+    }
+
+    #[test]
+    fn ingest_concurrency_flag_values_are_validated() {
+        assert_eq!(parse_ingest_concurrency("1").unwrap(), 1);
+        assert_eq!(parse_ingest_concurrency("8").unwrap(), 8);
+        for bad in ["0", "-1", "abc", "", "1.5"] {
+            let e = parse_ingest_concurrency(bad).unwrap_err();
+            assert!(
+                e.contains("--ingest-concurrency") && e.contains(&format!("'{bad}'")),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_forces_sequential_ingest_and_says_so() {
+        assert_eq!(effective_ingest_concurrency(4, false), (4, None));
+        assert_eq!(effective_ingest_concurrency(1, true), (1, None));
+        let (n, note) = effective_ingest_concurrency(4, true);
+        assert_eq!(n, 1);
+        assert!(note.unwrap().contains("--ingest-concurrency 4"));
+    }
+
+    // ---- #900: --ingest-concurrency -------------------------------------------------------
+
+    use std::sync::atomic::AtomicUsize;
+
+    /// A corpus of `k` single-chunk notes (`n0` … `n{k-1}`), no supersessions.
+    fn many_fixture(k: usize) -> Fixture {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("notes")).unwrap();
+        let notes: Vec<String> = (0..k).map(|i| format!(r#"{{"id":"n{i}"}}"#)).collect();
+        std::fs::write(
+            d.path().join("manifest.json"),
+            format!(
+                r#"{{"corpus_version":"v1","notes":[{}],"supersedes":[]}}"#,
+                notes.join(",")
+            ),
+        )
+        .unwrap();
+        for i in 0..k {
+            std::fs::write(
+                d.path().join(format!("notes/n{i}.md")),
+                format!("# N{i}\nbody {i}"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            d.path().join("questions.jsonl"),
+            r#"{"id":"q1","category":"direct","text":"hi","relevant_notes":[{"note":"n0"}]}"#,
+        )
+        .unwrap();
+        let f = super::super::fixture::load(d.path()).unwrap();
+        std::mem::forget(d);
+        f
+    }
+
+    /// Transport whose `knowledge_process_chunk` calls take `delay(chunk_index)` ms, track how many
+    /// are in flight at once, and can be made to fail for chosen notes.
+    struct DelayTransport {
+        delay: Box<dyn Fn(usize) -> u64 + Send + Sync>,
+        fail_notes: Vec<&'static str>,
+        in_flight: AtomicUsize,
+        peak: AtomicUsize,
+        chunk_calls_started: AtomicUsize,
+        chunk_calls_finished: AtomicUsize,
+        /// Chunk calls finished at the moment each non-chunk call started.
+        finished_at_pass_start: std::sync::Mutex<Vec<(String, usize)>>,
+        /// Chunk calls still in flight at the moment each non-chunk call started.
+        in_flight_at_pass_start: std::sync::Mutex<Vec<usize>>,
+    }
+
+    impl DelayTransport {
+        fn new(delay: impl Fn(usize) -> u64 + Send + Sync + 'static) -> Self {
+            Self {
+                delay: Box::new(delay),
+                fail_notes: Vec::new(),
+                in_flight: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                chunk_calls_started: AtomicUsize::new(0),
+                chunk_calls_finished: AtomicUsize::new(0),
+                finished_at_pass_start: std::sync::Mutex::new(Vec::new()),
+                in_flight_at_pass_start: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl RpcTransport for DelayTransport {
+        fn call<'a>(&'a self, m: &'a str, p: Value) -> BoxFuture<'a, Result<Value, String>> {
+            Box::pin(async move {
+                if m != "knowledge_process_chunk" {
+                    self.finished_at_pass_start.lock().unwrap().push((
+                        m.to_string(),
+                        self.chunk_calls_finished.load(Ordering::SeqCst),
+                    ));
+                    self.in_flight_at_pass_start
+                        .lock()
+                        .unwrap()
+                        .push(self.in_flight.load(Ordering::SeqCst));
+                    return match m {
+                        "knowledge_get_entities_by_source" => Ok(json!({"nodes": []})),
+                        _ => Ok(json!({})),
+                    };
+                }
+                self.chunk_calls_started.fetch_add(1, Ordering::SeqCst);
+                let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(now, Ordering::SeqCst);
+                // Decrement even if this future is dropped mid-sleep.
+                struct Dec<'a>(&'a AtomicUsize);
+                impl Drop for Dec<'_> {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                let _dec = Dec(&self.in_flight);
+                let chunk_id = p["chunk_id"].as_str().unwrap().to_string();
+                let idx: usize = chunk_id[1..chunk_id.find('#').unwrap()].parse().unwrap();
+                tokio::time::sleep(Duration::from_millis((self.delay)(idx))).await;
+                self.chunk_calls_finished.fetch_add(1, Ordering::SeqCst);
+                if self.fail_notes.iter().any(|n| p["doc_id"] == *n) {
+                    return Err(format!("boom on {chunk_id}"));
+                }
+                Ok(json!({"episode_uuid": format!("ep-{chunk_id}")}))
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrency_four_keeps_four_calls_in_flight_and_is_faster() {
+        let fx = many_fixture(16);
+        let seq = DelayTransport::new(|_| 40);
+        let t0 = Instant::now();
+        ingest_with(&seq, &fx, 1).await.unwrap();
+        let seq_elapsed = t0.elapsed();
+        assert_eq!(seq.peak.load(Ordering::SeqCst), 1);
+
+        let par = DelayTransport::new(|_| 40);
+        let t0 = Instant::now();
+        let m = ingest_with(&par, &fx, 4).await.unwrap();
+        let par_elapsed = t0.elapsed();
+        assert_eq!(par.peak.load(Ordering::SeqCst), 4, "exactly 4 in flight");
+        assert_eq!(m.chunks, 16);
+        // Ideal is 25%; allow generous slack for a loaded CI host.
+        assert!(
+            par_elapsed < seq_elapsed.mul_f64(0.6),
+            "N=4 took {par_elapsed:?} vs N=1 {seq_elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_ingest_is_sequential() {
+        let fx = many_fixture(6);
+        let t = DelayTransport::new(|_| 5);
+        ingest(&t, &fx).await.unwrap();
+        assert_eq!(t.peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrency_above_the_chunk_count_is_fine() {
+        let fx = many_fixture(3);
+        let t = DelayTransport::new(|_| 20);
+        let m = ingest_with(&t, &fx, 50).await.unwrap();
+        assert_eq!(m.chunks, 3);
+        assert_eq!(t.peak.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn out_of_order_completion_gives_the_same_map_as_sequential() {
+        let fx = many_fixture(12);
+        let seq = ingest_with(&DelayTransport::new(|_| 1), &fx, 1)
+            .await
+            .unwrap();
+        // Later chunks finish first.
+        let t = DelayTransport::new(|i| (12 - i as u64) * 6);
+        let par = ingest_with(&t, &fx, 4).await.unwrap();
+        assert_eq!(t.peak.load(Ordering::SeqCst), 4);
+        assert_eq!(par.episode_note, seq.episode_note);
+        assert_eq!(par.chunks, seq.chunks);
+        assert_eq!(par.rpc_calls, seq.rpc_calls);
+        assert_eq!(par.extraction_requests, seq.extraction_requests);
+        assert_eq!(par.episode_note["ep-n7#0"], "n7");
+    }
+
+    #[tokio::test]
+    async fn later_passes_start_only_after_every_chunk_has_finished() {
+        let fx = many_fixture(10);
+        let t = DelayTransport::new(|i| (10 - i as u64) * 4);
+        ingest_with(&t, &fx, 4).await.unwrap();
+        let at = t.finished_at_pass_start.lock().unwrap();
+        assert!(!at.is_empty());
+        assert!(
+            at.iter().all(|(_, finished)| *finished == 10),
+            "a pass began before the last chunk finished: {at:?}"
+        );
+        assert!(t
+            .in_flight_at_pass_start
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|n| *n == 0));
+    }
+
+    #[tokio::test]
+    async fn a_failed_chunk_at_n4_names_note_and_chunk_and_stops_new_calls() {
+        let fx = many_fixture(24);
+        let mut t = DelayTransport::new(|_| 10);
+        t.fail_notes = vec!["n2"];
+        let e = ingest_with(&t, &fx, 4).await.unwrap_err();
+        assert!(
+            e.contains("'n2'") && e.contains("chunk 0") && e.contains("boom"),
+            "{e}"
+        );
+        let started = t.chunk_calls_started.load(Ordering::SeqCst);
+        // Chunks 0..=2 were needed to reach the failure, plus at most the refills for the
+        // results folded before it; nothing like the full 24.
+        assert!(
+            started <= 3 + 4,
+            "calls kept starting after the failure: {started}"
+        );
+        // The run does not return while its calls are still running.
+        assert_eq!(t.in_flight.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn concurrent_failures_report_the_earliest_chunk_in_manifest_order() {
+        let fx = many_fixture(8);
+        let mut t = DelayTransport::new(|i| if i == 5 { 1 } else { 30 });
+        // n5 fails first in time, n3 later; both are in flight together at N=8.
+        t.fail_notes = vec!["n3", "n5"];
+        let e = ingest_with(&t, &fx, 8).await.unwrap_err();
+        assert!(e.contains("'n3'"), "earliest in manifest order wins: {e}");
+    }
+
+    #[cfg(unix)]
+    struct EchoServer {
+        accepted: Arc<AtomicUsize>,
+        _dir: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    /// Accepts any number of connections. `fail` answers with a service error, `hang` never
+    /// answers, anything else echoes after 30 ms.
+    #[cfg(unix)]
+    fn echo_server() -> EchoServer {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let acc = accepted.clone();
+        tokio::spawn(async move {
+            loop {
+                let (s, _) = listener.accept().await.unwrap();
+                acc.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut r = BufReader::new(s);
+                    loop {
+                        let mut line = String::new();
+                        if r.read_line(&mut line).await.unwrap_or(0) == 0 {
+                            break;
+                        }
+                        let req: Value = serde_json::from_str(&line).unwrap();
+                        let id = req["id"].clone();
+                        let out = match req["method"].as_str().unwrap() {
+                            "hang" => continue,
+                            "fail" => {
+                                json!({"jsonrpc":"2.0","id":id,"error":{"code":-1,"message":"nope"}})
+                            }
+                            m => {
+                                tokio::time::sleep(Duration::from_millis(30)).await;
+                                json!({"jsonrpc":"2.0","id":id,"result":{"echo":m}})
+                            }
+                        };
+                        r.get_mut()
+                            .write_all(format!("{out}\n").as_bytes())
+                            .await
+                            .unwrap();
+                    }
+                });
+            }
+        });
+        EchoServer {
+            accepted,
+            _dir: dir,
+            path,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pool_never_opens_more_than_n_connections_and_reuses_them() {
+        let srv = echo_server();
+        let pool = UdsPool::new(&srv.path, 3);
+        let calls: Vec<_> = (0..9).map(|_| pool.call("ping", json!({}))).collect();
+        for r in futures::future::join_all(calls).await {
+            assert_eq!(r.unwrap()["echo"], "ping");
+        }
+        assert_eq!(srv.accepted.load(Ordering::SeqCst), 3);
+        assert_eq!(pool.idle_connections(), 3);
+        // A later call reuses a parked connection instead of dialling a fourth.
+        pool.call("ping", json!({})).await.unwrap();
+        assert_eq!(srv.accepted.load(Ordering::SeqCst), 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pool_call_timeout_scales_with_concurrency_over_the_sidecar_pool() {
+        // One connection, and up to the sidecar pool size, keep the plain timeout.
+        assert_eq!(pool_call_timeout(1), RPC_TIMEOUT);
+        assert_eq!(pool_call_timeout(SERVICE_SIDECAR_POOL), RPC_TIMEOUT);
+        // 12 calls over 4 slots: a call can queue behind two rounds, so three times the budget.
+        assert_eq!(pool_call_timeout(12), RPC_TIMEOUT * 3);
+        assert_eq!(pool_call_timeout(5), RPC_TIMEOUT * 2);
+        // Never below the plain timeout, and never decreasing in N.
+        assert_eq!(pool_call_timeout(0), RPC_TIMEOUT);
+        let mut prev = Duration::ZERO;
+        for n in 1..=64 {
+            let t = pool_call_timeout(n);
+            assert!(t >= prev && t >= RPC_TIMEOUT);
+            prev = t;
+        }
+        // The pool applies it by default; an explicit override still wins.
+        let p = UdsPool::new(Path::new("/nonexistent.sock"), 12);
+        assert_eq!(p.call_timeout(), RPC_TIMEOUT * 3);
+        let p = p.with_timeout(Duration::from_secs(5));
+        assert_eq!(p.call_timeout(), Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pool_retires_a_connection_after_a_failed_or_cancelled_call() {
+        let srv = echo_server();
+        let pool = UdsPool::new(&srv.path, 2).with_timeout(Duration::from_millis(150));
+        pool.call("ping", json!({})).await.unwrap();
+        assert_eq!(pool.idle_connections(), 1);
+        // A service error: that connection is dropped, not parked.
+        assert!(pool
+            .call("fail", json!({}))
+            .await
+            .unwrap_err()
+            .contains("nope"));
+        assert_eq!(pool.idle_connections(), 0);
+        // A timeout (the response may still arrive later): likewise.
+        pool.call("ping", json!({})).await.unwrap();
+        assert!(pool
+            .call("hang", json!({}))
+            .await
+            .unwrap_err()
+            .contains("no response"));
+        assert_eq!(pool.idle_connections(), 0);
+        // A dropped (cancelled) future is retired too.
+        pool.call("ping", json!({})).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_millis(5), pool.call("ping", json!({}))).await;
+        assert_eq!(pool.idle_connections(), 0);
+        // And the pool still works.
+        assert_eq!(pool.call("ping", json!({})).await.unwrap()["echo"], "ping");
     }
 }
