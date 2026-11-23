@@ -194,7 +194,7 @@ fn documented_features() -> Vec<(String, String)> {
         .find("#### Feature strings")
         .expect("`#### Feature strings` missing from docs/ipc-mcp-reference.md");
     let section = &REFERENCE[start + 4..];
-    let end = section.find("\n#").map_or(section.len(), |i| i);
+    let end = section.find("\n#").unwrap_or(section.len());
     section[..end]
         .lines()
         .filter_map(|l| {
