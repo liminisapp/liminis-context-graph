@@ -36,11 +36,25 @@ const OTHER: &str = "other";
 #[derive(Default)]
 struct CountingExtractor {
     calls: AtomicUsize,
+    /// One-shot gate: the next `extract` call signals `entered` and then waits for `release`, so a
+    /// test can hold an ingest in flight (holding its per-document lock) for exactly as long as it
+    /// needs.
+    gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 
 impl CountingExtractor {
     fn count(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    /// Arms the gate; returns `(entered, release)`.
+    fn arm_gate(&self) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let g = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
+        *self.gate.lock().unwrap() = Some((Arc::clone(&g.0), Arc::clone(&g.1)));
+        g
     }
 }
 
@@ -50,6 +64,7 @@ impl Extractor for CountingExtractor {
         opts: ExtractOptions<'a>,
     ) -> BoxFuture<'a, Result<ExtractionOutcome, Error>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let gate = self.gate.lock().unwrap().take();
         let fact = opts
             .episode_body
             .lines()
@@ -59,6 +74,10 @@ impl Extractor for CountingExtractor {
             .trim()
             .to_string();
         Box::pin(async move {
+            if let Some((entered, release)) = gate {
+                entered.notify_one();
+                release.notified().await;
+            }
             let (s, t) = (format!("{fact} src"), format!("{fact} dst"));
             Ok(ExtractionResult {
                 entities: [&s, &t]
@@ -433,37 +452,98 @@ async fn move_keeps_document_mode_baseline_so_reingest_does_not_re_extract() {
     assert_eq!(f.ex.count(), calls + 1);
 }
 
-/// A destination `doc_id` with no live episode but leftover `DocRevision` rows (a hard delete
-/// keeps them) must be refused: the move would otherwise merge two revision histories there.
+/// The destination must be empty (ADR-0903 decision 5), against a real database: each case leaves a
+/// different kind of thing under a destination that holds **no live episode**, and a move into it
+/// is refused as `destination_has_history` with the graph and the WAL untouched. (The same rule over
+/// every kind of footprint and every destination shape is the unit test `footprint_table`; this
+/// covers the half that reads the database.)
 #[tokio::test]
-async fn destination_with_leftover_revision_history_is_refused() {
+async fn a_destination_with_anything_left_under_it_is_refused() {
     let f = fx();
-    ingest(&f.state, "b", "notes/b.md", NOTE).await;
-    let del = call(
+    for src in ["s1", "s2", "s3", "s4", "s5"] {
+        ingest(
+            &f.state,
+            src,
+            &format!("notes/{src}.md"),
+            &NOTE.replace("cache", src),
+        )
+        .await;
+    }
+    let chunk = |id: &str, file: &str, doc: &str| {
+        json!({"chunk_text": format!("fact of {id}"), "chunk_id": id, "source_file": file,
+               "group_id": G, "doc_id": doc, "reference_time": "2026-08-04T00:00:00Z"})
+    };
+
+    // [1] A document-mode destination hard-deleted: its episodes are gone, its `DocRevision` rows stay.
+    ingest(&f.state, "d1", "dest/d1.md", NOTE).await;
+    call(
         "knowledge_delete_by_source",
-        json!({"source_file": "notes/b.md", "group_ids": [G]}),
+        json!({"source_file": "dest/d1.md", "group_ids": [G]}),
         &f.state,
     )
     .await;
-    assert!(del["deleted_count"].as_u64().unwrap() >= 1, "{del}");
-    ingest(&f.state, "a", "notes/a.md", &NOTE.replace("cache", "bus")).await;
-    let before = identity_snapshot(&f.db, G);
+    {
+        let conn = f.db.connect().unwrap();
+        assert!(!conn.doc_revision_rows_for_doc(G, "d1").unwrap().is_empty());
+    }
+    assert_refused(
+        &f,
+        vec![mv("s1", "notes/s1.md", "d1", "moved/d1.md")],
+        "destination_has_history",
+    )
+    .await;
 
-    let r = move_docs(&f.state, vec![mv("a", "notes/a.md", "b", "moved/b.md")]).await;
-    assert!(error_message(&r).contains("destination_has_history"), "{r}");
-    assert_eq!(
-        identity_snapshot(&f.db, G),
-        before,
-        "a refusal changes nothing"
-    );
-}
+    // [2] A chunk-ingested destination whose chunks were all retired: no revision row, no
+    // supersession record, only retired episodes.
+    call(
+        "knowledge_process_chunk",
+        chunk("d2::0", "dest/d2.md", "d2"),
+        &f.state,
+    )
+    .await;
+    let rm = call(
+        "knowledge_mark_chunk_removed",
+        json!({"chunk_id": "d2::0", "group_ids": [G]}),
+        &f.state,
+    )
+    .await;
+    assert_eq!(rm["superseded_count"], 1, "{rm}");
+    {
+        let conn = f.db.connect().unwrap();
+        assert!(conn.doc_revision_rows_for_doc(G, "d2").unwrap().is_empty());
+        assert!(conn.doc_supersession_for(G, "d2").unwrap().is_none());
+    }
+    assert_refused(
+        &f,
+        vec![mv("s2", "notes/s2.md", "d2", "moved/d2.md")],
+        "destination_has_history",
+    )
+    .await;
 
-/// A destination `doc_id` that is the *superseding* side of a leftover supersession record (its
-/// document was hard-deleted) must be refused: the record and the `superseded_by` values on the
-/// superseded document's episodes would otherwise silently point at the moved document.
-#[tokio::test]
-async fn destination_named_as_a_superseding_document_is_refused() {
-    let f = fx();
+    // [3] The same, reached by a path-only destination (no `doc_id` named at all).
+    call(
+        "knowledge_process_chunk",
+        chunk("p::0", "dest/p.md", "p"),
+        &f.state,
+    )
+    .await;
+    call(
+        "knowledge_mark_chunk_removed",
+        json!({"chunk_id": "p::0", "group_ids": [G]}),
+        &f.state,
+    )
+    .await;
+    assert_refused(
+        &f,
+        vec![json!({"from": {"source_path": "notes/s3.md"}, "to": {"source_path": "dest/p.md"}})],
+        "destination_has_history",
+    )
+    .await;
+
+    // [4] A destination named as the superseding document of a leftover supersession record.
+    // `old` is superseded by `new` (effective later, so it stays live); `new` is chunk-ingested, so
+    // it never had revision rows, then hard-deleted: only the record and `old`'s `superseded_by`
+    // remain under it.
     ingest(
         &f.state,
         "old",
@@ -471,17 +551,12 @@ async fn destination_named_as_a_superseding_document_is_refused() {
         &NOTE.replace("cache", "memo"),
     )
     .await;
-    // The superseding document is chunk-ingested, so it never gets `DocRevision` rows: only the
-    // supersession record itself can mark its `doc_id` as occupied once it is deleted.
     call(
         "knowledge_process_chunk",
-        json!({"chunk_text": "the plan replaces the memo", "chunk_id": "new::0",
-               "source_file": "notes/new.md", "group_id": G, "doc_id": "new",
-               "reference_time": "2026-08-04T00:00:00Z"}),
+        chunk("new::0", "dest/new.md", "new"),
         &f.state,
     )
     .await;
-    // Effective in the future, so `old` stays live and the record is a plain leftover.
     call(
         "knowledge_supersede_document",
         json!({"group_id": G, "superseding_doc_id": "new", "superseded_doc_id": "old",
@@ -489,10 +564,9 @@ async fn destination_named_as_a_superseding_document_is_refused() {
         &f.state,
     )
     .await;
-    // `new` is hard-deleted; its supersession record and `old`'s `superseded_by` remain.
     let del = call(
         "knowledge_delete_by_source",
-        json!({"source_file": "notes/new.md", "group_ids": [G]}),
+        json!({"source_file": "dest/new.md", "group_ids": [G]}),
         &f.state,
     )
     .await;
@@ -505,53 +579,20 @@ async fn destination_named_as_a_superseding_document_is_refused() {
             .unwrap()
             .is_empty());
     }
-    ingest(&f.state, "x", "notes/x.md", &NOTE.replace("cache", "bus")).await;
-    let before = identity_snapshot(&f.db, G);
-
-    let r = move_docs(&f.state, vec![mv("x", "notes/x.md", "new", "moved/new.md")]).await;
-    assert!(error_message(&r).contains("destination_has_history"), "{r}");
-    assert_eq!(
-        identity_snapshot(&f.db, G),
-        before,
-        "a refusal changes nothing"
-    );
-}
-
-/// A destination `doc_id` whose only episodes are retired (a chunk-ingested document whose chunks
-/// were all marked removed: no `DocRevision` row, no supersession record) still carries history,
-/// so a move into it is refused rather than merging two documents' histories under one `doc_id`.
-#[tokio::test]
-async fn destination_with_only_retired_episodes_is_refused() {
-    let f = fx();
-    call(
-        "knowledge_process_chunk",
-        json!({"chunk_text": "the old b fact", "chunk_id": "b::0", "source_file": "notes/b.md",
-               "group_id": G, "doc_id": "b", "reference_time": "2026-08-04T00:00:00Z"}),
-        &f.state,
+    assert_refused(
+        &f,
+        vec![mv("s4", "notes/s4.md", "new", "moved/new.md")],
+        "destination_has_history",
     )
     .await;
-    let rm = call(
-        "knowledge_mark_chunk_removed",
-        json!({"chunk_id": "b::0", "group_ids": [G]}),
+
+    // A destination with nothing under it is still fine.
+    let r = move_docs(
         &f.state,
+        vec![mv("s5", "notes/s5.md", "empty", "moved/empty.md")],
     )
     .await;
-    assert_eq!(rm["superseded_count"], 1, "{rm}");
-    {
-        let conn = f.db.connect().unwrap();
-        assert!(conn.doc_revision_rows_for_doc(G, "b").unwrap().is_empty());
-        assert!(conn.doc_supersession_for(G, "b").unwrap().is_none());
-    }
-    ingest(&f.state, "a", "notes/a.md", NOTE).await;
-    let before = identity_snapshot(&f.db, G);
-
-    let r = move_docs(&f.state, vec![mv("a", "notes/a.md", "b", "moved/b.md")]).await;
-    assert!(error_message(&r).contains("destination_has_history"), "{r}");
-    assert_eq!(
-        identity_snapshot(&f.db, G),
-        before,
-        "a refusal changes nothing"
-    );
+    assert_eq!(r["result"]["success"], true, "{r}");
 }
 
 #[tokio::test]
@@ -819,33 +860,43 @@ async fn refusals_leave_graph_and_wal_unchanged() {
         "destination_is_source",
     )
     .await;
-    // A chunk-id rewrite colliding with a live chunk id elsewhere in the group.
-    let collide = {
-        let conn = f.db.connect().unwrap();
-        let b = conn
-            .move_candidates(Some(G), &live_at())
-            .unwrap()
-            .into_iter()
-            .find(|c| c.doc_id.as_deref() == Some("b"))
-            .unwrap();
-        b.name
-    };
-    let a_name = {
+    // A chunk-id rewrite onto a chunk id that already exists: the destination is not empty.
+    let name_of = |doc: &str| {
         let conn = f.db.connect().unwrap();
         conn.move_candidates(Some(G), &live_at())
             .unwrap()
             .into_iter()
-            .find(|c| c.doc_id.as_deref() == Some("a"))
+            .find(|c| c.doc_id.as_deref() == Some(doc))
             .unwrap()
             .name
     };
+    let (a_name, b_name) = (name_of("a"), name_of("b"));
     assert_refused(
         &f,
         vec![json!({
             "from": {"doc_id": "a", "source_path": "notes/a.md"},
             "to": {"doc_id": "c", "source_path": "c.md"},
-            "chunk_id_prefix": {"from": a_name, "to": collide},
+            "chunk_id_prefix": {"from": a_name, "to": b_name},
         })],
+        "occupied_destination",
+    )
+    .await;
+    // Two moves of one batch rewriting into the same chunk id: nothing existing is in the way, so
+    // this is the one chunk-id collision the footprint cannot see.
+    assert_refused(
+        &f,
+        vec![
+            json!({
+                "from": {"doc_id": "a", "source_path": "notes/a.md"},
+                "to": {"doc_id": "c1", "source_path": "c1.md"},
+                "chunk_id_prefix": {"from": a_name, "to": "zz::0"},
+            }),
+            json!({
+                "from": {"doc_id": "b", "source_path": "notes/b.md"},
+                "to": {"doc_id": "c2", "source_path": "c2.md"},
+                "chunk_id_prefix": {"from": b_name, "to": "zz::0"},
+            }),
+        ],
         "chunk_id_collision",
     )
     .await;
@@ -1123,28 +1174,149 @@ async fn a_folder_rename_is_one_call() {
     assert_eq!(identity_snapshot(&db2, G), identity_snapshot(&f.db, G));
 }
 
-/// A document ingest racing a move into its `doc_id` never leaves two documents mixed under one
-/// identity: either the move is refused (the destination was claimed first), or the move wins and
-/// the ingest revises the moved document.
+// ── Ingest and move, in each order — forced, not raced ──────────────────────
+//
+// A document ingest holds its per-`(group, doc_id)` lock from before it reads its baseline until it
+// has committed, and a move takes the same locks for every `doc_id` it reads or writes *before* it
+// plans. The extractor gate holds an ingest in flight at its slowest point, so each interleaving
+// below is forced and its final state is exact.
+
+async fn within(secs: u64, what: &str, fut: impl std::future::Future<Output = ()>) {
+    tokio::time::timeout(std::time::Duration::from_secs(secs), fut)
+        .await
+        .unwrap_or_else(|_| panic!("timed out: {what}"));
+}
+
+/// The identity lines of the live episodes carrying `doc_id`.
+fn lines_of(db: &Db, doc_id: &str) -> Vec<String> {
+    identity_snapshot(db, G)
+        .into_iter()
+        .filter(|l| l.contains(&format!("doc=Some(\"{doc_id}\")")))
+        .collect()
+}
+
+/// Order 1 — the ingest into the destination is in flight when the move arrives. The move waits for
+/// the ingest's lock, then plans against what it committed: the destination is occupied, the move
+/// is refused, and nothing of `a` or of the new `b` changed.
 #[tokio::test]
-async fn ingest_racing_a_move_into_the_destination_never_merges_silently() {
+async fn ingest_in_flight_into_the_destination_makes_the_move_refuse() {
     let f = fx();
     ingest(&f.state, "a", "notes/a.md", NOTE).await;
+    let a_before = lines_of(&f.db, "a");
+    let wal_before = wal_bytes(f.wal.path());
+    let (entered, release) = f.ex.arm_gate();
+
     let st = Arc::clone(&f.state);
     let ing = tokio::spawn(async move {
         ingest(&st, "b", "moved/b.md", "# Other\n\nA different document.\n").await
     });
+    within(10, "the ingest reaching its extractor", entered.notified()).await;
+
+    let st = Arc::clone(&f.state);
+    let mut mv_task = tokio::spawn(async move {
+        move_docs(&st, vec![mv("a", "notes/a.md", "b", "moved/b.md")]).await
+    });
+    // The move cannot finish while the ingest holds `b`'s lock.
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(400), &mut mv_task)
+            .await
+            .is_err(),
+        "the move must wait for the in-flight ingest of its destination"
+    );
+    assert_eq!(
+        wal_bytes(f.wal.path()),
+        wal_before,
+        "nothing is logged while it waits"
+    );
+
+    release.notify_one();
+    let ingested = ing.await.unwrap();
+    assert_eq!(ingested["status"], "committed", "{ingested}");
+    let r = mv_task.await.unwrap();
+    assert!(error_message(&r).contains("occupied_destination"), "{r}");
+
+    // Exact final state: `a` untouched, `b` exactly what the ingest committed, at its own path.
+    assert_eq!(lines_of(&f.db, "a"), a_before);
+    let b = lines_of(&f.db, "b");
+    assert!(!b.is_empty());
+    assert!(
+        b.iter().all(|l| l.contains("sf=Some(\"moved/b.md\")")),
+        "{b:?}"
+    );
+}
+
+/// Order 2 — the move completes first. The ingest then sees the moved document at that `doc_id`:
+/// the same bytes are an unchanged no-op (no extraction), and the document stays one document with
+/// one path.
+#[tokio::test]
+async fn ingest_after_the_move_sees_the_moved_document() {
+    let f = fx();
+    ingest(&f.state, "a", "notes/a.md", NOTE).await;
     let r = move_docs(&f.state, vec![mv("a", "notes/a.md", "b", "moved/b.md")]).await;
-    ing.await.unwrap();
-    let snap = identity_snapshot(&f.db, G);
-    if r.get("error").is_some() {
-        assert!(error_message(&r).contains("occupied_destination"), "{r}");
-        assert!(snap.iter().any(|l| l.contains("doc=Some(\"a\")")));
-    } else {
-        // The move won; the ingest then revised document `b` as one document with one path.
-        assert!(snap
-            .iter()
-            .filter(|l| l.contains("doc=Some(\"b\")"))
-            .all(|l| l.contains("sf=Some(\"moved/b.md\")")));
-    }
+    assert_eq!(r["result"]["success"], true, "{r}");
+    let after_move = identity_snapshot(&f.db, G);
+    let calls = f.ex.count();
+
+    let again = ingest(&f.state, "b", "moved/b.md", NOTE).await;
+    assert_eq!(again["status"], "unchanged", "{again}");
+    assert_eq!(
+        f.ex.count(),
+        calls,
+        "the moved baseline means no extraction"
+    );
+    assert_eq!(identity_snapshot(&f.db, G), after_move);
+    assert!(lines_of(&f.db, "a").is_empty());
+}
+
+/// Order 3 — the ingest is in flight on the **source** when the move arrives. The move waits, then
+/// re-keys what the ingest committed, including the revision it just wrote: one extraction in
+/// total, and nothing left under the old identity.
+#[tokio::test]
+async fn ingest_in_flight_on_the_source_is_moved_whole() {
+    let f = fx();
+    ingest(&f.state, "a", "notes/a.md", NOTE).await;
+    let calls = f.ex.count();
+    let (entered, release) = f.ex.arm_gate();
+
+    let edited = NOTE.replace("Redis or memcached.", "Redis or Valkey.");
+    let st = Arc::clone(&f.state);
+    let ing = tokio::spawn(async move { ingest(&st, "a", "notes/a.md", &edited).await });
+    within(10, "the ingest reaching its extractor", entered.notified()).await;
+
+    let st = Arc::clone(&f.state);
+    let mut mv_task = tokio::spawn(async move {
+        move_docs(&st, vec![mv("a", "notes/a.md", "b", "moved/b.md")]).await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(400), &mut mv_task)
+            .await
+            .is_err(),
+        "the move must wait for the in-flight ingest of its source"
+    );
+
+    release.notify_one();
+    assert_eq!(ing.await.unwrap()["status"], "committed");
+    let r = mv_task.await.unwrap();
+    assert_eq!(r["result"]["success"], true, "{r}");
+
+    assert_eq!(f.ex.count(), calls + 1, "only the ingest extracted");
+    assert!(lines_of(&f.db, "a").is_empty());
+    let b = lines_of(&f.db, "b");
+    assert!(!b.is_empty());
+    assert!(
+        b.iter().all(|l| l.contains("sf=Some(\"moved/b.md\")")),
+        "{b:?}"
+    );
+    assert!(identity_snapshot(&f.db, G)
+        .iter()
+        .all(|l| !l.contains("notes/a.md")));
+    // The moved document's baseline includes the revision the ingest wrote.
+    let calls = f.ex.count();
+    let edited_again = NOTE.replace("Redis or memcached.", "Redis or Valkey.");
+    ingest(&f.state, "b", "moved/b.md", &edited_again).await;
+    assert_eq!(
+        f.ex.count(),
+        calls,
+        "re-ingesting the edited text is a no-op"
+    );
 }

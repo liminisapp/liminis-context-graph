@@ -125,8 +125,8 @@ A consumer can detect support for the move method from the capabilities reply an
 ### Edge Cases
 
 - **Origin is unchanged by a move.** If the new location implies a different origin, the consumer calls `knowledge_stamp_origin` afterwards. The move does not re-evaluate origin rules.
-- **Live episodes identify and occupy; superseded history moves with the document.** A document is identified by its live episodes, and a destination counts as "holding episodes" only when it holds live ones. Superseded revisions of the moved document are re-keyed with it (otherwise `knowledge_delete_by_source` on the old path would still find them and lint citations would still name the old `doc_id`). Deleted episodes do not exist and are not touched.
-- **Leftover document state at the destination.** A destination `doc_id` that holds no live episode but still has document revision rows (a hard delete keeps them) or a supersession record is refused (`destination_has_history`), because moving into it would merge two revision histories.
+- **Live episodes identify a document; its superseded history moves with it.** A document is identified by its live episodes, and an identity with none is an unknown source. Superseded revisions of the moved document are re-keyed with it (otherwise `knowledge_delete_by_source` on the old path would still find them and lint citations would still name the old `doc_id`). Deleted episodes do not exist and are not touched.
+- **The destination must be empty.** A destination must have no episodes or document state of any kind in the group: no episode of any liveness (live, superseded, retired) at the new `doc_id`, at the new source path or under the rewritten chunk-id prefix; no document revision row and no supersession record for the new `doc_id`, on either side; and no episode whose `superseded_by` names it. The moving document's own rows do not count, and the check is the same whether the move names a `doc_id`, a path or both. Something live in the way is refused as `occupied_destination` (a merge, not a move); anything else is refused as `destination_has_history`.
 - **Chunk-id prefix rewrite is optional.** When it is given, only chunk ids that start with the old prefix are rewritten. If a rewritten chunk id would collide with a live chunk id elsewhere, the move is refused.
 - **A document with no `doc_id`.** A document ingested without a `doc_id` is identified by its source path, so it can still be moved.
 - **Identical old and new identity.** This is refused as a no-op or invalid request, and nothing is written.
@@ -148,7 +148,7 @@ A consumer can detect support for the move method from the capabilities reply an
 - **FR-006**: A move MUST NOT change episode origin.
 - **FR-007**: A document MUST be addressable by its `doc_id` when it has one, and otherwise by its source path.
 - **FR-008**: A move MUST be refused, and nothing changed, when the old identity matches no live episodes in the group (unknown source).
-- **FR-009**: A move MUST be refused, and nothing changed, when the new identity already holds live episodes. This is a merge, not a move, and the reference doc MUST say so.
+- **FR-009**: A move MUST be refused, and nothing changed, when the new identity already holds live episodes. This is a merge, not a move, and the reference doc MUST say so. More generally the destination MUST be empty: a move MUST also be refused when anything of any kind is under it (episodes of any liveness, document revision rows, supersession records on either side, episodes superseded by it).
 - **FR-010**: A move MUST be refused, and nothing changed, when the old identity belongs to a different group than the request's `group_id`. `group_id` MUST be required, and a missing one is an error.
 - **FR-011**: A move MUST be refused when a chunk-id rewrite would collide with an existing live chunk id.
 - **FR-012**: A move MUST be refused when the old and new identities are identical.
@@ -187,7 +187,7 @@ A consumer can detect support for the move method from the capabilities reply an
 - The method is a `write`-scope method, not `admin`. A rename is a routine consumer operation, unlike `knowledge_stamp_origin`, which is a one-off adoption tool. Planning can revisit this.
 - A "batch" is a list of move items in one request, and a single move is the same request with one item.
 - When no chunk-id prefix rewrite is supplied, chunk ids are left unchanged. The consumer decides whether chunk ids embed the path, and supplies the rewrite if they do.
-- Live episodes identify a document and occupy a destination. Superseded revisions of the moved document are re-keyed with it, and a destination with leftover revision or supersession state is refused.
+- Live episodes identify a document, and its superseded revisions are re-keyed with it. A destination must be empty (no episodes of any liveness and no document state), so history never ends up shared under one identity.
 - No upper bound on batch size is specified. A folder rename of about 900 documents must work.
 - Dry run follows the shape that `knowledge_stamp_origin` uses.
 - The destination must be free of live episodes before the batch. Chains and swaps within a batch are not supported, and a consumer that needs them issues separate calls.

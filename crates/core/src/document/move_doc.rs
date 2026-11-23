@@ -3,18 +3,20 @@
 //!
 //! Two halves:
 //!
-//! * a **pure planner** ([`parse_moves`], [`plan_moves`]) that takes the batch and a snapshot of
-//!   the group's live episodes and returns either a [`MovePlan`] (the final column values per
-//!   episode uuid) or the full list of [`Refusal`]s. Every refusal is decided here, before the
-//!   first write, so a refused batch writes nothing — graph or WAL.
+//! * a **pure planner** ([`parse_moves`], [`plan_moves`]) that takes the batch, a snapshot of the
+//!   group's episodes and each destination's [`Footprint`] (from [`destination_footprints`], the
+//!   one place a destination is looked at) and returns either a [`MovePlan`] (the final column
+//!   values per episode uuid) or the full list of [`Refusal`]s. Every refusal is decided here,
+//!   before the first write, so a refused batch writes nothing — graph or WAL.
 //! * [`apply_plan`], which writes the plan through the recording `Conn` helpers: one uuid-keyed,
 //!   fixed-valued `SET` per episode, plus the document-mode and supersession state keyed by
 //!   `doc_id` outside `Episodic` (`DocRevision`, `DocSupersession`, `Episodic.superseded_by`).
 //!
-//! A document is *identified* by its live episodes (an identity with none is an unknown source,
-//! and only live episodes can occupy a destination), but its superseded revisions are history
-//! that belongs to it: they are re-keyed too, so `knowledge_delete_by_source` on the old path
-//! finds nothing and lint citations of earlier revisions name the new identity.
+//! A document is *identified* by its live episodes (an identity with none is an unknown source),
+//! but its superseded revisions are history that belongs to it: they are re-keyed too, so
+//! `knowledge_delete_by_source` on the old path finds nothing and lint citations of earlier
+//! revisions name the new identity. A *destination* must be empty: no episodes of any liveness and
+//! no document state of any kind (ADR-0903 decision 5).
 //!
 //! Origin, content, embeddings, entities, relationships and belief history are never touched.
 
@@ -22,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::db::{Conn, EpisodeRekey, MoveCandidate};
+use crate::db::{Conn, DestDocState, EpisodeRekey, MoveCandidate};
 use crate::error::Error;
 use crate::source_identity::{episode_matches_source, episode_source_file};
 
@@ -241,31 +243,161 @@ fn row_matches(row: &MoveCandidate, id: &Identity) -> bool {
     true
 }
 
-/// Whether `row` holds the *destination*: either named component matches (a document that
-/// already sits at the new `doc_id`, or at the new path, is occupied).
-fn row_occupies(row: &MoveCandidate, spec: &MoveSpec) -> bool {
-    if !row.live {
-        return false;
+/// Everything the group holds under one **destination** identity — the single answer to "is this
+/// destination empty?" (ADR-0903 decision 5). A move is only ever into an empty destination.
+///
+/// * `episodes`: every `Episodic` row of the group, **of any liveness** (live, superseded, retired),
+///   that matches the destination `doc_id`, the destination source path, or — when the move
+///   rewrites chunk ids — a chunk id under the rewritten prefix. Same matching as
+///   [`row_matches`] / `episode_matches_source`, but either named component is enough.
+/// * `doc_state`: the destination `doc_id`'s `DocRevision` rows, its `DocSupersession` record on
+///   either side, and the episodes whose `superseded_by` names it.
+///
+/// It is taken for the destination as it stands, so it still includes the moving document's own
+/// episodes and document state when the destination shares an identity component with the source
+/// (a path-only change keeps the `doc_id`); [`Footprint::residual`] subtracts those.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Footprint {
+    /// The destination `doc_id`, when the move names one.
+    pub doc_id: Option<String>,
+    /// `(uuid, live)` of every matching episode.
+    pub episodes: Vec<(String, bool)>,
+    pub doc_state: DestDocState,
+}
+
+/// What a footprint holds once the moving document's own rows are set aside.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Residual {
+    live: usize,
+    history: usize,
+    doc_state: DestDocState,
+}
+
+impl Residual {
+    fn is_empty(&self) -> bool {
+        self.live == 0 && self.history == 0 && self.doc_state == DestDocState::default()
     }
-    if let Some(d) = &spec.to.doc_id {
-        if spec.from.doc_id.as_ref() != Some(d) && row.doc_id.as_deref() == Some(d.as_str()) {
-            return true;
+
+    /// What is in the way, for the refusal message.
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if self.history > 0 {
+            parts.push(format!("{} retired or superseded episode(s)", self.history));
         }
+        if self.doc_state.revisions > 0 {
+            parts.push(format!(
+                "{} document revision row(s)",
+                self.doc_state.revisions
+            ));
+        }
+        if self.doc_state.superseded_record {
+            parts.push("a document supersession record".to_string());
+        }
+        if self.doc_state.superseding_records > 0 {
+            parts.push(
+                "a document supersession record naming it as the superseding document".into(),
+            );
+        }
+        if self.doc_state.superseded_by_episodes > 0 {
+            parts.push(format!(
+                "{} episode(s) superseded by it",
+                self.doc_state.superseded_by_episodes
+            ));
+        }
+        parts.join(", ")
     }
-    if let Some(p) = &spec.to.source_path {
-        if spec.from.source_path.as_ref() != Some(p)
-            && episode_matches_source(
-                row.source_file.as_deref(),
-                &row.source_description,
-                &row.name,
-                row.write_path.as_deref(),
-                p,
-            )
+}
+
+impl Footprint {
+    /// The footprint minus the moving document: its own episodes (by uuid) and, when the
+    /// destination `doc_id` is one of its own, the document-level state that `doc_id` carries.
+    fn residual(&self, own: &HashSet<&str>, own_doc_ids: &BTreeSet<String>) -> Residual {
+        let mut r = Residual::default();
+        for (uuid, live) in &self.episodes {
+            if own.contains(uuid.as_str()) {
+                continue;
+            }
+            if *live {
+                r.live += 1;
+            } else {
+                r.history += 1;
+            }
+        }
+        if !self
+            .doc_id
+            .as_ref()
+            .is_some_and(|d| own_doc_ids.contains(d))
         {
-            return true;
+            r.doc_state = self.doc_state.clone();
         }
+        r
     }
-    false
+}
+
+/// The episodes of `snapshot` (every episode of the group, any liveness) under `spec`'s
+/// destination: a pure function of the snapshot, used by [`destination_footprints`].
+pub fn episode_footprint(snapshot: &[MoveCandidate], spec: &MoveSpec) -> Vec<(String, bool)> {
+    let to_prefix = spec
+        .chunk_id_prefix
+        .as_ref()
+        .map(|(_, to)| to.as_str())
+        .filter(|t| !t.is_empty());
+    snapshot
+        .iter()
+        .filter(|row| {
+            spec.to
+                .doc_id
+                .as_deref()
+                .is_some_and(|d| row.doc_id.as_deref() == Some(d))
+                || spec.to.source_path.as_deref().is_some_and(|p| {
+                    episode_matches_source(
+                        row.source_file.as_deref(),
+                        &row.source_description,
+                        &row.name,
+                        row.write_path.as_deref(),
+                        p,
+                    )
+                })
+                || to_prefix.is_some_and(|t| {
+                    row.name.starts_with(t)
+                        || row.chunk_id.as_deref().is_some_and(|c| c.starts_with(t))
+                })
+        })
+        .map(|row| (row.uuid.clone(), row.live))
+        .collect()
+}
+
+/// The footprint of every move's destination, one per spec, in order. **The one place** the
+/// destination is looked at: every move — whether it names a `doc_id`, a path or both — goes
+/// through here, and the planner only ever sees the result. Episodes come from `snapshot` (the
+/// group's episodes of any liveness, already loaded); the document-level state is read once for all
+/// the batch's destinations. A failure to read it is an `Err`, never a refusal.
+pub fn destination_footprints(
+    conn: &Conn<'_>,
+    group_id: &str,
+    snapshot: &[MoveCandidate],
+    specs: &[MoveSpec],
+) -> Result<Vec<Footprint>, Error> {
+    let ids: Vec<String> = specs
+        .iter()
+        .filter_map(|s| s.to.doc_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let state = conn.destination_doc_state(group_id, &ids)?;
+    Ok(specs
+        .iter()
+        .map(|spec| Footprint {
+            doc_id: spec.to.doc_id.clone(),
+            episodes: episode_footprint(snapshot, spec),
+            doc_state: spec
+                .to
+                .doc_id
+                .as_ref()
+                .and_then(|d| state.get(d).cloned())
+                .unwrap_or_default(),
+        })
+        .collect())
 }
 
 fn rewrite_prefix(value: &str, prefix: &Option<(String, String)>) -> Option<String> {
@@ -307,11 +439,20 @@ fn recompose_description(
     (new != sd).then_some(new)
 }
 
-/// Plans a batch against `live` (the group's live episodes) — or returns every refusal.
+/// Plans a batch against `live` (every episode of the group, flagged live or not) and the
+/// destination `footprints` (one per spec, from [`destination_footprints`]) — or returns every
+/// refusal. Pure: it reads no database.
 ///
 /// The whole batch is validated against the state *before* the batch, so chains and swaps are
-/// refused rather than ordered.
-pub fn plan_moves(specs: &[MoveSpec], live: &[MoveCandidate]) -> Result<MovePlan, Vec<Refusal>> {
+/// refused rather than ordered. A destination must be empty: if anything of any liveness is under
+/// it, the move is `occupied_destination` (something live) or `destination_has_history` (nothing
+/// live, but episodes or document state of any kind).
+pub fn plan_moves(
+    specs: &[MoveSpec],
+    live: &[MoveCandidate],
+    footprints: &[Footprint],
+) -> Result<MovePlan, Vec<Refusal>> {
+    debug_assert_eq!(specs.len(), footprints.len());
     let mut refusals: Vec<Refusal> = Vec::new();
     let refuse =
         |refusals: &mut Vec<Refusal>, index: usize, code: &'static str, message: String| {
@@ -352,12 +493,13 @@ pub fn plan_moves(specs: &[MoveSpec], live: &[MoveCandidate]) -> Result<MovePlan
                 format!("no live episode matches {}", spec.from.describe()),
             );
         } else {
-            let own: HashSet<usize> = rows.iter().copied().collect();
-            if live
+            let own: HashSet<&str> = rows.iter().map(|&ix| live[ix].uuid.as_str()).collect();
+            let own_docs: BTreeSet<String> = rows
                 .iter()
-                .enumerate()
-                .any(|(ix, r)| !own.contains(&ix) && row_occupies(r, spec))
-            {
+                .filter_map(|&ix| live[ix].doc_id.clone())
+                .collect();
+            let left = footprints[i].residual(&own, &own_docs);
+            if left.live > 0 {
                 refuse(
                     &mut refusals,
                     i,
@@ -368,31 +510,18 @@ pub fn plan_moves(specs: &[MoveSpec], live: &[MoveCandidate]) -> Result<MovePlan
                         spec.to.describe()
                     ),
                 );
-            } else if let Some(d) = spec.to.doc_id.as_deref().filter(|d| {
-                spec.from.doc_id.as_deref() != Some(*d)
-                    && !rows
-                        .iter()
-                        .any(|&ix| live[ix].doc_id.as_deref() == Some(*d))
-            }) {
-                // No live episode holds the destination `doc_id`, but retired or superseded ones
-                // may (e.g. a chunk-ingested document whose chunks were all marked removed, which
-                // leaves no `DocRevision` row): joining them would put two unrelated documents'
-                // histories under one `doc_id`.
-                if live
-                    .iter()
-                    .enumerate()
-                    .any(|(ix, r)| !own.contains(&ix) && !r.live && r.doc_id.as_deref() == Some(d))
-                {
-                    refuse(
-                        &mut refusals,
-                        i,
-                        code::DESTINATION_HAS_HISTORY,
-                        format!(
-                            "doc_id '{d}' holds no live episodes but still has retired or \
-                             superseded episodes; moving into it would merge two histories"
-                        ),
-                    );
-                }
+            } else if !left.is_empty() {
+                refuse(
+                    &mut refusals,
+                    i,
+                    code::DESTINATION_HAS_HISTORY,
+                    format!(
+                        "{} holds no live episodes but is not empty: it still has {}; moving into \
+                         it would merge two histories",
+                        spec.to.describe(),
+                        left.describe()
+                    ),
+                );
             }
         }
         matched.push(rows);
@@ -538,6 +667,15 @@ pub fn plan_moves(specs: &[MoveSpec], live: &[MoveCandidate]) -> Result<MovePlan
         *final_names.entry(n).or_default() += 1;
     }
     for m in &moves {
+        // An existing episode under the rewritten prefix is already a footprint refusal (the
+        // destination is not empty); this pass is for names the footprint cannot see: two moves of
+        // one batch rewriting into the same chunk id.
+        if refusals.iter().any(|r| {
+            r.index == m.index
+                && (r.code == code::OCCUPIED_DESTINATION || r.code == code::DESTINATION_HAS_HISTORY)
+        }) {
+            continue;
+        }
         let collide = m.episodes.iter().find_map(|(_, c)| {
             c.name
                 .as_deref()
@@ -587,56 +725,6 @@ pub fn classify_cross_group(
             );
         }
     }
-}
-
-/// Refuses a move whose destination `doc_id` holds no live episode but still carries document
-/// state outside `Episodic` — `DocRevision` rows (kept after a delete or a retirement) or a
-/// `DocSupersession` record, or is named as another document's superseding document. `apply_plan`
-/// re-keys the source's revision and supersession rows into that `doc_id`, so without this check
-/// the destination would hold two unrelated revision histories and the next `knowledge_process_document` could pick the wrong baseline.
-///
-/// A failure to *read* that state is a database error (`Err`), not a refusal: only a real history
-/// conflict is reported as `destination_has_history`.
-pub fn check_destination_history(
-    conn: &Conn<'_>,
-    group_id: &str,
-    plan: &MovePlan,
-) -> Result<Vec<Refusal>, Error> {
-    let mut refusals = Vec::new();
-    for m in &plan.moves {
-        let Some(dest) = &m.spec.to.doc_id else {
-            continue;
-        };
-        if m.old_doc_ids.contains(dest) {
-            continue;
-        }
-        let has_revisions = conn
-            .doc_revision_rows_for_doc(group_id, dest)
-            .map(|r| !r.is_empty())?;
-        let has_supersession = conn
-            .doc_supersession_for(group_id, dest)
-            .map(|r| r.is_some())?;
-        // The destination as the *superseding* side: records and episodes of other documents that
-        // name it would silently point at the moved document.
-        let is_superseding = !conn
-            .doc_supersessions_superseded_by(group_id, dest)?
-            .is_empty()
-            || !conn
-                .episode_uuids_superseded_by_doc(group_id, dest)?
-                .is_empty();
-        if has_revisions || has_supersession || is_superseding {
-            refusals.push(Refusal {
-                index: m.index,
-                code: code::DESTINATION_HAS_HISTORY,
-                message: format!(
-                    "doc_id '{dest}' holds no live episodes but still has document revision or \
-                     supersession state (including being named as another document's superseding \
-                     document); moving into it would merge two histories"
-                ),
-            });
-        }
-    }
-    Ok(refusals)
 }
 
 /// Writes a validated plan through the recording `Conn` helpers. All statements are uuid- or
@@ -751,6 +839,36 @@ mod tests {
         }
     }
 
+    /// `plan_moves` with the episode part of each footprint derived from the snapshot and no
+    /// document-level state (the database half of a footprint is covered in `footprint_table`).
+    fn planned(specs: &[MoveSpec], live: &[MoveCandidate]) -> Result<MovePlan, Vec<Refusal>> {
+        let fps: Vec<Footprint> = specs
+            .iter()
+            .map(|s| Footprint {
+                doc_id: s.to.doc_id.clone(),
+                episodes: episode_footprint(live, s),
+                doc_state: DestDocState::default(),
+            })
+            .collect();
+        plan_moves(specs, live, &fps)
+    }
+
+    fn planned_with(
+        specs: &[MoveSpec],
+        live: &[MoveCandidate],
+        state: DestDocState,
+    ) -> Result<MovePlan, Vec<Refusal>> {
+        let fps: Vec<Footprint> = specs
+            .iter()
+            .map(|s| Footprint {
+                doc_id: s.to.doc_id.clone(),
+                episodes: episode_footprint(live, s),
+                doc_state: state.clone(),
+            })
+            .collect();
+        plan_moves(specs, live, &fps)
+    }
+
     fn codes(r: &[Refusal]) -> Vec<&'static str> {
         r.iter().map(|r| r.code).collect()
     }
@@ -783,7 +901,7 @@ mod tests {
             id(Some("b.md"), Some("b.md")),
         );
         spec.chunk_id_prefix = Some(("a.md::".into(), "b.md::".into()));
-        let plan = plan_moves(&[spec], &live).unwrap();
+        let plan = planned(&[spec], &live).unwrap();
         assert_eq!(plan.episodes_rekeyed(), 2);
         let (_, c) = &plan.moves[0].episodes[0];
         assert_eq!(c.doc_id.as_deref(), Some("b.md"));
@@ -797,8 +915,7 @@ mod tests {
     #[test]
     fn without_prefix_names_stay_and_description_follows_the_path() {
         let live = vec![row("u1", None, "a.md", "c1")];
-        let plan =
-            plan_moves(&[mv(id(None, Some("a.md")), id(None, Some("b.md")))], &live).unwrap();
+        let plan = planned(&[mv(id(None, Some("a.md")), id(None, Some("b.md")))], &live).unwrap();
         let (_, c) = &plan.moves[0].episodes[0];
         assert_eq!(c.name, None);
         assert_eq!(c.doc_id, None);
@@ -810,7 +927,7 @@ mod tests {
     fn doc_only_move_keeps_doc_id_as_source_file_consistent() {
         // Document mode without a source_path stores the doc_id as the source file.
         let live = vec![row("u1", Some("d1"), "d1", "d1::abc")];
-        let plan = plan_moves(&[mv(id(Some("d1"), None), id(Some("d2"), None))], &live).unwrap();
+        let plan = planned(&[mv(id(Some("d1"), None), id(Some("d2"), None))], &live).unwrap();
         let (_, c) = &plan.moves[0].episodes[0];
         assert_eq!(c.doc_id.as_deref(), Some("d2"));
         assert_eq!(c.source_file.as_deref(), Some("d2"));
@@ -821,7 +938,7 @@ mod tests {
     fn legacy_row_without_source_file_is_migrated_to_a_stored_one() {
         let mut r = row("u1", None, "a.md", "c1");
         r.source_file = None;
-        let plan = plan_moves(&[mv(id(None, Some("a.md")), id(None, Some("b.md")))], &[r]).unwrap();
+        let plan = planned(&[mv(id(None, Some("a.md")), id(None, Some("b.md")))], &[r]).unwrap();
         let (_, c) = &plan.moves[0].episodes[0];
         assert_eq!(c.source_file.as_deref(), Some("b.md"));
         assert_eq!(c.source_description.as_deref(), Some("b.md:c1"));
@@ -833,7 +950,7 @@ mod tests {
         r.source_file = None;
         r.source_description = "a.md".into();
         r.write_path = Some("episode".into());
-        let plan = plan_moves(&[mv(id(None, Some("a.md")), id(None, Some("b.md")))], &[r]).unwrap();
+        let plan = planned(&[mv(id(None, Some("a.md")), id(None, Some("b.md")))], &[r]).unwrap();
         let (_, c) = &plan.moves[0].episodes[0];
         assert_eq!(c.source_description.as_deref(), Some("b.md"));
     }
@@ -844,21 +961,20 @@ mod tests {
             row("u1", Some("a"), "a.md", "a::1"),
             row("u2", Some("b"), "b.md", "b::1"),
         ];
-        let e = plan_moves(&[mv(id(Some("nope"), None), id(Some("x"), None))], &live).unwrap_err();
+        let e = planned(&[mv(id(Some("nope"), None), id(Some("x"), None))], &live).unwrap_err();
         assert_eq!(codes(&e), [code::UNKNOWN_SOURCE]);
-        let e = plan_moves(&[mv(id(Some("a"), None), id(Some("b"), None))], &live).unwrap_err();
+        let e = planned(&[mv(id(Some("a"), None), id(Some("b"), None))], &live).unwrap_err();
         assert_eq!(codes(&e), [code::OCCUPIED_DESTINATION]);
-        let e =
-            plan_moves(&[mv(id(None, Some("a.md")), id(None, Some("b.md")))], &live).unwrap_err();
+        let e = planned(&[mv(id(None, Some("a.md")), id(None, Some("b.md")))], &live).unwrap_err();
         assert_eq!(codes(&e), [code::OCCUPIED_DESTINATION]);
-        let e = plan_moves(&[mv(id(Some("a"), None), id(Some("a"), None))], &live).unwrap_err();
+        let e = planned(&[mv(id(Some("a"), None), id(Some("a"), None))], &live).unwrap_err();
         assert_eq!(codes(&e), [code::IDENTICAL]);
     }
 
     #[test]
     fn path_change_with_unchanged_doc_id_is_not_occupied_by_itself() {
         let live = vec![row("u1", Some("a"), "a.md", "a::1")];
-        let plan = plan_moves(
+        let plan = planned(
             &[mv(id(Some("a"), Some("a.md")), id(Some("a"), Some("c.md")))],
             &live,
         )
@@ -876,7 +992,7 @@ mod tests {
             row("u3", Some("c"), "c.md", "c::1"),
         ];
         // Duplicate source.
-        let e = plan_moves(
+        let e = planned(
             &[
                 mv(id(Some("a"), None), id(Some("x"), None)),
                 mv(id(Some("a"), None), id(Some("y"), None)),
@@ -886,7 +1002,7 @@ mod tests {
         .unwrap_err();
         assert!(codes(&e).contains(&code::DUPLICATE_SOURCE));
         // Duplicate destination.
-        let e = plan_moves(
+        let e = planned(
             &[
                 mv(id(Some("a"), None), id(Some("x"), None)),
                 mv(id(Some("b"), None), id(Some("x"), None)),
@@ -896,7 +1012,7 @@ mod tests {
         .unwrap_err();
         assert!(codes(&e).contains(&code::DUPLICATE_DESTINATION));
         // Chain: a -> b while b -> x.
-        let e = plan_moves(
+        let e = planned(
             &[
                 mv(id(Some("a"), None), id(Some("b"), None)),
                 mv(id(Some("b"), None), id(Some("x"), None)),
@@ -906,7 +1022,7 @@ mod tests {
         .unwrap_err();
         assert!(codes(&e).contains(&code::DESTINATION_IS_SOURCE));
         // Swap.
-        let e = plan_moves(
+        let e = planned(
             &[
                 mv(id(Some("a"), None), id(Some("b"), None)),
                 mv(id(Some("b"), None), id(Some("a"), None)),
@@ -918,15 +1034,16 @@ mod tests {
     }
 
     #[test]
-    fn refuses_chunk_id_collisions_including_within_the_batch() {
+    fn chunk_id_collisions_are_the_footprint_or_a_clash_within_the_batch() {
         let live = vec![
             row("u1", Some("a"), "a.md", "a.md::0"),
             row("u2", Some("z"), "z.md", "b.md::0"), // already holds the rewritten name
         ];
         let mut spec = mv(id(Some("a"), Some("a.md")), id(Some("b"), Some("b.md")));
         spec.chunk_id_prefix = Some(("a.md::".into(), "b.md::".into()));
-        let e = plan_moves(&[spec], &live).unwrap_err();
-        assert_eq!(codes(&e), [code::CHUNK_ID_COLLISION]);
+        // An existing live chunk id under the rewritten prefix: the destination is not empty.
+        let e = planned(&[spec], &live).unwrap_err();
+        assert_eq!(codes(&e), [code::OCCUPIED_DESTINATION]);
 
         // Two moves rewriting into the same name.
         let live = vec![
@@ -937,61 +1054,246 @@ mod tests {
         m1.chunk_id_prefix = Some(("p::".into(), "n::".into()));
         let mut m2 = mv(id(Some("b"), None), id(Some("y"), None));
         m2.chunk_id_prefix = Some(("q::".into(), "n::".into()));
-        let e = plan_moves(&[m1, m2], &live).unwrap_err();
+        let e = planned(&[m1, m2], &live).unwrap_err();
         assert!(codes(&e).contains(&code::CHUNK_ID_COLLISION));
     }
 
     #[test]
     fn cross_group_is_told_apart_from_unknown() {
         let specs = [mv(id(Some("a"), None), id(Some("x"), None))];
-        let mut e = plan_moves(&specs, &[]).unwrap_err();
+        let mut e = planned(&specs, &[]).unwrap_err();
         let mut other = row("u9", Some("a"), "a.md", "a::1");
         other.group_id = "other".into();
         classify_cross_group(&mut e, &specs, "g", &[other]);
         assert_eq!(codes(&e), [code::CROSS_GROUP]);
-        let mut e = plan_moves(&specs, &[]).unwrap_err();
+        let mut e = planned(&specs, &[]).unwrap_err();
         classify_cross_group(&mut e, &specs, "g", &[]);
         assert_eq!(codes(&e), [code::UNKNOWN_SOURCE]);
     }
 
     #[test]
-    fn history_moves_with_the_document_but_never_identifies_or_occupies() {
+    fn history_moves_with_the_document_but_never_identifies() {
         let mut old_rev = row("u0", Some("a"), "a.md", "a::1");
         old_rev.live = false;
         let live = vec![old_rev.clone(), row("u1", Some("a"), "a.md", "a::1")];
-        let plan = plan_moves(&[mv(id(Some("a"), None), id(Some("b"), None))], &live).unwrap();
+        let plan = planned(&[mv(id(Some("a"), None), id(Some("b"), None))], &live).unwrap();
         // The superseded revision is re-keyed with its live sibling; the shared name is no collision.
         assert_eq!(plan.episodes_rekeyed(), 2);
         // A document that only has history is an unknown source.
-        let e = plan_moves(
+        let e = planned(
             &[mv(id(Some("a"), None), id(Some("b"), None))],
             &[old_rev.clone()],
         )
         .unwrap_err();
         assert_eq!(codes(&e), [code::UNKNOWN_SOURCE]);
-        // History at the destination `doc_id` does not *occupy* it, but it is still another
-        // document's history: the move is refused as `destination_has_history`, never merged.
-        let live = vec![row("u1", Some("a"), "a.md", "a::1"), {
-            let mut h = row("u2", Some("b"), "b.md", "b::1");
-            h.live = false;
-            h
-        }];
-        let e = plan_moves(&[mv(id(Some("a"), None), id(Some("b"), None))], &live).unwrap_err();
-        assert_eq!(codes(&e), [code::DESTINATION_HAS_HISTORY]);
-        // History under a different `doc_id` (or only at the destination path) is not a conflict.
-        let live = vec![row("u1", Some("a"), "a.md", "a::1"), {
-            let mut h = row("u2", Some("c"), "b.md", "c::1");
-            h.live = false;
-            h
-        }];
-        assert!(plan_moves(&[mv(id(Some("a"), None), id(Some("b"), None))], &live).is_ok());
+    }
+
+    /// The destination must be empty (ADR-0903 decision 5): one table, every kind of thing that can
+    /// be under a destination, run against a `doc_id` destination, a path-only destination and a
+    /// combined one — the same rule and the same code every time.
+    #[test]
+    fn footprint_table() {
+        #[derive(Clone, Copy, PartialEq, Debug)]
+        enum Dest {
+            DocId,
+            Path,
+            Both,
+        }
+        let spec = |d: Dest, prefix: bool| {
+            let (from, to) = match d {
+                Dest::DocId => (id(Some("a"), None), id(Some("b"), None)),
+                Dest::Path => (id(None, Some("a.md")), id(None, Some("b.md"))),
+                Dest::Both => (id(Some("a"), Some("a.md")), id(Some("b"), Some("b.md"))),
+            };
+            MoveSpec {
+                from,
+                to,
+                chunk_id_prefix: prefix.then(|| ("a::".to_string(), "b::".to_string())),
+            }
+        };
+        let source = || row("src", Some("a"), "a.md", "a::1");
+        // A row *at* the destination: matches by `doc_id` b and by path b.md.
+        let at_dest = |uuid: &str, live: bool| {
+            let mut r = row(uuid, Some("b"), "b.md", "b::existing");
+            r.live = live;
+            r
+        };
+        let state = |f: fn(&mut DestDocState)| {
+            let mut st = DestDocState::default();
+            f(&mut st);
+            st
+        };
+
+        // (label, extra episodes, document state, destination kinds it can be seen under,
+        //  expected refusal — `None` = the move is allowed)
+        let all = [Dest::DocId, Dest::Path, Dest::Both];
+        let with_doc = [Dest::DocId, Dest::Both];
+        type Case<'a> = (
+            &'a str,
+            Vec<MoveCandidate>,
+            DestDocState,
+            &'a [Dest],
+            Option<&'a str>,
+        );
+        let cases: Vec<Case> = vec![
+            (
+                "empty destination",
+                vec![],
+                DestDocState::default(),
+                &all,
+                None,
+            ),
+            (
+                "a live episode",
+                vec![at_dest("d1", true)],
+                DestDocState::default(),
+                &all,
+                Some(code::OCCUPIED_DESTINATION),
+            ),
+            (
+                "a superseded or retired episode (no live one)",
+                vec![at_dest("d1", false)],
+                DestDocState::default(),
+                &all,
+                Some(code::DESTINATION_HAS_HISTORY),
+            ),
+            (
+                "live and retired episodes together",
+                vec![at_dest("d1", true), at_dest("d2", false)],
+                DestDocState::default(),
+                &all,
+                Some(code::OCCUPIED_DESTINATION),
+            ),
+            (
+                "a DocRevision row",
+                vec![],
+                state(|s| s.revisions = 1),
+                &with_doc,
+                Some(code::DESTINATION_HAS_HISTORY),
+            ),
+            (
+                "a supersession record as the superseded document",
+                vec![],
+                state(|s| s.superseded_record = true),
+                &with_doc,
+                Some(code::DESTINATION_HAS_HISTORY),
+            ),
+            (
+                "a supersession record as the superseding document",
+                vec![],
+                state(|s| s.superseding_records = 1),
+                &with_doc,
+                Some(code::DESTINATION_HAS_HISTORY),
+            ),
+            (
+                "an episode superseded_by the destination doc_id",
+                vec![],
+                state(|s| s.superseded_by_episodes = 1),
+                &with_doc,
+                Some(code::DESTINATION_HAS_HISTORY),
+            ),
+            (
+                "an episode of another doc at the destination path only",
+                vec![{
+                    let mut r = row("d1", Some("other"), "b.md", "other::1");
+                    r.live = false;
+                    r
+                }],
+                DestDocState::default(),
+                &[Dest::Path, Dest::Both],
+                Some(code::DESTINATION_HAS_HISTORY),
+            ),
+            (
+                "an episode of the destination doc_id at another path only",
+                vec![{
+                    let mut r = row("d1", Some("b"), "elsewhere.md", "b::1");
+                    r.live = true;
+                    r
+                }],
+                DestDocState::default(),
+                &[Dest::DocId, Dest::Both],
+                Some(code::OCCUPIED_DESTINATION),
+            ),
+            (
+                "an unrelated document",
+                vec![row("d1", Some("z"), "z.md", "z::1")],
+                DestDocState::default(),
+                &all,
+                None,
+            ),
+        ];
+        for (label, extra, st, kinds, expect) in &cases {
+            for &kind in *kinds {
+                let mut live = vec![source()];
+                live.extend(extra.iter().cloned());
+                let res = planned_with(&[spec(kind, false)], &live, st.clone());
+                match (res, expect) {
+                    (Ok(_), None) => {}
+                    (Err(e), Some(code)) => {
+                        assert_eq!(codes(&e), [*code], "{label} under {kind:?}")
+                    }
+                    (got, want) => panic!("{label} under {kind:?}: got {got:?}, want {want:?}"),
+                }
+            }
+        }
+
+        // Chunk ids under the rewritten prefix are part of the footprint, whatever else matches.
+        for kind in all {
+            for live_flag in [true, false] {
+                let mut other = row("d1", Some("z"), "z.md", "b::x");
+                other.live = live_flag;
+                let e = planned(&[spec(kind, true)], &[source(), other]).unwrap_err();
+                let want = if live_flag {
+                    code::OCCUPIED_DESTINATION
+                } else {
+                    code::DESTINATION_HAS_HISTORY
+                };
+                assert_eq!(codes(&e), [want], "prefix footprint under {kind:?}");
+            }
+        }
+
+        // The moving document's own rows and own document state are never in the way.
+        let own_state = state(|s| {
+            s.revisions = 2;
+            s.superseded_record = true;
+            s.superseding_records = 1;
+            s.superseded_by_episodes = 3;
+        });
+        let live = vec![source()];
+        let to_same_doc = MoveSpec {
+            from: id(Some("a"), Some("a.md")),
+            to: id(Some("a"), Some("c.md")),
+            chunk_id_prefix: None,
+        };
+        assert!(planned_with(&[to_same_doc], &live, own_state).is_ok());
+    }
+
+    /// A failure to read the document state is an error, not a refusal (`destination_footprints`
+    /// returns `Err`); the planner never sees it.
+    #[test]
+    fn residual_describes_what_is_in_the_way() {
+        let fp = Footprint {
+            doc_id: Some("b".into()),
+            episodes: vec![("e1".into(), false)],
+            doc_state: DestDocState {
+                revisions: 1,
+                superseded_record: true,
+                superseding_records: 0,
+                superseded_by_episodes: 2,
+            },
+        };
+        let r = fp.residual(&HashSet::new(), &BTreeSet::new());
+        let d = r.describe();
+        assert!(d.contains("retired or superseded episode"), "{d}");
+        assert!(d.contains("revision row"), "{d}");
+        assert!(d.contains("supersession record"), "{d}");
+        assert!(d.contains("superseded by it"), "{d}");
     }
 
     #[test]
     fn a_doc_less_episode_moves_by_source_path_alone() {
         let live = vec![row("u1", None, "a.md", "c1")];
-        let plan =
-            plan_moves(&[mv(id(None, Some("a.md")), id(None, Some("b.md")))], &live).unwrap();
+        let plan = planned(&[mv(id(None, Some("a.md")), id(None, Some("b.md")))], &live).unwrap();
         assert!(plan.lock_doc_ids().is_empty());
     }
 }

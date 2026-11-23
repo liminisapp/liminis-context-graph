@@ -1152,7 +1152,7 @@ pub fn registry() -> Vec<ToolSpec> {
             name: "knowledge_move_document",
             description: "Rename or move a document WITHOUT re-extracting it (issue #903): re-keys \
                            the document's episodes from one identity (`doc_id` and/or source \
-                           path) to another — live episodes identify it and occupy a destination, \
+                           path) to another — live episodes identify it, \
                            superseded revisions move with it. No extractor, LLM or embedder call. Rewrites \
                            `doc_id`, the stored source file, `source_description` and — with an \
                            optional `chunk_id_prefix` {from, to} — the chunk ids that start with \
@@ -1162,13 +1162,14 @@ pub fn registry() -> Vec<ToolSpec> {
                            ORIGIN are untouched (call `knowledge_stamp_origin` afterwards if the \
                            new location implies another origin). `moves` is a batch applied \
                            all-or-nothing: any refusal changes nothing and the error names each \
-                           offending move with a code (`unknown_source`, `occupied_destination` \
-                           — moving into a document that already holds live episodes is a merge, \
-                           not a move —, `cross_group`, `chunk_id_collision`, `identical`, \
-                           `duplicate_source`, `duplicate_destination`, `destination_is_source`, \
-                           `destination_has_history` — the destination `doc_id` holds no live \
-                           episodes but still has revision or supersession state, or is another document's \
-                           superseding document). \
+                           offending move with a code. The destination must have no episodes or \
+                           document state of any kind (no episode of any liveness at the new \
+                           `doc_id`, path or chunk-id prefix; no revision or supersession record for \
+                           the new `doc_id`): `occupied_destination` if anything under it is live \
+                           (a merge, not a move), `destination_has_history` otherwise. Other \
+                           codes: `unknown_source`, `cross_group`, `chunk_id_collision` (two moves \
+                           rewriting into one chunk id), `identical`, `duplicate_source`, \
+                           `duplicate_destination`, `destination_is_source`. \
                            `from` and `to` must name the same identity kinds. Pages that link to \
                            the moved `doc_id` in `attributes.links` are not rewritten. \
                            `dry_run: true` validates and reports without writing. `group_id` is \

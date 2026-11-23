@@ -1537,23 +1537,17 @@ by index with one of these codes:
 | Code | Meaning |
 |---|---|
 | `unknown_source` | The old identity matches no live episode in the group. Re-sending a move that was already applied is refused this way. |
-| `occupied_destination` | The new `doc_id` or source path already holds live episodes. **That is a merge, not a move, and is always refused.** |
+| `occupied_destination` | The destination is not empty and something under it is live: a live episode at the new `doc_id`, at the new source path, or under the rewritten chunk-id prefix. **That is a merge, not a move, and is always refused.** |
 | `cross_group` | The old identity has live episodes only in a different group. Moves never cross groups. |
-| `destination_has_history` | The new `doc_id` holds no live episode but still has document revision rows (a hard delete keeps them) or a supersession record, or it is named as another document's superseding document, or it holds only retired or superseded episodes; moving into it would merge two histories. |
-| `chunk_id_collision` | A prefix rewrite would give an episode a chunk id another live episode (in the batch or not) already has. |
+| `destination_has_history` | The destination is not empty, but nothing under it is live: retired or superseded episodes at the new `doc_id`, path or chunk-id prefix, a `DocRevision` row (a hard delete keeps them), or a `DocSupersession` record for the new `doc_id` on either side (as the superseded or the superseding document), or an episode whose `superseded_by` names it. Moving into it would merge two histories. |
+| `chunk_id_collision` | Two moves of one batch would rewrite into the same chunk id. (A chunk id that already exists is an `occupied_destination` or `destination_has_history`, since it is under the destination.) |
 | `identical` | `from` and `to` are the same identity. |
 | `duplicate_source`, `duplicate_destination` | Two moves in the batch name the same source or destination. |
 | `destination_is_source` | A move's destination is another move's source: chains and swaps are not supported; issue separate calls. |
 
 An empty `moves` array and mismatched `from` / `to` kinds are request errors.
 
-**History is checked by `doc_id`, not by path.** `destination_has_history` guards a destination `doc_id`,
-because that is the key revision and supersession lineage hang off. A destination *source path* that
-only retired or superseded episodes of another document still carry (no live episode) is **not**
-refused: a path is shared exactly as it already is when a new document is ingested at the path of a
-deleted or retired one. Such history then shares the stored `source_file`, so `knowledge_delete_by_source`
-on that path removes it together with the moved document. A consumer that wants a clean path deletes
-the old history first.
+**The destination must be empty.** A move's destination has to have **no episodes and no document state of any kind** in the group: no episode of any liveness (live, superseded or retired) at the new `doc_id`, at the new source path, or under the rewritten chunk-id prefix; no `DocRevision` row and no `DocSupersession` record for the new `doc_id`, on either side; and no episode whose `superseded_by` names it. The moving document's own rows do not count. Anything live in the way is `occupied_destination`; anything else is `destination_has_history`. The check is the same for a move that names a `doc_id`, a path or both, and a failure to read the database is an error, never a refusal. To reuse a path or `doc_id` that still has history, delete that history first with `knowledge_delete_by_source`.
 
 **Reply.** `{success, dry_run, group_id, moved, episodes_rekeyed, moves: [{from, to, episodes,
 chunk_ids_rewritten}]}`; there is no per-episode list, because a folder rename covers hundreds of

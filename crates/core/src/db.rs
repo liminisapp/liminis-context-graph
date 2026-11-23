@@ -3108,6 +3108,55 @@ impl<'db> Conn<'db> {
             .collect())
     }
 
+    /// The document-level state `(group_id, doc_id)` carries outside `Episodic`, for every id in
+    /// `doc_ids` at once (a folder rename is hundreds of destinations, so this is four queries,
+    /// not four per move): `DocRevision` rows, a `DocSupersession` record as the superseded
+    /// and as the superseding document, and episodes whose `superseded_by` names it. Ids with no
+    /// such state are absent from the map. A missing table (a graph that never used the feature)
+    /// reads as no state.
+    pub fn destination_doc_state(
+        &self,
+        group_id: &str,
+        doc_ids: &[String],
+    ) -> Result<HashMap<String, DestDocState>, Error> {
+        let mut out: HashMap<String, DestDocState> = HashMap::new();
+        if doc_ids.is_empty() {
+            return Ok(out);
+        }
+        let params = serde_json::json!({ "gid": group_id, "ids": doc_ids });
+        let mut read =
+            |cypher: &str, bump: &mut dyn FnMut(&mut DestDocState)| -> Result<(), Error> {
+                let rows = match self.query_params(cypher, params.clone()) {
+                    Err(e) if e.to_string().contains("does not exist") => return Ok(()),
+                    other => other?,
+                };
+                for r in rows {
+                    bump(out.entry(value_as_string(&r[0])).or_default());
+                }
+                Ok(())
+            };
+        read(
+            "MATCH (r:DocRevision) WHERE r.group_id = $gid AND r.doc_id IN $ids RETURN r.doc_id",
+            &mut |st| st.revisions += 1,
+        )?;
+        read(
+            "MATCH (d:DocSupersession) WHERE d.group_id = $gid AND d.superseded_doc_id IN $ids \
+             RETURN d.superseded_doc_id",
+            &mut |st| st.superseded_record = true,
+        )?;
+        read(
+            "MATCH (d:DocSupersession) WHERE d.group_id = $gid AND d.superseding_doc_id IN $ids \
+             RETURN d.superseding_doc_id",
+            &mut |st| st.superseding_records += 1,
+        )?;
+        read(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.superseded_by_kind = 'document' \
+             AND ep.superseded_by IN $ids RETURN ep.superseded_by",
+            &mut |st| st.superseded_by_episodes += 1,
+        )?;
+        Ok(out)
+    }
+
     /// Re-keys one `DocRevision` row to its final `doc_id`, `source_path` and `chunk_names`
     /// (uuid-keyed, fixed-valued).
     pub fn rekey_doc_revision(
@@ -7015,6 +7064,19 @@ pub struct MoveCandidate {
     pub name: String,
     pub chunk_id: Option<String>,
     pub write_path: Option<String>,
+}
+
+/// What a `doc_id` carries outside `Episodic` (#903): see [`Conn::destination_doc_state`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DestDocState {
+    /// `DocRevision` rows of the document.
+    pub revisions: usize,
+    /// It is the superseded side of a `DocSupersession` record.
+    pub superseded_record: bool,
+    /// `DocSupersession` records naming it as the superseding document.
+    pub superseding_records: usize,
+    /// Episodes (of other documents) whose `superseded_by` names it.
+    pub superseded_by_episodes: usize,
 }
 
 /// The identity-bearing columns of a `DocRevision` row (#903).

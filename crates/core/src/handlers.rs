@@ -3736,7 +3736,8 @@ fn move_refused(refusals: &[crate::document::move_doc::Refusal]) -> Error {
     ))
 }
 
-/// Plans a move batch against the group's current live episodes (refusals classified).
+/// Plans a move batch against the group's current episodes and the destinations' footprints
+/// (refusals classified).
 fn plan_move_batch(
     conn: &crate::db::Conn<'_>,
     group_id: &str,
@@ -3745,7 +3746,9 @@ fn plan_move_batch(
     use crate::document::move_doc as md;
     let live_at = crate::db::ingested_at_or_now("");
     let live = conn.move_candidates(Some(group_id), &live_at)?;
-    let plan = md::plan_moves(specs, &live).map_err(|mut refusals| {
+    // The one look at the destinations (ADR-0903 decision 5); a failure to read is an error.
+    let footprints = md::destination_footprints(conn, group_id, &live, specs)?;
+    let plan = md::plan_moves(specs, &live, &footprints).map_err(|mut refusals| {
         if refusals.iter().any(|r| r.code == md::code::UNKNOWN_SOURCE) {
             // A different group is only consulted to tell a cross-group request from a typo.
             if let Ok(all) = conn.move_candidates(None, &live_at) {
@@ -3754,10 +3757,6 @@ fn plan_move_batch(
         }
         move_refused(&refusals)
     })?;
-    let history = md::check_destination_history(conn, group_id, &plan)?;
-    if !history.is_empty() {
-        return Err(move_refused(&history));
-    }
     Ok(plan)
 }
 

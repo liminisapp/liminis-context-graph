@@ -37,27 +37,31 @@ removes. `DocSupersession` records and `Episodic.superseded_by` are re-keyed on 
 record is deleted and merged under the new key (both fixed-valued).
 
 **4. Live episodes identify a document; its history moves with it.** An identity with no live episode
-is an unknown source, and only live episodes can occupy a destination. But superseded revisions are
-part of the document, and leaving them under the old path would make `knowledge_delete_by_source` on
-the old path delete history and leave lint citations naming the old `doc_id`. They are re-keyed too.
-(The spec's wording "only live episodes move" is read as "only live episodes count" for identity and
-occupancy.)
+is an unknown source. But superseded revisions are part of the document, and leaving them under the old
+path would make `knowledge_delete_by_source` on the old path delete history and leave lint citations
+naming the old `doc_id`. They are re-keyed too. (The spec's wording "only live episodes move" is read as
+"only live episodes identify the document". What a *destination* may hold is decision 5, and there
+liveness does not matter: history counts as something under it.)
 
-**5. Refusals are decided before the first write.** A destination that already holds live episodes is a
-merge and is refused, as is a destination `doc_id` that has no live episode but still carries `DocRevision` rows or a `DocSupersession` record, or is named as another document's superseding document, or holds only retired or superseded episodes (a hard delete keeps the revision rows; re-keying the source's rows into it would merge two histories — `destination_has_history`), as are an unknown source, a cross-group identity, a chunk-id collision (checked
-group-wide against the post-batch names), an identical identity and batch conflicts (duplicate source,
-duplicate destination, a destination that is another move's source). The batch is validated against the
-state before the batch, so chains and swaps are refused rather than ordered. Any refusal changes nothing
-and writes nothing to the WAL.
+**5. The destination must be empty; refusals are decided before the first write.** A move's
+destination must have **no episodes or document state of any kind** in the group. One function,
+`destination_footprints`, answers that for every move — whether it names a `doc_id`, a source path or
+both — and the pure planner only receives its result. The footprint is every `Episodic` row of any
+liveness matching the destination `doc_id`, the destination path or a chunk id under the rewritten
+prefix, plus the destination `doc_id`'s `DocRevision` rows, its `DocSupersession` record on either side
+and the episodes whose `superseded_by` names it. The moving document's own rows are set aside. A live
+episode in the footprint is `occupied_destination` (a merge, not a move); anything else is
+`destination_has_history`. Reading the footprint can fail with a database error, which is an error, not
+a refusal. This replaced a series of one-case checks (revision rows, then a supersession record, then
+retired chunks, then the superseding side, then path-only history): each fix had left the next special
+case, because "what does the destination hold?" had no single answer. A path or `doc_id` that still has
+history is cleared with `knowledge_delete_by_source` first.
 
-The history check is keyed by `doc_id` only. A destination *source path* that only retired or
-superseded episodes of another document carry is deliberately not refused: path sharing with earlier
-history already happens whenever a new document is ingested at the path of a deleted or retired one
-(`source_file` is matched exactly, ADR-0853), so a move does not introduce it, whereas `doc_id` is the
-key revision and supersession lineage hang off and two histories under one `doc_id` is a real merge.
-Refusing on path-only history would also block the common "delete a note, then rename another onto its
-path" case. The consequence — `knowledge_delete_by_source` on that path also removes the old history —
-is documented in the reference.
+The other refusals are an unknown source, a cross-group identity, a chunk-id collision *between* moves
+of one batch (an existing chunk id is already under the destination), an identical identity and batch
+conflicts (duplicate source, duplicate destination, a destination that is another move's source). The
+batch is validated against the state before the batch, so chains and swaps are refused rather than
+ordered. Any refusal changes nothing and writes nothing to the WAL.
 
 **6. Validate-then-apply, not a transaction.** lbug auto-commits per statement (ADR-0705), and an
 explicit transaction would disable the statement-level FTS backstop (`repair_fts_after`), which matters
@@ -68,9 +72,19 @@ still flushed so the WAL equals the graph, and the error is returned; re-sending
 the finished moves as `unknown_source`. The spike confirmed lbug 0.21.2 accepts `SET` on the ART-indexed
 `doc_id` / `name` and the FTS-indexed `source_description`, and a rebuild from the WAL reproduces them.
 
-**7. Locks.** Document ingest takes a per-`(group, doc_id)` lock before reading its baseline. A move
-takes the same locks for every old and new `doc_id` in the batch, in sorted order, then the write lock,
-and re-plans under them, so a destination claimed by an ingest cannot end in a silent merge. The lock set comes from a pre-plan, so the authoritative re-plan checks that its own lock set is covered (an ingest can add a `doc_id` at a path-only move's source between the two); if it grew, all locks are released and the move retries with the larger set, up to five attempts, then fails with nothing changed.
+**7. Locks.** Document ingest takes a per-`(group, doc_id)` lock before it reads its baseline and keeps
+it until it has committed; only its commit step runs under the global write lock, so the write lock
+alone does not serialize a move against an ingest in flight. A move therefore takes the same
+document locks for every `doc_id` it reads or writes (old and new, in sorted order), then the write
+lock, and takes the destination footprint and applies the plan under both. An ingest into the
+destination then either committed before the move — the footprint sees it and the move is refused — or
+starts after it and finds the moved document at that `doc_id`; and a move waits for an ingest in
+flight on its source and re-keys what it committed. Nothing can land in between. The lock set comes from
+a pre-plan (a path-only move learns its `doc_id`s from the episodes), so the authoritative re-plan checks
+that its own lock set is covered (an ingest can add a `doc_id` at a path-only move's source between the
+two); if it grew, all locks are released and the move retries with the larger set, up to five attempts,
+then fails with nothing changed. That loop exists to discover the lock set, not to repair a read-lock
+gap, and cannot be dropped while the ingest baseline is read outside the write lock.
 
 **8. Write scope, `GroupRequired`.** A rename is a routine consumer operation, unlike
 `knowledge_stamp_origin`, a one-off adoption tool. `--writable-groups` therefore applies to `group_id`.
