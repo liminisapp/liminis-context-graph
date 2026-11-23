@@ -99,3 +99,11 @@ to the moved `doc_id`.
 - One statement per episode: a 900-document move is a few thousand statements in one WAL chunk, which
   replay batches by template.
 - `knowledge_capabilities` advertises `move_document`; MCP tools 59 → 60, IPC methods 60 → 61.
+- Planning is a linear scan of the group's episodes per move (matching the source and the
+  destination footprint), done twice per call — once under the read lock to find the lock set, once
+  under the write lock — and again if the lock set grows. Measured on the pure planner in a **debug**
+  build: 900 moves of 10 episodes each in a group of 69,000 episodes took about 2.5 s for the
+  footprints and 1.0 s for the plan per pass (release is expected to be much faster; not measured).
+  If that ever matters in practice, index the snapshot by `doc_id` and stored `source_file` once and
+  look up per move; the legacy-row rule in `episode_matches_source` (rows with no stored
+  `source_file`) must keep its linear fallback, which is why this is not done up front.
