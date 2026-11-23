@@ -92,7 +92,10 @@ pub async fn handle_connection_with<S, F, Fut>(
             } else {
                 (None, None)
             };
-            let fut = dispatch(req, cancel.clone(), tx);
+            let fut = CatchPanic {
+                req_id: req.id.clone(),
+                fut: Box::pin(dispatch(req, cancel.clone(), tx)),
+            };
             match serve_cooperative(
                 &method,
                 fut,
@@ -123,6 +126,40 @@ pub async fn handle_connection_with<S, F, Fut>(
             // Trigger graceful shutdown instead of std::process::exit(0) (R3).
             shutdown_notify.notify_one();
             return;
+        }
+    }
+}
+
+/// Polls a dispatch future inline but turns a panic into the same `Internal error` response the
+/// spawned streaming path produced (a `JoinError`), so a panicking request answers the client
+/// instead of killing the connection task. Never polled again after it returns `Ready`.
+struct CatchPanic<Fut> {
+    req_id: Value,
+    fut: std::pin::Pin<Box<Fut>>,
+}
+
+impl<Fut: Future<Output = IpcResponse>> Future for CatchPanic<Fut> {
+    type Output = IpcResponse;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<IpcResponse> {
+        use std::task::Poll;
+        let this = &mut *self;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| this.fut.as_mut().poll(cx)))
+        {
+            Ok(poll) => poll,
+            Err(_) => {
+                eprintln!(
+                    "liminis-context-graph: request handler panicked; returning Internal error"
+                );
+                Poll::Ready(IpcResponse::err(
+                    this.req_id.clone(),
+                    -32000,
+                    "Internal error",
+                ))
+            }
         }
     }
 }
@@ -372,6 +409,38 @@ mod tests {
 
     async fn settle() {
         tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    #[tokio::test]
+    async fn panicking_cooperative_request_answers_internal_error() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let notify = Arc::new(Notify::new());
+        let h = tokio::spawn(handle_connection_with(
+            server,
+            CancellationToken::new(),
+            |_req, _cancel, _tx| async { panic!("boom") },
+            notify,
+        ));
+        client
+            .write_all(line(7, "knowledge_process_document", true).as_bytes())
+            .await
+            .unwrap();
+        let out = read_lines(&mut client, 1).await;
+        assert_eq!(out[0]["error"]["message"], "Internal error");
+        assert_eq!(out[0]["id"], 7);
+        // The connection survives and serves the next request.
+        client
+            .write_all(line(8, "knowledge_process_chunk", false).as_bytes())
+            .await
+            .unwrap();
+        let out = read_lines(&mut client, 1).await;
+        assert_eq!(out[0]["error"]["message"], "Internal error");
+        assert_eq!(out[0]["id"], 8);
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(5), h)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
