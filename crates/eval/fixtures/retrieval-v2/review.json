@@ -1,7 +1,7 @@
 {
   "status": "reviewed",
-  "skeleton_hash": "22459bab8ca899de",
-  "questions_version": "meridian-questions-3",
+  "skeleton_hash": "025da8b6f84a5d63",
+  "questions_version": "meridian-questions-4",
   "questions_hash": "c110fc2cb5090cea",
   "sample_policy": "stratified: 6 questions per category (seeded sample, at least 10% of all questions). A maintainer fills every verdict (true/false) after reading the rendered question, its relevant notes and its key fact, then sets status to \"reviewed\" and records reviewer, reviewed_on and error_rate. Nobody else writes verdicts.",
   "reviewer": "Brett Adam",
