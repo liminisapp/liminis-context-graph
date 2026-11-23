@@ -885,7 +885,7 @@ fn seed_native_mention(db: &Db, ep: &str, en: &str, group: &str) {
         .unwrap();
 }
 
-/// F1 of ADR-0828: a graph built through the real write path (`knowledge_add_episode`) has
+/// Finding F1 of the #828 research (see ADR-0882 for the fix): a graph built through the real write path (`knowledge_add_episode`) has
 /// uuid-less MENTIONS edges; a dump → rebuild must preserve every one, and provenance readers
 /// must agree between the source and rebuilt graphs.
 #[tokio::test]
