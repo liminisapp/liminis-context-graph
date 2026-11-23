@@ -22,8 +22,8 @@ episode UUIDs also had no way to fetch just those episodes.
   is a thin wrapper that keeps its tuple shape for `entities_with_corroborating_mention`.
   `entity_support_with_episodes` collects the live episodes during the same loop that builds the
   `support` tally; `entity_support` is the flag-off wrapper. No per-hit query.
-- **Liveness** is `EpisodeOriginInfo::is_live`, the predicate `support` uses. It does not also
-  exclude pending document revisions, which `get_entities_by_source` does.
+- **Liveness** is `EpisodeOriginInfo::is_live`, the predicate `support` uses. *(Amended by the
+  #883 addendum below: it now also excludes pending document revisions.)*
 - **List shapes.** `episode_uuids` and `source_descriptions` are index-aligned and not
   de-duplicated (as on `get_entity_neighbors`). `source_files` is de-duplicated, in first-appearance
   order, carries only stored `source_file` values (no legacy attribution fallback) and is therefore
@@ -58,3 +58,34 @@ subset* of the neighbors set. The reference docs state the difference per method
 - Rejected: making neighbors / by_source live-only (breaking behaviour change); a second sibling
   query (two round-trips); extending `SupportTally` (shared with lint and edge support, and it
   counts documents, not episodes); a request-tunable cap (out of scope).
+
+## Addendum (#883, 2026-11-22): liveness aligned with belief/search
+
+As first shipped, `EpisodeOriginInfo::is_live` checked supersession only, so a pending document
+revision (written, not yet committed, ADR-0785) was reported as a live mention by
+`find_entities` while `knowledge_walk` `include_provenance` (#860), search and belief treated it
+as not live. That difference was recorded above without justification and is not intended.
+
+- **Predicate.** `EpisodeOriginInfo` carries `revision_id_present` and
+  `revision_committed_at_us`; `is_live(t)` is `belief::revision_visible_at(..) && unsuperseded`,
+  the same helper `EpisodeSupersession::visible_at` uses, so the two cannot drift. A grid unit test
+  asserts `is_live == EpisodeSupersession::live_at` over every revision x supersession state.
+- **`support` / `corroboration` also exclude pending revisions (decision).** One predicate feeds
+  both the tally and the episode list; keeping `support` on the old check would show
+  `support.primary: 1` beside an empty `episode_uuids`. ADR-0752 already says only episodes live
+  under the `belief::evaluate` predicate count, and `lint` already excludes pending revisions, so
+  this corrects drift rather than overturning a decision. Edge `support` and the `origins` filter
+  on `find_relationships` use the same predicate and change with it. The only flag-off behavioural
+  change is therefore these counts while a document revision is in flight.
+- **The ingest veto keeps the old semantics.** `entities_with_corroborating_mention` (derived or
+  answer episodes may not rewrite an entity with a live primary/external mention) is a write-side
+  guard, not a belief read. A pending primary revision is about to become live at commit, so
+  dropping its shield would let derived content merge into the entity in that window. It uses the
+  new `is_unsuperseded` (the old check) and is deliberately not widened.
+- **Caps stay different.** 50 per entity (newest first, `episodes_truncated` only when `true`)
+  versus 20 per edge (recorded order, `episodes_truncated` always present). The unit and ordering
+  differ and an entity has far more mentions than an edge has producers; aligning would change
+  shipped 0.19.2 behaviour for one side. The reference states both. The cap is applied after the
+  liveness filter on both.
+- "Neighbors parity reads as live subset" still holds: the live set only shrank, so it remains a
+  subset of what `get_entity_neighbors` reports.
