@@ -29,19 +29,30 @@ for behaviour changes that affect raw-socket clients; `llms-full.txt` is served 
 - `scripts/assemble-changelog.sh` (bash + POSIX awk, no dependencies) does both jobs, so the CI check
   and the release assembly cannot disagree: `--check` validates every fragment and writes nothing;
   with no flag it merges the fragments, plus any entries already under `## [Unreleased]`, into that
-  section — one heading per section, fixed order, existing text first, fragments in file-name order —
-  and deletes them. It validates everything first and changes nothing on any error; with no fragments
-  it exits 0 without touching the file (idempotent). Headings in the existing body that are not in the
-  known list are kept after the known ones.
+  section — one heading per section, fixed order, existing text first, fragments in issue-number
+  order (904 before 1000) — and deletes them. It validates everything first and changes nothing on any
+  error; with no fragments it exits 0 without touching the file (idempotent). Headings in the existing
+  body that are not in the known list are kept after the known ones.
+- The fixed order is Upgrading, Upgrade notes, Added, Fixed, Changed, Deprecated, Removed, Security,
+  Response schemas, Documentation, Internal, Known issues, Windows notes: it mirrors the released
+  sections (0.18.1, 0.19.0, 0.19.1), so the upgrade note still leads the GitHub Release body.
+- `changelog.d/` may hold only `README.md` and top-level `<number>-<slug>.md` files; anything else
+  (a subdirectory, `.markdown`, `.MD`, a mis-named file) fails `--check`, because the assembler would
+  never read it. The assembler also refuses to write if the existing `[Unreleased]` has an unclosed
+  code fence (or a `## [` line inside a fence), which would otherwise fold later releases into the new
+  section.
 - The release manager runs it in the release PR **before** renaming `[Unreleased]` to the version
   (CONTRIBUTING runbook step 4). Nothing else in the release path changes: `release.yml`, cargo-dist's
   `plan`, `assert-plan-output.sh` and the archive staging read the assembled `CHANGELOG.md`.
-- `--check` runs in CI's `changes` job, which runs on every PR. It is deliberately **not** in `lint`:
-  `lint` is skipped for docs-only PRs (ADR-0322), and a fragment-only PR is exactly that, so a check
-  there would never run where it matters. `changelog.d/` needs no classifier change — it is not in
+- `--check` runs in its own CI job, `changelog fragments`, which runs on every PR and should be a
+  required check. It is deliberately **not** in `lint`: `lint` is skipped for docs-only PRs
+  (ADR-0322), and a fragment-only PR is exactly that, so a check there would never run where it
+  matters. It is also not a step in `changes`: a failure there would leave the classifier unrun, and
+  every downstream job would take its fail-safe "run everything" branch, starting the full build and
+  test suite for a typo in a fragment. `changelog.d/` needs no classifier change — it is not in
   `CODE_PATTERN`, so it is docs-only by default, like `CHANGELOG.md`; `test-patterns.sh` pins it.
   The assembler's self-test runs in `lint` (the scripts match `^scripts/`, i.e. code).
-- The #852 guard accepts an added or modified `changelog.d/*.md` fragment (not `README.md`; a
+- The #852 guard accepts an added or modified top-level `changelog.d/*.md` fragment (not `README.md`; a
   deleted one is the release PR consuming it) *or* a direct `CHANGELOG.md` edit.
 - **Transition.** PRs in flight (#859, #861, #862, #900, #903) still edit `CHANGELOG.md` directly and
   that keeps working: those entries stay where they are and are merged with fragments at assembly.

@@ -7,7 +7,8 @@
 #
 # Compares <base-ref>...<head-ref> (the PR's own changes). If anything under contract/ changed
 # (README.md excluded -- it is prose about the directory, not a schema) and the PR neither adds or
-# edits a changelog.d/*.md fragment (changelog.d/README.md excluded -- it is the format note) nor
+# edits a top-level changelog.d/*.md fragment (subdirectories do not count: the assembler reads only
+# the top level; changelog.d/README.md excluded -- it is the format note) nor
 # edits CHANGELOG.md, exits non-zero with instructions. Run from inside the repository.
 set -euo pipefail
 
@@ -23,7 +24,7 @@ if ! printf '%s\n' "$changed" | grep -E '^contract/' | grep -Ev '^contract/READM
 fi
 
 # A deleted fragment is the release PR consuming it, not an entry: only added/modified count.
-fragments="$(git diff --name-only --diff-filter=AM "$base...$head" | grep -E '^changelog\.d/.+\.md$' | grep -Ev '^changelog\.d/README\.md$' || true)"
+fragments="$(git diff --name-only --diff-filter=AM "$base...$head" | grep -E '^changelog\.d/[^/]+\.md$' | grep -Ev '^changelog\.d/README\.md$' || true)"
 if [ -n "$fragments" ]; then
   echo "published schema changed and a changelog fragment was recorded"
   exit 0

@@ -27,9 +27,13 @@ Changelog `###` headings:
 
 Rules, all enforced by `scripts/assemble-changelog.sh --check` (run on every PR):
 
-- Use only these `###` sections: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`,
-  `Response schemas`, `Documentation`, `Internal`, `Upgrading`, `Upgrade notes`, `Known issues`,
-  `Windows notes`. The assembled release lists them in that order. Names are case-sensitive.
+- Use only these `###` sections: `Upgrading`, `Upgrade notes`, `Added`, `Fixed`, `Changed`,
+  `Deprecated`, `Removed`, `Security`, `Response schemas`, `Documentation`, `Internal`,
+  `Known issues`, `Windows notes`. The assembled release lists them in that order (the upgrade
+  note leads, as in every recent release). Names are case-sensitive.
+- Keep this directory flat: only `README.md` and `<number>-<slug>.md` files. A subdirectory,
+  `.markdown`, `.MD`, `.md.txt`, a dotfile or a mis-named file is an error, because the assembler
+  reads only `changelog.d/<number>-<slug>.md` and would silently never assemble it.
 - Every heading needs at least one line of entries under it.
 - Nothing but blank lines before the first heading, and no `#` or `##` headings.
 - A `###` line inside a code fence is text, not a heading.
@@ -48,8 +52,11 @@ scripts/assemble-changelog.sh
 ```
 
 It merges every fragment into `## [Unreleased]` together with any entries already there (one
-heading per section, existing text first, fragments in file-name order), then deletes the
-fragments. It validates everything first and changes nothing if any fragment is invalid. Running
+heading per section, existing text first, fragments in issue-number order: 904 before 1000), then deletes the
+fragments. It validates everything first and changes nothing if any fragment is invalid, or if the existing
+`[Unreleased]` has an unclosed code fence (or a line starting `## [` inside a fence).
+Afterwards, rename `## [Unreleased]` to the version and add a fresh, empty `## [Unreleased]`
+above it; the next assembly exits 3 without that heading. Running
 it again with no fragments left is a no-op.
 
 ## Transition

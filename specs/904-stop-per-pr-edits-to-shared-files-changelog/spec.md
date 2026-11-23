@@ -131,7 +131,7 @@ A new contributor or agent reading CONTRIBUTING, `CLAUDE.md` or the ADRs is told
 
 ---
 
-### Edge Cases
+## Edge Cases
 
 - **Mixed sources**: the same section heading appears both in existing `[Unreleased]` text and in fragments; the assembled output has one heading per section with all entries beneath it.
 - **Transition**: direct `CHANGELOG.md` edits by in-flight PRs land after this PR merges; the next assembly must still place them correctly and not duplicate or drop them.

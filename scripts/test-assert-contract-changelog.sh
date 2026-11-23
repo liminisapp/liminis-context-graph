@@ -43,6 +43,7 @@ expect pass 'new schema added with a changelog fragment' contract/new.schema.jso
 expect pass 'only a fragment changed' changelog.d/904-x.md
 expect fail 'schema changed, only changelog.d/README.md touched' contract/m.schema.json changelog.d/README.md
 expect fail 'schema changed, only a non-markdown file in changelog.d/' contract/m.schema.json changelog.d/notes.txt
+expect fail 'schema changed, fragment only in a changelog.d/ subdirectory (never assembled)' contract/m.schema.json changelog.d/schemas/870-x.md
 
 # the release PR consumes (deletes) fragments; a deletion is not a changelog entry
 git -C "$tmp" checkout -q -B seed main

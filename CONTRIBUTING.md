@@ -137,9 +137,12 @@ to the same `## [Unreleased]` block, so concurrent PRs always overlapped and the
 them one at a time ([ADR-0904](docs/adr/0904-changelog-fragments-and-generated-llms-full.md)).
 
 A fragment is the text you would have put under `[Unreleased]`, using `### <Section>` headings from
-this list: `Added`, `Changed`, `Deprecated`, `Removed`, `Fixed`, `Security`, `Response schemas`,
-`Documentation`, `Internal`, `Upgrading`, `Upgrade notes`, `Known issues`, `Windows notes`. Each
-heading needs at least one entry. The format and the assembly are documented in
+this list, which is also the order they take in the assembled release (the upgrade note leads, as in
+every recent release): `Upgrading`, `Upgrade notes`, `Added`, `Fixed`, `Changed`, `Deprecated`,
+`Removed`, `Security`, `Response schemas`, `Documentation`, `Internal`, `Known issues`,
+`Windows notes`. Each heading needs at least one entry. Nothing else may sit in `changelog.d/`
+except `README.md`: a subdirectory, a `.markdown`/`.MD` file or a mis-named file fails the check,
+because the assembler would never read it. The format and the assembly are documented in
 [`changelog.d/README.md`](changelog.d/README.md); `scripts/assemble-changelog.sh --check` validates
 fragments and runs on every PR. The release manager assembles them into `CHANGELOG.md` at release
 time (runbook step 4). The entry text still follows the rules below, and the published
@@ -274,15 +277,20 @@ never commit release prep directly to `main` — then tag the merge commit.
    the string (sorted, `lower_snake_case`, append-only) before tagging, or record the reason in the
    release PR and under "Changes deliberately not advertised" in the reference. Nothing enforces this
    mechanically; it is how 0.19.2 shipped eight changes without a string (#885).
-4. **Assemble the changelog fragments.** Run `scripts/assemble-changelog.sh` in the release PR,
-   *before* the rename in the next step. It merges every `changelog.d/<issue>-<slug>.md` fragment into
+4. **Assemble the changelog fragments.** First make sure `CHANGELOG.md` has a `## [Unreleased]`
+   heading (it should: step 5 of the previous release leaves one; the script exits 3 without it). If
+   no entries were maintained anywhere, write the section from the merged PRs since the last tag
+   (`gh pr list --state merged --search "merged:>=<last-release-date>"`) now, before assembling.
+   Then run `scripts/assemble-changelog.sh` in the release PR, *before* the rename in the next
+   step. It merges every `changelog.d/<issue>-<slug>.md` fragment (in issue-number order) into
    `## [Unreleased]` together with any entries already there (one heading per section, in a fixed
    order), then deletes the fragments; it validates all of them first and changes nothing if one is
-   malformed. Running it again with no fragments left is a no-op. Read the assembled section once
-   before continuing. See [`changelog.d/README.md`](changelog.d/README.md).
-5. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`. If no
-   `[Unreleased]` section has been maintained, write the section from the merged PRs since the last
-   tag (`gh pr list --state merged --search "merged:>=<last-release-date>"`).
+   malformed or if the existing `[Unreleased]` has an unclosed code fence. Running it again with no
+   fragments left is a no-op. Read the assembled section once before continuing. See
+   [`changelog.d/README.md`](changelog.d/README.md).
+5. **Update `CHANGELOG.md`:** rename `## [Unreleased]` to `## [x.y.z] - YYYY-MM-DD`, then **add a
+   fresh, empty `## [Unreleased]` heading above it**. Contributors no longer edit `CHANGELOG.md`, so
+   nobody re-adds it by habit, and the next release's assembly exits 3 without it.
 6. **Open a PR and merge it** to `main` once CI is green.
 7. **Tag the merge commit and push:** `git tag vX.Y.Z <merge-sha> && git push origin vX.Y.Z`.
    The tag (`vX.Y.Z`) must equal the `Cargo.toml` version, or cargo-dist's `plan` step fails.

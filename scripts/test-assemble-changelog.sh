@@ -92,7 +92,7 @@ EOF
 before_released="$(sed -n '/^## \[1.0.0\]/,$p' "$cl")"
 if run >/dev/null 2>"$tmp/err"; then pass "assemble succeeds"; else fail "assemble failed: $(cat "$tmp/err")"; fi
 heads="$(sed -n '/^## \[Unreleased\]/,/^## \[1.0.0\]/p' "$cl" | grep '^### ' | tr '\n' '|')"
-want='### Added|### Changed|### Fixed|### Response schemas|### Upgrading|### Known issues|'
+want='### Upgrading|### Added|### Fixed|### Changed|### Response schemas|### Known issues|'
 [ "$heads" = "$want" ] && pass "one heading per section, canonical order" || fail "headings: $heads"
 added="$(awk '/^## \[1.0.0\]/{exit} /^### Added/{f=1;next} /^### /{f=0} f' "$cl")"
 expected_added='
@@ -103,7 +103,7 @@ expected_added='
 
 - frag added (20)'
 [ "$(printf '%s' "$added" | sed '/^$/d')" = "$(printf '%s' "$expected_added" | sed '/^$/d')" ] \
-  && pass "existing text first, then fragments in file-name order" || fail "Added block: $added"
+  && pass "existing text first, then fragments in issue-number order" || fail "Added block: $added"
 fixed_n="$(grep -c 'existing fix' "$cl")"
 [ "$fixed_n" = 2 ] && grep -q 'second Fixed block' "$cl" && pass "duplicate existing blocks merged without loss" || fail "fixed entries lost"
 grep -q '^  continued line' "$cl" && grep -q '^  - nested bullet' "$cl" && pass "multi-line and nested entries preserved" || fail "nesting lost"
@@ -149,12 +149,29 @@ if run >/dev/null 2>&1; then pass "missing changelog.d/ is not an error"; else f
 fresh none2; write_changelog
 if run --check >/dev/null 2>&1; then pass "--check with no fragments passes"; else fail "--check empty"; fi
 
-# --- 7. non-fragment files ignored --------------------------------------------------------------
+# --- 7. README.md ignored; every other stray entry is an error ---------------------------------
 fresh ignore; write_changelog
-echo 'format note: ### Bogus' > "$fd/README.md"; : > "$fd/.gitkeep"; echo x > "$fd/notes.txt"
+echo 'format note: ### Bogus' > "$fd/README.md"
 printf '### Added\n\n- real\n' > "$fd/7-real.md"
-run >/dev/null 2>&1 && [ -e "$fd/README.md" ] && [ -e "$fd/.gitkeep" ] && [ -e "$fd/notes.txt" ] && [ ! -e "$fd/7-real.md" ] \
-  && ! grep -q Bogus "$cl" && pass "README.md and non-.md files ignored and kept" || fail "ignore rules"
+run >/dev/null 2>&1 && [ -e "$fd/README.md" ] && [ ! -e "$fd/7-real.md" ] \
+  && ! grep -q Bogus "$cl" && pass "README.md ignored and kept" || fail "README rule"
+stray() { # <label> <relative path> -- a file the assembler would never read must fail the check
+  fresh stray; write_changelog; cp "$cl" "$tmp/orig"
+  printf '### Added\n\n- good\n' > "$fd/1-good.md"
+  mkdir -p "$(dirname "$fd/$2")"; printf '### Added\n\n- hidden\n' > "$fd/$2"
+  for m in "" --check; do
+    if run $m >/dev/null 2>"$tmp/err"; then fail "$1 ${m:-assemble}: expected failure"; continue; fi
+    if grep -q "$(printf %s "$2" | cut -d/ -f1)" "$tmp/err" && cmp -s "$tmp/orig" "$cl" && [ -e "$fd/1-good.md" ] && [ -e "$fd/$2" ]; then
+      pass "$1 ${m:-assemble}: rejected, tree untouched"
+    else fail "$1 ${m:-assemble}: $(cat "$tmp/err")"; fi
+  done
+}
+stray "subdirectory fragment" schemas/870-x.md
+stray ".markdown file"        871-x.markdown
+stray ".MD file"              872-x.MD
+stray ".md.txt file"          873-x.md.txt
+stray "dotfile"               .gitkeep
+stray "text file"             notes.txt
 
 # --- 8. --check never writes ---------------------------------------------------------------------
 fresh check; write_changelog; cp "$cl" "$tmp/orig"
@@ -186,8 +203,8 @@ bad "only whitespace"        7-x.md '\n\n  \n'                           'no ###
 bad "empty heading name"     8-x.md '###\n\n- a\n'                       'empty section heading'
 bad "level-2 heading"        9-x.md '### Added\n\n- a\n\n## [9.9.9]\n'   'level-1/level-2'
 bad "unterminated fence"     10-x.md '### Added\n\n```\n- a\n'           'unterminated'
-bad "bad file name"          Notes.md '### Added\n\n- a\n'               'file name must be'
-bad "name without number"    x-y.md '### Added\n\n- a\n'                 'file name must be'
+bad "bad file name"          Notes.md '### Added\n\n- a\n'               'not README.md or a'
+bad "name without number"    x-y.md '### Added\n\n- a\n'                 'not README.md or a'
 bad "lowercase section case" 11-x.md '### added\n\n- a\n'                'unknown section "added"'
 
 # --- 10. heading-like text in fences / code spans is not a heading ------------------------------
@@ -214,6 +231,75 @@ printf '# Changelog\n\n## [1.0.0] - 2026-01-01\n' > "$cl"; cp "$cl" "$tmp/orig"
 printf '### Added\n\n- x\n' > "$fd/15-x.md"
 if ! run >/dev/null 2>"$tmp/err" && grep -q 'Unreleased' "$tmp/err" && cmp -s "$tmp/orig" "$cl" && [ -e "$fd/15-x.md" ]; then
   pass "missing [Unreleased] fails, nothing changed"; else fail "missing Unreleased"; fi
+
+# --- 13b. numeric fragment order (904 before 1000), not lexical ---------------------------------
+fresh numorder; write_changelog
+printf '### Added\n\n- frag 1000\n' > "$fd/1000-x.md"
+printf '### Added\n\n- frag 904\n' > "$fd/904-x.md"
+printf '### Added\n\n- frag 99\n' > "$fd/99-x.md"
+run >/dev/null 2>&1
+order="$(grep -E '^- frag ' "$cl" | tr '\n' '|')"
+[ "$order" = '- frag 99|- frag 904|- frag 1000|' ] && pass "fragments ordered by numeric prefix" || fail "order: $order"
+
+# --- 13c. unbalanced fences in the existing [Unreleased] -----------------------------------------
+fence_case() { # <label> <changelog body printf format> <expect: fail|ok>
+  fresh fcase
+  printf "$2" > "$cl"; cp "$cl" "$tmp/orig"
+  printf '### Added\n\n- new\n' > "$fd/20-n.md"
+  if run >/dev/null 2>"$tmp/err"; then
+    [ "$3" = ok ] && pass "$1" || fail "$1: expected failure but exit 0"
+  else
+    if [ "$3" = fail ] && cmp -s "$tmp/orig" "$cl" && [ -e "$fd/20-n.md" ] && grep -q 'code fence' "$tmp/err"; then
+      pass "$1"
+    else fail "$1: $(cat "$tmp/err")"; fi
+  fi
+}
+fence_case "open fence swallowing a release heading fails, nothing written" \
+  '# Changelog\n\n## [Unreleased]\n\n### Added\n\n- a\n\n```\ncode\n\n## [1.0.0] - 2026-01-01\n\n### Added\n\n- old\n' fail
+fence_case "fence open at end of file fails, nothing written" \
+  '# Changelog\n\n## [Unreleased]\n\n### Added\n\n- a\n\n```\ncode\n' fail
+fence_case "4-backtick fence closed by 3 backticks stays open and fails" \
+  '# Changelog\n\n## [Unreleased]\n\n### Added\n\n````\ncode\n```\n\n## [1.0.0] - 2026-01-01\n\n- old\n' fail
+fence_case "tilde fence is not closed by backticks" \
+  '# Changelog\n\n## [Unreleased]\n\n### Added\n\n~~~\ncode\n```\n\n## [1.0.0] - 2026-01-01\n\n- old\n' fail
+fence_case "balanced 4-backtick fence containing a 3-backtick line is fine" \
+  '# Changelog\n\n## [Unreleased]\n\n### Added\n\n````md\n```\n### example\n```\n````\n\n## [1.0.0] - 2026-01-01\n\n- old\n' ok
+fence_case "a release heading line inside a balanced fence is rejected" \
+  '# Changelog\n\n## [Unreleased]\n\n### Added\n\n```md\n## [9.9.9]\n```\n\n## [1.0.0] - 2026-01-01\n\n- old\n' fail
+fence_case "inline triple-backtick code is not a fence" \
+  '# Changelog\n\n## [Unreleased]\n\n### Added\n\n- see ```x``` here\n\n## [1.0.0] - 2026-01-01\n\n- old\n' ok
+
+# --- 13d. the real [Unreleased] plus a fragment: heading order ------------------------------------
+fresh realcopy
+cp "$here/../CHANGELOG.md" "$cl"
+printf '### Added\n\n- fragment entry for the real-changelog copy\n\n### Upgrading\n\n- fragment upgrade note\n' > "$fd/999999-real.md"
+if run >/dev/null 2>"$tmp/err"; then
+  body="$(awk '/^## \[Unreleased\]/{f=1;next} f && /^## /{exit} f' "$cl")"
+  # canonical index of a known section name, -1 for a non-standard heading kept after them
+  idx() {
+    local n=0 w
+    for w in Upgrading "Upgrade notes" Added Fixed Changed Deprecated Removed Security "Response schemas" Documentation Internal "Known issues" "Windows notes"; do
+      [ "$w" = "$1" ] && { echo "$n"; return; }
+      n=$((n + 1))
+    done
+    echo -1
+  }
+  last=-1; ok=1; seen="|"
+  while IFS= read -r h; do
+    name="${h#\#\#\# }"; n="$(idx "$name")"
+    [ "$n" = -1 ] && continue
+    case "$seen" in *"|$name|"*) ok=0 ;; esac   # a known heading twice
+    seen="$seen$name|"
+    [ "$n" -lt "$last" ] && ok=0                # out of canonical order
+    last=$n
+  done <<EOF2
+$(printf '%s\n' "$body" | grep '^### ')
+EOF2
+  if [ "$ok" = 1 ] && printf '%s' "$body" | grep -q 'fragment entry for the real-changelog copy' \
+     && printf '%s' "$body" | grep -q 'fragment upgrade note'; then
+    pass "real [Unreleased] + fragment: one heading per known section, canonical order"
+  else fail "real-copy order: $(printf '%s\n' "$body" | grep '^### ' | tr '\n' '|')"; fi
+else fail "real-copy assemble failed: $(cat "$tmp/err")"; fi
 
 # --- 14. usage -----------------------------------------------------------------------------------
 if "$script" --bogus >/dev/null 2>&1; then fail "unknown flag should fail"; else pass "unknown flag fails"; fi

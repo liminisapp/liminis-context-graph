@@ -79,7 +79,7 @@ tag they pin; see the [response contract](ipc-mcp-reference.md#response-contract
   `scripts/assert-contract-changelog.sh`). Before tagging, run `scripts/assemble-changelog.sh` so the
   fragments are in `## [Unreleased]`, confirm the entries for any schema change mark breaking changes
   (removed or renamed fields, widened types, required fields made optional) as **BREAKING**, and that
-  the section is renamed to the version being released.
+  the section is renamed to the version being released, with a fresh empty `## [Unreleased]` added above it.
 - **First check after a release publishes.** `release.yml` does not run on pull requests (ADR-0639), so
   the asset step is first exercised on a tag. Confirm the release lists the seven
   `*.schema.json` files and `contract-manifest.json`, and that `jq -r .lcg_version contract-manifest.json`

@@ -20,20 +20,28 @@
 #   * only blank lines before the first heading; no `#` / `##` headings
 #   * entry text is copied verbatim (multi-line and nested bullets are fine); heading-like
 #     lines inside ``` / ~~~ fences are text, not headings
-#   * changelog.d/README.md and any non-.md file are ignored
+#   * changelog.d/README.md is the only other thing allowed in the directory (it is ignored);
+#     any other entry -- a subdirectory, .markdown, .MD, .md.txt, a mis-named file -- is an
+#     error, so nothing can sit in changelog.d/ that the assembler would silently never read
 #
 # Assembly: every fragment is validated first (any error => exit 1, nothing modified). With no
 # fragments the script exits 0 without touching CHANGELOG.md, so a second run is a no-op. With
-# fragments, the current [Unreleased] body and the fragments (sorted by file name) are regrouped
-# to one heading per section in the fixed order below -- existing text first within a section --
-# and any heading in the existing body that is not a known section is kept after the known ones.
+# fragments, the current [Unreleased] body and the fragments (sorted by their numeric prefix, so
+# 904-x.md comes before 1000-x.md; ties by file name) are regrouped to one heading per section in
+# the fixed order below -- existing text first within a section -- and any heading in the existing
+# body that is not a known section is kept after the known ones. The existing body is checked for
+# balanced code fences first: a line starting `## [` inside a fence (an unclosed fence swallowing
+# the next release looks exactly like this), or a fence still open at the end of the file, is an error (exit 1, nothing written) rather than folding later releases into
+# [Unreleased].
 #
 # Portable: bash 3.2 + POSIX awk (macOS and Linux). No external dependencies.
 set -euo pipefail
 export LC_ALL=C
 
-# Known sections, in assembly order. Keep in sync with changelog.d/README.md and CONTRIBUTING.md.
-KNOWN="Added|Changed|Deprecated|Removed|Fixed|Security|Response schemas|Documentation|Internal|Upgrading|Upgrade notes|Known issues|Windows notes"
+# Known sections, in assembly order. The order mirrors the released sections (0.18.1, 0.19.0,
+# 0.19.1): the upgrade note leads the GitHub Release body, then Added, Fixed, Changed, and the
+# known issues come last. Keep in sync with changelog.d/README.md and CONTRIBUTING.md.
+KNOWN="Upgrading|Upgrade notes|Added|Fixed|Changed|Deprecated|Removed|Security|Response schemas|Documentation|Internal|Known issues|Windows notes"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHANGELOG_FILE="${CHANGELOG_FILE:-$root/CHANGELOG.md}"
@@ -43,9 +51,34 @@ mode=assemble
 case "${1:-}" in
   "") ;;
   --check) mode=check ;;
-  -h|--help) sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  -h|--help) sed -n '2,37p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "usage: $0 [--check]" >&2; exit 2 ;;
 esac
+
+# --- shared awk: CommonMark-style fence tracking ---------------------------------------------------
+# fenceline(line) -> 1 if the line opens or closes a code fence (updating infence/fchar/flen).
+# A fence opens with 3+ backticks or tildes (a backtick opener may not have a backtick in its info
+# string, so ```inline``` is not a fence) and closes only with the SAME character, at least as many
+# of them, and nothing else on the line.
+FENCE_AWK=$(cat <<'AWK'
+function fenceline(line,    t, c, n, rest) {
+  t = line; sub(/^ */, "", t)
+  c = substr(t, 1, 1)
+  if (c != "`" && c != "~") return 0
+  n = 0
+  while (substr(t, n + 1, 1) == c) n++
+  if (n < 3) return 0
+  rest = substr(t, n + 1)
+  if (infence) {
+    if (c == fchar && n >= flen && rest ~ /^[ \t]*$/) { infence = 0; return 1 }
+    return 0
+  }
+  if (c == "`" && index(rest, "`") > 0) return 0
+  infence = 1; fchar = c; flen = n
+  return 1
+}
+AWK
+)
 
 # --- per-fragment validation (awk) -------------------------------------------------------------
 VALIDATE_AWK=$(cat <<'AWK'
@@ -64,12 +97,9 @@ BEGIN {
   line = $0
   isblank = (line ~ /^[ \t]*$/)
 
-  if (line ~ /^ *(```|~~~)/) {
-    marker = substr(line, match(line, /[`~]/), 1)
-    if (!infence) { infence = 1; fencechar = marker }
-    else if (marker == fencechar) infence = 0
-    if (cur == "" && !isblank) { fail("text before the first ### section heading") }
-    else if (cur != "") body = 1
+  if (fenceline(line)) {
+    if (cur == "") fail("text before the first ### section heading")
+    else body = 1
     next
   }
   if (infence) {
@@ -135,6 +165,10 @@ BEGIN {
   phase = "pre"
 }
 FNR == 1 {
+  if (fileno == 1 && infence) {
+    print "ERROR: CHANGELOG.md: [Unreleased] ends inside an unclosed code fence (fix the fence; nothing was written)" > "/dev/stderr"
+    failed = 1; exit 1
+  }
   if (fileno >= 1) endpiece()
   cur = ""; infence = 0
   fileno++
@@ -150,11 +184,10 @@ FNR == 1 {
   }
   if (!frag && phase == "post") { postl[++np] = line; next }
   # body of the existing [Unreleased] section, or a fragment
-  if (line ~ /^ *(```|~~~)/) {
-    marker = substr(line, match(line, /[`~]/), 1)
-    if (!infence) { infence = 1; fencechar = marker }
-    else if (marker == fencechar) infence = 0
-    addline(line); next
+  if (fenceline(line)) { addline(line); next }
+  if (infence && !frag && line ~ /^## \[/) {
+    printf "ERROR: CHANGELOG.md: line %d: \"%s\" inside a code fence in [Unreleased]: a release heading in a fence is either an unclosed fence swallowing later releases or text that must not start a line with "## [" (nothing was written)\n", FNR, line > "/dev/stderr"
+    failed = 1; exit 1
   }
   if (!infence) {
     if (!frag && line ~ /^## /) { endpiece(); phase = "post"; postl[++np] = line; next }
@@ -167,6 +200,7 @@ FNR == 1 {
   addline(line)
 }
 END {
+  if (failed) exit 1
   if (phase == "pre") { print "ERROR: no \"## [Unreleased]\" heading found in the changelog" > "/dev/stderr"; exit 3 }
   endpiece()
   emit()
@@ -175,25 +209,40 @@ AWK
 )
 
 # --- collect fragments -------------------------------------------------------------------------
-frags=()
+# Everything in changelog.d/ must be README.md or a <number>-<slug>.md file. Anything else (a
+# subdirectory, .markdown, .MD, .md.txt, a dotfile, a mis-named file) is an error: the assembler
+# reads only changelog.d/<number>-<slug>.md, so a stray file would pass validation and then never
+# be assembled or deleted. Fragments are ordered by numeric prefix (904 before 1000), then name.
+NAME_RE='^[0-9]+-[a-z0-9]+(-[a-z0-9]+)*\.md$'
+errors=0
+keyed=""
 if [ -d "$FRAGMENT_DIR" ]; then
-  for f in "$FRAGMENT_DIR"/*.md; do
-    [ -f "$f" ] || continue
+  shopt -s dotglob nullglob
+  for f in "$FRAGMENT_DIR"/*; do
     base="$(basename "$f")"
-    [ "$base" = "README.md" ] && continue
-    frags+=("$f")
+    case "$base" in .|..) continue ;; esac
+    if [ -f "$f" ] && [ "$base" = "README.md" ]; then continue; fi
+    if [ -f "$f" ] && printf '%s\n' "$base" | grep -Eq "$NAME_RE"; then
+      num="${base%%-*}"
+      keyed="${keyed}${num}"$'\t'"${f}"$'\n'
+    else
+      echo "ERROR: changelog.d/$base: not README.md or a <issue-or-PR-number>-<slug>.md file (slug: lowercase letters, digits, hyphens; no subdirectories); the assembler would never read it" >&2
+      errors=$((errors + 1))
+    fi
   done
+  shopt -u dotglob nullglob
+fi
+frags=()
+if [ -n "$keyed" ]; then
+  while IFS=$'\t' read -r _ path; do
+    frags+=("$path")
+  done < <(printf '%s' "$keyed" | sort -t "$(printf '\t')" -k1,1n -k2,2)
 fi
 
-errors=0
 if [ "${#frags[@]}" -gt 0 ]; then
   for f in "${frags[@]}"; do
     base="$(basename "$f")"
-    if ! printf '%s\n' "$base" | grep -Eq '^[0-9]+-[a-z0-9]+(-[a-z0-9]+)*\.md$'; then
-      echo "ERROR: $base: file name must be <issue-or-PR-number>-<slug>.md (slug: lowercase letters, digits, hyphens)" >&2
-      errors=$((errors + 1))
-    fi
-    if ! awk -v known="$KNOWN" -v file="$base" "$VALIDATE_AWK" "$f"; then
+    if ! awk -v known="$KNOWN" -v file="$base" "$FENCE_AWK"$'\n'"$VALIDATE_AWK" "$f"; then
       errors=$((errors + 1))
     fi
   done
@@ -218,7 +267,7 @@ fi
 [ -f "$CHANGELOG_FILE" ] || { echo "ERROR: $CHANGELOG_FILE not found" >&2; exit 2; }
 out="$(mktemp "$(dirname "$CHANGELOG_FILE")/.assemble-changelog.XXXXXX")"
 trap 'rm -f "$out"' EXIT
-if ! awk -v known="$KNOWN" "$ASSEMBLE_AWK" "$CHANGELOG_FILE" "${frags[@]}" > "$out"; then
+if ! awk -v known="$KNOWN" "$FENCE_AWK"$'\n'"$ASSEMBLE_AWK" "$CHANGELOG_FILE" "${frags[@]}" > "$out"; then
   echo "ERROR: assembly failed; CHANGELOG.md and the fragments are untouched" >&2
   exit 1
 fi
