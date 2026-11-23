@@ -476,6 +476,12 @@ that file is the canonical source for per-tool descriptions; they are not duplic
     matter how long the call runs in total — only genuine silence (no output at all for the full
     timeout window) trips it. If the remote stops responding mid-call (e.g. it crashes), the
     attached client fails that call with a clean timeout error rather than blocking forever.
+    Keep it comfortably **above 10 s**: for `knowledge_process_chunk` and
+    `knowledge_process_document` the attached client asks the remote for progress frames, and the
+    remote's only sign of life during a long silent stretch (e.g. LLM extraction) is a fixed
+    10 s `heartbeat` frame. A shorter timeout drops the connection mid-ingest, and the remote
+    then cancels that ingest before commit (cancel-on-disconnect, ADR-0861) instead of finishing
+    it in the background as it did before.
   - **Reconnect and retry.** If the connection to the remote breaks, the client transparently
     re-dials the same socket path rather than staying wedged. If the break is detected while
     writing the outgoing request — treated as safe to retry, since the write failing is the
