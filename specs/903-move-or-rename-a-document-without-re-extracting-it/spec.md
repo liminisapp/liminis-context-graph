@@ -190,7 +190,7 @@ A consumer can detect support for the move method from the capabilities reply an
 - Live episodes identify a document, and its superseded revisions are re-keyed with it. A destination must be empty (no episodes of any liveness and no document state), so history never ends up shared under one identity.
 - No upper bound on batch size is specified. A folder rename of about 900 documents must work.
 - Dry run follows the shape that `knowledge_stamp_origin` uses.
-- The destination must be free of live episodes before the batch. Chains and swaps within a batch are not supported, and a consumer that needs them issues separate calls.
+- The destination must be empty before the batch: no episodes of any liveness and no document state of any kind. Chains and swaps within a batch are not supported, and a consumer that needs them issues separate calls.
 
 ## Out of Scope *(optional)*
 
