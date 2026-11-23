@@ -597,11 +597,128 @@ async fn future_effective_date_keeps_fact_until_then() {
     let gone = only(&after, "fact one");
     assert_eq!(gone["state"], "superseded");
     assert_eq!(gone["in_force"], false);
-    // Retiring again while pending is a no-op (episodes are no longer live).
+    // Retiring again for the same or a later instant is a no-op that says why: the scheduled
+    // instant is reported, and nothing is moved later.
+    for extra in [
+        json!({"effective_at": rfc3339(t_eff)}),
+        json!({"effective_at": rfc3339(t_eff + 3_600_000_000)}),
+    ] {
+        let again = retire(&state, G, "D", extra).await;
+        assert_eq!(again["result"]["superseded_count"], 0, "{again}");
+        assert_eq!(
+            again["result"]["existing_retirement_at"],
+            rfc3339(t_eff),
+            "{again}"
+        );
+    }
+}
+
+/// A pending retirement can be moved earlier, never later: a retire with no `effective_at` ends
+/// belief now.
+#[tokio::test]
+async fn pending_retirement_can_be_moved_earlier() {
+    let (state, _db, _d, wal) = two_chunk_history().await;
+    let t_eff = now_us() + 3_600_000_000;
+    retire(&state, G, "D", json!({"effective_at": rfc3339(t_eff)})).await;
+    let r = retire(&state, G, "D", json!({})).await;
+    assert_eq!(r["result"]["superseded_count"], 2, "{r}");
+    let now = beliefs(&state, json!({"believed_only": true})).await;
+    assert_eq!(facts(&now), vec!["other doc fact"]);
+    // The earlier instant replays: the later statement is guarded out when applied after it.
+    let (state2, _db2, _d2) = replayed(wal.path(), 2).await;
     assert_eq!(
-        retire(&state, G, "D", json!({})).await["result"]["superseded_count"],
-        0
+        facts(&beliefs(&state2, json!({"believed_only": true})).await),
+        vec!["other doc fact"]
     );
+}
+
+/// A pending future-dated retirement must not block a correction: re-ingesting a chunk of the
+/// document with new content supersedes the old episode instead of leaving both believed, and the
+/// document baseline still sees the pending episodes as live.
+#[tokio::test]
+async fn pending_retirement_does_not_block_a_correction() {
+    let wal = TempDir::new().unwrap();
+    let (state, db, _d) = state_with(
+        vec![
+            one("d1", "fact one"),
+            one("d2", "fact two"),
+            one("d1b", "fact one corrected"),
+        ],
+        Some(wal.path().to_path_buf()),
+    );
+    ingest(&state, G, "d1", Some("D")).await;
+    ingest(&state, G, "d2", Some("D")).await;
+    let t_eff = now_us() + 30 * 86_400_000_000;
+    retire(&state, G, "D", json!({"effective_at": rfc3339(t_eff)})).await;
+    let baseline = db
+        .connect()
+        .unwrap()
+        .document_baseline_episodes(G, "D")
+        .unwrap();
+    assert_eq!(baseline.len(), 2, "pending episodes are still live");
+
+    ingest(&state, G, "d1", Some("D")).await;
+    let now = beliefs(&state, json!({"believed_only": true})).await;
+    assert_eq!(
+        facts(&now),
+        vec!["fact one corrected", "fact two"],
+        "the old fact must not stay believed beside its correction: {now:?}"
+    );
+    let (state2, _db2, _d2) = replayed(wal.path(), 1).await;
+    assert_eq!(
+        facts(&beliefs(&state2, json!({"believed_only": true})).await),
+        vec!["fact one corrected", "fact two"]
+    );
+}
+
+/// Once a retirement has taken effect the baseline is empty again (re-ingest is all "added").
+#[tokio::test]
+async fn effective_retirement_leaves_an_empty_baseline() {
+    let (state, db, _d, _wal) = two_chunk_history().await;
+    retire(&state, G, "D", json!({})).await;
+    let baseline = db
+        .connect()
+        .unwrap()
+        .document_baseline_episodes(G, "D")
+        .unwrap();
+    assert!(baseline.is_empty());
+}
+
+/// ADR-0858: while a retire waits for the write lock, every chunk of the document is registered as
+/// in flight, so a concurrent identical `process_chunk` cannot take the `unchanged` no-op and then
+/// have its episode retired underneath it. The registration is gone once the retire finishes.
+#[tokio::test]
+async fn retire_registers_the_documents_chunks_as_in_flight() {
+    let (state, _db, _d, _wal) = two_chunk_history().await;
+    let held = state.write_lock.write().await;
+    let st = Arc::clone(&state);
+    let task = tokio::spawn(async move { retire(&st, G, "D", json!({})).await });
+    let mut seen = false;
+    for _ in 0..200 {
+        nap(10).await;
+        let keys: Vec<(String, String)> = state
+            .chunk_inflight
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        if keys.contains(&(G.to_string(), "d1".to_string()))
+            && keys.contains(&(G.to_string(), "d2".to_string()))
+        {
+            assert!(
+                !keys.contains(&(G.to_string(), "e1".to_string())),
+                "another document's chunk must not be registered: {keys:?}"
+            );
+            seen = true;
+            break;
+        }
+    }
+    assert!(seen, "retire never registered d1 and d2 while queued");
+    drop(held);
+    let r = task.await.unwrap();
+    assert_eq!(r["result"]["superseded_count"], 2, "{r}");
+    assert!(state.chunk_inflight.lock().unwrap().is_empty());
 }
 
 /// A past `effective_at` behaves as "removed now": belief ends at the recording instant.

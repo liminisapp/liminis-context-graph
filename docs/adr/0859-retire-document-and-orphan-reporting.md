@@ -30,16 +30,29 @@ are never written and the statement is uuid-keyed and fixed-valued: WAL replay, 
 checkpoint restore reproduce it, and replaying an overlapping tail is idempotent.
 
 - **Idempotent.** A document with no live episode reports `superseded_count: 0` and writes nothing —
-  not even a WAL record. "Live" is `superseded_at IS NULL`, exactly as
-  `knowledge_supersede_document` reads it, so a document already superseded by another document
-  (even with a pending future date) is a no-op and keeps its reason.
+  not even a WAL record. A document already superseded by another document (even with a pending
+  future date), or already corrected or chunk-removed, is a no-op for those episodes and keeps its
+  reason. On a no-op the response's `existing_retirement_at` carries the instant a retirement is, or
+  was scheduled to be, in effect.
+- **A pending retirement is movable and does not shield from correction (review of #896).** A retire
+  with a future `effective_at` leaves `superseded_at` in the future with `superseded_by_kind` NULL and
+  `supersession_reason = 'document_removed'`. Every "is this episode live?" predicate and the
+  supersession guard treat such an episode like a pending document supersession (ADR-0707): it can be
+  pre-empted by a correction, it is part of the document baseline, and a second retire with an
+  earlier or omitted `effective_at` moves the date earlier (a later or equal one is a no-op; nothing
+  moves later). Without this, re-ingesting corrected content during the pending window would leave the
+  old and the corrected fact both believed.
 - **Rejected with no side effects**: unknown `doc_id`, omitted `group_id`, `effective_at` without a
   timezone offset, or (ADR-0752) a `derived` / `answer` actor retiring a `primary` / `external`
   document. All checks complete before any mutation.
 - **Concurrency.** It takes the per-document ingest lock and then the write lock, the order
   `knowledge_process_document` uses, so it cannot interleave with an in-flight ingest of the same
   document. It supersedes pending (uncommitted) revision episodes as well, like
-  `knowledge_supersede_document`.
+  `knowledge_supersede_document`. Chunk-mode calls with a `doc_id` do not take the document lock, so
+  before waiting for the write lock it also registers each of the document's chunks as in flight
+  ([ADR-0858](0858-unchanged-chunk-resubmission-noop.md)), as `knowledge_mark_chunk_removed` does: a
+  concurrent identical `knowledge_process_chunk` then cannot return `unchanged` and have its episode
+  retired underneath it.
 - **No durable record, so a limited `effective_at`.** A document supersession stores a
   `DocSupersession` row because it needs a *superseding* document; a removal has none, and forcing a
   sentinel into that table would break ADR-0707's one-superseding-document and cycle invariants. So
@@ -66,11 +79,20 @@ rels go with the episodes) and re-checked after, inside the existing per-group t
 - **`prune_orphans: true` is explicit.** It deletes the orphans, the group's `RelatesToNode_` rows
   that cited a deleted episode and now have no surviving episode (a warranted edge has none to lose
   and is never a candidate), and any group-owned edge hopping to a pruned entity — so no edge is left
-  dangling. Edges go first, then entities. The statements are uuid-keyed `DETACH DELETE`s (plus the
+  dangling. Edges go first, then entities. An unmentioned entity is **not** an orphan while a
+  same-group edge supports it — an asserted edge (no `episodes`) or an extracted edge citing an
+  episode that still exists — so pruning can never delete an asserted relationship or an edge a
+  surviving episode cites (review of #896). Only an orphan's unsupported edges go with it. The statements are uuid-keyed `DETACH DELETE`s (plus the
   direct `Entity→Entity` compat rel), drained into the owning group's WAL bucket (ADR-0402), so a
-  rebuild does not resurrect the rows. A forced cross-group pointer rebind for the group follows, as
-  in the group purge (ADR-0361), so a foreign layer's pointer at a pruned entity records `unbound`
-  rather than going stale.
+  rebuild does not resurrect the rows. A cross-group pointer re-check follows, so a foreign layer's pointer at a pruned entity records
+  `unbound` rather than going stale. It is **limited to pointers that resolved to a pruned entity**
+  (`rebind_pointers_to_entities`): the group purge's forced pass over every pointer into the group
+  bypasses the `bound_at_seq` staleness gate and is only safe when the whole group is going away.
+- **Write policy.** That re-check rewrites pointer rows owned by *other* groups and appends to their
+  WAL streams (ADR-0385), so the hard deletes are classified `DeleteEpisodes`: `group_ids` must be
+  writable as before, and with `prune_orphans: true` the foreign pointer owners must be too, as for
+  `knowledge_delete_by_group`; otherwise the call is refused (`group_not_writable`) with nothing
+  written. Without the flag only the named groups' streams are written.
 - **Scope.** Only entities that lost a mention in this call are considered: pre-existing orphans
   elsewhere in the graph are not swept, and asserted entities that were never mentioned are neither
   reported nor pruned. `prune_orphans` never widens `group_ids`; candidates and edge scans are

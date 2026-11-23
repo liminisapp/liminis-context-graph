@@ -91,7 +91,12 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   mention in the delete and are mentioned by no remaining episode (superseded episodes count as
   mentions). By default nothing extra is deleted. `prune_orphans: true` deletes those entities
   together with the edges left with no episodes, in the same call, group-scoped and reproduced by WAL
-  replay. This is not a retention policy and does not replace `knowledge_delete_by_group`.
+  replay. This is not a retention policy and does not replace `knowledge_delete_by_group`. An entity
+  an asserted edge, or an edge a surviving episode cites, still touches is not an orphan. With
+  `--writable-groups`, `prune_orphans: true` also requires the groups owning cross-group pointers into
+  the targeted groups to be writable (the prune re-checks those pointers, only the ones that resolved
+  to a pruned entity). A future-dated retire can be moved earlier by retiring again, does not block a
+  correction of the document, and a no-op retire reports `existing_retirement_at`.
 
 - **`lcg-eval` verifies the ontology the service loaded, and reports that (#881, ADR-0881).**
   `knowledge_get_ontology` gains an additive `ontology_hash` (the semantic `content_hash` of the

@@ -1491,7 +1491,8 @@ The check is made against the groups a call **actually changes**, not every grou
 |---------|------------------------------|
 | `knowledge_add_episode`, `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_merge_entities`, `knowledge_add_cross_group_edge`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types` | `group_id` (default group if omitted) |
 | `knowledge_supersede_document`, `knowledge_retire_document`, `knowledge_stamp_origin`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing`, `knowledge_reload_ontology` | the required `group_id` |
-| `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed` | every entry of `group_ids` |
+| `knowledge_delete_by_source`, `knowledge_delete_chunk_episode` | every entry of `group_ids`; with `prune_orphans: true`, **also** every group owning a cross-group pointer row into them (the prune re-checks and rewrites those rows — issue #859, ADR-0385) |
+| `knowledge_mark_chunk_removed` | every entry of `group_ids` |
 | `knowledge_delete_episode` | the group that owns the episode (looked up; a missing episode is a no-op) |
 | `knowledge_delete_by_group`, `knowledge_rebuild_from_wal` (every call, not just `force_clear`) | the target group(s) **and** every group owning a cross-group pointer row into them (ADR-0385: the purge/replay rebinds those rows) |
 | `knowledge_rebind_pointers` | every group that owns a pointer row into `source_group_id` (those rows are what it rewrites; `source_group_id` itself is not written) |
@@ -2192,10 +2193,20 @@ now" — without a record there is no retroactive "in force until" date. `origin
 document is refused (`origin_conflict:`).
 
 It returns `{success, group_id, doc_id, superseded_count, superseded_uuids, superseded_at,
-effective_at}` (`superseded_at` is `null` when nothing was retired; `effective_at` echoes the request,
-or `null`). It is **idempotent**: a document with no live episode (already retired, or already
-superseded by another document) reports `superseded_count: 0`, changes nothing and writes nothing to
-the WAL; an earlier reason (`chunk_removed`, `document_superseded`) is never overwritten. An unknown
+effective_at, existing_retirement_at}` (`superseded_at` is `null` when nothing was retired;
+`effective_at` echoes the request, or `null`). It is **idempotent**: a document with no live episode
+(already retired, or already superseded by another document) reports `superseded_count: 0`, changes
+nothing and writes nothing to the WAL; an earlier reason (`chunk_removed`, `document_superseded`) is
+never overwritten. On such a no-op `existing_retirement_at` carries the instant the document's
+retirement is, or was scheduled to be, in effect (`null` otherwise), so a caller can see why nothing
+changed. A **pending** (future-dated) retirement can be moved *earlier* by retiring again with an
+earlier or omitted `effective_at` (belief then ends at the earlier instant); a later or equal one is
+a no-op, and nothing is ever moved later. A pending retirement does not shield the document from
+correction: re-ingesting a chunk or the document with new content supersedes the old episodes at the
+correction, exactly as for a pending document supersession, so the old and the corrected fact are
+never both believed. While a retire waits for the write lock it registers each of the document's
+chunks as in flight ([ADR-0858](adr/0858-unchanged-chunk-resubmission-noop.md)), so a concurrent identical
+`knowledge_process_chunk` cannot return `unchanged` and then have its episode retired underneath it. An unknown
 `doc_id`, an omitted `group_id` or an `effective_at` with no timezone is rejected with no side
 effects. Episodes ingested under the same `doc_id` *after* retirement are live as usual; there is no
 un-retire. The statement is uuid-keyed and fixed-valued, so WAL replay, dump compaction and checkpoint
@@ -2691,13 +2702,20 @@ mentions, so readable history is never reported):
 | `orphaned_entity_uuids`, `orphaned_entity_count` | The stranded entities. Always present; empty / `0` when nothing was stranded. Only entities that lost a mention here are considered — pre-existing orphans elsewhere, and asserted entities that were never mentioned, are not. |
 | `pruned_entity_count`, `pruned_edge_count` | What `prune_orphans` deleted; always `0` without it. |
 
+An entity that an *asserted* (`knowledge_assert_relationship`, no episodes) edge or an extracted edge
+that a *surviving* episode cites still touches is **not** an orphan, even with no mention left: it is
+neither reported nor pruned, and the edge stays.
+
 Without `prune_orphans` nothing beyond the episodes is deleted, so an orphan still comes back from
 `knowledge_find_entities`. Pass `"prune_orphans": true` (optional boolean, default `false`) to delete
 the orphans in the same call, together with the group's edges left with no surviving episode (a
 warranted edge, with no episodes, is never one) and any edge hopping to a pruned entity. It stays
 inside the groups named by `group_ids`, is written to each group's own WAL stream so a rebuild does not
-resurrect the rows, and re-checks cross-group pointers into the group as `knowledge_delete_by_group`
-does. This is a narrow, per-delete sibling of the group purge, not a retention policy; see
+resurrect the rows, and re-checks only the cross-group pointers that resolved to a pruned entity (they
+record `unbound`; pointers to entities that were kept are untouched). Because that re-check rewrites
+pointer rows owned by *other* groups, a deployment using `--writable-groups` must list those owning
+groups too when `prune_orphans` is `true` — otherwise the call is refused with `group_not_writable`
+and nothing is written (without the flag only `group_ids` need be writable). This is a narrow, per-delete sibling of the group purge, not a retention policy; see
 [ADR-0859](adr/0859-retire-document-and-orphan-reporting.md).
 
 ### Source identity: `source_file` and `chunk_id` (issue #853)

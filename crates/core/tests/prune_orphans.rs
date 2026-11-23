@@ -531,3 +531,160 @@ async fn prune_orphans_must_be_a_boolean() {
         vec!["x", "y", "z"]
     );
 }
+
+/// An entity that loses its *only* mention but is an endpoint of a hand-asserted (warranted,
+/// episode-less) edge is neither reported nor pruned, and the asserted edge survives.
+#[tokio::test]
+async fn entity_with_only_an_asserted_edge_is_not_an_orphan() {
+    let (state, _db, _d) = two_chunks(None).await;
+    call(
+        "knowledge_assert_entity",
+        json!({"name": "w", "group_id": G, "summary": "by hand"}),
+        &state,
+    )
+    .await;
+    call(
+        "knowledge_assert_relationship",
+        json!({
+            "source_name": "y", "target_name": "w", "predicate": "KNOWS",
+            "group_id": G, "fact": "asserted y-w",
+        }),
+        &state,
+    )
+    .await;
+    // y is mentioned only by c1.
+    let r = call(
+        "knowledge_delete_chunk_episode",
+        json!({"chunk_id": "c1", "group_ids": [G], "prune_orphans": true}),
+        &state,
+    )
+    .await;
+    assert_eq!(r["orphaned_entity_count"], 0, "{r}");
+    assert_eq!(r["pruned_entity_count"], 0, "{r}");
+    assert_eq!(
+        name_set(&entity_names(&state, G).await),
+        vec!["w", "x", "y", "z"]
+    );
+    let facts = edge_facts(&state, G).await;
+    assert!(facts.contains(&"asserted y-w".to_string()), "{facts:?}");
+    // Its extracted edge cited only c1, so it is left with no episodes and is pruned.
+    assert!(!facts.contains(&"x relates y".to_string()), "{facts:?}");
+}
+
+/// An extracted edge a *surviving* episode cites supports its endpoints even when that episode has
+/// no `MENTIONS` to them.
+#[tokio::test]
+async fn edge_cited_by_a_surviving_episode_keeps_its_endpoints() {
+    let (state, db, _d) = two_chunks(None).await;
+    {
+        let conn = db.connect().unwrap();
+        let eps: Vec<(String, String)> = conn
+            .query_cypher_raw("MATCH (ep:Episodic) RETURN ep.name, ep.uuid")
+            .unwrap()
+            .map(|r| (format!("{}", r[0]), format!("{}", r[1])))
+            .collect();
+        let uuid = |n: &str| eps.iter().find(|(name, _)| name == n).unwrap().1.clone();
+        // "x relates y" now also cites c2, which mentions x and z but not y.
+        conn.run_cypher(&format!(
+            "MATCH (rn:RelatesToNode_) WHERE rn.fact = 'x relates y' \
+             SET rn.episodes = ['{}', '{}']",
+            uuid("c1"),
+            uuid("c2")
+        ))
+        .unwrap();
+    }
+    let r = call(
+        "knowledge_delete_chunk_episode",
+        json!({"chunk_id": "c1", "group_ids": [G], "prune_orphans": true}),
+        &state,
+    )
+    .await;
+    assert_eq!(
+        r["orphaned_entity_count"], 0,
+        "y is supported by the edge: {r}"
+    );
+    assert_eq!(r["pruned_entity_count"], 0, "{r}");
+    assert_eq!(r["pruned_edge_count"], 0, "{r}");
+    assert_eq!(
+        name_set(&entity_names(&state, G).await),
+        vec!["x", "y", "z"]
+    );
+    assert!(edge_facts(&state, G)
+        .await
+        .contains(&"x relates y".to_string()));
+}
+
+/// A pointer from another group into a pruned entity is re-checked and recorded `unbound`; a
+/// pointer into an entity that was not pruned is left exactly as it was (no forced pass over every
+/// pointer into the group).
+#[tokio::test]
+async fn prune_rebinds_only_pointers_to_pruned_entities() {
+    use lcg_core::cross_group::{self, CreateCrossGroupEdgeParams, EndpointSpec};
+    use lcg_core::pointer::{read_pointers, BindingState, EndpointSide};
+    use lcg_core::types::EntityRow;
+
+    let (state, db, _d) = two_chunks(None).await;
+    let ts = "2026-08-04T00:00:00Z";
+    {
+        let conn = db.connect().unwrap();
+        let alice = EntityRow {
+            uuid: uuid::Uuid::new_v4().to_string(),
+            name: "Alice".to_string(),
+            group_id: "layer".to_string(),
+            labels: vec!["Entity".to_string()],
+            created_at: ts.to_string(),
+            name_embedding: vec![1.0, 0.0, 0.0, 0.0],
+            summary: "layer entity".to_string(),
+            attributes: "{}".to_string(),
+            ..Default::default()
+        };
+        conn.insert_entity(&alice).unwrap();
+        // `layer` edges pointing at `y` (pruned below) and `z` (kept: c2 still mentions it).
+        for (target, fact) in [("y", "layer to y"), ("z", "layer to z")] {
+            cross_group::create_cross_group_edge(
+                &conn,
+                CreateCrossGroupEdgeParams {
+                    name: "KNOWS".to_string(),
+                    source: EndpointSpec::Uuid(alice.uuid.clone()),
+                    target: EndpointSpec::Foreign {
+                        kind: None,
+                        source_group_id: G.to_string(),
+                        endpoint_name: target.to_string(),
+                    },
+                    group_id: "layer".to_string(),
+                    fact: fact.to_string(),
+                    fact_embedding: vec![1.0, 0.0, 0.0, 0.0],
+                    valid_at: None,
+                    relation_type: None,
+                },
+                ts,
+            )
+            .unwrap();
+        }
+    }
+    let binding = |fact: &str| -> BindingState {
+        let conn = db.connect().unwrap();
+        let rows: Vec<_> = conn
+            .query_cypher_raw(&format!(
+                "MATCH (rn:RelatesToNode_) WHERE rn.fact = '{fact}' RETURN rn.attributes"
+            ))
+            .unwrap()
+            .collect();
+        read_pointers(&format!("{}", rows[0][0]))
+            .get(EndpointSide::Dst)
+            .unwrap_or_else(|| panic!("no dst pointer on {fact}"))
+            .binding_state
+    };
+    assert_eq!(binding("layer to y"), BindingState::Bound);
+    assert_eq!(binding("layer to z"), BindingState::Bound);
+
+    let r = call(
+        "knowledge_delete_chunk_episode",
+        json!({"chunk_id": "c1", "group_ids": [G], "prune_orphans": true}),
+        &state,
+    )
+    .await;
+    assert_eq!(r["pruned_entity_count"], 1, "y only: {r}");
+    assert_eq!(binding("layer to y"), BindingState::Unbound);
+    assert_eq!(binding("layer to z"), BindingState::Bound);
+}

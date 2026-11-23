@@ -3859,6 +3859,22 @@ async fn handle_retire_document(req: &IpcRequest, state: Arc<AppState>) -> Resul
     let db = load_db(&state)?;
     let state_c = Arc::clone(&state);
     let _doc_lock = crate::document::ingest::lock_document(&state, &group_id, &doc_id).await;
+    // Chunk-mode calls carrying this `doc_id` do not take the document lock, so register each of
+    // the document's chunks as in flight — as `knowledge_mark_chunk_removed` does — *before*
+    // waiting for the write lock: a concurrent identical resubmission that arrives while this call
+    // queues then sees another call in flight, skips the `unchanged` no-op and cannot be told its
+    // content is believed and then have its episode retired underneath it (issue #859, ADR-0858).
+    // The names are only used as in-flight keys, never to select what is retired (that read happens
+    // under the write lock below), so reading them without the shared lock is safe.
+    let chunk_names = {
+        let (db_c, gid, did) = (Arc::clone(&db), group_id.clone(), doc_id.clone());
+        tokio::task::spawn_blocking(move || db_c.connect()?.chunk_names_for_doc(&gid, &did))
+            .await??
+    };
+    let _inflight: Vec<_> = chunk_names
+        .iter()
+        .map(|n| state.chunk_inflight_enter(&group_id, n).0)
+        .collect();
     let _guard = state.write_lock.write().await;
     let response = tokio::task::spawn_blocking(move || -> Result<Value, Error> {
         let conn = db.connect()?;
@@ -3886,7 +3902,15 @@ async fn handle_retire_document(req: &IpcRequest, state: Arc<AppState>) -> Resul
             (Some(eff), Some(us)) if us > recorded_us => eff.clone(),
             _ => recorded_at,
         };
-        let uuids = conn.live_episode_uuids_for_doc(&group_id, &doc_id)?;
+        // Untouched episodes, plus those an earlier retirement scheduled for a later instant (a
+        // second retire moves the date earlier, never later). Nothing else is ever overwritten.
+        let uuids = conn.retirable_episode_uuids_for_doc(&group_id, &doc_id, &superseded_at)?;
+        let existing_retirement_at = if uuids.is_empty() {
+            conn.existing_retirement_at(&group_id, &doc_id)?
+                .map(crate::belief::format_us)
+        } else {
+            None
+        };
         if !uuids.is_empty() {
             conn.supersede_episodes_by_uuids(&uuids, &superseded_at, None, "document_removed")?;
             let seq = wal_exec::wal_flush_chunk(&state_c, &group_id, conn.drain_mutations());
@@ -3900,6 +3924,9 @@ async fn handle_retire_document(req: &IpcRequest, state: Arc<AppState>) -> Resul
             "superseded_uuids": uuids,
             "superseded_at": if uuids.is_empty() { Value::Null } else { json!(superseded_at) },
             "effective_at": effective_at,
+            // On a no-op: when the document's retirement is (or was) already in effect or
+            // scheduled, the instant it carries, so the caller can see why nothing changed.
+            "existing_retirement_at": existing_retirement_at,
         }))
     })
     .await??;

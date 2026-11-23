@@ -163,7 +163,7 @@ fn with_belief(mut props: Value) -> Value {
 fn prune_orphans_prop() -> Value {
     json!({
         "type": "boolean", "default": false,
-        "description": "If true, also delete the entities the delete left with no mentioning episode (superseded episodes still count as mentions), together with any edge left with no episodes. Default false: orphans are only reported."
+        "description": "If true, also delete the entities the delete left with no mentioning episode (superseded episodes still count as mentions), together with any edge left with no episodes. An entity an asserted edge, or an edge a surviving episode cites, still touches is not an orphan. Default false: orphans are only reported. Under --writable-groups, true also requires every group owning a cross-group pointer into the targeted groups to be writable."
     })
 }
 
@@ -1269,7 +1269,9 @@ pub fn registry() -> Vec<ToolSpec> {
                            (RFC 3339 with an offset) as in knowledge_supersede_document: a \
                            future date keeps the fact believed and in force until then. \
                            Idempotent: a document with no live episode reports \
-                           `superseded_count: 0` and writes nothing. Rejected, with no side \
+                           `superseded_count: 0` and writes nothing (a pending future-dated \
+                           retirement can be moved earlier, never later; a no-op reports \
+                           `existing_retirement_at`). Rejected, with no side \
                            effects, for an unknown `doc_id`, a missing `group_id` or an \
                            `effective_at` without a timezone offset. Optional `origin` (issue \
                            #752): a `derived`/`answer` retirement of a `primary`/`external` \

@@ -1723,12 +1723,16 @@ impl<'db> Conn<'db> {
     /// with it; (3) the episodes are deleted; (4) a collected entity that no remaining episode —
     /// superseded ones included — mentions is an **orphan** and is reported. Only entities that lost
     /// a mention here are candidates, so pre-existing orphans and asserted-only entities are never
-    /// reported or pruned. With `prune_orphans`, (5) the group's `RelatesToNode_` rows left with no
-    /// surviving episode, and those hopping to an orphan, are deleted, then (6) the orphans. Edges
-    /// go first so none is left dangling; a warranted edge (empty `episodes`) is never a candidate.
-    /// (7) Pruning ends with a forced cross-group pointer rebind for the group, as a group purge
-    /// does, so another group's pointer at a pruned entity records `unbound` rather than going
-    /// stale.
+    /// reported or pruned. An unmentioned entity that a same-group edge still supports — an asserted
+    /// edge (no `episodes`) or one citing a surviving episode — is not an orphan either
+    /// ([`Self::split_supported`]). With `prune_orphans`, (5) the group's `RelatesToNode_` rows left
+    /// with no surviving episode, and those hopping to an orphan, are deleted, then (6) the orphans.
+    /// Edges go first so none is left dangling; a warranted edge (empty `episodes`) is never a
+    /// candidate. (7) Pruning ends with a cross-group pointer re-check limited to the pointers that
+    /// resolved to a pruned entity ([`crate::cross_group::rebind_pointers_to_entities`]), so another
+    /// group's pointer at one records `unbound` rather than going stale while every other pointer is
+    /// left alone. That re-check writes the pointer owners' WAL streams, which is why the write
+    /// policy requires them to be writable when `prune_orphans` is set.
     fn delete_episodes_per_group(
         &self,
         group_ids: &[&str],
@@ -1756,12 +1760,19 @@ impl<'db> Conn<'db> {
                 self.drain_mutations_into(&mut out.grouped, gid);
 
                 let still_mentioned = self.entities_with_any_mention(&candidates)?;
-                let orphans: Vec<String> = candidates
+                let unmentioned: Vec<String> = candidates
                     .into_iter()
                     .filter(|u| !still_mentioned.contains(u))
                     .collect();
+                let (orphans, orphan_edges) = self.split_supported(gid, unmentioned)?;
                 if prune_orphans {
-                    self.prune_after_delete(gid, &orphans, &edge_candidates, &mut out)?;
+                    self.prune_after_delete(
+                        gid,
+                        &orphans,
+                        &orphan_edges,
+                        &edge_candidates,
+                        &mut out,
+                    )?;
                 }
                 out.uuids.extend(uuids);
                 out.orphaned_entity_uuids.extend(orphans);
@@ -1779,11 +1790,49 @@ impl<'db> Conn<'db> {
         Ok(out)
     }
 
+    /// Splits the entities no episode mentions into `(orphans, edges hopping to an orphan)`.
+    ///
+    /// An unmentioned entity is **not** an orphan while a same-group edge still supports it: an
+    /// edge with no `episodes` (asserted / warranted, ADR-0859) or one citing an episode that still
+    /// exists. Such an entity is neither reported nor pruned, so `prune_orphans` can never erase an
+    /// asserted relationship or an extracted edge a surviving episode cites. What remains of an
+    /// orphan's edges is, by construction, unsupported, and goes with it.
+    fn split_supported(
+        &self,
+        gid: &str,
+        unmentioned: Vec<String>,
+    ) -> Result<(Vec<String>, Vec<String>), Error> {
+        let hops = self.edge_hops_of_entities(gid, &unmentioned)?;
+        let cited: Vec<String> = hops
+            .iter()
+            .flat_map(|(_, _, eps)| eps.iter().cloned())
+            .collect();
+        let surviving = self.existing_episode_uuids(&cited)?;
+        let supported: std::collections::HashSet<&String> = hops
+            .iter()
+            .filter(|(_, _, eps)| eps.is_empty() || eps.iter().any(|e| surviving.contains(e)))
+            .map(|(entity, _, _)| entity)
+            .collect();
+        let orphans: Vec<String> = unmentioned
+            .iter()
+            .filter(|u| !supported.contains(u))
+            .cloned()
+            .collect();
+        let orphan_set: std::collections::HashSet<&String> = orphans.iter().collect();
+        let edges: BTreeSet<String> = hops
+            .iter()
+            .filter(|(entity, _, _)| orphan_set.contains(entity))
+            .map(|(_, edge, _)| edge.clone())
+            .collect();
+        Ok((orphans, edges.into_iter().collect()))
+    }
+
     /// Steps (5)–(7) of [`Self::delete_episodes_per_group`] for one group.
     fn prune_after_delete(
         &self,
         gid: &str,
         orphans: &[String],
+        orphan_edges: &[String],
         edge_candidates: &[(String, Vec<String>)],
         out: &mut DeleteOutcome,
     ) -> Result<(), Error> {
@@ -1799,7 +1848,7 @@ impl<'db> Conn<'db> {
             .map(|(u, _)| u.clone())
             .collect();
         // An edge hopping to a pruned entity must not outlive it.
-        edges.extend(self.edges_hopping_to_entities(gid, orphans)?);
+        edges.extend(orphan_edges.iter().cloned());
         let edges: Vec<String> = edges.into_iter().collect();
         if edges.is_empty() && orphans.is_empty() {
             return Ok(());
@@ -1812,7 +1861,8 @@ impl<'db> Conn<'db> {
         out.pruned_entity_count += orphans.len();
         if !orphans.is_empty() {
             let ts = ingested_at_or_now("");
-            let (_, rebind) = crate::cross_group::rebind_pointers_forced(self, gid, &ts)?;
+            let (_, rebind) =
+                crate::cross_group::rebind_pointers_to_entities(self, gid, &ts, orphans)?;
             for (owning, mutations) in rebind {
                 out.grouped.entry(owning).or_default().extend(mutations);
             }
@@ -1888,27 +1938,34 @@ impl<'db> Conn<'db> {
         Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
     }
 
-    /// UUIDs of the `group_id`-owned edges with a hop to or from any of `entity_uuids`.
-    fn edges_hopping_to_entities(
+    /// `(entity uuid, edge uuid, edge episodes)` for every `group_id`-owned edge with a hop to or
+    /// from any of `entity_uuids`.
+    fn edge_hops_of_entities(
         &self,
         group_id: &str,
         entity_uuids: &[String],
-    ) -> Result<Vec<String>, Error> {
+    ) -> Result<Vec<(String, String, Vec<String>)>, Error> {
         if entity_uuids.is_empty() {
             return Ok(Vec::new());
         }
         let mut out = BTreeSet::new();
         for q in [
             "MATCH (rn:RelatesToNode_)-[:RELATES_TO]->(n:Entity) \
-             WHERE n.uuid IN $uuids AND rn.group_id = $gid RETURN DISTINCT rn.uuid",
+             WHERE n.uuid IN $uuids AND rn.group_id = $gid RETURN DISTINCT n.uuid, rn.uuid, rn.episodes",
             "MATCH (n:Entity)-[:RELATES_TO]->(rn:RelatesToNode_) \
-             WHERE n.uuid IN $uuids AND rn.group_id = $gid RETURN DISTINCT rn.uuid",
+             WHERE n.uuid IN $uuids AND rn.group_id = $gid RETURN DISTINCT n.uuid, rn.uuid, rn.episodes",
         ] {
             let rows = self.query_params(
                 q,
                 serde_json::json!({ "uuids": entity_uuids, "gid": group_id }),
             )?;
-            out.extend(rows.into_iter().map(|r| value_as_string(&r[0])));
+            out.extend(rows.into_iter().map(|r| {
+                (
+                    value_as_string(&r[0]),
+                    value_as_string(&r[1]),
+                    value_as_str_list(&r[2]),
+                )
+            }));
         }
         Ok(out.into_iter().collect())
     }
@@ -1968,7 +2025,8 @@ impl<'db> Conn<'db> {
             "MATCH (ep:Episodic) \
              WHERE ep.name = $name AND ep.group_id = $gid \
              AND (ep.superseded_at IS NULL \
-                  OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+                  OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+                       AND ep.superseded_at > $live_at)) \
              RETURN ep.uuid",
             serde_json::json!({ "name": chunk_id, "gid": group_id, "live_at": as_of }),
         )?;
@@ -1994,7 +2052,8 @@ impl<'db> Conn<'db> {
             "MATCH (ep:Episodic) \
              WHERE ep.name = $name AND ep.group_id = $gid \
              AND (ep.superseded_at IS NULL \
-                  OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+                  OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+                       AND ep.superseded_at > $live_at)) \
              RETURN ep.uuid, ep.source_description, ep.write_path",
             serde_json::json!({ "name": chunk_id, "gid": group_id, "live_at": as_of }),
         )?;
@@ -2027,7 +2086,8 @@ impl<'db> Conn<'db> {
             "MATCH (ep:Episodic) \
              WHERE ep.name = $name AND ep.group_id = $gid \
              AND (ep.superseded_at IS NULL \
-                  OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+                  OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+                       AND ep.superseded_at > $live_at)) \
              RETURN ep.uuid, ep.content, ep.attributes, ep.origin, ep.source_file, \
              ep.source_description, ep.valid_at, ep.doc_id, ep.write_path, ep.chunk_hash, \
              ep.superseded_at",
@@ -2070,7 +2130,8 @@ impl<'db> Conn<'db> {
             return Ok(());
         }
         const GUARD: &str = "ep.uuid IN $uuids AND (ep.superseded_at IS NULL \
-             OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $superseded_at))";
+             OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+                  AND ep.superseded_at > $superseded_at))";
         match superseded_by {
             Some(by) => self.exec_params(
                 &format!(
@@ -2144,6 +2205,62 @@ impl<'db> Conn<'db> {
         let rows = self.query_params(
             "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
              AND ep.superseded_at IS NULL RETURN ep.uuid ORDER BY ep.uuid",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        )?;
+        Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
+    }
+
+    /// UUIDs of the episodes of `doc_id` in `group_id` that `knowledge_retire_document` would end at
+    /// `superseded_at` (issue #859): the untouched ones, plus those a retirement already scheduled
+    /// for a *later* instant, so a second retire can move the date earlier. Same predicate as the
+    /// guard of [`Self::supersede_episodes_by_uuids`], so listing and writing never disagree. An
+    /// episode a document supersession or a correction already ended is never included.
+    pub fn retirable_episode_uuids_for_doc(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+        superseded_at: &str,
+    ) -> Result<Vec<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             AND (ep.superseded_at IS NULL \
+                  OR (ep.supersession_reason = 'document_removed' \
+                      AND ep.superseded_at > $superseded_at)) \
+             RETURN ep.uuid ORDER BY ep.uuid",
+            serde_json::json!({
+                "gid": group_id,
+                "doc_id": doc_id,
+                "superseded_at": superseded_at,
+            }),
+        )?;
+        Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
+    }
+
+    /// The earliest `superseded_at` (µs since the epoch) any `document_removed` episode of `doc_id`
+    /// carries, past or scheduled — what a no-op retire reports so the caller can see why nothing
+    /// changed.
+    pub fn existing_retirement_at(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+    ) -> Result<Option<i64>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             AND ep.supersession_reason = 'document_removed' \
+             RETURN ep.superseded_at ORDER BY ep.superseded_at ASC LIMIT 1",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        )?;
+        Ok(rows
+            .first()
+            .and_then(|r| value_as_optional_timestamp_micros(&r[0])))
+    }
+
+    /// Distinct chunk names (`ep.name`) of `doc_id`'s episodes in `group_id`, whatever their
+    /// liveness — what a retire registers as in flight (issue #859, ADR-0858).
+    pub fn chunk_names_for_doc(&self, group_id: &str, doc_id: &str) -> Result<Vec<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
+             RETURN DISTINCT ep.name ORDER BY ep.name",
             serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
         )?;
         Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
@@ -2323,10 +2440,15 @@ impl<'db> Conn<'db> {
     ) -> Result<Vec<crate::document::diff::BaselineEpisode>, Error> {
         let rows = self.query_params(
             "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.doc_id = $doc_id \
-             AND ep.superseded_at IS NULL \
+             AND (ep.superseded_at IS NULL \
+                  OR (ep.supersession_reason = 'document_removed' AND ep.superseded_at > $live_at)) \
              RETURN ep.uuid, ep.name, ep.write_path, ep.revision_id, ep.revision_committed_at, \
              ep.heading_path, ep.chunk_hash, ep.byte_start, ep.content",
-            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+            serde_json::json!({
+                "gid": group_id,
+                "doc_id": doc_id,
+                "live_at": ingested_at_or_now(""),
+            }),
         )?;
         Ok(rows
             .into_iter()
@@ -4204,7 +4326,8 @@ impl<'db> Conn<'db> {
         if let Some(at) = live_at {
             cypher.push_str(
                 " AND (ep.superseded_at IS NULL \
-                   OR (ep.superseded_by_kind = 'document' AND ep.superseded_at > $live_at)) \
+                   OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+                       AND ep.superseded_at > $live_at)) \
                  AND (ep.revision_id IS NULL OR ep.revision_committed_at IS NOT NULL)",
             );
             params["live_at"] = serde_json::json!(at);
