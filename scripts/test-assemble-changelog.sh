@@ -299,8 +299,11 @@ elif run >/dev/null 2>"$tmp/err"; then
   done <<EOF2
 $(printf '%s\n' "$body" | grep '^### ')
 EOF2
-  if [ "$ok" = 1 ] && printf '%s' "$body" | grep -q 'fragment entry for the real-changelog copy' \
-     && printf '%s' "$body" | grep -q 'fragment upgrade note'; then
+  # case, not `printf | grep -q`: the live body is large, grep -q exits at the first match, and
+  # under pipefail the resulting SIGPIPE on printf makes the pipeline "fail" on Linux (not macOS).
+  case "$body" in *'fragment entry for the real-changelog copy'*) have1=1 ;; *) have1=0 ;; esac
+  case "$body" in *'fragment upgrade note'*) have2=1 ;; *) have2=0 ;; esac
+  if [ "$ok" = 1 ] && [ "$have1" = 1 ] && [ "$have2" = 1 ]; then
     pass "real [Unreleased] + fragment: one heading per known section, canonical order"
   else fail "real-copy order: $(printf '%s\n' "$body" | grep '^### ' | tr '\n' '|')"; fi
 else fail "real-copy assemble failed (the live CHANGELOG.md [Unreleased] section is malformed, e.g. an unclosed code fence): $(cat "$tmp/err")"; fi
