@@ -591,6 +591,133 @@ fn cap_boundary_is_inclusive_and_measured_in_bytes() {
     assert!(chunk_for_ingest_with_cap(&multibyte, 1000).is_err());
 }
 
+// ── #862 measurement: cost of a document at the default 2 MiB cap ───────────
+//
+// `#[ignore]`d: run on demand to record numbers for ADR-0862, e.g.
+//   cargo test -p lcg-core --test document_mode --no-run
+//   /usr/bin/time -l <test-binary> --ignored --nocapture --test-threads=1 measure_
+// Mock providers only (`ScriptExtractor`, `MockEmbedder`), so the cost shown is the server's own:
+// chunker, diff, per-episode writes and the WAL.
+
+const TWO_MIB: usize = 2 * 1024 * 1024;
+
+fn truncate_to(mut s: String, bytes: usize) -> String {
+    while s.len() > bytes {
+        s.pop();
+    }
+    s
+}
+
+async fn measure(label: &str, doc: String) {
+    assert!(doc.len() <= TWO_MIB, "{label}: {} bytes", doc.len());
+    let f = fx();
+    let t = std::time::Instant::now();
+    let chunk_t = std::time::Instant::now();
+    let chunked = lcg_core::document::ingest::chunk_for_ingest_with_cap(&doc, TWO_MIB);
+    let chunk_ms = chunk_t.elapsed().as_millis();
+    let units = chunked.as_ref().map(|c| c.chunks.len()).unwrap_or(0);
+    let r = try_call(
+        "knowledge_process_document",
+        doc_params("measure", &doc),
+        &f.state,
+    )
+    .await;
+    let total_ms = t.elapsed().as_millis();
+    println!(
+        "MEASURE {label}: bytes={} units={units} chunk_only_ms={chunk_ms} \
+         end_to_end_ms={total_ms} extractor_calls={} ok={}",
+        doc.len(),
+        f.ex.call_count(),
+        r.get("error").is_none()
+    );
+}
+
+#[tokio::test]
+#[ignore = "measurement: run on demand (ADR-0862)"]
+async fn measure_realistic_2mib_document() {
+    measure("realistic", truncate_to(big_doc(TWO_MIB), TWO_MIB)).await;
+}
+
+#[tokio::test]
+#[ignore = "measurement: run on demand (ADR-0862)"]
+async fn measure_unclosed_fence_2mib_document() {
+    let mut d = String::from("# Fence\n\n```\n");
+    while d.len() < TWO_MIB {
+        d.push_str("let x = 1; // line inside a fence that never closes\n");
+    }
+    measure("unclosed_fence", truncate_to(d, TWO_MIB)).await;
+}
+
+#[tokio::test]
+#[ignore = "measurement: run on demand (ADR-0862)"]
+async fn measure_many_tables_2mib_document() {
+    let mut d = String::from("# Tables\n\n");
+    let mut i = 0;
+    while d.len() < TWO_MIB {
+        d.push_str(&format!(
+            "| key | value |\n|-----|-------|\n| a{i} | b{i} |\n| c{i} | d{i} |\n\n"
+        ));
+        i += 1;
+    }
+    measure("many_tables", truncate_to(d, TWO_MIB)).await;
+}
+
+#[tokio::test]
+#[ignore = "measurement: run on demand (ADR-0862)"]
+async fn measure_single_long_line_2mib_document() {
+    let d = format!("# Line\n\n{}", "word ".repeat(TWO_MIB / 5));
+    measure("single_long_line", truncate_to(d, TWO_MIB)).await;
+}
+
+/// Chunker-only timing for every pathological shape, including many tiny sections (about
+/// 80 000 units, each of which would be one extractor call — a cost of the document, not a
+/// superlinear chunker, so it is timed here without ingesting).
+#[test]
+#[ignore = "measurement: run on demand (ADR-0862)"]
+fn measure_chunker_only_on_pathological_2mib_documents() {
+    let mut headings = String::new();
+    let mut i = 0;
+    while headings.len() < TWO_MIB {
+        headings.push_str(&format!("## H{i}\n\nShort body {i}.\n\n"));
+        i += 1;
+    }
+    let mut fence = String::from("# Fence\n\n```\n");
+    while fence.len() < TWO_MIB {
+        fence.push_str("let x = 1; // line inside a fence that never closes\n");
+    }
+    let mut tables = String::from("# Tables\n\n");
+    let mut j = 0;
+    while tables.len() < TWO_MIB {
+        tables.push_str(&format!(
+            "| key | value |\n|-----|-------|\n| a{j} | b{j} |\n\n"
+        ));
+        j += 1;
+    }
+    let mut front = String::from("---\ntitle: x\n");
+    while front.len() < TWO_MIB {
+        front.push_str("key: value line in a front-matter block that never closes\n");
+    }
+    let one_line = format!("# Line\n\n{}", "word ".repeat(TWO_MIB / 5));
+    for (label, d) in [
+        ("many_headings", headings),
+        ("unclosed_fence", fence),
+        ("many_tables", tables),
+        ("unclosed_front_matter", front),
+        ("single_long_line", one_line),
+        ("realistic", big_doc(TWO_MIB)),
+    ] {
+        let d = truncate_to(d, TWO_MIB);
+        let t = std::time::Instant::now();
+        let r = lcg_core::document::ingest::chunk_for_ingest_with_cap(&d, TWO_MIB);
+        println!(
+            "MEASURE chunker_only {label}: bytes={} units={} ms={}",
+            d.len(),
+            r.map(|c| c.chunks.len()).unwrap_or(0),
+            t.elapsed().as_millis()
+        );
+    }
+}
+
 // ── US2: the server applies the diff ────────────────────────────────────────
 
 /// US2 AC1, SC-002: one edited paragraph re-extracts exactly one chunk; its old episode is
