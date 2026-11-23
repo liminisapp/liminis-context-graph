@@ -85,6 +85,10 @@ not cancelled on disconnect and run to completion as before.
   clients that want an answer must not close or half-close first. A socket read error while the
   request runs is treated the same way. (A pipelined line that is not valid UTF-8 is not: the
   in-flight request finishes and is answered, then the connection closes.)
+- **Keep reading while a request runs.** Progress and heartbeat frames are written while the
+  request executes, and a frame that cannot be written within 5 s (a client that has stopped
+  reading and let its socket buffer fill) is treated as a disconnect, so the request is cancelled
+  before commit. A commit that has already started still finishes.
 
 **Choosing a timeout and retrying.** Ingest latency is dominated by the embedder and the LLM, so
 set the client timeout to the slowest chunk you expect (or stream with `_progress_token` and treat

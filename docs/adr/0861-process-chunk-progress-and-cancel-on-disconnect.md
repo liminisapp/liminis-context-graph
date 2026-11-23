@@ -70,6 +70,10 @@ The cancellation points already existed in `add_episode_with_opts` (the last one
   `{"type":"progress","phase":"heartbeat"}` every 10 s. This covers `knowledge_process_document` too,
   so existing streaming `process_document` clients can now see a `heartbeat` phase (documented in
   the IPC reference; clients ignore unknown phases). Token-less requests never see a frame.
+- **Bounded frame writes.** The dispatch future is polled inline, so a progress or heartbeat
+  write that blocks (a client that stopped reading) would stall the request. Each frame write is
+  bounded to 5 s; a write that fails or times out is a disconnect (cancel before commit, a started
+  commit still finishes), and nothing more is written to that socket.
 - **Attached MCP.** `AttachedBackend` drops its socket after 30 s with no line (per-line idle read
   timeout). With cancel-on-disconnect that would cancel every ingest slower than 30 s, and it can
   never be retried to success. So the backend always sends `_progress_token` for the two

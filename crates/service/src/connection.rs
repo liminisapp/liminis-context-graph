@@ -37,6 +37,26 @@ const MAX_PENDING_LINES: usize = 8;
 /// Only sent when the caller asked for progress; token-less requests never see a frame.
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Upper bound on one progress/heartbeat frame write while a cooperative request runs. The
+/// dispatch future is polled inline, so a client that stops reading its socket would otherwise
+/// stall the request (even a commit holding the group write lock) once the socket buffer fills.
+/// A write that cannot finish in this time is treated as a disconnect.
+const FRAME_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Writes one frame, returning `false` if the write failed or did not finish within `limit`
+/// (both mean the client is gone or not reading). A timed-out write may leave a partial line on
+/// the socket, so the caller must not write to it again.
+async fn write_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+    limit: std::time::Duration,
+) -> bool {
+    matches!(
+        tokio::time::timeout(limit, writer.write_all(bytes)).await,
+        Ok(Ok(()))
+    )
+}
+
 /// How a cooperative request ended.
 #[allow(clippy::large_enum_variant)]
 enum Served {
@@ -69,6 +89,7 @@ pub async fn handle_connection_with<S, F, Fut>(
         dispatch,
         shutdown_notify,
         HEARTBEAT_INTERVAL,
+        FRAME_WRITE_TIMEOUT,
     )
     .await;
 }
@@ -80,6 +101,7 @@ async fn serve_connection<S, F, Fut>(
     dispatch: F,
     shutdown_notify: std::sync::Arc<Notify>,
     heartbeat: std::time::Duration,
+    write_timeout: std::time::Duration,
 ) where
     S: AsyncRead + AsyncWrite + Send + 'static,
     F: Fn(IpcRequest, CancellationToken, Option<UnboundedSender<Value>>) -> Fut,
@@ -141,6 +163,7 @@ async fn serve_connection<S, F, Fut>(
                 &mut pending,
                 &mut writer,
                 heartbeat,
+                write_timeout,
             )
             .await
             {
@@ -232,6 +255,7 @@ async fn serve_cooperative<Fut, R, W>(
     pending: &mut VecDeque<String>,
     writer: &mut W,
     heartbeat: std::time::Duration,
+    write_timeout: std::time::Duration,
 ) -> Served
 where
     Fut: Future<Output = IpcResponse>,
@@ -257,7 +281,7 @@ where
             } => match frame {
                 Some(val) => {
                     let json = serde_json::to_string(&val).unwrap_or_default();
-                    if writer.write_all(format!("{json}\n").as_bytes()).await.is_err() {
+                    if !write_frame(writer, format!("{json}\n").as_bytes(), write_timeout).await {
                         disconnected = true;
                     }
                 }
@@ -266,7 +290,7 @@ where
             },
             _ = beat.tick(), if rx.is_some() => {
                 let frame = "{\"type\":\"progress\",\"phase\":\"heartbeat\"}\n";
-                if writer.write_all(frame.as_bytes()).await.is_err() {
+                if !write_frame(writer, frame.as_bytes(), write_timeout).await {
                     disconnected = true;
                 }
             }
@@ -300,7 +324,9 @@ where
             if let Some(r) = rx.as_mut() {
                 while let Ok(val) = r.try_recv() {
                     let json = serde_json::to_string(&val).unwrap_or_default();
-                    let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
+                    if !write_frame(writer, format!("{json}\n").as_bytes(), write_timeout).await {
+                        break;
+                    }
                 }
             }
             Served::Done {
@@ -491,6 +517,7 @@ mod tests {
             fake(Arc::clone(&probe), 600, 0),
             notify,
             Duration::from_millis(100),
+            FRAME_WRITE_TIMEOUT,
         ));
         client
             .write_all(line(1, "knowledge_process_chunk", true).as_bytes())
@@ -505,6 +532,32 @@ mod tests {
         );
         drop(client);
         let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+    }
+
+    #[tokio::test]
+    async fn client_that_stops_reading_is_treated_as_disconnected() {
+        // A 16-byte socket buffer fills on the first progress frame and the client never reads.
+        let (mut client, server) = tokio::io::duplex(16);
+        let probe = Arc::new(Probe::default());
+        let notify = Arc::new(Notify::new());
+        let h = tokio::spawn(serve_connection(
+            server,
+            CancellationToken::new(),
+            fake(Arc::clone(&probe), 10_000, 0),
+            notify,
+            Duration::from_secs(60),
+            Duration::from_millis(100),
+        ));
+        client
+            .write_all(line(1, "knowledge_process_chunk", true).as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), h)
+            .await
+            .expect("a stalled frame write must not hang the connection")
+            .unwrap();
+        assert_eq!(probe.saw_cancel.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.finished.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -543,6 +596,7 @@ mod tests {
             fake(Arc::clone(&probe), 400, 0),
             notify,
             Duration::from_millis(50),
+            FRAME_WRITE_TIMEOUT,
         ));
         client
             .write_all(line(1, "knowledge_process_chunk", false).as_bytes())
