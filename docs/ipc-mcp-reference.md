@@ -2081,8 +2081,12 @@ completion hop runs, from the start entities. Anything else with empty `hops`, a
 
 Algorithm (E13's v5, generic — no relation names are hard-coded). Per hop:
 
-1. **Candidates** are edges incident to the frontier (either direction) whose far end has not been
-   visited (cycles never revisit). Live edges only, except in `history` mode. On the **last** hop,
+1. **Candidates** are edges incident to the frontier (either direction) whose far end is not a
+   start entity or an entity reached on an earlier hop (walks never cycle back). The *current*
+   frontier is not excluded: an edge between two frontier entities (for example a project and its
+   supplier, both reached on the previous hop) is a candidate in both orientations, each with its
+   own `direction_matched`, and ranking keeps only the better one, so the edge takes one beam slot
+   and its fact is reported once. Hop 1 excludes the start entities. Live edges only, except in `history` mode. On the **last** hop,
    when `answer_type` is `"value"` or absent, the frontier entities' own **self-loops** are
    candidates too. These are the literal-valued facts (a budget, a price, a date) an ontology
    extraction stores on the entity they describe
@@ -2102,7 +2106,7 @@ Algorithm (E13's v5, generic — no relation names are hard-coded). Per hop:
    matching edges, falling back to all (recorded) if none match. `any` applies neither.
 5. **Rank** by cosine(embedding of `phrase` with the query-side instruction, the edge's fact
    embedding) plus the bonus; ties break by edge uuid. Edges with no usable fact embedding rank
-   after every embedded edge (score 0.0). The top B are kept; their far ends are the next frontier.
+   after every embedded edge (score 0.0). The top B are kept (one orientation per edge); their far ends are the next frontier.
 
 If the hops end on no entity of an entity-type `answer_type` and `query` is given (and mode is not
 `history`), one **completion hop** runs: edges from the final frontier to entities of that type,
@@ -2186,7 +2190,7 @@ included) gains three keys, appended after `signature_mismatch` and **always pre
 **Known limit:** each hop loads every incident edge (with its fact embedding) of the frontier, so a
 hub entity with thousands of edges costs proportionally; the beam keeps later frontiers small. There
 is deliberately no cap, since a cap would silently drop candidates; each hop reports its
-`candidate_count` (the unfiltered candidates after visited-node exclusion) so a caller can see how
+`candidate_count` (the unfiltered candidates after the start/earlier-hop exclusion and before orientation dedup, so an edge between two frontier entities counts once per orientation) so a caller can see how
 wide a hop was.
 
 ### Ontology reload (`knowledge_reload_ontology`)
