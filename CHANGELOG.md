@@ -9,19 +9,6 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
-### Changed
-
-- **Graph-question gold answers include facts the v2 prose states (#907, ADR-0907).** The LLM-rendered
-  corpus introduced two project owners the skeleton lacks, so a correct extraction was marked wrong
-  (g109 scored 0.67 for `[Orbit Core, Telemetry clean-up]`). A new fixture
-  `crates/eval/fixtures/retrieval-v2/prose-facts.json` records them; `retrieval-gen` folds a `stated`
-  fact into the gold and lists an `ambiguous` one under a new optional, additive `optional_answers`
-  field, which `lcg-eval graph-qa` excludes from both precision and recall for `set` questions.
-  `graph-questions.jsonl` is regenerated: only g072, g109, i013 and i014 change (ids, text and splits
-  do not), and the question-set version is now `meridian-questions-4`, so **graph-qa scores from
-  before and after are not comparable on those four questions**. The corpus and cassette are
-  unchanged.
-
 ### Fixed
 
 - **`find_entities` `include_episodes` no longer reports episodes of a pending document revision
