@@ -127,7 +127,7 @@ The app team (shadoworg/liminis-notes) needs to know from the ADR what, if anyth
 - This issue's deliverable is research: an ADR draft and a measuring fixture or eval extension. Implementing the chosen counting behaviour is a separate follow-up issue.
 - The ADR is numbered `0880-<slug>` per the repository's issue-numbered ADR rule.
 - Any new caller-declared source/author key follows the `origin` model: declared by the caller, never authenticated, and only as reliable as the caller's declaration.
-- Weak-support and contradiction lint live in the consuming app (shadoworg/liminis-notes), so lcg's ADR describes what the lint categories need from the API; the app-side lint changes are handled in the companion app issues.
+- Two lint layers read `support` / `corroboration`. lcg's own deterministic lint (`crates/core/src/lint/weak.rs`, `lint/contradiction.rs`, per ADR-0755) is in this repository, and the ADR analyses it as the in-repo readers. The consuming app (shadoworg/liminis-notes) has its own weak-support and contradiction lint, ranking and UI that read the same values through the API; the ADR describes what those need from the API, and the app-side changes are handled in the companion app issues.
 - Mis-stamped origin (agent-made summaries marked `primary`) is handled app-side and is not solved by this work.
 - Restatement is judged per source/author key over same-fact siblings, using the existing same-fact key; semantic or embedding-based "is this a paraphrase" judgement is not required.
 - The fixture can extend the existing retrieval-quality corpus or be a separate small corpus, whichever the researcher finds fits the existing eval structure better.
