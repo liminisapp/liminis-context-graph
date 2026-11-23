@@ -359,3 +359,88 @@ fn valid_value_is_logged_and_flag_beats_env() {
     });
     assert!(line.contains("[env-group]"), "{line}");
 }
+
+// ── implicit default-group warning over IPC and MCP (issue #856) ────────────────────────────
+
+const IMPLICIT_WARNING_PREFIX: &str = "group_id omitted; wrote to default group \"liminis\"";
+
+fn warnings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| a.iter().map(|w| w.as_str().unwrap().to_string()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn implicit_default_group_write_warns_over_ipc_standalone_and_attached_mcp() {
+    let dir = TempDir::new().unwrap();
+    let url = embedder_url();
+    let (_daemon, socket) = spawn_daemon(&dir, &url, |_| {});
+    let implicit = json!({"name": "Widget", "summary": "a widget"});
+
+    // IPC socket: omitted → warns; explicit (including "liminis") → no warnings key.
+    let v = socket_request(&socket, "knowledge_assert_entity", implicit.clone());
+    let w = warnings(&v["result"]["warnings"]);
+    assert_eq!(w.len(), 1, "{v}");
+    assert!(w[0].starts_with(IMPLICIT_WARNING_PREFIX), "{v}");
+    assert_eq!(
+        node_count(&socket, "liminis"),
+        1,
+        "still written to liminis"
+    );
+    for g in ["liminis", "mine"] {
+        let v = socket_request(&socket, "knowledge_assert_entity", assert_entity_params(g));
+        assert!(v["result"].get("warnings").is_none(), "{g}: {v}");
+    }
+
+    // Attached MCP: the same field arrives in the structured tool result.
+    let mut cmd = Command::new(binary_path());
+    cmd.env_remove("LCG_WRITABLE_GROUPS").args([
+        "--mcp-stdio",
+        "--connect",
+        socket.to_str().unwrap(),
+    ]);
+    let mut client = McpClient::spawn(cmd);
+    client.initialize();
+    let resp = client.call_tool("knowledge_assert_entity", implicit.clone());
+    assert_mcp_ok(&resp);
+    let w = warnings(&resp["result"]["structuredContent"]["warnings"]);
+    assert_eq!(w.len(), 1, "{resp}");
+    assert!(w[0].starts_with(IMPLICIT_WARNING_PREFIX), "{resp}");
+    let resp = client.call_tool("knowledge_assert_entity", assert_entity_params("mine"));
+    assert!(
+        resp["result"]["structuredContent"]
+            .get("warnings")
+            .is_none(),
+        "{resp}"
+    );
+    // The tool description tells MCP clients about the default.
+    let tools = client.list_tools();
+    let tool = tools
+        .iter()
+        .find(|t| t["name"] == "knowledge_assert_entity")
+        .unwrap();
+    assert!(
+        tool["description"].as_str().unwrap().contains("`warnings`"),
+        "{tool}"
+    );
+    client.shutdown();
+}
+
+#[test]
+fn implicit_default_group_write_warns_over_standalone_mcp() {
+    let dir = TempDir::new().unwrap();
+    let url = embedder_url();
+    let mut cmd = base_cmd(&dir, &url);
+    cmd.arg("--mcp-stdio");
+    let mut client = McpClient::spawn(cmd);
+    client.initialize();
+    let resp = client.call_tool(
+        "knowledge_assert_entity",
+        json!({"name": "Widget", "summary": "a widget"}),
+    );
+    assert_mcp_ok(&resp);
+    let w = warnings(&resp["result"]["structuredContent"]["warnings"]);
+    assert_eq!(w.len(), 1, "{resp}");
+    assert!(w[0].starts_with(IMPLICIT_WARNING_PREFIX), "{resp}");
+    client.shutdown();
+}

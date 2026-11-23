@@ -129,7 +129,9 @@ returns the ontology that applies to a group — the same group → workspace �
 for extraction — as a planning menu for `knowledge_walk`: mode, entity types (description, parent)
 and relation types (description, `source_type` / `target_type` lists, `inverse_aliases`,
 `symmetric`). Assert-only types (`extract: false`) are omitted unless `include_asserted: true`; a
-group with no ontology gets `has_ontology: false` and `mode: "free-form"`. See
+group with no ontology gets `has_ontology: false` and `mode: "free-form"`. The response also carries
+`ontology_hash`, the content hash of the ontology in effect (`"none"` without one), so a client can
+check which ontology the service actually loaded (#881). See
 [IPC/MCP reference → Typed relation walks](ipc-mcp-reference.md#typed-relation-walks-knowledge_get_ontology-knowledge_walk-issue-820).
 
 ## Reloading a group's ontology

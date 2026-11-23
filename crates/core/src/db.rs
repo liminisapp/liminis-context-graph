@@ -12,6 +12,15 @@ use crate::{
     types::{EntityRow, EpisodicRow, MentionsEdge, PassageResult, RelatesToEdge},
 };
 
+/// Supersession state plus source identity of one episode (`get_episode_provenance`, #860).
+#[derive(Debug, Clone)]
+pub struct EpisodeProvenance {
+    pub supersession: crate::belief::EpisodeSupersession,
+    /// `None` on a legacy row (#853).
+    pub source_file: Option<String>,
+    pub source_description: String,
+}
+
 /// Map from entity UUID to (episode_uuids, source_descriptions), positionally aligned.
 type EpisodeInfoMap = HashMap<String, (Vec<String>, Vec<String>)>;
 
@@ -2245,25 +2254,56 @@ impl<'db> Conn<'db> {
             serde_json::json!({ "uuids": uuids }),
         )?;
         for r in rows {
+            out.insert(
+                value_as_string(&r[0]),
+                episode_supersession_from_cols(&r[1..=8]),
+            );
+        }
+        Ok(out)
+    }
+
+    /// Supersession state **and** source identity of the given episode UUIDs, in one batched
+    /// lookup (`knowledge_walk` `include_provenance`, #860). A UUID absent from the result no
+    /// longer exists (hard-deleted). `source_file` is `None` on legacy rows (#853).
+    pub fn get_episode_provenance(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, EpisodeProvenance>, Error> {
+        let mut out = std::collections::HashMap::new();
+        if uuids.is_empty() {
+            return Ok(out);
+        }
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids \
+             RETURN ep.uuid, ep.superseded_at, ep.superseded_by_kind, ep.superseded_by, \
+             ep.supersession_reason, ep.group_id, ep.doc_id, ep.revision_id, \
+             ep.revision_committed_at, ep.source_file, ep.source_description",
+            serde_json::json!({ "uuids": uuids }),
+        )?;
+        for r in rows {
             let superseded = match &r[1] {
                 lbug::Value::Null(_) => None,
                 other => Some(value_as_timestamp_micros(other)),
             };
+            let sup = crate::belief::EpisodeSupersession {
+                superseded_at_us: superseded,
+                kind: value_as_optional_string(&r[2]),
+                superseded_by: value_as_optional_string(&r[3]),
+                reason: value_as_optional_string(&r[4]),
+                group_id: value_as_string(&r[5]),
+                doc_id: value_as_optional_string(&r[6]),
+                revision_id_present: value_as_optional_string(&r[7]).is_some(),
+                revision_committed_at_us: match &r[8] {
+                    lbug::Value::Null(_) => None,
+                    other => Some(value_as_timestamp_micros(other)),
+                },
+            };
             out.insert(
                 value_as_string(&r[0]),
-                crate::belief::EpisodeSupersession {
-                    superseded_at_us: superseded,
-                    kind: value_as_optional_string(&r[2]),
-                    superseded_by: value_as_optional_string(&r[3]),
-                    reason: value_as_optional_string(&r[4]),
-                    group_id: value_as_string(&r[5]),
-                    doc_id: value_as_optional_string(&r[6]),
-                    // Document mode (issue #785): a pending episode is never believed.
-                    revision_id_present: value_as_optional_string(&r[7]).is_some(),
-                    revision_committed_at_us: match &r[8] {
-                        lbug::Value::Null(_) => None,
-                        other => Some(value_as_timestamp_micros(other)),
-                    },
+                EpisodeProvenance {
+                    supersession: sup,
+                    source_file: value_as_optional_string(&r[9]),
+                    source_description: value_as_optional_string(&r[10]).unwrap_or_default(),
                 },
             );
         }
@@ -2751,6 +2791,105 @@ impl<'db> Conn<'db> {
             .into_iter()
             .map(|r| (value_as_string(&r[0]), value_as_string(&r[1])))
             .collect())
+    }
+
+    // ── Status episode breakdown scans (issue #884, ADR-0884) ─────────────────
+    //
+    // Narrow, content-free, keyset-paged scans. They only project columns; classification stays in
+    // Rust over `EpisodeSupersession` / `belief::evaluate` so liveness has a single definition.
+
+    /// One chunk of every `Episodic` row ordered by uuid, as `(uuid, supersession state)`. The
+    /// state's `group_id` is the episode's group.
+    pub fn breakdown_scan_episodes(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, crate::belief::EpisodeSupersession)>, Error> {
+        let where_clause = if after.is_some() {
+            "WHERE ep.uuid > $after "
+        } else {
+            ""
+        };
+        let cypher = format!(
+            "MATCH (ep:Episodic) {where_clause}RETURN ep.uuid, ep.superseded_at, \
+             ep.superseded_by_kind, ep.superseded_by, ep.supersession_reason, ep.group_id, \
+             ep.doc_id, ep.revision_id, ep.revision_committed_at \
+             ORDER BY ep.uuid LIMIT $limit"
+        );
+        let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
+        if let Some(a) = after {
+            params["after"] = serde_json::json!(a);
+        }
+        let rows = self.query_params(&cypher, params)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                (
+                    value_as_string(&r[0]),
+                    episode_supersession_from_cols(&r[1..=8]),
+                )
+            })
+            .collect())
+    }
+
+    /// One chunk of every edge ordered by uuid, as `(belief row, group_id)`.
+    pub fn breakdown_scan_edges(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(crate::belief::EdgeBeliefRow, String)>, Error> {
+        let where_clause = if after.is_some() {
+            "WHERE rn.uuid > $after "
+        } else {
+            ""
+        };
+        let cypher = format!(
+            "MATCH (rn:RelatesToNode_) {where_clause}RETURN rn.uuid, rn.ingested_at, \
+             rn.episodes, rn.warrant, rn.valid_at_source, rn.group_id \
+             ORDER BY rn.uuid LIMIT $limit"
+        );
+        let mut params = serde_json::json!({ "limit": limit.min(i64::MAX as usize) as i64 });
+        if let Some(a) = after {
+            params["after"] = serde_json::json!(a);
+        }
+        let rows = self.query_params(&cypher, params)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let uuid = value_as_string(&r[0]);
+                (
+                    crate::belief::EdgeBeliefRow {
+                        uuid,
+                        ingested_at_us: match &r[1] {
+                            lbug::Value::Null(_) => None,
+                            other => Some(value_as_timestamp_micros(other)),
+                        },
+                        episodes: value_as_str_list(&r[2]),
+                        warrant: value_as_optional_string(&r[3]),
+                        valid_at_source: value_as_optional_string(&r[4]),
+                    },
+                    value_as_string(&r[5]),
+                )
+            })
+            .collect())
+    }
+
+    /// `group_id` of each given entity (chunked). A uuid absent from the result no longer exists.
+    pub fn entity_groups(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, String>, Error> {
+        let mut out = std::collections::HashMap::new();
+        for part in uuids.chunks(1000) {
+            let rows = self.query_params(
+                "MATCH (e:Entity) WHERE e.uuid IN $uuids RETURN e.uuid, e.group_id",
+                serde_json::json!({ "uuids": part }),
+            )?;
+            for r in rows {
+                out.insert(value_as_string(&r[0]), value_as_string(&r[1]));
+            }
+        }
+        Ok(out)
     }
 
     /// Names of the given entities, for citing a report page. A uuid absent from the result no
@@ -6238,6 +6377,30 @@ pub struct StampCandidate {
     pub origin: crate::origin::Origin,
     pub source_description: String,
     pub attributes: String,
+}
+
+/// `EpisodeSupersession` from the eight-column projection
+/// `superseded_at, superseded_by_kind, superseded_by, supersession_reason, group_id, doc_id,
+/// revision_id, revision_committed_at` (`cols` is exactly those eight). The one mapping shared by
+/// [`Conn::get_episode_supersession`] and the status-breakdown scan.
+fn episode_supersession_from_cols(cols: &[lbug::Value]) -> crate::belief::EpisodeSupersession {
+    crate::belief::EpisodeSupersession {
+        superseded_at_us: match &cols[0] {
+            lbug::Value::Null(_) => None,
+            other => Some(value_as_timestamp_micros(other)),
+        },
+        kind: value_as_optional_string(&cols[1]),
+        superseded_by: value_as_optional_string(&cols[2]),
+        reason: value_as_optional_string(&cols[3]),
+        group_id: value_as_string(&cols[4]),
+        doc_id: value_as_optional_string(&cols[5]),
+        // Document mode (issue #785): a pending episode is never believed.
+        revision_id_present: value_as_optional_string(&cols[6]).is_some(),
+        revision_committed_at_us: match &cols[7] {
+            lbug::Value::Null(_) => None,
+            other => Some(value_as_timestamp_micros(other)),
+        },
+    }
 }
 
 fn episode_origin_info_from_cols(

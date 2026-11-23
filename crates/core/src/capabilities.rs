@@ -46,7 +46,9 @@ pub const FEATURES: &[&str] = &[
     "lint",
     "origin",
     "process_document",
+    "status_episode_breakdown",
     "walk",
+    "walk_provenance",
     "writable_groups",
 ];
 

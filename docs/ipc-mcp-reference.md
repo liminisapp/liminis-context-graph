@@ -92,6 +92,38 @@ distinguishes a genuinely empty group from one whose WAL holds unapplied content
 field-by-field in [Operations: `knowledge_status` health fields](operations.md#knowledge_status-health-fields)
 rather than here.
 
+**`knowledge_status` episode breakdown (issue #884, [ADR-0884](adr/0884-status-episode-breakdown-opt-in.md)).**
+`knowledge_status` accepts an optional boolean `include_episode_breakdown` (default `false`; only a
+literal `true` enables it). The feature is advertised as `status_episode_breakdown` by
+`knowledge_capabilities`. It is opt-in because it scans every episode, `MENTIONS` edge and edge
+while holding the read lock, which blocks writers for its duration; a call without it runs no extra
+query and is unchanged. With it, the response gains:
+
+```json
+"episode_breakdown": {
+  "as_of_us": 1763844000000000,
+  "groups": [
+    {"group_id": "g1", "live": 10, "superseded": 25, "pending": 0,
+     "only_superseded_entities": 4, "only_superseded_edges": 7}
+  ]
+}
+```
+
+- `live` / `superseded` / `pending` partition a group's episodes. Liveness is the belief/search
+  predicate (`EpisodeSupersession::live_at`) evaluated at `as_of_us`; `pending` is an uncommitted
+  document revision (ADR-0785), never counted as live or superseded. Unattributed episodes are never
+  superseded, so they are live. A future-dated supersession counts as live until its instant.
+- `only_superseded_entities`: entities with at least one `MENTIONS` from a superseded episode and
+  none from a live one (pending mentions are neutral). `only_superseded_edges`: edges whose belief
+  state is `superseded` (every surviving producing episode superseded), counted by producer and not
+  by fact text. Each is attributed to the entity's / edge's own `group_id` and counted once.
+- Every field is present even at `0`; groups are sorted by `group_id`; the superseded : live ratio
+  is `superseded / live`, computed by the client.
+- When the database is not open, not queryable or the scan fails, `episode_breakdown` is `null` and
+  `episode_breakdown_unavailable` is a reason string; the rest of the status response is unaffected.
+- A workspace rebuilt from `knowledge_dump_wal` has no native `MENTIONS` (ADR-0828 finding F1), so
+  `only_superseded_entities` reads `0` there.
+
 Every long-running method above (the six WAL/recovery/reclassification operations most likely
 to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
 before the terminal result — see [Progress notifications](#progress-notifications) below.
@@ -134,7 +166,7 @@ during a rebuild and under any `--writable-groups` policy.
 ```json
 {"server_version": "0.19.1", "protocol_version": 1,
  "features": ["chunk_supersede", "entity_provenance", "hybrid_passage_search", "lint", "origin",
-              "process_document", "walk", "writable_groups"],
+              "process_document", "walk", "walk_provenance", "writable_groups"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -307,7 +339,8 @@ The check is made against the groups a call **actually changes**, not every grou
 
 - An omitted (or `null`/non-string) `group_id` resolves to the default group, `liminis` — **the
   default group must be listed to stay writable.** `group_id: ""` is a distinct group that can
-  never be listed, so it is always refused.
+  never be listed, so it is always refused. A write that falls back to the default group also
+  carries an [implicit default-group warning](#implicit-default-group-writes).
 - `knowledge_add_cross_group_edge` is checked against the edge's own `group_id`. The
   `source_group_id` of a foreign endpoint is a read-only pointer and is not checked: with
   `--writable-groups=a`, `{group_id: "a", target: {source_group_id: "b", …}}` succeeds and
@@ -648,6 +681,122 @@ before relying on `[]` to mean "nothing" — on the other six it doesn't.
 
 This section is the single, central statement of that contract; individual tool entries on this
 page don't restate it.
+
+### Omitted-group behaviour per method (issue #856)
+
+Many methods treat `group_id` as optional, and "omitted" does not mean the same thing everywhere:
+writes fall back to the default group `liminis` (the Liminis app's own graph), most reads span
+every group, and some methods refuse. **No default changed** with #856 — this table records what
+each method already did. The classes:
+
+- **default group + warning** — an omitted (or `null`/non-string) `group_id` resolves to `liminis`
+  and the response carries an [implicit default-group warning](#implicit-default-group-writes).
+- **default group** — an omitted group resolves to `liminis`, but the method is a read or an admin
+  operation and gets no warning.
+- **every group** — an omitted group means all groups.
+- **refused** — the group is required; omitting it is an error.
+- **not applicable** — the method takes no group (or is addressed by uuid / job id).
+
+| Method | Omitted group means | Notes |
+|--------|---------------------|-------|
+| `health_check` | not applicable | takes no group |
+| `knowledge_status` | not applicable | takes no group |
+| `knowledge_capabilities` | not applicable | takes no group; returns the protocol version and feature registry |
+| `knowledge_find_entities` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_resolve_entity` | default group | `group_id`; resolves by `(group_id, name)` in `liminis` only (read, no warning) |
+| `knowledge_find_relationships` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_get_episodes` | every group | `group_ids` plus the legacy `group_id` alias are unioned; neither means all groups |
+| `knowledge_lint` | every group | `group_ids` / legacy `group_id` scope; neither means all groups |
+| `knowledge_get_nodes_by_group` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_get_edges_by_group` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_get_edges_by_uuids` | not applicable | addressed by edge `uuids`, not by group |
+| `knowledge_get_correction_changes` | not applicable | addressed by episode uuid, not by group |
+| `knowledge_get_affected_work` | not applicable | addressed by edge uuid, not by group |
+| `knowledge_rebuild_status` | not applicable | addressed by `job_id` |
+| `knowledge_search_passages` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_list_entities` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_list_relationships` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_get_entity_neighbors` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_get_ontology` | default group | `group_id` (blank also means default); read, no warning |
+| `knowledge_walk` | default group | `group_ids` omitted means `["liminis"]`; read-style traversal, no warning |
+| `knowledge_get_entities_by_source` | every group | `group_ids` omitted/`null` means all groups; see [group_ids semantics](#group_ids-semantics-omitted-vs-empty) for an explicit `[]` |
+| `knowledge_validate_corrections` | not applicable | takes no group |
+| `knowledge_preview_chunks` | not applicable | takes no group |
+| `knowledge_add_episode` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_process_chunk` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_process_document` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_assert_entity` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_assert_relationship` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_merge_entities` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_add_cross_group_edge` | default group + warning | `group_id` is the edge's own group; `source_group_id` on an endpoint is a pointer, not a default |
+| `knowledge_reprocess_entity_types` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_reprocess_relation_types` | default group + warning | `group_id`; write goes to `liminis` |
+| `knowledge_supersede_document` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_stamp_origin` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_canonicalize_relations` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_backfill_relation_types` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_backfill_summary_embeddings` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_reembed_missing` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_reload_ontology` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_delete_by_source` | refused | `group_ids` is a required non-empty array; an omitted one is an error (no all-groups delete) |
+| `knowledge_delete_chunk_episode` | refused | `group_ids` is a required non-empty array; an omitted one is an error (no all-groups delete) |
+| `knowledge_mark_chunk_removed` | refused | `group_ids` is a required non-empty array; an omitted one is an error (no all-groups delete) |
+| `knowledge_rebuild_from_wal` | default group | `group_id` (`""` also maps to `liminis`); replays that group's WAL directory; admin, no warning |
+| `knowledge_delete_episode` | not applicable | takes `episode_uuid`; the group is looked up from the episode |
+| `knowledge_rebind_pointers` | refused | `source_group_id` is required |
+| `knowledge_delete_by_group` | refused | `group_ids` is a required non-empty array; an omitted one is an error (no all-groups delete) |
+| `knowledge_clear_all` | every group | carries no group; acts on every group present |
+| `knowledge_apply_corrections` | every group | carries no group; acts on every group present |
+| `knowledge_query_cypher` | not applicable | takes no group |
+| `knowledge_recover` | not applicable | takes no group |
+| `knowledge_recover_full` | not applicable | takes no group |
+| `knowledge_close` | not applicable | takes no group |
+| `knowledge_strip_wal_embeddings` | every group | `group_id` omitted means every group's WAL directory; file-level |
+| `knowledge_build_indices` | not applicable | takes no group |
+| `knowledge_prepare_checkpoint` | not applicable | takes no group |
+| `knowledge_dump_wal` | every group | `group_id` omitted means every group's WAL directory; file-level |
+| `knowledge_wal_mark_create` | default group | `group_id` (`""` also maps to `liminis`); that group's checkpoints; admin, no warning |
+| `knowledge_wal_mark_list` | default group | `group_id` (`""` also maps to `liminis`); that group's checkpoints; admin, no warning |
+| `knowledge_wal_mark_delete` | default group | `group_id` (`""` also maps to `liminis`); that group's checkpoints; admin, no warning |
+
+The nine **default group + warning** rows are exactly the defaulting write methods in the
+[write allow-list](#per-group-write-allow-list) table ("default group if omitted"). A test keeps
+this table, the dispatch classification and the warning behaviour in agreement.
+
+### Implicit default-group writes
+
+When a request to one of the nine defaulting write methods omits `group_id` — or sends `null` or a
+non-string — the write still goes to the default group `liminis`, exactly as before, and the
+successful response gains an additive `warnings` array:
+
+```json
+{"result": {"success": true, "…": "…",
+            "warnings": ["group_id omitted; wrote to default group \"liminis\". Third-party writers should pass their own group_id."]}}
+```
+
+Where the warning does **not** appear:
+
+- an explicit `group_id` string, including exactly `"liminis"` (a deliberate choice), and
+  `group_id: ""` (a distinct group, not the default);
+- error responses, `-32004` write refusals, and `Ok({"success": false, …})` soft failures such as
+  an unknown `scope` — nothing was written, so there is nothing to warn about;
+- reads, `knowledge_walk` and the admin defaulters in the table above;
+- daemon-internal writes (WAL replay, auto-heal, degraded-mode recovery), which are not client
+  requests.
+
+`dry_run` calls that would have written to the default group do warn, since the fallback occurred.
+The `warnings` array is separate from — and does not replace — the existing `warning` object on
+`knowledge_process_chunk` (oversized chunk) and `embedding_warning` on `knowledge_assert_entity`.
+The same field arrives in the MCP tool result's structured content, over standalone and attached
+`--mcp-stdio` alike.
+
+**Guidance for third-party writers.** The default group is the Liminis app's own graph: content
+written there is entity-resolved together with the user's notes. A client that is not the Liminis
+app should **always pass its own `group_id`**. To enforce that, start the daemon with
+`--writable-groups=<your-group>` (or `LCG_WRITABLE_GROUPS`; see [Configuration](configuration.md)
+and the [per-group write allow-list](#per-group-write-allow-list)): an omitted `group_id` resolves
+to `liminis`, so a write without one is refused unless `liminis` is itself listed — the default
+group must be listed to stay writable. See [ADR-0742](adr/0742-per-group-write-allow-list.md).
 
 ### Time: event time vs ingest time (`reference_time`, `ingested_at`)
 
@@ -1510,7 +1659,8 @@ unavailable.
 none, as for extraction):
 
 ```json
-{"group_id": "liminis", "has_ontology": true, "mode": "strict", "include_asserted": false,
+{"group_id": "liminis", "has_ontology": true, "mode": "strict", "ontology_hash": "9c1f…",
+ "include_asserted": false,
  "entity_type_count": 2, "entity_types": [
    {"name": "Employee", "description": "...", "parent": "Person", "identity": false, "extract": true}],
  "relation_type_count": 1, "relation_types": [
@@ -1521,7 +1671,9 @@ none, as for extraction):
 Types with `extract: false` (assert-only) are omitted unless `include_asserted: true`. A group with
 no ontology returns `has_ontology: false`, `mode: "free-form"` and empty lists — not an error.
 `source_type`/`target_type`, `inverse_aliases` and `symmetric` are always present and carry the
-declared values (#816).
+declared values (#816). `ontology_hash` is the semantic content hash of the ontology in effect for
+the group (`"none"` when there is none), whatever `include_asserted` says; clients use it to verify
+which ontology a service actually loaded (#881). An older service omits it.
 
 #### `knowledge_walk`
 
@@ -1536,6 +1688,7 @@ Request:
 | `query` | The question text; ranks the completion hop. |
 | `mode` | `single` (default, top 3 per hop), `list` (top 10) or `history` (top 10; includes invalidated edges). |
 | `direction_mode` | `soft` (default) or `hard`. |
+| `include_provenance` | Boolean, default `false`. When `true`, each returned edge also carries the episodes and source files behind it (see [Provenance](#provenance-include_provenance)). A non-boolean value is a `-32000` validation error. Clients detect support through the `walk_provenance` feature of `knowledge_capabilities`. |
 
 `hops` may be empty or omitted only when `answer_type` is an entity type and `query` is given — then only the
 completion hop runs, from the start entities. Anything else with empty `hops`, an unknown
@@ -1608,6 +1761,43 @@ Response:
   only the side that is present otherwise. Showing the reader each endpoint's type was E13's
   largest single gain.
 - An embedder failure is an explicit error, never a walk over zero vectors.
+
+##### Provenance (`include_provenance`)
+
+With `include_provenance: true`, every edge in every hop (completion-hop and self-loop edges
+included) gains three keys, appended after `signature_mismatch` and **always present** (empty list /
+`false`, never omitted):
+
+```json
+{"uuid": "...", "...": "...", "signature_mismatch": false,
+ "episodes": ["<episode uuid>", "..."], "source_files": ["notes/a.md", "https://h.example:8080/b.md"],
+ "episodes_truncated": false}
+```
+
+- `episodes`: the UUIDs of the edge's producing episodes (the `RelatesToNode_.episodes` column,
+  [ADR-0705](adr/0705-belief-time-separate-from-validity.md)) that are **live**: they still exist,
+  are not superseded and are not a pending document revision (the predicate belief and search use).
+  Superseded or deleted episodes are never listed, in any mode including `history`. Recorded order,
+  at most **20**. `episodes_truncated` is `true` only when *more than* 20 live producers exist.
+- `source_files`: the distinct sources of **all** live producers (not only the 20 shown), in
+  first-seen order: each episode's `source_file`
+  ([Source identity](#source-identity-source_file-and-chunk_id-issue-853), #853), or, for a legacy episode without one, its stored
+  `source_description` **unsplit** (the composed value cannot be reliably split).
+- An edge whose producers are all superseded or gone is still returned, with empty `episodes` and
+  `source_files` (no fallback to stale descriptions); provenance never filters, ranks or reorders
+  edges.
+- An edge with **no recorded producing episodes** (a legacy row, a direct assertion, a cross-group
+  edge) has empty `episodes` and falls back for `source_files`: first the edge's own
+  `source_descriptions`, otherwise, for an edge without a `warrant`, the sources of live episodes in
+  the edge's group that mention **both** endpoints (at most **20** distinct sources, ordered by
+  episode UUID; `episodes_truncated` is `true` when more were dropped). This is a heuristic for legacy
+  rows only; those episodes are not reported as producers.
+  The mention query itself is unbounded (every episode mentioning either endpoint is read), so a
+  hub entity mentioned by thousands of episodes costs proportionally even though at most 20 sources
+  are returned; only the liveness lookup is restricted to episodes mentioning both endpoints.
+- Without the flag (absent or `false`) the response is byte-identical to before, `facts_text` is
+  unchanged either way, and no extra lookups run. Episodes are looked up in the edge's own group.
+  The walk stays read-only. Fetch passages for a citation with the existing episode tools.
 
 **Known limit:** each hop loads every incident edge (with its fact embedding) of the frontier, so a
 hub entity with thousands of edges costs proportionally; the beam keeps later frontiers small. There

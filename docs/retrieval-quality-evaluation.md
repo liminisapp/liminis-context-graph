@@ -695,7 +695,15 @@ target/release/lcg-eval retrieval --corpus crates/eval/fixtures/retrieval-v2 \
 
 **The ontology hash.** The report records the ontology's hash and mode in its Reproduction block
 and in `meta.ontology_hash` / `meta.ontology_mode`. It is `lcg_core::ontology::content_hash`, the
-hash LCG already computes; a run without an ontology records `none`.
+hash LCG already computes; a run without an ontology records `none`. The value is the one the
+**service reports** (`knowledge_get_ontology.ontology_hash` for the eval group), not the staged
+file's: the spawned service is always given the eval workspace through `LIMINIS_WORKSPACE_ROOT`
+(overriding any value in your shell), and right after startup `lcg-eval` checks that the service
+loaded the staged ontology. If the service has no ontology, a different one, or is an older build
+that reports no hash, the run exits non-zero before any ingest with an error naming both hashes
+(#881). `graph-qa` applies the same check when its workspace has an ontology (the eval group's
+`.lcg/ontology/retrieval-eval.yaml`, else `.lcg/ontology.yaml`). The cassette sidecar and the
+kept-workspace manifest also record the service-reported hash.
 
 **The cassette check.** A cassette's records carry no ontology, so `--record-cassette C` also
 writes `C.meta.json` with the hash it was recorded under (`none` without an ontology). Replaying

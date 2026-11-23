@@ -60,7 +60,11 @@ pub async fn dispatch_with_policy(
     let start = Instant::now();
 
     let (response, success) = match handle(&req, Arc::clone(&state), progress_tx, policy).await {
-        Ok(result) => (IpcResponse::ok(req.id, result), true),
+        Ok(result) => {
+            let result =
+                crate::write_policy::annotate_implicit_default(&method, &req.params, result);
+            (IpcResponse::ok(req.id, result), true)
+        }
         Err(e) => {
             use crate::error::Error;
             match e {
@@ -193,7 +197,7 @@ async fn handle(
 
     match req.method.as_str() {
         "health_check" => handle_health_check(state).await,
-        "knowledge_status" => handle_knowledge_status(state).await,
+        "knowledge_status" => handle_knowledge_status(state, &req.params).await,
         "knowledge_capabilities" => Ok(crate::capabilities::payload()),
         "knowledge_process_chunk" => handle_knowledge_process_chunk(req, state).await,
         "knowledge_process_document" => {
@@ -519,9 +523,24 @@ enum StatusOutcome {
 /// `knowledge_status` wrapper: adds the additive top-level `providers` (#851) and
 /// `search_min_score_default` (issue
 /// #812) to every response shape (degraded, queryable, not-queryable) in one place.
-async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
+async fn handle_knowledge_status(state: Arc<AppState>, params: &Value) -> Result<Value, Error> {
+    // Opt-in (issue #884): only a literal JSON `true` turns the breakdown on; absent or any
+    // other value keeps the pre-existing behaviour and runs no extra query.
+    let want_breakdown = params.get("include_episode_breakdown") == Some(&Value::Bool(true));
     let providers = providers_payload(&state);
-    let mut result = handle_knowledge_status_inner(state).await?;
+    let mut result = handle_knowledge_status_inner(Arc::clone(&state)).await?;
+    if want_breakdown {
+        let queryable = result.get("queryable") == Some(&Value::Bool(true));
+        match episode_breakdown(&state, queryable).await {
+            Ok(b) => {
+                result["episode_breakdown"] = b;
+            }
+            Err(reason) => {
+                result["episode_breakdown"] = Value::Null;
+                result["episode_breakdown_unavailable"] = json!(reason);
+            }
+        }
+    }
     if let Some(obj) = result.as_object_mut() {
         obj.insert("providers".to_string(), providers);
         obj.insert(
@@ -530,6 +549,31 @@ async fn handle_knowledge_status(state: Arc<AppState>) -> Result<Value, Error> {
         );
     }
     Ok(result)
+}
+
+/// The opt-in `episode_breakdown` block (issue #884, ADR-0884). `Err(reason)` means unavailable
+/// (degraded, not queryable, or a scan error); it never fails the surrounding status call
+/// (FR-011). Runs in its own read-locked pass so episodes, `MENTIONS` and edges are consistent
+/// with each other; writers are blocked while it runs, which is why it is opt-in.
+async fn episode_breakdown(state: &Arc<AppState>, queryable: bool) -> Result<Value, String> {
+    if !queryable {
+        return Err("database not queryable".to_string());
+    }
+    let db = state
+        .db
+        .load_full()
+        .ok_or_else(|| "database not open".to_string())?;
+    let _guard = state.write_lock.read().await;
+    // Taken after the lock is held so `as_of_us` is the instant the scan actually evaluates
+    // liveness at, not an earlier one a slow writer made stale.
+    let now_us = chrono::Utc::now().timestamp_micros();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.connect()?;
+        crate::status_breakdown::compute(&conn, now_us).map(|b| b.to_json())
+    })
+    .await
+    .map_err(|e| format!("breakdown task failed: {e}"))?
+    .map_err(|e| format!("breakdown scan failed: {e}"))
 }
 
 async fn handle_knowledge_status_inner(state: Arc<AppState>) -> Result<Value, Error> {
@@ -2795,12 +2839,16 @@ async fn handle_list_relationships(req: &IpcRequest, state: Arc<AppState>) -> Re
 /// maps the in-memory `Ontology` to the wire shape. Signatures are the declared
 /// `source_types`/`target_types` lists, alongside `inverse_aliases` and `symmetric` (#816).
 ///
-/// `extract: false` (assert-only) types are omitted unless `include_asserted`.
+/// `extract: false` (assert-only) types are omitted unless `include_asserted`. `ontology_hash`
+/// is the semantic [`crate::ontology::content_hash`] of the *whole* ontology (`"none"` when there
+/// is none) — independent of `include_asserted` — so a client can verify which ontology the
+/// service actually loaded (#881).
 fn ontology_view(onto: Option<&crate::ontology::Ontology>, include_asserted: bool) -> Value {
     let Some(o) = onto else {
         return json!({
             "has_ontology": false,
             "mode": "free-form",
+            "ontology_hash": crate::ontology::content_hash(None),
             "entity_types": [],
             "entity_type_count": 0,
             "relation_types": [],
@@ -2842,6 +2890,7 @@ fn ontology_view(onto: Option<&crate::ontology::Ontology>, include_asserted: boo
     json!({
         "has_ontology": true,
         "mode": o.mode.to_string(),
+        "ontology_hash": crate::ontology::content_hash(Some(o)),
         "entity_type_count": entity_types.len(),
         "entity_types": entity_types,
         "relation_type_count": relation_types.len(),
@@ -2901,6 +2950,52 @@ impl crate::walk::WalkGraph for DbWalkGraph<'_, '_> {
         let mut out = Vec::new();
         for chunk in uuids.chunks(200) {
             out.extend(self.conn.get_entities_by_uuids(chunk)?);
+        }
+        Ok(out)
+    }
+
+    /// Live episodes only (#860): `EpisodeSupersession::live_at(now)` — the predicate belief,
+    /// search and rerank use — so a superseded, pending-revision or hard-deleted episode is
+    /// absent from the result.
+    fn live_episode_sources(
+        &self,
+        uuids: &[String],
+    ) -> Result<std::collections::HashMap<String, crate::walk::EpisodeSource>, Error> {
+        let now_us = chrono::Utc::now().timestamp_micros();
+        let mut out = std::collections::HashMap::new();
+        for chunk in uuids.chunks(200) {
+            for (uuid, p) in self.conn.get_episode_provenance(chunk)? {
+                if p.supersession.live_at(now_us) {
+                    out.insert(
+                        uuid,
+                        crate::walk::EpisodeSource {
+                            group_id: p.supersession.group_id,
+                            source_file: p.source_file,
+                            source_description: p.source_description,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn mentioning_episodes(
+        &self,
+        entity_uuids: &[String],
+        group_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>, Error> {
+        let gids: Vec<&str> = group_ids.iter().map(String::as_str).collect();
+        let mut out: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for chunk in entity_uuids.chunks(200) {
+            let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+            let info = self
+                .conn
+                .get_episode_info_for_entities(&refs, Some(&gids))?;
+            for (ent, (eps, _)) in info {
+                out.entry(ent).or_default().extend(eps);
+            }
         }
         Ok(out)
     }

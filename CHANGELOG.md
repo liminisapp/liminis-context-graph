@@ -25,6 +25,28 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ### Added
 
+- **`lcg-eval` verifies the ontology the service loaded, and reports that (#881, ADR-0881).**
+  `knowledge_get_ontology` gains an additive `ontology_hash` (the semantic `content_hash` of the
+  loaded ontology, `"none"` without one; independent of `include_asserted`). After startup,
+  `lcg-eval retrieval --ontology` (and `graph-qa` on a workspace that has an ontology) queries it for
+  the eval group and exits non-zero, before any ingest, when the service has no ontology, a different
+  hash, or an older build that reports no hash — the error names both hashes. `report.md`,
+  `report.json` (`meta.ontology_hash` is `"none"` for a free-form run, no longer `null`), the
+  cassette `.meta.json` and the kept-workspace manifest now state the hash and mode the service
+  reported rather than the staged file's.
+
+- **`knowledge_status` per-group episode breakdown (#884, ADR-0884).** ADR-0828's reopening
+  trigger "superseded : live episodes exceeds 2 : 1 in any group" could not be checked because
+  `episode_count` is a total.
+  - New opt-in `include_episode_breakdown: true` adds `episode_breakdown: {as_of_us, groups:
+    [{group_id, live, superseded, pending, only_superseded_entities, only_superseded_edges}]}`.
+    Liveness is `EpisodeSupersession::live_at` (pending revisions are counted separately); edges
+    use the belief rule, entities need a superseded and no live `MENTIONS`. Opt-in because it scans
+    every episode, `MENTIONS` edge and edge under the read lock. Without the flag the response is
+    unchanged; when it cannot be computed it is `null` with `episode_breakdown_unavailable`.
+  - `knowledge_capabilities` lists the new feature `status_episode_breakdown`. Read-only; no
+    `PROTOCOL_VERSION` change.
+
 - **`find_entities` `include_episodes`, and a `uuids` filter on `get_episodes` (#857, ADR-0857).**
   `knowledge_find_entities` returned `episode_uuids` and `source_descriptions` always empty while
   `get_entity_neighbors` and `get_entities_by_source` filled them, so the same field meant
@@ -39,6 +61,16 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   - `knowledge_capabilities` lists the new feature `entity_provenance`. The reference docs and MCP
     tool descriptions now say when the provenance fields are empty and when they are filled.
 
+- **`knowledge_walk` `include_provenance`: producing episodes and source files on each edge
+  (#860, implements #839).** An opt-in `include_provenance: true` makes every returned edge carry
+  `episodes` (UUIDs of its **live** producing episodes only, at most 20), `episodes_truncated`
+  (true when more than 20 live producers exist) and `source_files` (each live producer's
+  `source_file`, or for a legacy episode its stored `source_description` unsplit; an edge with no
+  recorded producers falls back to its legacy sources, capped at 20 — on that path
+  `episodes_truncated` means sources were dropped, not that live producers exist), so a walk
+  result can be turned into citations. Superseded or deleted episodes are never cited. Without the flag the response is
+  byte-identical to before. `knowledge_capabilities` advertises the `walk_provenance` feature.
+  The MCP tool schema, the IPC/MCP reference, `docs/llms-full.txt` and the README are updated.
 - **Graph question answering eval: `lcg-eval graph-qa`, ontology ingest and kept workspaces
   (#821, ADR-0821).** E13's graph question-answering eval (#815) ran only as scratch Python, so
   none of its numbers could be reproduced and `knowledge_walk` (#820) had no regression check.
@@ -282,6 +314,12 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   unchanged.
 
 ### Fixed
+
+- **`lcg-eval --ontology` never reached the spawned service (#881).** `spawn_service` staged
+  `.lcg/ontology.yaml` but did not set `LIMINIS_WORKSPACE_ROOT`, the only way the service finds its
+  ontology, so `retrieval --ontology` and `graph-qa` extracted free-form while the output claimed
+  the ontology. The variable is now always set to the eval workspace, overriding any inherited
+  value. Unreleased regression from #821 (#842); the service is unaffected.
 
 - **`knowledge_delete_by_source` no longer deletes other sources' episodes, and
   `knowledge_get_entities_by_source` returns only the requested source's live entities** (#829,

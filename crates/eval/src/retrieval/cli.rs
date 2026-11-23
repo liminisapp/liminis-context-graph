@@ -182,7 +182,8 @@ OPTIONS:
                                inside a git working tree so nothing private can be committed.
     --ontology <FILE>          Ingest under this ontology: every extraction call is constrained by
                                it (written to the workspace as .lcg/ontology.yaml). The report
-                               records its hash and mode. A replayed cassette whose sidecar
+                               records the hash and mode the service reports; the run fails before
+                               ingest if the service did not load this ontology. A replayed cassette whose sidecar
                                (<cassette>.meta.json) records a different ontology hash fails
                                before ingest; a cassette with no sidecar is replayed with a warning.
     --ontology-mode <open|strict>
