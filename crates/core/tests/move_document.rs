@@ -1056,6 +1056,16 @@ async fn status_and_lint_name_the_new_identity_straight_away() {
     let f = fx();
     ingest(&f.state, "meetings/m.md", "meetings/m.md", NOTE).await;
     let before = call("knowledge_status", json!({}), &f.state).await;
+    let lint_before = call("knowledge_lint", json!({"group_ids": [G]}), &f.state).await;
+    // The lint must have something to cite, or the checks below prove nothing.
+    assert!(
+        lint_before["count"].as_u64().unwrap() > 0,
+        "the fixture must produce lint findings: {lint_before}"
+    );
+    assert!(
+        lint_before.to_string().contains("meetings/m.md"),
+        "{lint_before}"
+    );
     move_docs(
         &f.state,
         vec![mv(
@@ -1072,6 +1082,8 @@ async fn status_and_lint_name_the_new_identity_straight_away() {
     assert_eq!(before["relationship_count"], after["relationship_count"]);
 
     let lint = call("knowledge_lint", json!({"group_ids": [G]}), &f.state).await;
+    assert_eq!(lint["count"], lint_before["count"], "{lint}");
+    assert!(lint.to_string().contains("archive/m.md"), "{lint}");
     assert!(!lint.to_string().contains("meetings/m.md"), "{lint}");
 }
 
@@ -1130,7 +1142,19 @@ async fn stale_derived_page_reports_the_moved_document() {
         &f.state,
     )
     .await;
+    assert_eq!(
+        lint_before["count"], 1,
+        "the corrected note makes the page stale: {lint_before}"
+    );
     assert_eq!(lint_before["count"], lint_after["count"], "{lint_after}");
+    // Before the move the finding names the note; after it, only the new `doc_id`.
+    let before = lint_before["findings"][0]["citations"]["documents"].to_string();
+    assert!(before.contains("\"note\""), "{before}");
+    let after = lint_after["findings"][0]["citations"]["documents"].to_string();
+    assert!(
+        after.contains("\"note-moved\"") && !after.contains("\"note\""),
+        "{after}"
+    );
     let text = lint_after.to_string();
     assert!(
         !text.contains("\"note\""),
