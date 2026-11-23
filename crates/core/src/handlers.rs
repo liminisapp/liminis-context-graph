@@ -3760,12 +3760,15 @@ fn plan_move_batch(
     Ok(plan)
 }
 
-/// `knowledge_move_document` (issue #903, ADR-0903): re-keys a document's live episodes from one
+/// `knowledge_move_document` (issue #903, ADR-0903): re-keys a document's episodes from one
 /// identity (`doc_id` and/or source path) to another **without re-extraction** — no extractor,
-/// LLM or embedder call. Rewrites `doc_id`, `source_file`, `source_description` and (with a
-/// `chunk_id_prefix`) the chunk id on each live episode; re-keys the `DocRevision` and
-/// supersession state keyed by `doc_id` so the next ingest at the new identity finds its baseline.
-/// Entities, relationships, embeddings, belief history and origin are untouched.
+/// LLM or embedder call. Live episodes identify the document and its superseded revisions move
+/// with it. Rewrites `doc_id`, `source_file`, `source_description` and (with a `chunk_id_prefix`)
+/// the chunk id on each; re-keys the `DocRevision` and supersession state keyed by `doc_id` so the
+/// next ingest at the new identity finds its baseline. Entities, relationships, embeddings, belief
+/// history and origin are untouched.
+///
+/// The destination must be empty: no episodes or document state of any kind (ADR-0903 decision 5).
 ///
 /// Batch form: `moves` is validated as a whole against the state before the batch, under the
 /// per-document locks and the write lock, before the first write; any refusal changes nothing and
