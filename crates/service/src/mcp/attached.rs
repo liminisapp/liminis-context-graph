@@ -156,7 +156,15 @@ impl McpBackend for AttachedBackend {
     ) -> IpcResponse {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        if progress.is_some() {
+        // The remote cancels `process_chunk` / `process_document` when the connection drops
+        // (issue #861), and this backend drops it after `call_timeout` of silence. Those two are
+        // not MCP-streaming methods (`progress` is `None`), so ask the remote for progress frames
+        // anyway: its phase and heartbeat frames reset the per-line idle timeout for as long as the
+        // request is genuinely running, and are discarded below. Without them a slow ingest would
+        // be cancelled at the timeout and could never commit.
+        let wants_frames =
+            progress.is_some() || crate::connection::COOPERATIVE_CANCEL_METHODS.contains(&method);
+        if wants_frames {
             match params {
                 Value::Object(ref mut map) => {
                     map.entry("_progress_token").or_insert(Value::Bool(true));

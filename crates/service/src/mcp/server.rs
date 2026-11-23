@@ -229,7 +229,10 @@ impl<B: McpBackend> ServerHandler for LcgMcpServer<B> {
         _context: NotificationContext<RoleServer>,
     ) {
         // No requirement to make an in-flight operation cancellable (issue's Edge Cases):
-        // the underlying handlers::dispatch call runs to completion regardless. This override
+        // the underlying handlers::dispatch call runs to completion regardless. (In attached mode
+        // the remote cancels `process_chunk` / `process_document` only if this process drops its
+        // connection — #861 — which the attached backend avoids by requesting progress frames
+        // that keep its idle timeout from firing.) This override
         // exists only to document that a client disconnecting mid-stream is a known, handled
         // no-op rather than an oversight — the transport does not crash or leak the operation,
         // it simply keeps running to completion and its result (and any further progress

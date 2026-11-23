@@ -42,6 +42,71 @@ with open(endpoint, "r+b", buffering=0) as pipe:
 
 In Node, `net.createConnection(endpoint)` accepts the pipe name directly.
 
+### Connections, concurrency and timeouts (issue #861)
+
+**One request at a time per connection.** The service handles the requests on a single connection
+strictly in order: it reads one line, runs it to completion, writes the response, then reads the
+next. Pipelined requests wait unserved until the current one finishes (while a
+`knowledge_process_chunk` or `knowledge_process_document` is running, the service watches the socket
+and holds up to 8 pipelined lines in memory; it stops reading beyond that). So a `knowledge_find_entities` sent on the same
+connection as a slow `knowledge_process_chunk` **waits behind the ingest**; a read is only fast on
+a connection that is not busy ingesting. Connections do not block one another (reads never take the
+write lock, and each connection has its own task), so:
+
+- **Open several connections** to run ingest in parallel, or to keep reads responsive while an
+  ingest is running: one connection per concurrent request, or a small pool. Requests that write
+  still serialise on the per-group write lock inside the service; parallelism pays off in the
+  embed/extract phase, which is the slow one.
+- Correlate by connection, not by id: `_progress_token` frames (below) do not echo the token, which
+  is safe because a connection never has two requests in flight.
+
+**Disconnect cancels an in-flight ingest (feature `cancel_on_disconnect`).** While a
+`knowledge_process_chunk` or `knowledge_process_document` request is running, the service watches
+its connection. If the client disconnects (the socket closes, errors, or a progress write fails),
+the request is cancelled at its next cancellation point **before commit** and the service logs
+`client disconnected; cancelling in-flight <method> (cause=client_disconnect)`. A cancelled
+`knowledge_process_chunk` writes no episode, entity, edge or WAL record; a cancelled
+`knowledge_process_document` leaves the units it had already committed in place (see below). Either
+way the request releases its locks and leaves the service healthy.
+**Once the commit has started it finishes**, whether or not the client is still there: the commit
+is never interrupted. This applies to streaming (`_progress_token`) and plain requests alike, and
+to requests queued behind another on the same connection (they do not start). Other methods are
+not cancelled on disconnect and run to completion as before.
+
+- An in-flight LLM call is abandoned at the next cancellation point, not aborted instantly; a
+  provider may still bill for a request it had already received.
+- `knowledge_process_document` commits per extraction unit's episode as it goes; units that were
+  already written stay written, and the revision itself is only committed in its final step, so a
+  cancelled document ingest retires nothing. Resubmit the document to finish it.
+- **A half-close is supported.** A client that sends its request and then half-closes its write
+  side (`shutdown(SHUT_WR)`, `socat`, `nc -N`, `printf '{...}\n' | nc -U ...`) can still receive,
+  so its `process_chunk` / `process_document` request runs to completion and is answered, and
+  the connection then closes. The service cancels only when the peer has *fully* closed (it can
+  no longer receive: Python's `socket.close()` after a timeout is the case this exists for), and
+  it keeps checking while the request runs, so a client that half-closes and later closes fully
+  is cancelled then. On a Windows named pipe there is no half-close: EOF means the client closed.
+  A socket read error while the request runs is treated as a disconnect. (A pipelined line that
+  is not valid UTF-8 is not: the in-flight request finishes and is answered, then the connection
+  closes.)
+- **Keep reading while a request runs.** Progress and heartbeat frames are written while the
+  request executes, and a frame that cannot be written within 5 s (a client that has stopped
+  reading and let its socket buffer fill) is treated as a disconnect, so the request is cancelled
+  before commit. A commit that has already started still finishes.
+
+**Choosing a timeout and retrying.** Ingest latency is dominated by the embedder and the LLM, so
+set the client timeout to the slowest chunk you expect (or stream with `_progress_token` and treat
+silence between frames as the timeout). When a call times out, close the connection and retry on a
+new one:
+
+- If the timeout fired during embed or extract, the disconnect cancelled the original, so the retry
+  extracts the chunk **once**, not twice.
+- If it fired during commit, the original finishes anyway and **may have succeeded**. "During
+  commit" starts when the `commit` frame is sent (the group write lock is held). A request that is
+  still waiting for the lock behind another writer has not committed and is cancelled like one in
+  embed or extract. The retry is
+  still safe: an identical resubmission is a no-op (`unchanged_noop`, issue #858) that returns the
+  existing episode, and a changed one supersedes it as usual.
+
 ## IPC methods (60)
 
 The socket dispatch handles **60 methods**: 59 `knowledge_*` methods plus `health_check`.
@@ -165,7 +230,7 @@ during a rebuild and under any `--writable-groups` policy.
 
 ```json
 {"server_version": "0.19.1", "protocol_version": 1,
- "features": ["chunk_supersede", "entity_provenance", "episode_source_fields",
+ "features": ["cancel_on_disconnect", "chunk_progress", "chunk_supersede", "entity_provenance", "episode_source_fields",
               "exact_source_match", "hybrid_passage_search", "implicit_default_group_warning",
               "lint", "origin", "passage_legs", "process_document", "ready_for_reads",
               "retire_document", "search_min_score_env", "status_episode_breakdown", "test_providers",
@@ -193,6 +258,8 @@ by #885 name capabilities that shipped in 0.19.2 without one.
 
 | Feature | Introduced | Meaning |
 |---|---|---|
+| `cancel_on_disconnect` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | A client disconnect cancels an in-flight `knowledge_process_chunk` or `knowledge_process_document` before commit; a commit that has started finishes. |
+| `chunk_progress` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | `knowledge_process_chunk` streams `embed`, `extract` and `commit` progress frames when given a `_progress_token`. |
 | `chunk_supersede` | closest known origin: #785 ([ADR-0292](adr/0292-chunk-ingest-never-supersedes-unattributed-episodes.md)); seeded by #854 | Chunk ingest can supersede earlier episodes of the same document. |
 | `entity_provenance` | #857 ([ADR-0857](adr/0857-find-entities-episode-provenance.md)) | `knowledge_find_entities` can return episode provenance and filter by `uuids`. |
 | `episode_source_fields` | #853 ([ADR-0853](adr/0853-episode-source-identity-and-exact-source-matching.md)) | Episodes carry stored `source_file` and `chunk_id`. Independent of `exact_source_match`. |
@@ -409,6 +476,12 @@ that file is the canonical source for per-tool descriptions; they are not duplic
     matter how long the call runs in total — only genuine silence (no output at all for the full
     timeout window) trips it. If the remote stops responding mid-call (e.g. it crashes), the
     attached client fails that call with a clean timeout error rather than blocking forever.
+    Keep it comfortably **above 10 s**: for `knowledge_process_chunk` and
+    `knowledge_process_document` the attached client asks the remote for progress frames, and the
+    remote's only sign of life during a long silent stretch (e.g. LLM extraction) is a fixed
+    10 s `heartbeat` frame. A shorter timeout drops the connection mid-ingest, and the remote
+    then cancels that ingest before commit (cancel-on-disconnect, ADR-0861) instead of finishing
+    it in the background as it did before.
   - **Reconnect and retry.** If the connection to the remote breaks, the client transparently
     re-dials the same socket path rather than staying wedged. If the break is detected while
     writing the outgoing request — treated as safe to retry, since the write failing is the
@@ -1261,9 +1334,14 @@ document are serialized.
 | `mode_transition_superseded_episode_uuids`, `stale_superseded_episode_uuids` | Chunk-mode episodes of the document replaced on transition; overlap left by an interrupted earlier commit, repaired now. |
 | `nodes_extracted`, `edges_extracted`, `duration_seconds` | Totals. |
 
+Disconnecting cancels the call before its commit step
+(see [Connections, concurrency and timeouts](#connections-concurrency-and-timeouts-issue-861)).
 With `_progress_token`, progress lines stream before the result: `{"type":"progress","phase":
 "chunked"|"extracting"|"committing", "chunk_index", "chunk_count", "classification", "unit",
-"units", "extracted", "total"}`.
+"units", "extracted", "total"}`. While a call that sent a token is otherwise silent (an extraction
+slower than about 10 s), the service also writes `{"type":"progress","phase":"heartbeat"}` about
+every 10 s, a frame without the document fields above; ignore unknown `phase` values. Without the
+token no frame is sent.
 
 **Episode fields.** A document-mode episode read by `knowledge_get_episodes` also carries
 `revision_id`, `revision_committed_at` (absent while pending), `byte_start` / `byte_end` (its span
@@ -2293,6 +2371,23 @@ completely unaffected: pointers only ever exist on edges created through this to
 
 ### Ingestion results (`process_chunk`)
 
+**Progress (issue #861, feature `chunk_progress`).** With a non-null `_progress_token` param,
+`knowledge_process_chunk` streams `{"type":"progress","phase":"embed"|"extract"|"commit"}` lines
+before the terminal result, in that order, each only if the phase runs. `embed` and `extract` are
+emitted together as start-of-phase markers (the service runs them concurrently); `commit` is sent
+once the group write lock is held, after which the write cannot be cancelled: a request still
+waiting for the lock behind another writer has not sent `commit` and is still cancellable. A request
+that returns early sends no frame for a phase that never ran: an unchanged resubmission
+(`unchanged_noop`) or a validation error sends none, only the terminal response. Without the token
+nothing changes. These names are the single-chunk vocabulary; `knowledge_process_document` keeps
+its own (`chunked` / `extracting` / `committing`). The frames carry no token; correlate by
+connection (see [Connections, concurrency and timeouts](#connections-concurrency-and-timeouts-issue-861)).
+A client that disconnects mid-request cancels it before commit (feature `cancel_on_disconnect`).
+While a request that sent a token is otherwise silent (the LLM call between `extract` and
+`commit`), the service writes `{"type":"progress","phase":"heartbeat"}` about every 10 s, so a
+client with a per-line idle read timeout (as the attached MCP backend has, 30 s by default) keeps
+its connection and the ingest alive. Ignore unknown `phase` values; token-less requests get none.
+
 `knowledge_process_chunk` reports what it could not write, not only how much. Two additive
 result fields exist for that, both introduced in 0.13.2.
 
@@ -2416,6 +2511,10 @@ result fields exist for that, both introduced in 0.13.2.
   were all vetoed. The tallies are per chunk; sum them across chunks for a run total.
 
 ### Progress notifications
+
+Over the socket, `knowledge_process_chunk` and `knowledge_process_document` also stream progress
+when given `_progress_token`; see [Ingestion results](#ingestion-results-process_chunk). Those two
+are not bridged to MCP progress notifications.
 
 The seven long-running operations — `knowledge_rebuild_from_wal`, `knowledge_canonicalize_relations`,
 `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`,

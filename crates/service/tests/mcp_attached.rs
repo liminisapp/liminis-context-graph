@@ -315,6 +315,96 @@ fn attached_mode_timeout_invalidates_connection_and_next_call_reconnects() {
     mcp.shutdown();
 }
 
+/// Spawns a stub "remote service" that behaves like the real one for a slow, cooperative ingest:
+/// if (and only if) the request carries a `_progress_token`, it keeps the connection busy with a
+/// progress frame every `frame_every` for `total`, then answers. Without a token it stays silent
+/// for `total` (as the service did before #861 for a token-less request). The request line it saw
+/// is recorded so the test can assert the token was sent.
+fn spawn_slow_ingest_remote(
+    dir: &TempDir,
+    frame_every: Duration,
+    total: Duration,
+) -> (PathBuf, Arc<std::sync::Mutex<Option<serde_json::Value>>>) {
+    let socket_path = dir.path().join("slow-ingest.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind slow-ingest stub socket");
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let seen_w = Arc::clone(&seen);
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stub stream"));
+            let mut writer = stream;
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                return;
+            }
+            let Ok(req) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                return;
+            };
+            let id = req["id"].clone();
+            let streaming = !req["params"]["_progress_token"].is_null();
+            *seen_w.lock().unwrap() = Some(req);
+            let start = Instant::now();
+            while start.elapsed() < total {
+                std::thread::sleep(frame_every);
+                if streaming
+                    && writeln!(
+                        writer,
+                        "{}",
+                        json!({"type": "progress", "phase": "heartbeat"})
+                    )
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = writeln!(
+                writer,
+                "{}",
+                json!({"jsonrpc": "2.0", "id": id, "result": {"success": true}})
+            );
+        }
+    });
+    (socket_path, seen)
+}
+
+/// Issue #861: the remote now cancels `process_chunk` when the connection drops, and the attached
+/// backend drops it after `call_timeout` of silence. An ingest that runs longer than the timeout
+/// must therefore keep receiving frames: the backend asks for them (`_progress_token`) even though
+/// `process_chunk` is not an MCP-streaming method, and they keep its idle timer from firing.
+#[test]
+fn attached_mode_slow_cooperative_ingest_outlives_the_idle_timeout() {
+    let dir = TempDir::new().unwrap();
+    let (socket_path, seen) = spawn_slow_ingest_remote(
+        &dir,
+        Duration::from_millis(150),
+        Duration::from_millis(1500),
+    );
+
+    let mut cmd = Command::new(binary_path());
+    cmd.env("LCG_ATTACHED_CALL_TIMEOUT_MS", "500");
+    cmd.args(["--mcp-stdio", "--connect", socket_path.to_str().unwrap()]);
+    let mut mcp = McpClient::spawn(cmd);
+    mcp.initialize();
+
+    let resp = mcp.call_tool(
+        "knowledge_process_chunk",
+        json!({"chunk_text": "slow chunk", "chunk_id": "c1", "source_file": "s.md"}),
+    );
+    assert_eq!(
+        resp["result"]["isError"].as_bool(),
+        Some(false),
+        "a 1.5 s ingest must outlive the 500 ms idle timeout: {resp:?}"
+    );
+    let req = seen.lock().unwrap().clone().expect("remote saw a request");
+    assert_eq!(req["method"], "knowledge_process_chunk");
+    assert!(
+        !req["params"]["_progress_token"].is_null(),
+        "attached backend must request progress frames for cooperative methods: {req}"
+    );
+
+    mcp.shutdown();
+}
+
 #[test]
 fn attached_mode_call_times_out_on_hung_remote_instead_of_blocking_forever() {
     let dir = TempDir::new().unwrap();

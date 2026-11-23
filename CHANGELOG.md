@@ -98,6 +98,28 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   to a pruned entity). A future-dated retire can be moved earlier by retiring again, does not block a
   correction of the document, and a no-op retire reports `existing_retirement_at`.
 
+- **`knowledge_process_chunk` streams progress, and an abandoned ingest is cancelled before commit
+  (#861, ADR-0861; part 1 of #836).** With `_progress_token`, `process_chunk` sends
+  `{"type":"progress","phase":"embed"|"extract"|"commit"}` frames before its result (feature
+  `chunk_progress`). When a client disconnects while a `process_chunk` or `process_document`
+  request is in flight, the service cancels it at the next cancellation point before commit: no
+  episode, no WAL record, locks released, and a retry on a new connection extracts once; a commit
+  that has started finishes (feature `cancel_on_disconnect`). For `process_chunk` a cancel leaves
+  no episode and no WAL record; a cancelled `process_document` keeps the unit episodes it had
+  already committed (the revision itself retires nothing). The `commit` frame is sent once the
+  write lock is held. **Additive**: no `protocol_version` bump and no new request or response
+  fields. Behaviour changes for every client of these two methods, with or without a token, in one
+  way only: a client that *fully* closes its connection mid-request now has the request cancelled
+  before commit. A client that merely half-closes its write side after sending (`socat`,
+  `nc -N`, `shutdown(SHUT_WR)`, `printf ... | nc -U`) is not affected: its request still runs and
+  is answered. The attached MCP
+  backend now requests progress frames for these methods (a streaming `process_chunk` or
+  `process_document` caller also gets a `heartbeat` progress frame every 10 s while silent; a
+  new `phase` value for existing `process_document` streaming clients), so ingests slower than its 30 s idle
+  timeout are not dropped and cancelled. The IPC reference
+  gains a "Connections, concurrency and timeouts" section: one request at a time per connection,
+  use several connections for parallel ingest or reads alongside ingest, and timeout/retry
+  guidance. `deadline_ms`, joining a duplicate in-flight resubmit and pipelining remain deferred.
 - **`lcg-eval` verifies the ontology the service loaded, and reports that (#881, ADR-0881).**
   `knowledge_get_ontology` gains an additive `ontology_hash` (the semantic `content_hash` of the
   loaded ontology, `"none"` without one; independent of `include_asserted`). After startup,
