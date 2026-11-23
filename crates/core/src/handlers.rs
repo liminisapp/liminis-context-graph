@@ -55,88 +55,122 @@ pub async fn dispatch_with_policy(
     progress_tx: Option<UnboundedSender<Value>>,
     policy: Option<&crate::write_policy::WritableGroups>,
 ) -> IpcResponse {
+    let cancel = state.cancel_token.clone();
+    dispatch_inner(req, state, progress_tx, policy, cancel).await
+}
+
+/// [`dispatch`] with a per-request cancellation token (issue #861, ADR-0861).
+///
+/// The connection layer passes a child of `state.cancel_token` so process shutdown still
+/// cascades, while a client disconnect cancels just this request. Only
+/// `knowledge_process_chunk` and `knowledge_process_document` honour it, at their pre-commit
+/// cancellation points; every other method behaves exactly as under [`dispatch`].
+pub async fn dispatch_cancellable(
+    req: IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> IpcResponse {
+    dispatch_inner(
+        req,
+        state,
+        progress_tx,
+        crate::write_policy::current(),
+        cancel,
+    )
+    .await
+}
+
+async fn dispatch_inner(
+    req: IpcRequest,
+    state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+    policy: Option<&crate::write_policy::WritableGroups>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> IpcResponse {
     let method = req.method.clone();
     let request_id = req.id.clone();
     let start = Instant::now();
 
-    let (response, success) = match handle(&req, Arc::clone(&state), progress_tx, policy).await {
-        Ok(result) => {
-            let result =
-                crate::write_policy::annotate_implicit_default(&method, &req.params, result);
-            (IpcResponse::ok(req.id, result), true)
-        }
-        Err(e) => {
-            use crate::error::Error;
-            match e {
-                Error::DbUnavailable(ref reason) => (
-                    IpcResponse::err_with_data(
-                        req.id,
-                        -32001,
-                        "DB unavailable, recovery required",
-                        json!({"reason": reason}),
-                    ),
-                    false,
-                ),
-                // A name-only resolution that matched several kinds (issue #615, D2/FR-006): a
-                // distinct code with the candidates as structured data, so a caller can retry
-                // with an explicit `kind` instead of parsing the message.
-                Error::AmbiguousEntity {
-                    ref name,
-                    ref group_id,
-                    ref candidates,
-                } => (
-                    IpcResponse::err_with_data(
-                        req.id,
-                        -32002,
-                        e.to_string(),
-                        json!({
-                            "reason": "ambiguous_entity",
-                            "name": name,
-                            "group_id": group_id,
-                            "candidates": candidates,
-                        }),
-                    ),
-                    false,
-                ),
-                // A group's identity-bearing set changed in a way that would reinterpret existing
-                // entities (issue #616, D1). Structured so a client can name the label.
-                Error::IdentitySetChangeRefused {
-                    ref group_id,
-                    ref label,
-                    count,
-                    ..
-                } => (
-                    IpcResponse::err_with_data(
-                        req.id,
-                        -32003,
-                        e.to_string(),
-                        json!({
-                            "reason": "identity_set_change_refused",
-                            "group_id": group_id,
-                            "label": label,
-                            "entity_count": count,
-                        }),
-                    ),
-                    false,
-                ),
-                // A write refused by the daemon-wide `--writable-groups` allow-list (issue #742).
-                Error::WriteRefused {
-                    reason,
-                    ref group_ids,
-                    ..
-                } => (
-                    IpcResponse::err_with_data(
-                        req.id,
-                        -32004,
-                        e.to_string(),
-                        crate::write_policy::refusal_data(reason, group_ids, policy),
-                    ),
-                    false,
-                ),
-                _ => (IpcResponse::err(req.id, -32000, e.to_string()), false),
+    let (response, success) =
+        match handle(&req, Arc::clone(&state), progress_tx, policy, cancel).await {
+            Ok(result) => {
+                let result =
+                    crate::write_policy::annotate_implicit_default(&method, &req.params, result);
+                (IpcResponse::ok(req.id, result), true)
             }
-        }
-    };
+            Err(e) => {
+                use crate::error::Error;
+                match e {
+                    Error::DbUnavailable(ref reason) => (
+                        IpcResponse::err_with_data(
+                            req.id,
+                            -32001,
+                            "DB unavailable, recovery required",
+                            json!({"reason": reason}),
+                        ),
+                        false,
+                    ),
+                    // A name-only resolution that matched several kinds (issue #615, D2/FR-006): a
+                    // distinct code with the candidates as structured data, so a caller can retry
+                    // with an explicit `kind` instead of parsing the message.
+                    Error::AmbiguousEntity {
+                        ref name,
+                        ref group_id,
+                        ref candidates,
+                    } => (
+                        IpcResponse::err_with_data(
+                            req.id,
+                            -32002,
+                            e.to_string(),
+                            json!({
+                                "reason": "ambiguous_entity",
+                                "name": name,
+                                "group_id": group_id,
+                                "candidates": candidates,
+                            }),
+                        ),
+                        false,
+                    ),
+                    // A group's identity-bearing set changed in a way that would reinterpret existing
+                    // entities (issue #616, D1). Structured so a client can name the label.
+                    Error::IdentitySetChangeRefused {
+                        ref group_id,
+                        ref label,
+                        count,
+                        ..
+                    } => (
+                        IpcResponse::err_with_data(
+                            req.id,
+                            -32003,
+                            e.to_string(),
+                            json!({
+                                "reason": "identity_set_change_refused",
+                                "group_id": group_id,
+                                "label": label,
+                                "entity_count": count,
+                            }),
+                        ),
+                        false,
+                    ),
+                    // A write refused by the daemon-wide `--writable-groups` allow-list (issue #742).
+                    Error::WriteRefused {
+                        reason,
+                        ref group_ids,
+                        ..
+                    } => (
+                        IpcResponse::err_with_data(
+                            req.id,
+                            -32004,
+                            e.to_string(),
+                            crate::write_policy::refusal_data(reason, group_ids, policy),
+                        ),
+                        false,
+                    ),
+                    _ => (IpcResponse::err(req.id, -32000, e.to_string()), false),
+                }
+            }
+        };
 
     state.sink.emit(TelemetryEvent::IpcCall {
         ts_ms: now_ms(),
@@ -154,6 +188,7 @@ async fn handle(
     state: Arc<AppState>,
     progress_tx: Option<UnboundedSender<Value>>,
     policy: Option<&crate::write_policy::WritableGroups>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Value, Error> {
     // Degraded-mode guard: reject all methods except the recovery-safe subset
     // when the DB is unavailable. See ADR-0009.
@@ -199,9 +234,11 @@ async fn handle(
         "health_check" => handle_health_check(state).await,
         "knowledge_status" => handle_knowledge_status(state, &req.params).await,
         "knowledge_capabilities" => Ok(crate::capabilities::payload()),
-        "knowledge_process_chunk" => handle_knowledge_process_chunk(req, state).await,
+        "knowledge_process_chunk" => {
+            handle_knowledge_process_chunk(req, state, progress_tx, cancel).await
+        }
         "knowledge_process_document" => {
-            handle_knowledge_process_document(req, state, progress_tx).await
+            handle_knowledge_process_document(req, state, progress_tx, cancel).await
         }
         "knowledge_preview_chunks" => handle_knowledge_preview_chunks(req).await,
         "knowledge_add_episode" => handle_add_episode(req, state).await,
@@ -1279,6 +1316,8 @@ fn resolve_chunk_text_advisory_max_chars() -> usize {
 async fn handle_knowledge_process_chunk(
     req: &IpcRequest,
     state: Arc<AppState>,
+    progress_tx: Option<UnboundedSender<Value>>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Value, Error> {
     let p = &req.params;
 
@@ -1439,6 +1478,9 @@ async fn handle_knowledge_process_chunk(
         document: None,
         // Issue #853: store the two halves of `source_description` separately.
         source_file: Some(source_file.clone()),
+        // Issue #861: per-request cancel (client disconnect) and phase progress.
+        cancel: Some(cancel),
+        progress: progress_tx,
     };
     let result = episode::add_episode_with_opts(
         Arc::clone(&state),
@@ -1540,6 +1582,7 @@ async fn handle_knowledge_process_document(
     req: &IpcRequest,
     state: Arc<AppState>,
     progress_tx: Option<UnboundedSender<Value>>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Value, Error> {
     let p = &req.params;
     let doc_id = optional_doc_id_param(&p["doc_id"])?.ok_or_else(|| {
@@ -1570,7 +1613,7 @@ async fn handle_knowledge_process_document(
         reference_time,
         attributes: attributes_param_to_string(&p["attributes"]),
     };
-    crate::document::process_document(state, request, progress_tx).await
+    crate::document::process_document(state, request, progress_tx, cancel).await
 }
 
 /// `knowledge_preview_chunks` (issue #785, FR-006): the chunks `knowledge_process_document`

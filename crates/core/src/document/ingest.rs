@@ -17,7 +17,6 @@
 //! extraction, and a byte-identical resubmission writes nothing at all.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{json, Value};
@@ -200,6 +199,7 @@ pub async fn process_document(
     state: Arc<AppState>,
     req: DocumentRequest,
     progress_tx: Option<UnboundedSender<Value>>,
+    cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Value, Error> {
     let started = std::time::Instant::now();
     let chunked = chunk_for_ingest(&req.content)?;
@@ -352,8 +352,8 @@ pub async fn process_document(
         let n_units = chunk.units.len();
         for (k, unit) in chunk.units.iter().enumerate() {
             // A cancelled ingest retires nothing: stop before the next unit.
-            if state.cancel_token.is_cancelled() {
-                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+            if cancel.is_cancelled() {
+                crate::episode::note_cancelled(&state);
                 return Err(Error::Cancelled);
             }
             let context = render(&ContextInput {
@@ -386,6 +386,10 @@ pub async fn process_document(
                 }),
                 // Issue #853: the same source file the display value is composed from.
                 source_file: Some(source_path_or_doc.clone()),
+                // Issue #861: the units honour the same per-request cancel as the document's
+                // own checks; unit episodes emit no chunk-style progress frames.
+                cancel: Some(cancel.clone()),
+                progress: None,
             };
             extraction_calls += 1;
             let result = episode::add_episode_with_opts(
@@ -448,8 +452,8 @@ pub async fn process_document(
     }
 
     // ── Commit step: the revision's single commit boundary ───────────────────
-    if state.cancel_token.is_cancelled() {
-        state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+    if cancel.is_cancelled() {
+        crate::episode::note_cancelled(&state);
         return Err(Error::Cancelled);
     }
     progress(

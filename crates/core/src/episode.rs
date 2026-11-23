@@ -1,6 +1,8 @@
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
+use tokio_util::sync::CancellationToken;
+
 use chrono::DateTime;
 
 use crate::{
@@ -258,6 +260,31 @@ pub struct EpisodeOpts {
     /// `source_description == source_file + ":" + chunk_id` holds by construction. Set only by
     /// `knowledge_process_chunk` and document ingest; `None` leaves the episode a legacy row.
     pub source_file: Option<String>,
+    /// Per-request cancellation token (issue #861, ADR-0861). `None` falls back to the
+    /// process-wide shutdown token `state.cancel_token`. The connection layer hands each
+    /// cooperative request a child of that token, so shutdown still cascades while a client
+    /// disconnect cancels only this request. Checked at every pre-commit cancellation point;
+    /// never inside or after the Phase C write-lock acquisition.
+    pub cancel: Option<CancellationToken>,
+    /// Phase-progress sink for `knowledge_process_chunk` (issue #861): receives
+    /// `{"type":"progress","phase":"embed"|"extract"|"commit"}` frames. `None` emits nothing.
+    /// Send failures (a closed receiver) are ignored — a dead client is the cancel token's
+    /// business, not an ingest error.
+    pub progress: Option<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>,
+}
+
+/// Counts a cancellation in `cancelled_chunks` only when it was caused by process shutdown, so a
+/// client-disconnect cancel (issue #861) does not inflate the shutdown "stopped" telemetry.
+pub(crate) fn note_cancelled(state: &AppState) {
+    if state.cancel_token.is_cancelled() {
+        state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn emit_phase(tx: &Option<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>, phase: &str) {
+    if let Some(tx) = tx {
+        let _ = tx.send(serde_json::json!({"type": "progress", "phase": phase}));
+    }
 }
 
 /// Phase C's result: `(edges_inserted, edges_dropped_unresolvable,
@@ -331,6 +358,7 @@ enum DedupDecision {
 /// deterministic `fallback_merge`; a failed consolidation never fails the chunk.
 async fn merged_summary_for(
     state: &AppState,
+    cancel: &CancellationToken,
     entity_name: &str,
     current: &str,
     incoming: &str,
@@ -344,8 +372,8 @@ async fn merged_summary_for(
         ConsolidationPlan::Consolidate => {
             let reply = tokio::select! {
                 r = state.extractor.consolidate_summary(entity_name, current, incoming) => r,
-                _ = state.cancel_token.cancelled() => {
-                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                _ = cancel.cancelled() => {
+                    note_cancelled(&state);
                     return Err(Error::Cancelled);
                 }
             };
@@ -371,6 +399,7 @@ async fn merged_summary_for(
 /// batch attaches it to the latest merge per uuid). Records `decision_idx` as that uuid's latest.
 async fn merge_into(
     state: &AppState,
+    cancel: &CancellationToken,
     merge_state: &mut std::collections::HashMap<String, (String, String, usize)>,
     decision_idx: usize,
     existing: &EntityRow,
@@ -383,7 +412,9 @@ async fn merge_into(
             decision_idx,
         )
     });
-    if let Some(next) = merged_summary_for(state, &existing.name, &entry.1, incoming).await? {
+    if let Some(next) =
+        merged_summary_for(state, cancel, &existing.name, &entry.1, incoming).await?
+    {
         entry.1 = next;
     }
     // Pass 2 of Phase B (#652) merges judged candidates after the pass-1 ones, so decision
@@ -594,6 +625,12 @@ pub async fn add_episode_with_opts(
     attributes: &str,
     opts: EpisodeOpts,
 ) -> Result<AddEpisodeResult, Error> {
+    // Per-request token (issue #861), else the shutdown token: every pre-commit cancellation
+    // point below reads this one.
+    let cancel = opts
+        .cancel
+        .clone()
+        .unwrap_or_else(|| state.cancel_token.clone());
     // Track write in flight so rebuild_from_wal can gate on active writes.
     state.active_writes.fetch_add(1, Ordering::Relaxed);
     let _active_guard = ActiveWriteGuard(Arc::clone(&state.active_writes));
@@ -678,6 +715,10 @@ pub async fn add_episode_with_opts(
         chunk_key: Some(name),
         document_context: document_context.as_deref(),
     };
+    // Phase A runs embed and extract concurrently; the two frames are start-of-phase markers
+    // emitted in a fixed order (issue #861).
+    emit_phase(&opts.progress, "embed");
+    emit_phase(&opts.progress, "extract");
     let (content_embedding, extraction_outcome): (Vec<f32>, ExtractionOutcome) = tokio::select! {
         result = async {
             tokio::try_join!(
@@ -685,8 +726,8 @@ pub async fn add_episode_with_opts(
                 state.extractor.extract(extract_opts)
             )
         } => result?,
-        _ = state.cancel_token.cancelled() => {
-            state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+        _ = cancel.cancelled() => {
+            note_cancelled(&state);
             return Err(Error::Cancelled);
         }
     };
@@ -1016,8 +1057,8 @@ pub async fn add_episode_with_opts(
             state.embedder.embed_batch(&name_refs, EmbedRole::Document),
             state.embedder.embed_batch(&summary_refs, EmbedRole::Document),
         ) => r?,
-        _ = state.cancel_token.cancelled() => {
-            state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+        _ = cancel.cancelled() => {
+            note_cancelled(&state);
             return Err(Error::Cancelled);
         }
     };
@@ -1151,8 +1192,8 @@ pub async fn add_episode_with_opts(
         } else {
             tokio::select! {
                 r = state.embedder.embed_batch(&missing_refs, EmbedRole::Document) => r?,
-                _ = state.cancel_token.cancelled() => {
-                    state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+                _ = cancel.cancelled() => {
+                    note_cancelled(&state);
                     return Err(Error::Cancelled);
                 }
             }
@@ -1244,15 +1285,15 @@ pub async fn add_episode_with_opts(
     let edge_fact_refs: Vec<&str> = edge_facts.iter().map(|s| s.as_str()).collect();
     let fact_embeddings = tokio::select! {
         r = state.embedder.embed_batch(&edge_fact_refs, EmbedRole::Document) => r?,
-        _ = state.cancel_token.cancelled() => {
-            state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+        _ = cancel.cancelled() => {
+            note_cancelled(&state);
             return Err(Error::Cancelled);
         }
     };
 
     // ── Phase B: async dedup (no lock) ────────────────────────────────────────
-    if state.cancel_token.is_cancelled() {
-        state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+    if cancel.is_cancelled() {
+        note_cancelled(&state);
         return Err(Error::Cancelled);
     }
     // Fetch cosine candidates in a blocking pass, then verify each with DedupAdapter.
@@ -1409,8 +1450,8 @@ pub async fn add_episode_with_opts(
     // (entity index, pair) for each candidate that survived the veto and still needs a verdict.
     let mut pending: Vec<(usize, DuplicatePair)> = Vec::new();
     for (i, extracted) in extraction.entities.iter().enumerate() {
-        if state.cancel_token.is_cancelled() {
-            state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+        if cancel.is_cancelled() {
+            note_cancelled(&state);
             return Err(Error::Cancelled);
         }
         let decision = match &phase_b_results[i] {
@@ -1432,6 +1473,7 @@ pub async fn add_episode_with_opts(
                 } else {
                     merge_into(
                         &state,
+                        &cancel,
                         &mut merge_state,
                         decisions.len(),
                         existing,
@@ -1452,6 +1494,7 @@ pub async fn add_episode_with_opts(
                     } else {
                         merge_into(
                             &state,
+                            &cancel,
                             &mut merge_state,
                             decisions.len(),
                             existing,
@@ -1486,8 +1529,8 @@ pub async fn add_episode_with_opts(
         let pairs: Vec<DuplicatePair> = pending.iter().map(|(_, p)| p.clone()).collect();
         let verdicts = tokio::select! {
             v = state.dedup.judge_batch(&pairs) => v,
-            _ = state.cancel_token.cancelled() => {
-                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+            _ = cancel.cancelled() => {
+                note_cancelled(&state);
                 return Err(Error::Cancelled);
             }
         };
@@ -1512,7 +1555,15 @@ pub async fn add_episode_with_opts(
                     } else {
                         dedup_paths.embedding_merge += 1;
                     }
-                    merge_into(&state, &mut merge_state, *i, existing, &extracted.summary).await?
+                    merge_into(
+                        &state,
+                        &cancel,
+                        &mut merge_state,
+                        *i,
+                        existing,
+                        &extracted.summary,
+                    )
+                    .await?
                 }
                 DedupVerdict::Distinct => {
                     if llm_mode {
@@ -1554,8 +1605,8 @@ pub async fn add_episode_with_opts(
         let refs: Vec<&str> = changed.iter().map(|(_, s)| *s).collect();
         let embeddings = tokio::select! {
             r = state.embedder.embed_batch(&refs, EmbedRole::Document) => r?,
-            _ = state.cancel_token.cancelled() => {
-                state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+            _ = cancel.cancelled() => {
+                note_cancelled(&state);
                 return Err(Error::Cancelled);
             }
         };
@@ -1637,10 +1688,14 @@ pub async fn add_episode_with_opts(
     // tokio::sync::RwLockWriteGuard is not 'static so it cannot move into the closure.
     // Cancellation is checked here — once the write guard is acquired the commit runs to
     // completion (FR-003: Phase C must not be torn mid-write).
+    emit_phase(&opts.progress, "commit");
+    // `biased;` with the lock arm first: once the lock is obtainable the commit proceeds, so
+    // "commit has started" is deterministic and a ready lock beats a ready cancel (issue #861).
     let _write_guard = tokio::select! {
+        biased;
         g = state.write_lock.write() => g,
-        _ = state.cancel_token.cancelled() => {
-            state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
+        _ = cancel.cancelled() => {
+            note_cancelled(&state);
             return Err(Error::Cancelled);
         }
     };
