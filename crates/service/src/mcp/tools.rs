@@ -985,10 +985,11 @@ pub fn registry() -> Vec<ToolSpec> {
                            Recommended maximum `chunk_text` size is 8,000 characters (default, \
                            overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`) — extraction \
                            quality degrades well before any context-window limit is reached. \
-                           Splitting oversized input into multiple `knowledge_process_chunk` \
-                           calls is the caller's responsibility; this call still succeeds above \
-                           the threshold, but the result gains a `warning` field naming the \
-                           actual size and the recommended maximum. \
+                           For a whole document or a long page, use `knowledge_process_document` \
+                           instead: the server chunks it by section and extracts only what \
+                           changed. This call still succeeds above the threshold, but the \
+                           result gains a `warning` field naming the actual size and the \
+                           recommended maximum, and pointing at `knowledge_process_document`. \
                            `attributes` (issue #528) is written directly to the resulting \
                            episode node — structured metadata co-located with, but independent \
                            of, the facts extracted from the chunk's prose (reachable from the \
@@ -1076,8 +1077,10 @@ pub fn registry() -> Vec<ToolSpec> {
                            different metadata it commits a revision with zero extraction \
                            calls. The first document-mode \
                            ingest of a `doc_id` supersedes its live chunk-mode episodes. \
-                           Documents over `LCG_DOCUMENT_MAX_BYTES` (default 512 KiB) and empty \
-                           or headings-only documents are rejected with nothing written. \
+                           Documents over the size cap (`LCG_DOCUMENT_MAX_BYTES`, default 2 MiB, \
+                           set at startup) are refused with `document_too_large` and never \
+                           truncated; empty or headings-only documents are rejected too, with \
+                           nothing written. \
                            `knowledge_process_chunk` is unchanged.",
             scope: Scope::Write,
             input_schema: || {

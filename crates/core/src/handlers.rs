@@ -1541,8 +1541,9 @@ async fn handle_knowledge_process_chunk(
             "message": format!(
                 "chunk_text is {chunk_text_chars} characters, which exceeds the recommended \
                  maximum of {threshold_chars} characters; extraction quality degrades well \
-                 before any context-window limit, so consider splitting oversized input into \
-                 multiple knowledge_process_chunk calls."
+                 before any context-window limit. For a whole document or a long page, send it to \
+                 knowledge_process_document instead: the server chunks it by section, \
+                 extracts only what changed and handles updates and removed sections."
             ),
         });
     }
