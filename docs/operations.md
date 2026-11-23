@@ -363,6 +363,18 @@ LCG_BUFFER_POOL_BYTES=2GiB LCG_MAX_THREADS=2 liminis-context-graph ...
 
 Beyond the [ontology summary](ontology.md#knowledge_status-summary), `knowledge_status` reports:
 
+**`episode_breakdown`** (opt-in, issue #884, [ADR-0884](adr/0884-status-episode-breakdown-opt-in.md)) —
+call `knowledge_status` with `{"include_episode_breakdown": true}` to get, per group, the `live`,
+`superseded` and `pending` episode counts and the `only_superseded_entities` / `only_superseded_edges`
+counts (the part of the graph a future prune could reclaim). To evaluate the first
+ADR-0828 (superseded-episode retention) reopening trigger, read
+`episode_breakdown.groups[]` and compute `superseded / live` for each group: above `2` the
+question of pruning superseded episodes is reopened. It is off by default because it scans every
+episode, `MENTIONS` edge and edge under the read lock (writers wait); use it for a periodic check,
+not in a polling loop. `null` with `episode_breakdown_unavailable` means it could not be computed
+(degraded, not queryable, or a scan error). See the
+[reference](ipc-mcp-reference.md) for the field semantics and caveats.
+
 **`dedup_mode`** (string, always present, including when degraded) — what protects the graph from
 wrong embedding-path merges during extraction, beyond the cosine threshold (issue #652,
 [ADR-0652](adr/0652-llm-verified-extraction-dedup-via-extractor.md)). `"veto-only"`: the

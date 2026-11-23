@@ -1108,6 +1108,38 @@ distinguishes a genuinely empty group from one whose WAL holds unapplied content
 field-by-field in [Operations: `knowledge_status` health fields](operations.md#knowledge_status-health-fields)
 rather than here.
 
+**`knowledge_status` episode breakdown (issue #884, [ADR-0884](adr/0884-status-episode-breakdown-opt-in.md)).**
+`knowledge_status` accepts an optional boolean `include_episode_breakdown` (default `false`; only a
+literal `true` enables it). The feature is advertised as `status_episode_breakdown` by
+`knowledge_capabilities`. It is opt-in because it scans every episode, `MENTIONS` edge and edge
+while holding the read lock, which blocks writers for its duration; a call without it runs no extra
+query and is unchanged. With it, the response gains:
+
+```json
+"episode_breakdown": {
+  "as_of_us": 1763844000000000,
+  "groups": [
+    {"group_id": "g1", "live": 10, "superseded": 25, "pending": 0,
+     "only_superseded_entities": 4, "only_superseded_edges": 7}
+  ]
+}
+```
+
+- `live` / `superseded` / `pending` partition a group's episodes. Liveness is the belief/search
+  predicate (`EpisodeSupersession::live_at`) evaluated at `as_of_us`; `pending` is an uncommitted
+  document revision (ADR-0785), never counted as live or superseded. Unattributed episodes are never
+  superseded, so they are live. A future-dated supersession counts as live until its instant.
+- `only_superseded_entities`: entities with at least one `MENTIONS` from a superseded episode and
+  none from a live one (pending mentions are neutral). `only_superseded_edges`: edges whose belief
+  state is `superseded` (every surviving producing episode superseded), counted by producer and not
+  by fact text. Each is attributed to the entity's / edge's own `group_id` and counted once.
+- Every field is present even at `0`; groups are sorted by `group_id`; the superseded : live ratio
+  is `superseded / live`, computed by the client.
+- When the database is not open, not queryable or the scan fails, `episode_breakdown` is `null` and
+  `episode_breakdown_unavailable` is a reason string; the rest of the status response is unaffected.
+- A workspace rebuilt from `knowledge_dump_wal` has no native `MENTIONS` (ADR-0828 finding F1), so
+  `only_superseded_entities` reads `0` there.
+
 Every long-running method above (the six WAL/recovery/reclassification operations most likely
 to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
 before the terminal result — see [Progress notifications](#progress-notifications) below.
@@ -4566,6 +4598,18 @@ LCG_BUFFER_POOL_BYTES=2GiB LCG_MAX_THREADS=2 liminis-context-graph ...
 ## `knowledge_status` health fields
 
 Beyond the [ontology summary](ontology.md#knowledge_status-summary), `knowledge_status` reports:
+
+**`episode_breakdown`** (opt-in, issue #884, [ADR-0884](adr/0884-status-episode-breakdown-opt-in.md)) —
+call `knowledge_status` with `{"include_episode_breakdown": true}` to get, per group, the `live`,
+`superseded` and `pending` episode counts and the `only_superseded_entities` / `only_superseded_edges`
+counts (the part of the graph a future prune could reclaim). To evaluate the first
+ADR-0828 (superseded-episode retention) reopening trigger, read
+`episode_breakdown.groups[]` and compute `superseded / live` for each group: above `2` the
+question of pruning superseded episodes is reopened. It is off by default because it scans every
+episode, `MENTIONS` edge and edge under the read lock (writers wait); use it for a periodic check,
+not in a polling loop. `null` with `episode_breakdown_unavailable` means it could not be computed
+(degraded, not queryable, or a scan error). See the
+[reference](ipc-mcp-reference.md) for the field semantics and caveats.
 
 **`dedup_mode`** (string, always present, including when degraded) — what protects the graph from
 wrong embedding-path merges during extraction, beyond the cosine threshold (issue #652,
@@ -8557,6 +8601,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0855](0855-health-check-ready-for-reads.md) | `health_check` Gains `ready_for_reads`; Documents `ok` / `healthy` / `ready_for_reads` Semantics | 2026-11-21 |
 | [0857](0857-find-entities-episode-provenance.md) | `find_entities` Episode Provenance and a `uuids` Filter on `get_episodes` | 2026-11-22 |
 | [0881](0881-eval-verifies-service-reported-ontology.md) | `lcg-eval` Verifies and Reports the Service-Reported Ontology | 2026-11-22 |
+| [0884](0884-status-episode-breakdown-opt-in.md) | `knowledge_status` Opt-in Per-group Episode Breakdown | 2026-11-22 |
 
 ## Historical numbering
 

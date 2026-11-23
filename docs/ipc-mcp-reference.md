@@ -92,6 +92,38 @@ distinguishes a genuinely empty group from one whose WAL holds unapplied content
 field-by-field in [Operations: `knowledge_status` health fields](operations.md#knowledge_status-health-fields)
 rather than here.
 
+**`knowledge_status` episode breakdown (issue #884, [ADR-0884](adr/0884-status-episode-breakdown-opt-in.md)).**
+`knowledge_status` accepts an optional boolean `include_episode_breakdown` (default `false`; only a
+literal `true` enables it). The feature is advertised as `status_episode_breakdown` by
+`knowledge_capabilities`. It is opt-in because it scans every episode, `MENTIONS` edge and edge
+while holding the read lock, which blocks writers for its duration; a call without it runs no extra
+query and is unchanged. With it, the response gains:
+
+```json
+"episode_breakdown": {
+  "as_of_us": 1763844000000000,
+  "groups": [
+    {"group_id": "g1", "live": 10, "superseded": 25, "pending": 0,
+     "only_superseded_entities": 4, "only_superseded_edges": 7}
+  ]
+}
+```
+
+- `live` / `superseded` / `pending` partition a group's episodes. Liveness is the belief/search
+  predicate (`EpisodeSupersession::live_at`) evaluated at `as_of_us`; `pending` is an uncommitted
+  document revision (ADR-0785), never counted as live or superseded. Unattributed episodes are never
+  superseded, so they are live. A future-dated supersession counts as live until its instant.
+- `only_superseded_entities`: entities with at least one `MENTIONS` from a superseded episode and
+  none from a live one (pending mentions are neutral). `only_superseded_edges`: edges whose belief
+  state is `superseded` (every surviving producing episode superseded), counted by producer and not
+  by fact text. Each is attributed to the entity's / edge's own `group_id` and counted once.
+- Every field is present even at `0`; groups are sorted by `group_id`; the superseded : live ratio
+  is `superseded / live`, computed by the client.
+- When the database is not open, not queryable or the scan fails, `episode_breakdown` is `null` and
+  `episode_breakdown_unavailable` is a reason string; the rest of the status response is unaffected.
+- A workspace rebuilt from `knowledge_dump_wal` has no native `MENTIONS` (ADR-0828 finding F1), so
+  `only_superseded_entities` reads `0` there.
+
 Every long-running method above (the six WAL/recovery/reclassification operations most likely
 to run for a while) accepts a `_progress_token` and streams `{"type":"progress",...}` frames
 before the terminal result — see [Progress notifications](#progress-notifications) below.
