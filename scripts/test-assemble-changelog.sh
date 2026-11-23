@@ -249,7 +249,7 @@ fence_case() { # <label> <changelog body printf format> <expect: fail|ok>
   if run >/dev/null 2>"$tmp/err"; then
     [ "$3" = ok ] && pass "$1" || fail "$1: expected failure but exit 0"
   else
-    if [ "$3" = fail ] && cmp -s "$tmp/orig" "$cl" && [ -e "$fd/20-n.md" ] && grep -q 'code fence' "$tmp/err"; then
+    if [ "$3" = fail ] && cmp -s "$tmp/orig" "$cl" && [ -e "$fd/20-n.md" ] && grep -q 'code fence' "$tmp/err" && grep -q 'nothing was written' "$tmp/err" && ! grep -q 'awk:' "$tmp/err"; then
       pass "$1"
     else fail "$1: $(cat "$tmp/err")"; fi
   fi

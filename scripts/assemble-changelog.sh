@@ -186,7 +186,7 @@ FNR == 1 {
   # body of the existing [Unreleased] section, or a fragment
   if (fenceline(line)) { addline(line); next }
   if (infence && !frag && line ~ /^## \[/) {
-    printf "ERROR: CHANGELOG.md: line %d: \"%s\" inside a code fence in [Unreleased]: a release heading in a fence is either an unclosed fence swallowing later releases or text that must not start a line with "## [" (nothing was written)\n", FNR, line > "/dev/stderr"
+    printf "ERROR: CHANGELOG.md: line %d: \"%s\" inside a code fence in [Unreleased]: a release heading in a fence is either an unclosed fence swallowing later releases or text that must not start a line with \"## [\" (nothing was written)\n", FNR, line > "/dev/stderr"
     failed = 1; exit 1
   }
   if (!infence) {
