@@ -98,6 +98,19 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   to a pruned entity). A future-dated retire can be moved earlier by retiring again, does not block a
   correction of the document, and a no-op retire reports `existing_retirement_at`.
 
+- **`knowledge_process_chunk` streams progress, and an abandoned ingest is cancelled before commit
+  (#861, ADR-0861; part 1 of #836).** With `_progress_token`, `process_chunk` sends
+  `{"type":"progress","phase":"embed"|"extract"|"commit"}` frames before its result (feature
+  `chunk_progress`). When a client disconnects while a `process_chunk` or `process_document`
+  request is in flight, the service cancels it at the next cancellation point before commit: no
+  episode, no WAL record, locks released, and a retry on a new connection extracts once; a commit
+  that has started finishes (feature `cancel_on_disconnect`). **Additive**: no `protocol_version`
+  bump, no change for clients that send no token. One caveat: a client that half-closes its write
+  side after sending one of these two requests is indistinguishable from a hung-up client and has
+  its request cancelled; keep the write side open until the response arrives. The IPC reference
+  gains a "Connections, concurrency and timeouts" section: one request at a time per connection,
+  use several connections for parallel ingest or reads alongside ingest, and timeout/retry
+  guidance. `deadline_ms`, joining a duplicate in-flight resubmit and pipelining remain deferred.
 - **`lcg-eval` verifies the ontology the service loaded, and reports that (#881, ADR-0881).**
   `knowledge_get_ontology` gains an additive `ontology_hash` (the semantic `content_hash` of the
   loaded ontology, `"none"` without one; independent of `include_asserted`). After startup,

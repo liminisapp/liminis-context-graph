@@ -66,3 +66,4 @@ Background `tokio::spawn` tasks cannot hold a `RwLockWriteGuard<'_, ()>` because
 - ADR-0002: `docs/adr/0002-reader-writer-split.md` (RwLock design; `OwnedRwLockWriteGuard` pattern derived from it)
 - WAL implementation: `crates/core/src/wal.rs`, `crates/core/src/replay.rs`
 - Streaming main.rs path: `crates/service/src/main.rs`
+- ADR-0861: `process_chunk` joins the streaming methods (`embed`/`extract`/`commit` phases) and in-flight `process_chunk`/`process_document` are cancelled on client disconnect; the streaming path in `crates/service/src/connection.rs`

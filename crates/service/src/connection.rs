@@ -288,15 +288,13 @@ mod tests {
 
     /// Fake dispatcher: `work_ms` of "extraction" that a cancel cuts short, then a `commit`
     /// stage of `commit_ms` that ignores cancellation (as Phase C does). Echoes the method.
+    type BoxedFut = std::pin::Pin<Box<dyn Future<Output = IpcResponse> + Send>>;
+
     fn fake(
         probe: Arc<Probe>,
         work_ms: u64,
         commit_ms: u64,
-    ) -> impl Fn(
-        IpcRequest,
-        CancellationToken,
-        Option<UnboundedSender<Value>>,
-    ) -> std::pin::Pin<Box<dyn Future<Output = IpcResponse> + Send>> {
+    ) -> impl Fn(IpcRequest, CancellationToken, Option<UnboundedSender<Value>>) -> BoxedFut {
         move |req, cancel, tx| {
             let probe = Arc::clone(&probe);
             Box::pin(async move {
