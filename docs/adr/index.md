@@ -183,6 +183,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0854](0854-knowledge-capabilities-protocol-version-and-feature-registry.md) | `knowledge_capabilities` — Protocol Version, Feature Registry and a Self-Describing Socket | 2026-11-21 |
 | [0855](0855-health-check-ready-for-reads.md) | `health_check` Gains `ready_for_reads`; Documents `ok` / `healthy` / `ready_for_reads` Semantics | 2026-11-21 |
 | [0857](0857-find-entities-episode-provenance.md) | `find_entities` Episode Provenance and a `uuids` Filter on `get_episodes` | 2026-11-22 |
+| [0880](0880-restatement-aware-corroboration.md) | Restatement-Aware Corroboration — Independent Sources, Not Documents | 2026-11-22 |
 | [0881](0881-eval-verifies-service-reported-ontology.md) | `lcg-eval` Verifies and Reports the Service-Reported Ontology | 2026-11-22 |
 | [0884](0884-status-episode-breakdown-opt-in.md) | `knowledge_status` Opt-in Per-group Episode Breakdown | 2026-11-22 |
 

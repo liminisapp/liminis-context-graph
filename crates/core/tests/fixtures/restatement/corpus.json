@@ -1,0 +1,47 @@
+{
+  "_comment": "Issue #880 / ADR-0880. Each series is a run of dated notes asserting ONE fact (series.fact) through the same-fact key (group, source, target, name). Note n of a series is dated start + (n-1) days at 09:00:00Z, gets chunk_id '<fact>-<series>-<nn>' (plus '-c<k>' when chunks_per_note > 1; first_asserted is compared at note granularity, since chunks of one note tie and the uuid tie-break between them is arbitrary), and its text is '<fact> uses <fact>-target: <series> note <n>' unless fact_text is set (then verbatim). source_key travels in the episode `attributes` JSON until a dedicated column exists (ADR-0880 Follow-up). doc: 'per_note' gives each note its own doc_id ('doc-<fact>-<series>-<nn>'); 'none' supplies no doc_id, so every episode counts as its own document today. `expected` is what ADR-0880 specifies; `baseline_corroboration` is what the CURRENT counting rule reports and is asserted against the live service.",
+  "series": [
+    {"id": "alice", "fact": "A", "count": 12, "start": "2026-03-01", "origin": "primary", "source_key": "alice", "doc": "per_note"},
+
+    {"id": "bob", "fact": "B", "count": 1, "start": "2026-03-01", "origin": "primary", "source_key": "bob", "doc": "per_note"},
+
+    {"id": "alice", "fact": "C", "count": 10, "start": "2026-03-01", "origin": "primary", "source_key": "alice", "doc": "per_note"},
+    {"id": "bob", "fact": "C", "count": 1, "start": "2026-03-20", "origin": "primary", "source_key": "bob", "doc": "per_note"},
+
+    {"id": "legacy", "fact": "D", "count": 3, "start": "2026-03-01", "origin": "primary", "source_key": null, "doc": "per_note"},
+
+    {"id": "alice", "fact": "E", "count": 1, "start": "2026-03-01", "origin": "primary", "source_key": "alice", "doc": "none", "chunks_per_note": 3},
+
+    {"id": "alice", "fact": "F", "count": 1, "start": "2026-03-01", "origin": "primary", "source_key": "alice", "doc": "per_note"},
+    {"id": "legacy", "fact": "F", "count": 2, "start": "2026-03-05", "origin": "primary", "source_key": null, "doc": "per_note"},
+
+    {"id": "alice", "fact": "G", "count": 4, "start": "2026-03-01", "origin": "primary", "source_key": "alice", "doc": "per_note"},
+
+    {"id": "acme", "fact": "H", "count": 3, "start": "2026-02-01", "origin": "external", "source_key": "acme.com", "doc": "per_note"},
+    {"id": "alice", "fact": "H", "count": 1, "start": "2026-03-01", "origin": "primary", "source_key": "alice", "doc": "per_note"},
+
+    {"id": "alice", "fact": "I", "count": 2, "start": "2026-03-01", "origin": "primary", "source_key": "alice", "doc": "per_note"},
+    {"id": "page", "fact": "I", "count": 1, "start": "2026-03-10", "origin": "derived", "source_key": "alice", "doc": "per_note"},
+
+    {"id": "orig", "fact": "J", "count": 1, "start": "2026-03-01", "origin": "primary", "source_key": "alice", "doc": "per_note", "fact_text": "J uses J-target: carried forward verbatim"},
+    {"id": "copy", "fact": "J", "count": 1, "start": "2026-03-02", "origin": "primary", "source_key": "alice", "doc": "per_note", "fact_text": "J uses J-target: carried forward verbatim"},
+    {"id": "rephrase", "fact": "J", "count": 1, "start": "2026-03-03", "origin": "primary", "source_key": "alice", "doc": "per_note", "fact_text": "J uses J-target: same thing, reworded"},
+
+    {"id": "source", "fact": "K", "count": 1, "start": "2026-03-01", "origin": "primary", "source_key": "alice", "doc": "per_note"},
+    {"id": "recap", "fact": "K", "count": 1, "start": "2026-03-05", "origin": "primary", "source_key": "alice", "doc": "per_note"}
+  ],
+  "removed_chunks": ["G-alice-01"],
+  "expected": {
+    "A": {"baseline_corroboration": 12, "independent_corroboration": 1, "restatements": 11, "first_asserted": "A-alice-01", "case": "single author restates across 12 dated daily notes"},
+    "B": {"baseline_corroboration": 1, "independent_corroboration": 1, "restatements": 0, "first_asserted": "B-bob-01", "case": "one independent statement"},
+    "C": {"baseline_corroboration": 11, "independent_corroboration": 2, "restatements": 9, "first_asserted": "C-alice-01", "case": "alice x10 restates, bob confirms once: two sources, not 11"},
+    "D": {"baseline_corroboration": 3, "independent_corroboration": 3, "restatements": 0, "first_asserted": "D-legacy-01", "case": "no source_key (legacy): identical to today, no backfill"},
+    "E": {"baseline_corroboration": 3, "independent_corroboration": 1, "restatements": 2, "first_asserted": "E-alice-01", "case": "one keyed note split into 3 chunks with no doc_id"},
+    "F": {"baseline_corroboration": 3, "independent_corroboration": 3, "restatements": 0, "first_asserted": "F-alice-01", "case": "keyed first note then 2 keyless notes: keyless notes each stay their own source"},
+    "G": {"baseline_corroboration": 3, "independent_corroboration": 1, "restatements": 2, "first_asserted": "G-alice-02", "case": "first assertion superseded: the next-earliest live restatement is promoted"},
+    "H": {"baseline_corroboration": 4, "independent_corroboration": 2, "restatements": 2, "first_asserted": "H-acme-01", "case": "external x3 from one site plus a primary author: units are origin-namespaced"},
+    "I": {"baseline_corroboration": 2, "independent_corroboration": 1, "restatements": 1, "first_asserted": "I-alice-01", "case": "derived page citing alice never forms a unit"},
+    "J": {"baseline_corroboration": 3, "independent_corroboration": 1, "restatements": 2, "first_asserted": "J-orig-01", "case": "verbatim copy and a rephrase by the same author are one unit"},
+    "K": {"baseline_corroboration": 2, "independent_corroboration": 1, "restatements": 1, "first_asserted": "K-source-01", "case": "standup recap sharing its source note's key adds 0 independent support (retrieval-quality gain-1 near-duplicate)"}
+  }
+}
