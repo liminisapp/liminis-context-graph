@@ -170,7 +170,8 @@ pub struct EpisodicRow {
     /// Kind of `superseded_by` (`episode` or `document`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by_kind: Option<String>,
-    /// Why: `revision` (the chunk was resubmitted), `chunk_removed` or `document_superseded`.
+    /// Why: `revision` (the chunk was resubmitted), `chunk_removed`, `document_superseded` or
+    /// `document_removed` (issue #859: the whole document was retired with no replacement).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersession_reason: Option<String>,
     /// Caller-supplied structured metadata (issue #528), a JSON object serialized as a string.

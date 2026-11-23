@@ -222,6 +222,7 @@ async fn handle(
         "knowledge_delete_chunk_episode" => handle_delete_chunk_episode(req, state).await,
         "knowledge_mark_chunk_removed" => handle_mark_chunk_removed(req, state).await,
         "knowledge_supersede_document" => handle_supersede_document(req, state).await,
+        "knowledge_retire_document" => handle_retire_document(req, state).await,
         "knowledge_stamp_origin" => handle_stamp_origin(req, state).await,
         "knowledge_delete_by_group" => handle_delete_by_group(req, state).await,
         "knowledge_reload_ontology" => handle_reload_ontology(req, state).await,
@@ -3760,6 +3761,98 @@ async fn handle_supersede_document(req: &IpcRequest, state: Arc<AppState>) -> Re
             "recorded_at": crate::belief::format_us(recorded_us),
             "superseded_count": uuids.len(),
             "superseded_uuids": uuids,
+        }))
+    })
+    .await??;
+    drop(_guard);
+    Ok(response)
+}
+
+/// `knowledge_retire_document` (issue #859, ADR-0859): records that a whole document no longer
+/// exists at its source and has no successor. Supersedes every live episode of `doc_id` in
+/// `group_id` with reason `document_removed` — the graph stops believing what they asserted, while
+/// the episodes and the edges they produced stay readable as history. Nothing is deleted and
+/// `valid_at` / `invalid_at` are never written. Un-retiring is out of scope.
+///
+/// `effective_at` (optional, RFC 3339 with an offset) follows `knowledge_supersede_document`: the
+/// episodes are superseded at `max(recorded, effective_at)`, so a future date keeps the fact
+/// believed and in force until then. Unlike a document supersession there is no durable record, so
+/// a past `effective_at` behaves as "removed now" rather than retroactively.
+///
+/// Idempotent: a document with no live episode (already retired, or superseded) is a no-op
+/// reporting `superseded_count: 0` and writing nothing to the WAL. Every check runs before any
+/// mutation, so a rejection (unknown document, bad `effective_at`, origin conflict) writes nothing.
+/// Takes the per-document ingest lock first, then the write lock — the order
+/// `knowledge_process_document` uses — so it cannot interleave with an in-flight ingest.
+async fn handle_retire_document(req: &IpcRequest, state: Arc<AppState>) -> Result<Value, Error> {
+    let p = &req.params;
+    let group_id = extract_required_group_id(&p["group_id"])?;
+    let doc_id = required_string_param(p, "doc_id")?;
+    let effective_us = match &p["effective_at"] {
+        Value::Null => None,
+        Value::String(s) if !s.is_empty() => Some(
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map_err(|_| {
+                    Error::Ipc(format!(
+                        "effective_at must be an RFC 3339 timestamp with a timezone offset: {s}"
+                    ))
+                })?
+                .timestamp_micros(),
+        ),
+        _ => {
+            return Err(Error::Ipc(
+                "effective_at must be an RFC 3339 timestamp with a timezone offset".to_string(),
+            ))
+        }
+    };
+    let effective_at = effective_us.map(crate::belief::format_us);
+    let acting_origin =
+        crate::origin::parse_origin_param(p)?.unwrap_or(crate::origin::Origin::Primary);
+
+    let db = load_db(&state)?;
+    let state_c = Arc::clone(&state);
+    let _doc_lock = crate::document::ingest::lock_document(&state, &group_id, &doc_id).await;
+    let _guard = state.write_lock.write().await;
+    let response = tokio::task::spawn_blocking(move || -> Result<Value, Error> {
+        let conn = db.connect()?;
+        if !conn.doc_is_known(&group_id, &doc_id)? {
+            return Err(Error::Ipc(format!(
+                "doc_id '{doc_id}' is unknown in group '{group_id}' (no episode carries that doc_id)"
+            )));
+        }
+        // A derived/answer actor may not end belief in a primary/external document (ADR-0752).
+        if !acting_origin.is_corroborating() {
+            let origins = conn.origins_for_doc(&group_id, &doc_id)?;
+            if origins.iter().any(|o| o.is_corroborating()) {
+                return Err(crate::origin::conflict(format!(
+                    "document '{doc_id}' in group '{group_id}' has primary or external origin; \
+                     a {:?} retirement would end belief in it and is refused",
+                    acting_origin.as_str()
+                )));
+            }
+        }
+        let recorded_at = crate::db::ingested_at_or_now("");
+        let recorded_us = crate::db::parse_timestamp_str(&recorded_at)
+            .map(|d| (d.unix_timestamp_nanos() / 1_000) as i64)
+            .ok_or_else(|| Error::Ipc("service clock produced an unparseable instant".into()))?;
+        let superseded_at = match (&effective_at, effective_us) {
+            (Some(eff), Some(us)) if us > recorded_us => eff.clone(),
+            _ => recorded_at,
+        };
+        let uuids = conn.live_episode_uuids_for_doc(&group_id, &doc_id)?;
+        if !uuids.is_empty() {
+            conn.supersede_episodes_by_uuids(&uuids, &superseded_at, None, "document_removed")?;
+            let seq = wal_exec::wal_flush_chunk(&state_c, &group_id, conn.drain_mutations());
+            wal_exec::advance_wal_position(&conn, &group_id, seq, &state_c);
+        }
+        Ok(json!({
+            "success": true,
+            "group_id": group_id,
+            "doc_id": doc_id,
+            "superseded_count": uuids.len(),
+            "superseded_uuids": uuids,
+            "superseded_at": if uuids.is_empty() { Value::Null } else { json!(superseded_at) },
+            "effective_at": effective_at,
         }))
     })
     .await??;

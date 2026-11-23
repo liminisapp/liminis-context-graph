@@ -196,6 +196,7 @@ pub const CLASSIFICATION: &[(&str, WriteClass)] = &[
     ("knowledge_reprocess_relation_types", WriteClass::GroupParam),
     // ── single required group ──
     ("knowledge_supersede_document", WriteClass::GroupRequired),
+    ("knowledge_retire_document", WriteClass::GroupRequired),
     ("knowledge_stamp_origin", WriteClass::GroupRequired),
     (
         "knowledge_canonicalize_relations",

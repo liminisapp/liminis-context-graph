@@ -49,6 +49,12 @@ impl EpisodeSupersession {
         self.kind.as_deref() == Some("document")
     }
 
+    /// Superseded by `knowledge_retire_document` (issue #859): no superseder, reason
+    /// `document_removed`. Unlike a correction it was true until `superseded_at`.
+    fn is_document_removed(&self) -> bool {
+        self.kind.is_none() && self.reason.as_deref() == Some("document_removed")
+    }
+
     /// A document-mode episode whose revision has not committed (ADR-0785). Never believed.
     pub fn is_pending(&self) -> bool {
         self.revision_id_present && self.revision_committed_at_us.is_none()
@@ -314,6 +320,13 @@ pub fn in_force(
                 Some(rec) if rec.effective_at_us <= t_us => any_ended = true,
                 _ => return Some(true),
             }
+        } else if ep.is_document_removed() {
+            // Retired (issue #859, ADR-0859): in force until `superseded_at`, which is
+            // `max(recorded, effective_at)`; a future `effective_at` keeps it in force until then.
+            match ep.superseded_at_us {
+                Some(s) if s <= t_us => any_ended = true,
+                _ => return Some(true),
+            }
         } else if ep.superseded_at_us.is_none() {
             return Some(true);
         }
@@ -332,6 +345,8 @@ pub fn in_force(
 pub enum SupersessionCause {
     Corrected,
     DocumentSuperseded,
+    /// The document was retired with no replacement (issue #859): true until `superseded_at`.
+    DocumentRemoved,
 }
 
 /// Stored supersession state of a fact, reported independently of the evaluated instant so the
@@ -378,6 +393,8 @@ pub fn supersession_info(
     let rec = doc_record(ep, docs);
     let cause = if ep.is_document_superseded() {
         SupersessionCause::DocumentSuperseded
+    } else if ep.is_document_removed() {
+        SupersessionCause::DocumentRemoved
     } else {
         SupersessionCause::Corrected
     };
@@ -389,7 +406,11 @@ pub fn supersession_info(
         } else {
             None
         },
-        in_force_until: rec.map(|r| format_us(r.effective_at_us)),
+        in_force_until: if ep.is_document_removed() {
+            Some(format_us(at))
+        } else {
+            rec.map(|r| format_us(r.effective_at_us))
+        },
         recorded_at: rec.map(|r| format_us(r.recorded_at_us)),
     })
 }
@@ -823,6 +844,40 @@ mod tests {
         ]
         .into();
         assert_eq!(in_force(&mixed, &m2, &rec(200, 200), 900), Some(false));
+    }
+
+    fn retired_ep(superseded: i64) -> EpisodeSupersession {
+        EpisodeSupersession {
+            superseded_at_us: Some(superseded),
+            kind: None,
+            superseded_by: None,
+            reason: Some("document_removed".into()),
+            group_id: "g".into(),
+            doc_id: Some("B".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn document_removed_is_in_force_until_superseded_at() {
+        let e = edge(100, &["b"], None);
+        let m: HashMap<_, _> = [("b".to_string(), retired_ep(500))].into();
+        let docs = DocRecords::new();
+        // Future effective date: still in force before it, ended at and after it.
+        assert_eq!(in_force(&e, &m, &docs, 400), Some(true));
+        assert_eq!(in_force(&e, &m, &docs, 500), Some(false));
+        assert_eq!(in_force(&e, &m, &docs, 900), Some(false));
+        let info = supersession_info(&e, &m, &docs).unwrap();
+        assert_eq!(info.cause, SupersessionCause::DocumentRemoved);
+        assert!(info.superseded_by_document.is_none());
+        assert_eq!(
+            info.in_force_until.as_deref(),
+            Some(format_us(500).as_str())
+        );
+        assert!(info.recorded_at.is_none());
+        // A correction is unchanged: never in force.
+        let c: HashMap<_, _> = [("b".to_string(), corrected_ep(500))].into();
+        assert_eq!(in_force(&e, &c, &docs, 900), None);
     }
 
     #[test]

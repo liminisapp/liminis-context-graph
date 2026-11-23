@@ -159,7 +159,7 @@ fn with_belief(mut props: Value) -> Value {
     props
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (58 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (59 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -952,7 +952,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── write (18) ────────────────────────────────────────────────────────────
+        // ── write (19) ────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_process_chunk",
             description: "Ingest a text chunk as an episode: extracts entities/relationships \
@@ -1237,6 +1237,39 @@ pub fn registry() -> Vec<ToolSpec> {
                         "effective_at": {"type": "string", "description": "When the replacement took effect: an RFC 3339 timestamp with a timezone offset (required). May be earlier than now (retroactive) or in the future."}
                     },
                     "required": ["group_id", "superseding_doc_id", "superseded_doc_id", "effective_at"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_retire_document",
+            description: "Record that a whole document no longer exists at its source and has \
+                           no replacement (issue #859). Supersedes every live episode of \
+                           `doc_id` in `group_id` with reason `document_removed`: the graph \
+                           stops believing the facts they asserted (a fact also asserted by \
+                           another live document stays believed), but nothing is deleted — the \
+                           episodes and edges stay readable as history, and \
+                           `valid_at`/`invalid_at` are never written. Optional `effective_at` \
+                           (RFC 3339 with an offset) as in knowledge_supersede_document: a \
+                           future date keeps the fact believed and in force until then. \
+                           Idempotent: a document with no live episode reports \
+                           `superseded_count: 0` and writes nothing. Rejected, with no side \
+                           effects, for an unknown `doc_id`, a missing `group_id` or an \
+                           `effective_at` without a timezone offset. Optional `origin` (issue \
+                           #752): a `derived`/`answer` retirement of a `primary`/`external` \
+                           document is refused (`origin_conflict:`). Use \
+                           knowledge_supersede_document when a successor exists, and \
+                           knowledge_delete_by_source to destroy the record.",
+            scope: Scope::Write,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "description": "Group the document belongs to (required, non-empty)."},
+                        "doc_id": {"type": "string", "description": "doc_id of the document to retire (required)."},
+                        "effective_at": {"type": "string", "description": "When the removal takes effect: an RFC 3339 timestamp with a timezone offset. Omitted, it takes effect at recording time."},
+                        "origin": origin_prop()
+                    },
+                    "required": ["group_id", "doc_id"]
                 })
             },
         },
@@ -2194,11 +2227,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_58_unique_tools() {
+    fn registry_has_59_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 58);
+        assert_eq!(r.len(), 59);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 58, "tool names must be unique");
+        assert_eq!(names.len(), 59, "tool names must be unique");
     }
 
     #[test]
@@ -2206,7 +2239,7 @@ mod tests {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
         assert_eq!(count(Scope::Read), 22);
-        assert_eq!(count(Scope::Write), 18);
+        assert_eq!(count(Scope::Write), 19);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 17);
     }

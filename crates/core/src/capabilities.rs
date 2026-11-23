@@ -54,6 +54,7 @@ pub const FEATURES: &[&str] = &[
     "passage_legs",
     "process_document",
     "ready_for_reads",
+    "retire_document",
     "search_min_score_env",
     "status_episode_breakdown",
     "test_providers",

@@ -92,6 +92,7 @@ async fn reports_version_protocol_and_seeded_features() {
     let features = strings(&r["features"]);
     for f in [
         "process_document",
+        "retire_document",
         "chunk_supersede",
         "walk",
         "walk_provenance",

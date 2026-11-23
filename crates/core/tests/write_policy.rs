@@ -381,6 +381,7 @@ async fn required_group_methods_are_checked() {
     let p = policy("a");
     for method in [
         "knowledge_supersede_document",
+        "knowledge_retire_document",
         "knowledge_canonicalize_relations",
         "knowledge_backfill_relation_types",
         "knowledge_backfill_summary_embeddings",
