@@ -43,6 +43,17 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
     required is **BREAKING**; adding an optional field is not. Additional properties are allowed.
   - No wire change: handlers are untouched and the schemas were written against the real responses
     (the shapes pinned include `derived_document`, the `causes` map and `finding.reason`).
+  - `contract/knowledge_status.schema.json`: describes the opt-in `episode_breakdown` block (#884,
+    `include_episode_breakdown: true`) and `episode_breakdown_unavailable` as optional properties.
+    Additive, not breaking.
+  - `contract/knowledge_find_entities.schema.json`: describes the `include_episodes` provenance fields
+    (`episode_uuids`, `source_descriptions`, `source_files`, `episodes_truncated`; #857, #883) as
+    optional properties. Additive, not breaking.
+  - `contract/knowledge_process_chunk.schema.json`: describes the optional `warnings` array (#856).
+    Additive, not breaking. The `status: "unchanged"` value from #858 is not described yet; #858 adds
+    it to the schema when it lands.
+  - `contract/knowledge_search_passages.schema.json`: describes the optional `legs` and `lexical_score`
+    passage fields (#871). Additive, not breaking.
 
 ### Added
 
