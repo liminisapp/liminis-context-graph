@@ -64,6 +64,7 @@ fn make_state(db: Arc<Db>, db_path: &str) -> Arc<AppState> {
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -97,6 +98,7 @@ fn make_state_with_wal(db: Arc<Db>, wal_root: std::path::PathBuf, db_path: &str)
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -128,12 +130,19 @@ fn assert_err(v: &Value, id: i64) {
     assert!(v.get("error").is_some(), "expected error field: {v}");
 }
 
+/// Issue #858: an identical resubmission is a no-op, so each submission gets distinct text; a
+/// repeat of a `chunk_id` here is then a genuine correction, as these tests intend.
+fn next_submission() -> usize {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
 async fn process_chunk(id: i64, chunk_id: &str, source_file: &str, state: Arc<AppState>) -> Value {
     dispatch_val(
         id,
         "knowledge_process_chunk",
         json!({
-            "chunk_text": "Alice works at Acme Corp.",
+            "chunk_text": format!("Alice works at Acme Corp. (submission {})", next_submission()),
             "chunk_id": chunk_id,
             "source_file": source_file,
             "reference_time": "2024-01-01T00:00:00Z",

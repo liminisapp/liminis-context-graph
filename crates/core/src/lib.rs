@@ -8,6 +8,7 @@ pub mod canonicalize;
 pub mod capabilities;
 pub mod cassette;
 pub(crate) mod checkpoint;
+pub mod chunk_unchanged;
 pub mod correction_reads;
 pub mod corrections;
 pub mod cross_group;

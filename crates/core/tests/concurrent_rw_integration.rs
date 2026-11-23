@@ -156,6 +156,7 @@ async fn concurrent_add_episode_no_write_conflict() {
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     });
 
@@ -229,6 +230,7 @@ fn make_state_with_embedder(db: Arc<Db>, embedder: Arc<dyn lcg_core::Embedder>) 
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
         embedding_cache: std::sync::Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }

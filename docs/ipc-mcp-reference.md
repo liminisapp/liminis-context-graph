@@ -166,7 +166,7 @@ during a rebuild and under any `--writable-groups` policy.
 ```json
 {"server_version": "0.19.1", "protocol_version": 1,
  "features": ["chunk_supersede", "entity_provenance", "hybrid_passage_search", "lint", "origin",
-              "process_document", "walk", "walk_provenance", "writable_groups"],
+              "process_document", "status_episode_breakdown", "unchanged_noop", "walk", "walk_provenance", "writable_groups"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -852,9 +852,10 @@ something. Belief is *transaction time*; it is deliberately separate from validi
 never true, so no supersession path ever writes `valid_at` or `invalid_at`: **correction ends belief
 and leaves validity alone.** See [ADR-0705](adr/0705-belief-time-separate-from-validity.md).
 
-**Corrections.** Resubmitting a `chunk_id` to `knowledge_process_chunk` supersedes that chunk's
+**Corrections.** Resubmitting a `chunk_id` with changed content to `knowledge_process_chunk` supersedes that chunk's
 earlier live episodes **in the same `group_id`**, at the new episode's ingest time, and only once the
-new ingest has fully succeeded. A failed re-ingest leaves the old episode live. The result gains
+new ingest has fully succeeded. (A resubmission identical to the chunk's live episode is a no-op
+instead; see **Unchanged resubmission** below.) A failed re-ingest leaves the old episode live. The result gains
 `superseded_episode_uuids`. Nothing is deleted. The same `chunk_id` in another group is never touched.
 `knowledge_add_episode` never supersedes (its `name` is free-form).
 
@@ -871,6 +872,33 @@ still treated as the chunk's own, so a pre-upgrade `knowledge_add_episode` row w
 `chunk_id` can still be superseded; so can rows written by raw Cypher or other writers that leave the
 column NULL. The explicit by-name operations (`knowledge_mark_chunk_removed`,
 `knowledge_delete_chunk_episode`) are unchanged and still act on every same-named episode.
+
+**Unchanged resubmission (issue #858, `unchanged_noop`).** Before any embedding or LLM call,
+`knowledge_process_chunk` looks up the live episode for `(group_id, chunk_id)`. If it is identical to
+the request, the call writes nothing (no episode, entity, edge, supersession or WAL record), makes
+no embedder or extractor call, and returns
+`{"success": true, "status": "unchanged", "chunk_id", "source_file", "episode_uuid": <existing>}`.
+The ingest counters (`nodes_extracted`, `superseded_episode_uuids`, …) and any oversize `warning` are
+absent. Clients therefore no longer need their own content-hash ledgers for chunk re-syncs; a
+resubmission of everything on each sync costs nothing for the chunks that did not change.
+"Identical" means all of: `chunk_text` byte-for-byte (no trimming or line-ending folding, as in
+document mode); `attributes` equal as JSON (key order is irrelevant; missing means `{}`); `origin`
+(a legacy NULL is `primary`); `source_file`; `doc_id` (omitted means none); and `reference_time`,
+compared as an instant only when you pass one, so an omitted `reference_time` is never a difference.
+`knowledge_process_chunk` has no `title` parameter; `source_file` is its analogue. Any difference
+takes the supersede path above, unchanged. The shortcut does **not** apply when: `supersede` is
+`false` or `same_revision_episode_uuids` is given (a multi-unit revision); more than one live
+episode exists for the `chunk_id`; a live same-named episode was written by another path
+(`knowledge_add_episode`, document mode); the live episode has a pending (future-effective) document supersession; another
+`knowledge_process_chunk` or `knowledge_mark_chunk_removed` call for the same `(group_id,
+chunk_id)` is in flight (the ordinary path then orders the two, so a revert is never lost to an
+earlier edit still extracting); or no live episode exists (never ingested, superseded, or removed
+with `knowledge_mark_chunk_removed`). With a `doc_id`, the "one document has one origin" refusal
+applies to a no-op as to an ingest. A malformed request is rejected as always, never
+reported as `unchanged`. A change of extractor, model or ontology does not by itself re-extract an
+identical chunk: change the chunk or use the reprocess operations. Discover support with the
+`unchanged_noop` entry in `knowledge_capabilities` `features`. See
+[ADR-0858](adr/0858-unchanged-chunk-resubmission-noop.md).
 
 To submit one chunk as several calls under one `chunk_id`, send `supersede: false` on every unit but
 the last, and pass the earlier units' `episode_uuid`s as `same_revision_episode_uuids` on the last:

@@ -173,6 +173,7 @@ fn fixture() -> Fx {
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
     });
     Fx {
         state,

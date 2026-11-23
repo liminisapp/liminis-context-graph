@@ -73,6 +73,7 @@ fn make_state(
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -145,6 +146,13 @@ fn rfc3339(us: i64) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 
+/// Issue #858: an identical resubmission is a no-op, so each submission gets distinct text; a
+/// repeat of a `chunk_id` here is then a genuine correction, as these tests intend.
+fn next_submission() -> usize {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
 async fn put(
     state: &Arc<AppState>,
     chunk_id: &str,
@@ -153,7 +161,7 @@ async fn put(
     attributes: Value,
 ) {
     let mut params = json!({
-        "chunk_text": format!("text of {chunk_id}"), "chunk_id": chunk_id,
+        "chunk_text": format!("text of {chunk_id} (submission {})", next_submission()), "chunk_id": chunk_id,
         "source_file": "notes/source-note.md", "group_id": G,
         "reference_time": "2026-08-04T00:00:00Z", "attributes": attributes,
     });

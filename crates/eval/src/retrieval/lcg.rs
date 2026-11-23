@@ -651,7 +651,10 @@ pub async fn ingest(t: &dyn RpcTransport, fx: &Fixture) -> Result<IngestMap, Str
                 .await
                 .map_err(|e| format!("ingest of note '{}' chunk {i}: {e}", n.id))?;
             map.rpc_calls += 1;
-            map.extraction_requests += 1;
+            // An `unchanged` resubmission (issue #858) makes no extraction call.
+            if r["status"].as_str() != Some("unchanged") {
+                map.extraction_requests += 1;
+            }
             map.chunks += 1;
             let ep = r["episode_uuid"]
                 .as_str()

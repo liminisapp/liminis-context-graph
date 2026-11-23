@@ -129,6 +129,7 @@ fn make_state(embedder: Arc<dyn Embedder>, eps: &[Ep]) -> (Arc<AppState>, Arc<Db
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
     });
     (state, db, dir)
 }

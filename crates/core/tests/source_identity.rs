@@ -76,6 +76,7 @@ fn make_state(
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
     });
     (state, db, dir)
@@ -112,11 +113,18 @@ async fn call(method: &str, params: Value, state: &Arc<AppState>) -> Value {
     v["result"].clone()
 }
 
+/// Issue #858: an identical resubmission is a no-op, so each submission gets distinct text; a
+/// repeat of a `chunk_id` here is then a genuine correction, as these tests intend.
+fn next_submission() -> usize {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
 async fn chunk_in(state: &Arc<AppState>, group: &str, source_file: &str, chunk_id: &str) -> String {
     let r = call(
         "knowledge_process_chunk",
         json!({
-            "chunk_text": format!("text of {source_file} {chunk_id}"),
+            "chunk_text": format!("text of {source_file} {chunk_id} (submission {})", next_submission()),
             "chunk_id": chunk_id,
             "source_file": source_file,
             "group_id": group,

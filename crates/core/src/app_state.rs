@@ -178,9 +178,61 @@ pub struct AppState {
     /// is set once at startup via [`AppState::set_search_stages`]; empty means neither stage is
     /// configured, and a call that opts in degrades (`not_configured`) instead of failing.
     pub search_stages: ArcSwapOption<crate::search_stages::SearchStages>,
+    /// `knowledge_process_chunk` / `knowledge_mark_chunk_removed` calls currently in flight, per
+    /// `(group_id, chunk_id)` (issue #858, ADR-0858). The unchanged no-op is taken only when the
+    /// calling request is the sole one in flight for its key — otherwise a revert could be
+    /// acknowledged and then overwritten by an earlier, still-extracting edit, or by a removal.
+    /// See [`AppState::chunk_inflight_enter`].
+    pub chunk_inflight: Arc<Mutex<HashMap<(String, String), usize>>>,
+}
+
+/// RAII registration of one in-flight chunk call; see [`AppState::chunk_inflight_enter`].
+pub struct ChunkInflightGuard {
+    map: Arc<Mutex<HashMap<(String, String), usize>>>,
+    key: (String, String),
+}
+
+impl Drop for ChunkInflightGuard {
+    fn drop(&mut self) {
+        let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = m.get_mut(&self.key) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.key);
+            }
+        }
+    }
 }
 
 impl AppState {
+    /// Registers an in-flight chunk call for `(group_id, chunk_id)` until the guard drops.
+    /// Returns the guard and whether this call is the only one in flight for that key at the
+    /// moment of registration (issue #858). Registering is atomic, so of two concurrent calls at
+    /// most one can observe `alone == true`, and a call that arrives while another is in flight
+    /// always sees `false`.
+    pub fn chunk_inflight_enter(
+        &self,
+        group_id: &str,
+        chunk_id: &str,
+    ) -> (ChunkInflightGuard, bool) {
+        let key = (group_id.to_string(), chunk_id.to_string());
+        let mut m = self
+            .chunk_inflight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let n = m.entry(key.clone()).or_insert(0);
+        *n += 1;
+        let alone = *n == 1;
+        drop(m);
+        (
+            ChunkInflightGuard {
+                map: Arc::clone(&self.chunk_inflight),
+                key,
+            },
+            alone,
+        )
+    }
+
     /// Installs the passage-search stage configuration and service handles (issue #796).
     pub fn set_search_stages(&self, stages: crate::search_stages::SearchStages) {
         self.search_stages.store(Some(Arc::new(stages)));
@@ -326,6 +378,7 @@ impl AppState {
             group_ontologies: Arc::new(Mutex::new(HashMap::new())),
             embedding_cache,
             search_stages: ArcSwapOption::empty(),
+            chunk_inflight: Default::default(),
         }
     }
 
@@ -1085,6 +1138,7 @@ mod tests {
             group_ontologies: Arc::new(Mutex::new(HashMap::new())),
             embedding_cache: Arc::new(EmbeddingCache::new()),
             search_stages: ArcSwapOption::empty(),
+            chunk_inflight: Default::default(),
         }
     }
 

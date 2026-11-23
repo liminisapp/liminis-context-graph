@@ -50,6 +50,7 @@ fn degraded_state() -> Arc<AppState> {
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -100,6 +101,7 @@ async fn reports_version_protocol_and_seeded_features() {
         "hybrid_passage_search",
         "entity_provenance",
         "status_episode_breakdown",
+        "unchanged_noop",
     ] {
         assert!(features.iter().any(|x| x == f), "missing feature {f}");
     }
