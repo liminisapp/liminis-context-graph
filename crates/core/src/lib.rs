@@ -18,6 +18,7 @@ pub mod dedup_adapter;
 pub mod dedup_judge;
 pub mod direction;
 pub mod document;
+pub mod document_config;
 pub(crate) mod dump;
 pub mod embedder;
 pub mod embedding_cache;

@@ -487,12 +487,31 @@ async fn invalid_documents_are_refused_with_nothing_written() {
     assert!(episodes(&f.state).await.is_empty());
 }
 
-/// SC-011, FR-016: a document over the cap is refused before any extraction or write, and the
-/// error states the cap.
+/// A realistic markdown document of at least `bytes` bytes: numbered sections of prose
+/// paragraphs, each paragraph unique so every chunk is distinct.
+fn big_doc(bytes: usize) -> String {
+    let mut out = String::with_capacity(bytes + 1024);
+    let mut i = 0usize;
+    while out.len() < bytes {
+        if i % 8 == 0 {
+            out.push_str(&format!("## Section {}\n\n", i / 8));
+        }
+        out.push_str(&format!(
+            "Paragraph {i} describes the subsystem and its behaviour at length. {}\n\n",
+            "The quick brown fox jumps over the lazy dog. ".repeat(24)
+        ));
+        i += 1;
+    }
+    out
+}
+
+/// SC-011, FR-016, #862 FR-015: a document over the cap is refused before any extraction or
+/// write, and the error names the effective cap (2 MiB by default) and `LCG_DOCUMENT_MAX_BYTES`.
 #[tokio::test]
 async fn oversized_document_is_rejected_before_any_work() {
     let f = fx();
-    let big = format!("# Big\n\n{}", "x".repeat(600 * 1024));
+    let big = big_doc(3 * 1000 * 1000);
+    assert!(big.len() > 2 * 1024 * 1024);
     let v = try_call(
         "knowledge_process_document",
         doc_params("big", &big),
@@ -501,9 +520,12 @@ async fn oversized_document_is_rejected_before_any_work() {
     .await;
     let msg = v["error"]["message"].as_str().unwrap();
     assert!(
-        msg.contains("document_too_large") && msg.contains("524288"),
+        msg.contains("document_too_large")
+            && msg.contains("2097152")
+            && msg.contains("LCG_DOCUMENT_MAX_BYTES"),
         "{msg}"
     );
+    assert!(!msg.contains("524288"), "{msg}");
     assert_eq!(f.ex.call_count(), 0);
     assert!(episodes(&f.state).await.is_empty());
     let preview = try_call(
@@ -513,6 +535,60 @@ async fn oversized_document_is_rejected_before_any_work() {
     )
     .await;
     assert!(preview.get("error").is_some());
+}
+
+/// #862: a 1.5 MB document (over the old 512 KiB cap, under the new default) is accepted and
+/// ingested in full — nothing truncated.
+#[tokio::test]
+async fn one_and_a_half_mb_document_is_accepted_by_default() {
+    let f = fx();
+    let doc = big_doc(1_500_000);
+    let r = ingest(&f.state, "web-page", &doc).await;
+    assert!(r.get("error").is_none(), "{r}");
+    assert!(f.ex.call_count() > 100, "calls: {}", f.ex.call_count());
+    // The last paragraph (the document's tail) was extracted: nothing was truncated.
+    let last = f.ex.calls().last().unwrap().body.clone();
+    assert!(last.contains("Paragraph"), "{last}");
+}
+
+/// #862: `LCG_DOCUMENT_MAX_BYTES=4MiB` accepts the 3 MB document the default refuses. The
+/// installed cap is process-wide and install-once, so this goes through the explicit-cap entry
+/// point (the same function the handler calls).
+#[test]
+fn three_mb_document_is_accepted_under_a_4mib_cap_and_refused_under_the_default() {
+    use lcg_core::document::ingest::chunk_for_ingest_with_cap;
+    use lcg_core::document_config::{parse_max_bytes, DEFAULT_MAX_BYTES};
+    let doc = big_doc(3 * 1000 * 1000);
+    let four_mib = parse_max_bytes("4MiB").unwrap();
+    assert!(chunk_for_ingest_with_cap(&doc, four_mib).is_ok());
+    let e = chunk_for_ingest_with_cap(&doc, DEFAULT_MAX_BYTES)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("document_too_large") && e.contains("LCG_DOCUMENT_MAX_BYTES"),
+        "{e}"
+    );
+}
+
+/// #862 edge cases: exactly at the cap is accepted, one byte over is refused, and the cap is in
+/// bytes, not characters.
+#[test]
+fn cap_boundary_is_inclusive_and_measured_in_bytes() {
+    use lcg_core::document::ingest::chunk_for_ingest_with_cap;
+    let at = "x".repeat(1000);
+    assert!(chunk_for_ingest_with_cap(&at, 1000).is_ok());
+    let over = "x".repeat(1001);
+    let e = chunk_for_ingest_with_cap(&over, 1000)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("document_too_large") && e.contains("1000 bytes"),
+        "{e}"
+    );
+    // 600 characters of 2-byte text is 1200 bytes: over a 1000-byte cap despite 600 < 1000 chars.
+    let multibyte = "é".repeat(600);
+    assert_eq!(multibyte.chars().count(), 600);
+    assert!(chunk_for_ingest_with_cap(&multibyte, 1000).is_err());
 }
 
 // ── US2: the server applies the diff ────────────────────────────────────────
