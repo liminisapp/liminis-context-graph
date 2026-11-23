@@ -2414,13 +2414,17 @@ mod tests {
                 .find(|t| t.name == *name)
                 .unwrap_or_else(|| panic!("profile tool `{name}` missing from the registry"));
             let schema = (tool.input_schema)();
-            let required: Vec<&str> = schema
+            let mut required: Vec<&str> = schema
                 .get("required")
                 .and_then(|r| r.as_array())
                 .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
+            // Compare as sets: reordering `required` is not a breaking change.
+            required.sort_unstable();
+            let mut expected_sorted: Vec<&str> = expected.to_vec();
+            expected_sorted.sort_unstable();
             assert_eq!(
-                &required, expected,
+                required, expected_sorted,
                 "required parameters of profile method `{name}` changed (ADR-0862 breaking \
                  change)"
             );
