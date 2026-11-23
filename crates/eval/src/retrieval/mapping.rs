@@ -39,6 +39,63 @@ pub fn map_passages(passages: &[Value]) -> (Vec<String>, Vec<String>) {
     (notes, evidence)
 }
 
+/// One returned passage, pre-dedupe, as written to `ranked.jsonl` (`--record-ranked`). Carries
+/// the per-hit fields the retriever boundary otherwise drops. Every optional field is absent
+/// (never `null`) when the service did not supply it: `similarity` is hybrid-mode only, `legs`
+/// needs a service at or after #871. No evidence text is kept.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RankedHit {
+    /// 1-based position in the service's response.
+    pub rank: usize,
+    pub note: Option<String>,
+    pub uuid: Option<String>,
+    pub score: Option<f64>,
+    pub similarity: Option<f64>,
+    pub legs: Option<String>,
+}
+
+impl RankedHit {
+    pub fn to_json(&self) -> Value {
+        let mut o = serde_json::Map::new();
+        o.insert("rank".into(), Value::from(self.rank));
+        if let Some(n) = &self.note {
+            o.insert("note".into(), Value::from(n.clone()));
+        }
+        if let Some(u) = &self.uuid {
+            o.insert("uuid".into(), Value::from(u.clone()));
+        }
+        if let Some(s) = self.score {
+            o.insert("score".into(), Value::from(s));
+        }
+        if let Some(s) = self.similarity {
+            o.insert("similarity".into(), Value::from(s));
+        }
+        if let Some(l) = &self.legs {
+            o.insert("legs".into(), Value::from(l.clone()));
+        }
+        Value::Object(o)
+    }
+}
+
+/// Passages to per-hit records, in response order (passage level, pre-dedupe).
+pub fn map_hits(passages: &[Value]) -> Vec<RankedHit> {
+    passages
+        .iter()
+        .enumerate()
+        .map(|(i, p)| RankedHit {
+            rank: i + 1,
+            note: p["source_description"]
+                .as_str()
+                .and_then(note_of_source_description)
+                .map(str::to_string),
+            uuid: p["uuid"].as_str().map(str::to_string),
+            score: p["score"].as_f64(),
+            similarity: p["similarity"].as_f64(),
+            legs: p["legs"].as_str().map(str::to_string),
+        })
+        .collect()
+}
+
 /// Lexical-only tally over a hybrid passage response (issue #871): hits whose `legs` is `lexical`
 /// against all hits returned. A zero-hit response is a zero tally, so the question still counts.
 pub fn tally_legs(passages: &[Value]) -> super::LegsTally {
@@ -328,5 +385,38 @@ mod tests {
         );
         assert!(c.iter().all(|x| !x.is_empty()));
         assert!(chunk_markdown("   \n\n", 100).is_empty());
+    }
+
+    #[test]
+    fn map_hits_carries_score_similarity_and_legs_when_present() {
+        let ps = vec![
+            json!({"uuid": "u1", "source_description": "n1:0", "score": 0.5, "similarity": 0.8, "legs": "both"}),
+            json!({"uuid": "u2", "source_description": "n2:1", "score": 0.25, "similarity": null, "legs": "lexical"}),
+        ];
+        let h = map_hits(&ps);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].rank, 1);
+        assert_eq!(h[0].note.as_deref(), Some("n1"));
+        assert_eq!(h[0].score, Some(0.5));
+        assert_eq!(h[0].similarity, Some(0.8));
+        assert_eq!(h[0].legs.as_deref(), Some("both"));
+        assert_eq!(h[1].similarity, None, "null similarity reads as absent");
+        let j = h[1].to_json();
+        assert!(j.get("similarity").is_none(), "absent, never null: {j}");
+        assert_eq!(j["legs"], "lexical");
+    }
+
+    #[test]
+    fn map_hits_tolerates_a_service_without_legs_or_scores() {
+        let h = map_hits(&[
+            json!({"source_description": "n1:0"}),
+            json!({"content": "x"}),
+        ]);
+        assert_eq!(h[0].legs, None);
+        assert_eq!(h[0].score, None);
+        assert_eq!(h[1].note, None);
+        let j = h[0].to_json();
+        assert_eq!(j, json!({"rank": 1, "note": "n1"}));
+        assert!(map_hits(&[]).is_empty());
     }
 }

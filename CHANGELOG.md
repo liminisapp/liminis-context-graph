@@ -71,6 +71,20 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `report.json` (`meta.ontology_hash` is `"none"` for a free-form run, no longer `null`), the
   cassette `.meta.json` and the kept-workspace manifest now state the hash and mode the service
   reported rather than the staged file's.
+- **`lcg-eval retrieval` input digests, `--compare`/`--strict`, and `--record-ranked` (#872, ADR-0872).**
+  Two retrieval reports could be read against each other even when their inputs differed.
+  - `report.json` gains an `inputs` block (schema 1) with full sha256 digests of the corpus,
+    questions, variants file, cassette, embedder model (as the service reports it), extractor
+    identity, service binary and effective `LCG_*` environment (credential-bearing names by name
+    only); `none` when an input is unused, `unknown` when it cannot be identified. The Markdown
+    report shows the first 16 hex and a `lexical (direct)` vs `paraphrase` nDCG@k summary.
+  - `--compare <report.json>` prints per-config and per-category nDCG@k deltas. A different corpus,
+    questions or `k`, or an earlier report with no `inputs` block, exits 2 with no deltas; a
+    soft-input difference prints a banner (`--strict` refuses it). This run's report is written
+    before the comparison is judged.
+  - `--record-ranked` writes `ranked.jsonl` (passage-level `score`, `similarity`, `legs`) beside the
+    report so dense and fused configs join on question id. Refused with `--private`.
+  - A run without these flags is unchanged apart from the added `inputs` key.
 
 - **`knowledge_status` per-group episode breakdown (#884, ADR-0884).** ADR-0828's reopening
   trigger "superseded : live episodes exceeds 2 : 1 in any group" could not be checked because

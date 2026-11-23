@@ -273,6 +273,8 @@ Evidence: no cluster, centroid or label merging exists to gate; ingest compares 
 
 ## #847: `lcg-eval` report hygiene
 
+> **Implemented in #872** (input digests, `retrieval --compare`/`--strict`, `--record-ranked`, and the lexical-vs-paraphrase summary); see [retrieval-quality-evaluation.md](../retrieval-quality-evaluation.md#input-digests-inputs) and ADR-0872. The text below is the pre-implementation analysis.
+
 ### What reports already record
 
 `lcg-eval retrieval` (`crates/eval/src/retrieval/report.rs:39`, `RunMeta`): `corpus_version`, `corpus_hash`, `questions_version`, `questions_hash` (the first 16 hex of a length-prefixed sha256, `fixture.rs:243-250`), `k`, `lcg_build` (a version string), qmd version and index, `embedder` (the endpoint or socket path, plus the embedding profile), `extractor` (cassette path or endpoint), `qmd_models`, `judge_model`, `category_counts`, and the bootstrap seed and resamples. Per-config JSON (`to_json`, `report.rs` about 1426-1550) carries a `by_category` block and per-question `recall`, `mrr`, `ndcg`, grounded metrics and so on. Paired bootstrap differences between configs within a run are reported.

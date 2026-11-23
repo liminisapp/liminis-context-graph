@@ -8,14 +8,17 @@
 //! LCG / index in qmd → warm up → score every configuration at the same k → report.
 
 pub mod cli;
+pub mod compare;
 pub mod evidence_judge;
 pub mod fixture;
 pub mod generator;
+pub mod inputs;
 pub mod lcg;
 pub mod mapping;
 pub mod metrics;
 pub mod origin;
 pub mod qmd;
+pub mod ranked;
 pub mod report;
 pub mod score_probe;
 pub mod stats;
@@ -35,7 +38,8 @@ use self::fixture::{Category, CorpusStats, Fixture, Question};
 use self::metrics::{score_question, summarize_by_category, QuestionScore};
 use self::origin::{origin_data, OriginIndex};
 use self::report::{
-    percentile, Bootstrap, ConfigOutcome, ConfigRun, Grounded, IngestCost, Report, RunMeta, Status,
+    percentile, Bootstrap, ConfigOutcome, ConfigRun, Grounded, IngestCost, RankedQuestion, Report,
+    RunMeta, Status,
 };
 
 /// Minimum questions per category before a plan warns that per-category figures are thin (SC-003).
@@ -62,7 +66,7 @@ impl LegsTally {
 }
 
 /// What one system returned for one question.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RankedResult {
     /// Note ids in rank order, duplicates allowed (metrics dedupe, keeping first occurrence).
     pub notes: Vec<String>,
@@ -78,6 +82,9 @@ pub struct RankedResult {
     /// Lexical-only tally for a hybrid-mode passage config (issue #871); `None` for every other
     /// retriever, so a vector row never reports a share.
     pub legs_tally: Option<LegsTally>,
+    /// Passage-level hits for `--record-ranked` (`ranked.jsonl`); `None` for retrievers with no
+    /// per-hit score fields (entities/facts, qmd).
+    pub hits: Option<Vec<mapping::RankedHit>>,
     pub latency: Duration,
 }
 
@@ -331,6 +338,7 @@ pub async fn score_config(
     let mut evidence_gaps = 0;
     let mut legs_tally: Option<LegsTally> = None;
     let mut errors = Vec::new();
+    let mut ranked: Vec<RankedQuestion> = Vec::new();
     let mut judge_failure: Option<String> = None;
 
     for q in questions {
@@ -345,6 +353,13 @@ pub async fn score_config(
         calls.push(res.model_calls);
         lookup_calls += res.lookup_calls;
         evidence_gaps += res.evidence_gaps;
+        if let Some(hits) = &res.hits {
+            ranked.push(RankedQuestion {
+                question: q.id.clone(),
+                category: q.category,
+                hits: hits.clone(),
+            });
+        }
         if let Some(t) = res.legs_tally {
             legs_tally.get_or_insert_with(LegsTally::default).add(t);
         }
@@ -414,6 +429,7 @@ pub async fn score_config(
         query_errors: errors,
         grounded,
         origin: None,
+        ranked,
     }))
 }
 
@@ -516,7 +532,7 @@ pub async fn run_cli(args: &[String]) -> i32 {
         }
     };
     match run(a).await {
-        Ok(()) => 0,
+        Ok(code) => code,
         Err(e) => {
             eprintln!("lcg-eval retrieval: {e}");
             1
@@ -524,7 +540,26 @@ pub async fn run_cli(args: &[String]) -> i32 {
     }
 }
 
-async fn run(a: RetrievalArgs) -> Result<(), String> {
+/// Exit code of a `--compare` refusal: incompatible inputs (or an earlier report with no `inputs`).
+pub const EXIT_INCOMPATIBLE: i32 = 2;
+
+/// Reads and validates the `--compare` file: unreadable or not a report is an error (exit 1); a
+/// report with no `inputs` block is `Ok(Err(..))` (exit 2, see [`EXIT_INCOMPATIBLE`]).
+fn load_previous(path: &Path) -> Result<Result<serde_json::Value, compare::CompareError>, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read --compare file {}: {e}", path.display()))?;
+    let prev = compare::parse_previous(&text).map_err(|e| {
+        format!(
+            "--compare file {} is not a valid report: {e}",
+            path.display()
+        )
+    })?;
+    Ok(compare::check_has_inputs(&prev).map(|()| prev))
+}
+
+/// Runs the whole retrieval eval. `Ok(code)` is the exit code (0, or [`EXIT_INCOMPATIBLE`] when
+/// `--compare` refused after the report was written); `Err` is a runtime failure (exit 1).
+async fn run(a: RetrievalArgs) -> Result<i32, String> {
     // Refuse before anything is loaded, started or spent.
     if a.private {
         cli::private_guard(&a)?;
@@ -533,8 +568,24 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
     let plan = resolve(&a, &fx);
     if a.dry_run {
         println!("{}", render_plan(&plan));
-        return Ok(());
+        return Ok(0);
     }
+    // `--compare` is read before anything is started or spent: an unreadable or `inputs`-less
+    // earlier report fails fast. Hard-input mismatches are judged only after this run's own
+    // report is written (as graph-integrity does), so a refusal never discards a finished run.
+    let previous = match &a.compare {
+        None => None,
+        Some(p) => match load_previous(p)? {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!(
+                    "lcg-eval retrieval: cannot compare with {}: {e}",
+                    p.display()
+                );
+                return Ok(EXIT_INCOMPATIBLE);
+            }
+        },
+    };
     for w in &plan.warnings {
         eprintln!("lcg-eval retrieval: WARNING {w}");
     }
@@ -593,6 +644,12 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
     // (#790): a document-prefix change means a re-embed, so each profile gets a fresh workspace
     // and a fresh ingest rather than reusing another profile's vectors.
     let mut _service_guards: Vec<lcg::ServiceGuard> = Vec::new();
+    // What the report's `inputs` block is built from (issue #872): one embedder identity and one
+    // effective child environment per spawned service, plus the binary that ran.
+    let mut embedders: Vec<lcg::EmbedderIdentity> = Vec::new();
+    let mut service_envs: Vec<BTreeMap<String, String>> = Vec::new();
+    let mut service_bin: Option<(PathBuf, String)> = None;
+    let mut extractor_identity: Option<String> = None;
     if plan.needs_lcg {
         let profile_runs: Vec<Option<String>> = if a.embedding_profiles.is_empty() {
             vec![None]
@@ -636,6 +693,27 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             // cassette sidecar state the former so a discrepancy can never be hidden.
             meta.ontology_hash = Some(guard.ontology.hash.clone());
             meta.ontology_mode = guard.ontology.mode.clone();
+            embedders.push(guard.embedder.clone());
+            // `vars_os`, not `vars`: `vars()` panics on a non-UTF-8 name or value anywhere in the
+            // operator's shell, and the child used to inherit the environment without eval reading it.
+            service_envs.push(inputs::without_flag_owned_cassette_vars(
+                lcg::effective_service_env(
+                    &opts,
+                    std::env::vars_os().map(|(k, v)| {
+                        (
+                            k.to_string_lossy().into_owned(),
+                            v.to_string_lossy().into_owned(),
+                        )
+                    }),
+                ),
+                a.replay_cassette.is_some(),
+                a.record_cassette.is_some(),
+            ));
+            service_bin = Some((opts.bin.clone(), guard.version.clone()));
+            extractor_identity = Some(inputs::extractor_identity(
+                a.replay_cassette.is_some(),
+                a.extractor_http.as_deref().or(a.extractor_uds.as_deref()),
+            ));
             meta.embedder = a
                 .embedder_http
                 .clone()
@@ -950,17 +1028,76 @@ async fn run(a: RetrievalArgs) -> Result<(), String> {
             return Err(e);
         }
     };
+    // Built here, after ingest, so a cassette this run recorded is hashed once it is written.
+    let variants_path = a.corpus.join(variants::FILE);
+    let cassette_path = a
+        .replay_cassette
+        .as_ref()
+        .or(a.record_cassette.as_ref())
+        .map(PathBuf::from);
+    let input_digests = inputs::InputDigests::build(&inputs::InputSources {
+        corpus: &fx.corpus_digest,
+        questions: &fx.questions_digest,
+        variants_file: (query_variants.is_some()).then_some(variants_path.as_path()),
+        cassette_file: cassette_path.as_deref(),
+        embedders: &embedders,
+        extractor_identity: extractor_identity.as_deref(),
+        service_bin: service_bin.as_ref().map(|(b, v)| (b.as_path(), v.as_str())),
+        path_var: std::env::var_os("PATH").as_deref(),
+        envs: &service_envs,
+    });
     let report = Report {
         meta,
         ingest: ingest_cost,
         configs: outcomes,
+        inputs: Some(input_digests),
     };
 
-    let written = write_report(&report, a.out.as_deref());
+    let mut written = write_report(&report, a.out.as_deref());
+    // A reused `--out` must not leave a `compare.md` / `ranked.jsonl` from an earlier run beside this
+    // run's `report.json`: clear both here; each is rewritten below only when this run produces it.
+    if let Some(dir) = a.out.as_deref() {
+        for name in ["compare.md", "ranked.jsonl"] {
+            if let Err(e) = std::fs::remove_file(dir.join(name)) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    written = written.and(Err(format!("cannot clear stale {name}: {e}")));
+                }
+            }
+        }
+    }
+    if let (true, Some(dir)) = (a.record_ranked, a.out.as_deref()) {
+        match ranked::write_ranked(dir, &report.configs) {
+            Ok(p) => eprintln!("lcg-eval retrieval: wrote {}", p.display()),
+            Err(e) => written = written.and(Err(e)),
+        }
+    }
+    let mut code = 0;
+    if let Some(prev) = &previous {
+        match compare::compare(prev, &report.to_json(), a.strict) {
+            Ok(c) => {
+                let md = compare::render_compare_markdown(&c);
+                println!("{md}");
+                if let Some(dir) = a.out.as_deref() {
+                    if let Err(e) = std::fs::write(dir.join("compare.md"), &md) {
+                        written = written.and(Err(format!("cannot write compare.md: {e}")));
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "lcg-eval retrieval: cannot compare with {}: {e}",
+                    a.compare
+                        .as_deref()
+                        .map_or(String::new(), |p| p.display().to_string())
+                );
+                code = EXIT_INCOMPATIBLE;
+            }
+        }
+    }
     write_kept_manifest();
     match keep_error {
         Some(e) => Err(e),
-        None => written,
+        None => written.map(|()| code),
     }
 }
 
@@ -1028,6 +1165,7 @@ mod tests {
                     lookup_calls: 0,
                     evidence_gaps: 0,
                     legs_tally: None,
+                    hits: None,
                     latency: Duration::from_millis(1),
                 })
             })
@@ -1146,6 +1284,7 @@ mod tests {
                     lookup_calls: 0,
                     evidence_gaps: 0,
                     legs_tally: None,
+                    hits: None,
                     latency: Duration::from_millis(5),
                 })
             };

@@ -313,6 +313,8 @@ pub(crate) mod testing {
             notes,
             corpus_hash: "c".into(),
             questions_hash: "abcd1234abcd1234".into(),
+            corpus_digest: "c".into(),
+            questions_digest: "abcd1234abcd1234".into(),
         }
     }
 

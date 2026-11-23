@@ -58,7 +58,7 @@ treated as free-form and the fit section is not applicable. The report states wh
 |---|---|
 | 0 | Success. |
 | 1 | Runtime error: unreadable skeleton or mapping, an invalid `--compare` file (the message names it), an unloadable `--ontology`, an unwritable `--out`. |
-| 2 | Usage error, or `--compare` against a report produced with a different skeleton or mapping. |
+| 2 | Usage error, or `--compare` against a report produced with a different skeleton or mapping. (`lcg-eval retrieval --compare` follows the same shape with its own hard/soft input policy; see [retrieval-quality-evaluation.md](retrieval-quality-evaluation.md#comparing-two-runs).) |
 | 3 | The workspace is unusable: missing, not an ingested workspace, its DB cannot be opened or queried (degraded or corrupt; nothing is repaired), or it holds no nodes in the group. An all-zero report is never produced. |
 
 ### How it reads without writing

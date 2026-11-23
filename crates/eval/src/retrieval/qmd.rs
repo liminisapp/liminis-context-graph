@@ -352,6 +352,7 @@ impl Retriever for QmdRetriever {
                 lookup_calls: 0,
                 evidence_gaps,
                 legs_tally: None,
+                hits: None,
                 latency,
             })
         })

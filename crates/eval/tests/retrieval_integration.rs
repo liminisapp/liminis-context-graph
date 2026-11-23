@@ -244,6 +244,7 @@ async fn full_run(
             qmd_seconds,
         },
         configs,
+        inputs: None,
     }
 }
 
@@ -545,4 +546,312 @@ fn v1_fixture_hashes_and_shape_are_unchanged() {
             .all(|n| n.origin.is_none() && n.cites.is_empty()),
         "v1 declares no origins"
     );
+}
+
+// ── #872: inputs digests, --compare, --record-ranked ─────────────────────────────
+
+/// Runs `lcg-eval retrieval` over the checked-in fixture with qmd absent, so every config is a
+/// skipped row and nothing needs a service, a model or a network. The report still carries the
+/// `inputs` block, which is all the comparison tests need.
+fn cli_run(extra: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_lcg-eval"))
+        .args([
+            "retrieval",
+            "--configs",
+            "qmd",
+            "--qmd-bin",
+            "/nonexistent/qmd",
+            "--no-grounded",
+            "--corpus",
+        ])
+        .arg(fixture_dir())
+        .args(extra)
+        .output()
+        .unwrap()
+}
+
+fn code(o: &std::process::Output) -> i32 {
+    o.status.code().unwrap()
+}
+
+fn stderr(o: &std::process::Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+/// A first run's `report.json`, edited by `edit`, written to `dir/prev.json`.
+fn previous_report(dir: &Path, edit: impl FnOnce(&mut Value)) -> PathBuf {
+    let first = dir.join("first");
+    let o = cli_run(&["--out", first.to_str().unwrap()]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let mut j: Value =
+        serde_json::from_str(&std::fs::read_to_string(first.join("report.json")).unwrap()).unwrap();
+    edit(&mut j);
+    let p = dir.join("prev.json");
+    std::fs::write(&p, serde_json::to_string(&j).unwrap()).unwrap();
+    p
+}
+
+#[test]
+fn report_json_gains_an_inputs_block_with_full_digests_and_none_for_unused_inputs() {
+    let d = tempfile::tempdir().unwrap();
+    let prev = previous_report(d.path(), |_| {});
+    let j: Value = serde_json::from_str(&std::fs::read_to_string(prev).unwrap()).unwrap();
+    let fx = fixture::load(&fixture_dir()).unwrap();
+    assert_eq!(j["inputs"]["schema_version"], 1);
+    assert_eq!(j["inputs"]["corpus"], fx.corpus_digest.as_str());
+    assert_eq!(j["inputs"]["questions"], fx.questions_digest.as_str());
+    assert_eq!(j["inputs"]["corpus"].as_str().unwrap().len(), 64);
+    // A run with no cassette, variants file or LCG service has nothing to digest.
+    for k in [
+        "variants",
+        "cassette",
+        "embedder_model",
+        "service_binary",
+        "service_env",
+    ] {
+        assert_eq!(j["inputs"][k], "none", "{k}");
+    }
+    // The pre-existing meta hashes are the first 16 hex of the same digests.
+    assert_eq!(j["meta"]["corpus_hash"], fx.corpus_hash.as_str());
+    assert!(fx.corpus_digest.starts_with(&fx.corpus_hash));
+}
+
+#[test]
+fn compare_against_an_identical_run_exits_0_and_writes_compare_md() {
+    let d = tempfile::tempdir().unwrap();
+    let prev = previous_report(d.path(), |_| {});
+    let out = d.path().join("second");
+    let o = cli_run(&[
+        "--compare",
+        prev.to_str().unwrap(),
+        "--strict",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(out.join("report.json").exists());
+    let md = std::fs::read_to_string(out.join("compare.md")).unwrap();
+    assert!(md.contains("# Retrieval comparison"), "{md}");
+    assert!(!md.contains("Soft inputs differ"));
+}
+
+#[test]
+fn a_hard_input_mismatch_exits_2_after_writing_the_report_and_prints_no_deltas() {
+    let d = tempfile::tempdir().unwrap();
+    let prev = previous_report(d.path(), |j| {
+        j["inputs"]["questions"] = json!("0".repeat(64));
+        j["meta"]["k"] = json!(7);
+    });
+    let out = d.path().join("second");
+    let o = cli_run(&[
+        "--compare",
+        prev.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&o), 2);
+    let err = stderr(&o);
+    assert!(
+        err.contains("questions") && err.contains("k (earlier 7"),
+        "{err}"
+    );
+    // This run's own report survives the refusal; no comparison is produced.
+    assert!(out.join("report.json").exists());
+    assert!(!out.join("compare.md").exists());
+    assert!(!String::from_utf8_lossy(&o.stdout).contains("Retrieval comparison"));
+}
+
+#[test]
+fn an_earlier_report_without_inputs_exits_2_before_anything_runs() {
+    let d = tempfile::tempdir().unwrap();
+    let prev = previous_report(d.path(), |j| {
+        j.as_object_mut().unwrap().remove("inputs");
+    });
+    let out = d.path().join("second");
+    let o = cli_run(&[
+        "--compare",
+        prev.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&o), 2);
+    assert!(stderr(&o).contains("re-run"), "{}", stderr(&o));
+    assert!(
+        !out.exists(),
+        "an inputs-less report is refused before any spend"
+    );
+}
+
+#[test]
+fn an_unreadable_or_invalid_compare_file_exits_1() {
+    let d = tempfile::tempdir().unwrap();
+    let o = cli_run(&["--compare", d.path().join("missing.json").to_str().unwrap()]);
+    assert_eq!(code(&o), 1);
+    assert!(stderr(&o).contains("cannot read --compare file"));
+    let bad = d.path().join("bad.json");
+    std::fs::write(&bad, "{\"not\": \"a report\"}").unwrap();
+    let o = cli_run(&["--compare", bad.to_str().unwrap()]);
+    assert_eq!(code(&o), 1);
+    assert!(stderr(&o).contains("not a valid report"));
+}
+
+#[test]
+fn a_soft_difference_prints_a_banner_and_strict_refuses_it() {
+    let d = tempfile::tempdir().unwrap();
+    let prev = previous_report(d.path(), |j| {
+        j["inputs"]["cassette"] = json!("c".repeat(64));
+    });
+    let out = d.path().join("lax");
+    let o = cli_run(&[
+        "--compare",
+        prev.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let md = std::fs::read_to_string(out.join("compare.md")).unwrap();
+    assert!(
+        md.contains("Soft inputs differ") && md.contains("`cassette`"),
+        "{md}"
+    );
+
+    let strict = d.path().join("strict");
+    let o = cli_run(&[
+        "--compare",
+        prev.to_str().unwrap(),
+        "--strict",
+        "--out",
+        strict.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&o), 2);
+    assert!(stderr(&o).contains("cassette"));
+    assert!(strict.join("report.json").exists());
+    assert!(!strict.join("compare.md").exists());
+}
+
+#[test]
+fn strict_without_compare_and_ranked_misuse_are_usage_errors() {
+    assert_eq!(code(&cli_run(&["--strict"])), 2);
+    assert_eq!(code(&cli_run(&["--record-ranked"])), 2);
+}
+
+#[test]
+fn private_record_ranked_is_refused_and_leaves_no_ranked_file() {
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("priv");
+    let o = cli_run(&[
+        "--private",
+        "--record-ranked",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&o), 2, "{}", stderr(&o));
+    assert!(!out.join("ranked.jsonl").exists());
+    // A private run may still compare, and still records digests.
+    let prev = previous_report(d.path(), |_| {});
+    let o = cli_run(&[
+        "--private",
+        "--compare",
+        prev.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    let j: Value =
+        serde_json::from_str(&std::fs::read_to_string(out.join("report.json")).unwrap()).unwrap();
+    assert_eq!(j["inputs"]["corpus"].as_str().unwrap().len(), 64);
+    assert!(!out.join("ranked.jsonl").exists());
+}
+
+#[tokio::test]
+async fn ranked_jsonl_joins_dense_and_hybrid_configs_on_question_id_with_no_missing_ids() {
+    let fx = fixture::load(&fixture_dir()).unwrap();
+    let transport: Arc<dyn RpcTransport> = Arc::new(FakeLcg::new());
+    lcg::ingest(transport.as_ref(), &fx).await.unwrap();
+    let slots = [lcg::PassageMode::Raw, lcg::PassageMode::Hybrid]
+        .into_iter()
+        .map(|mode| {
+            Slot::Run(Box::new(LcgPassages {
+                t: transport.clone(),
+                mode,
+            }))
+        })
+        .collect();
+    let outcomes = evaluate(&fx, K, slots, None, "no judge").await;
+    let d = tempfile::tempdir().unwrap();
+    let path = lcg_eval::retrieval::ranked::write_ranked(d.path(), &outcomes).unwrap();
+    assert_eq!(path, d.path().join("ranked.jsonl"));
+
+    let mut by_config: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for line in std::fs::read_to_string(path).unwrap().lines() {
+        let v: Value = serde_json::from_str(line).unwrap();
+        by_config
+            .entry(v["config"].as_str().unwrap().to_string())
+            .or_default()
+            .insert(v["question"].as_str().unwrap().to_string());
+        for h in v["hits"].as_array().unwrap() {
+            assert!(h["rank"].as_u64().unwrap() >= 1);
+            // The fake service supplies no legs; the field is absent, not null.
+            assert!(h.get("legs").is_none());
+        }
+    }
+    let raw = &by_config["lcg-passages-raw"];
+    let hybrid = &by_config["lcg-passages-hybrid"];
+    let all: BTreeSet<String> = fx.questions.iter().map(|q| q.id.clone()).collect();
+    assert_eq!(raw, &all, "every question has a raw record");
+    assert_eq!(
+        raw, hybrid,
+        "the two configs join on question id with none missing"
+    );
+}
+
+#[test]
+fn a_reused_out_dir_does_not_keep_a_stale_compare_md_or_ranked_jsonl() {
+    let d = tempfile::tempdir().unwrap();
+    let ok = previous_report(d.path(), |_| {});
+    let out = d.path().join("reused");
+    // First run: a compatible compare plus ranked output leaves both files behind.
+    let o = cli_run(&[
+        "--compare",
+        ok.to_str().unwrap(),
+        "--record-ranked",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(out.join("compare.md").exists() && out.join("ranked.jsonl").exists());
+    // Second run in the same directory: refused comparison, no --record-ranked.
+    // `previous_report` always writes `<dir>/prev.json`, so give the second one its own directory.
+    let other = d.path().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let bad = previous_report(&other, |j| {
+        j["inputs"]["questions"] = json!("0".repeat(64));
+    });
+    let o = cli_run(&[
+        "--compare",
+        bad.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code(&o), 2);
+    assert!(out.join("report.json").exists());
+    assert!(!out.join("compare.md").exists(), "stale compare.md cleared");
+    assert!(
+        !out.join("ranked.jsonl").exists(),
+        "stale ranked.jsonl cleared"
+    );
+}
+
+#[test]
+fn ranked_jsonl_is_not_written_without_the_flag() {
+    let d = tempfile::tempdir().unwrap();
+    let out = d.path().join("o");
+    let o = cli_run(&["--out", out.to_str().unwrap()]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(out.join("report.json").exists());
+    assert!(!out.join("ranked.jsonl").exists());
+    let out2 = d.path().join("o2");
+    let o = cli_run(&["--out", out2.to_str().unwrap(), "--record-ranked"]);
+    assert_eq!(code(&o), 0, "{}", stderr(&o));
+    assert!(out2.join("ranked.jsonl").exists());
 }
