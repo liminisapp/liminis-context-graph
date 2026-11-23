@@ -530,7 +530,9 @@ access or model calls. The prose is written separately, once, by `lcg-eval retri
 OPTIONS:
     --spec <FILE>   Scenario (quotas and seed), e.g. crates/eval/fixtures/retrieval-v2/scenario.json
     --out <DIR>     Fixture directory (writes skeleton.json and graph-questions.jsonl; review.json
-                    only when absent)
+                    only when absent). Reads prose-facts.json from it when present: prose-introduced
+                    facts folded into the graph-question gold answers (stated) or listed as
+                    optional_answers (ambiguous). An invalid file is an error.
     --check         Regenerate in memory and exit 1 if skeleton.json or graph-questions.jsonl
                     differs. If the fixture has been
                     rendered (render.json exists) also check the rendered notes and questions
@@ -589,8 +591,15 @@ fn run_gen(args: &[String]) -> Result<i32, String> {
         sc.seed,
         skeleton_hash(&text)
     );
-    // #821 FR-008: the graph question set is generated from the same skeleton.
-    let graph_text = graph_questions::to_jsonl(&graph_questions::generate(&g.skeleton)?);
+    // #821 FR-008: the graph question set is generated from the same skeleton, plus the
+    // hand-maintained prose overlay (#907): absent means none, present-but-invalid is an error.
+    let prose_path = Path::new(&out).join(graph_questions::PROSE_FACTS_FILE);
+    let prose = match std::fs::read_to_string(&prose_path) {
+        Ok(t) => graph_questions::parse_prose_facts(&t, &g.skeleton)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("{}: {e}", prose_path.display())),
+    };
+    let graph_text = graph_questions::to_jsonl(&graph_questions::generate(&g.skeleton, &prose)?);
     if check {
         let on_disk = std::fs::read_to_string(dir.join("skeleton.json")).unwrap_or_default();
         let mut failed = false;
