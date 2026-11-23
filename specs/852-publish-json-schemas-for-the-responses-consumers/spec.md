@@ -97,11 +97,11 @@ A consumer reading release notes can tell when a published schema changed and wh
 
 **Why this priority**: Consumers need a signal to know when to re-check their types, but the mechanism is documentation/process on top of the core contract.
 
-**Independent Test**: A release that changes a schema has a corresponding changelog entry; contributor documentation states the rule that removing or renaming a field is a breaking change.
+**Independent Test**: A release that changes a schema has a corresponding changelog entry; contributor documentation states the rule that removing or renaming a field, or otherwise changing the shape a reader depends on (widening a type, making a required field optional), is a breaking change.
 
 **Acceptance Scenarios**:
 
-1. **Given** a change to any published schema, **When** the change is prepared for release, **Then** the changelog/release notes mention the schema change, and mark removed or renamed fields as breaking.
+1. **Given** a change to any published schema, **When** the change is prepared for release, **Then** the changelog/release notes mention the schema change, and mark breaking changes (removed or renamed fields, widened types, required fields made optional) as breaking.
 2. **Given** the contributor documentation, **When** a contributor adds a field to a covered response, **Then** the documented process tells them to update the schema, add or adjust validating tests, and note the change.
 
 ---
@@ -129,7 +129,7 @@ A consumer reading release notes can tell when a published schema changed and wh
 - **FR-007**: The published schema files MUST be kept in sync with their source of truth by a check that fails CI when the committed files are stale or hand-edited out of sync.
 - **FR-008**: Each release MUST include the schema files as downloadable release assets alongside the binaries, so a consumer can fetch them at a pinned version by the same mechanism as the binary.
 - **FR-009**: The schema set MUST identify the lcg version it belongs to, so a consumer can confirm the schemas match the pinned binary.
-- **FR-010**: The project MUST document a compatibility policy: removing or renaming a field, or narrowing its type, in a published schema is a breaking change; adding an optional field is not.
+- **FR-010**: The project MUST document a compatibility policy: judged from the reader's side (the schemas describe what lcg emits), removing or renaming a field, widening a type (e.g. `string` to `string|null`), making an always-present field optional, or adding a union alternative in a published schema is a breaking change; adding an optional field, narrowing a type, or making an optional field always present is not.
 - **FR-011**: Any change to a published schema MUST be recorded in the release notes/changelog, with breaking changes called out.
 - **FR-012**: Documentation MUST explain to consumers how to fetch the schemas at a pinned version and validate a recorded response or generate types from them without a running engine, and MUST explain to contributors how to update schemas when changing a covered response.
 - **FR-013**: The schemas MUST describe only the method's successful result payload, not JSON-RPC error envelopes, streamed progress lines, or the MCP wrapper.
