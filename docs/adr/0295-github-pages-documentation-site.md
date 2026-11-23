@@ -1,5 +1,7 @@
 # ADR-0295: GitHub Pages Documentation Site
 
+> **Amended by [ADR-0904](0904-changelog-fragments-and-generated-llms-full.md) (issue #904):** `docs/llms-full.txt` is no longer committed or drift-checked by diff. `scripts/generate-docs-llms-full.sh` generates it when the site is built and published (same URL), and `docs-drift.yml` only checks that the generator runs cleanly. Where this ADR says "committed" or "regenerate and commit" for `llms-full.txt`, read it as superseded.
+
 **Status**: Accepted
 **Date**: 2026-08-02
 **Issue**: #295

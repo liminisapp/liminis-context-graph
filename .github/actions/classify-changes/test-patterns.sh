@@ -49,6 +49,12 @@ expect docs '.github/workflows/docs-publish.yml' 'the docs publish workflow'
 expect docs 'README.md
 CHANGELOG.md
 docs/adr/0322-ci-docs-only-fast-path.md' 'prose across the repo'
+expect docs 'changelog.d/904-changelog-fragments.md' 'a changelog fragment alone (#904)'
+expect docs 'changelog.d/README.md' 'the fragment format note'
+expect docs 'changelog.d/12-a.md
+changelog.d/13-b.md' 'several fragments'
+expect docs 'changelog.d/12-a.md
+CHANGELOG.md' 'a fragment and a direct CHANGELOG.md edit'
 
 echo
 echo "code changes must run the suite:"
@@ -64,6 +70,12 @@ expect code 'scripts/assert-openssl-linkage.sh' 'the OpenSSL linkage guard'
 expect code 'crates/eval/scripts/test-scripts.sh' 'a script the test job runs'
 expect code 'contract/knowledge_lint.schema.json' 'a published response schema (#852)'
 expect code 'contract/README.md' 'anything under contract/'
+expect code 'scripts/assemble-changelog.sh' 'the changelog assembler (its self-test runs in lint)'
+expect code 'scripts/test-assemble-changelog.sh' 'the changelog assembler self-test'
+expect code 'contract/knowledge_lint.schema.json
+changelog.d/852-x.md' 'a schema change with its fragment'
+expect code 'changelog.d/12-a.md
+crates/core/src/db.rs' 'a fragment alongside code'
 expect code 'docs/configuration.md
 crates/core/src/db.rs' 'docs alongside code'
 expect code 'scripts/generate-docs-llms-full.sh

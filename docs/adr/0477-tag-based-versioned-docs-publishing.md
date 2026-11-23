@@ -169,7 +169,9 @@ this PR's diff — the same category of action as ADR-0295's original Pages-enab
 
 - Merging a docs change to `main` no longer changes the live site (FR-001/SC-002) — a PR
   author verifies content via the existing `check-internal-links`/`check-llms-full` checks
-  (FR-007, unchanged in what they gate) and sees it live only once a release publishes.
+  (FR-007, unchanged in what they gate; since ADR-0904 `check-llms-full` runs the generator
+  instead of diffing a committed copy, and the publish build generates `llms-full.txt` itself)
+  and sees it live only once a release publishes.
 - The root URL and every versioned URL are independently correct and stable (FR-002/FR-003),
   at the cost of `gh-pages` growing one directory per release forever — acceptable per the
   spec's explicit "retain all" requirement; no pruning mechanism exists or is planned.

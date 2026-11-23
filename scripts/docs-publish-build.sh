@@ -50,6 +50,13 @@ if [[ ! -f "${SITE_DIR}/package.json" ]]; then
   exit 1
 fi
 
+# docs/llms-full.txt is generated, not committed (#904, ADR-0904). Generate it from THIS checkout's
+# docs/ before any site build so each published version serves its own bundle (ADR-0477), and so
+# sync-docs.mjs finds it. Under `set -e` a generator failure fails the publish rather than
+# publishing a site with a missing or stale llms-full.txt. The build itself is reused by both the
+# versioned and the root site build below.
+"${DOCS_SRC}/scripts/generate-docs-llms-full.sh"
+
 # DOCS_VERSION labels the build with the version it documents, rather than
 # whatever Cargo.toml at this ref happens to say. A no-op when building straight
 # from the matching tag (the values already agree), and the mechanism that makes

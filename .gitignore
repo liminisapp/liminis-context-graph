@@ -20,6 +20,9 @@ site/dist-versioned/
 site/dist-publish/
 site/.astro/
 site/src/content/docs/
+# docs/llms-full.txt is generated (scripts/generate-docs-llms-full.sh) at docs build/publish
+# time and is not committed (#904, ADR-0904).
+docs/llms-full.txt
 site/public/llms.txt
 site/public/llms-full.txt
 .openssl-rpath/

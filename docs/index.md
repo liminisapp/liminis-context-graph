@@ -83,4 +83,6 @@ every group in the database — treat the process boundary as the trust boundary
 
 [`llms.txt`](llms.txt) and [`llms-full.txt`](llms-full.txt) provide this site's content in a
 form suited to LLM ingestion. `CLAUDE.md` (agent guidance for contributors working in this
-repository) is referenced from `llms.txt` but is not itself published here.
+repository) is referenced from `llms.txt` but is not itself published here. `llms-full.txt` is
+generated when the site is built, so it exists on the published site but is not a file in the
+repository (the link does not resolve on github.com).

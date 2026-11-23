@@ -108,6 +108,26 @@ jobs:
         with:
           extra-deny-pattern: "^crates/core/tests/fixtures/real_corpus_wal/"
 
+  # #904: validate every changelog.d/ fragment on EVERY PR. Its own job, deliberately:
+  #  * not in `lint`, which is skipped for docs-only PRs (ADR-0322) -- a fragment-only PR is
+  #    exactly that, and a malformed fragment would otherwise first fail in the release PR;
+  #  * not a step in `changes`, because a failure there leaves `classify` unrun, every downstream
+  #    job then takes the fail-safe "run everything" branch, and a typo in a fragment starts the
+  #    ~40 minute build and test run (and, if the suite is green, the PR could still merge).
+  # Independent of `changes`: a bad fragment fails only this check. It should be a REQUIRED
+  # status check ("changelog fragments") in branch protection. Reads the checked-out tree, so no
+  # extra history is needed. Same parser as the release-time assembly (ADR-0904).
+  changelog-fragments:
+    name: changelog fragments
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Validate changelog fragments
+        run: scripts/assemble-changelog.sh --check
+
   # #640: cheap pre-gate. Runs the checks that need no compile — `cargo fmt --check`, the
   # eval script guards and the ML-runtime-deps `cargo tree` guard — so a trivial failure is
   # reported in about a minute instead of after the ~15-minute release build. `build-release`
@@ -167,7 +187,12 @@ jobs:
       - name: contract changelog guard self-test
         run: scripts/test-assert-contract-changelog.sh
 
-      # #852 (FR-011): a PR that changes a published response schema must say so in CHANGELOG.md.
+      # #904: the changelog fragment validator/assembler used by the release runbook.
+      - name: changelog fragment assembler self-test
+        run: scripts/test-assemble-changelog.sh
+
+      # #852 (FR-011): a PR that changes a published response schema must say so in the
+      # changelog: a changelog.d/ fragment (#904) or, during the transition, CHANGELOG.md.
       - name: published schema changes are in the changelog
         if: github.event_name == 'pull_request'
         env:

@@ -75,9 +75,11 @@ tag they pin; see the [response contract](ipc-mcp-reference.md#response-contract
   malformed, so a release cannot silently ship without its contract.
 - **The committed schemas are already in sync.** CI's `committed_schemas_match_generated` test fails
   when `contract/*.schema.json` differ from what the source types generate, and a PR that changes a
-  schema must also change `CHANGELOG.md` (`scripts/assert-contract-changelog.sh`). Before tagging,
-  confirm the `[Unreleased]` changelog entries for any schema change mark breaking changes (removed or
-  renamed fields, widened types, required fields made optional) as **BREAKING**, and that the section is renamed to the version being released.
+  schema must also add a `changelog.d/` fragment (or, during the transition, edit `CHANGELOG.md`;
+  `scripts/assert-contract-changelog.sh`). Before tagging, run `scripts/assemble-changelog.sh` so the
+  fragments are in `## [Unreleased]`, confirm the entries for any schema change mark breaking changes
+  (removed or renamed fields, widened types, required fields made optional) as **BREAKING**, and that
+  the section is renamed to the version being released, with a fresh empty `## [Unreleased]` added above it.
 - **First check after a release publishes.** `release.yml` does not run on pull requests (ADR-0639), so
   the asset step is first exercised on a tag. Confirm the release lists the seven
   `*.schema.json` files and `contract-manifest.json`, and that `jq -r .lcg_version contract-manifest.json`
@@ -116,7 +118,8 @@ On a tag run, `release.yml`'s `verify-plan` job fails if the plan output reached
 empty or without a build matrix, and `host` refuses to publish unless both build jobs
 succeeded ([ADR-0725](adr/0725-release-plan-output-guard.md)). The usual cause is **secret
 masking**: the runner silently drops a job output that looks like a credential (for example
-`Authorization: Bearer <key>` in the CHANGELOG section, which is embedded in the plan manifest).
+`Authorization: Bearer <key>` in the CHANGELOG section, which is embedded in the plan manifest;
+fragment text under `changelog.d/` ends up in that section, so the same hazard applies to it).
 Before this guard, that skipped the builds and published a release holding only
 `dist-manifest.json` from a green run (`v0.18.0`).
 

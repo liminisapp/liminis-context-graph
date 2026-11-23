@@ -11,6 +11,10 @@ permissions:
   contents: read
 
 jobs:
+  # #904, ADR-0904: llms-full.txt is generated at docs publish time and is no longer committed,
+  # so there is nothing to diff. The check is that the generator still runs cleanly on this PR's
+  # docs (it rejects a missing H1, a missing Cargo.toml version, ...). The job id and display
+  # name are unchanged on purpose: a required status check may be keyed on them.
   check-llms-full:
     name: Verify llms-full.txt is up to date
     runs-on: ubuntu-latest
@@ -19,16 +23,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Regenerate llms-full.txt
+      - name: Generate llms-full.txt (fails on anything the generator rejects)
         run: bash scripts/generate-docs-llms-full.sh
 
-      - name: Fail if llms-full.txt is out of date
+      - name: Check the generated file is non-empty and not tracked
         run: |
-          if ! git diff --exit-code docs/llms-full.txt; then
-            echo ""
-            echo "docs/llms-full.txt is out of date."
-            echo "Run 'scripts/generate-docs-llms-full.sh' and commit the result alongside"
-            echo "your doc changes."
+          test -s docs/llms-full.txt
+          if git ls-files --error-unmatch docs/llms-full.txt >/dev/null 2>&1; then
+            echo "docs/llms-full.txt is generated at publish time and must not be committed (ADR-0904)."
+            echo "Remove it with: git rm --cached docs/llms-full.txt"
             exit 1
           fi
 
@@ -56,6 +59,11 @@ jobs:
       - name: Install dependencies
         working-directory: site
         run: pnpm install --frozen-lockfile
+
+      # docs/index.md links to llms-full.txt, which is generated rather than committed (ADR-0904);
+      # sync-docs.mjs fails the build without it, and the link check needs it in the output.
+      - name: Generate llms-full.txt
+        run: bash scripts/generate-docs-llms-full.sh
 
       - name: Build site
         working-directory: site

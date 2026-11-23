@@ -185,8 +185,19 @@ for (const file of pages) {
 // public/ so they keep their exact bytes and their existing URLs.
 const PUBLIC = join(SITE, 'public')
 mkdirSync(PUBLIC, { recursive: true })
-for (const asset of ['llms.txt', 'llms-full.txt']) {
-  if (existsSync(join(SOURCE, asset))) copyFileSync(join(SOURCE, asset), join(PUBLIC, asset))
+//
+// llms.txt is committed. llms-full.txt is GENERATED and git-ignored (#904, ADR-0904): a build
+// without it would silently publish a site that lacks a documented URL, so a missing file is an
+// error here rather than a skip.
+if (existsSync(join(SOURCE, 'llms.txt'))) {
+  copyFileSync(join(SOURCE, 'llms.txt'), join(PUBLIC, 'llms.txt'))
 }
+if (!existsSync(join(SOURCE, 'llms-full.txt'))) {
+  throw new Error(
+    `${join(SOURCE, 'llms-full.txt')} is missing. It is generated, not committed: run ` +
+      '`scripts/generate-docs-llms-full.sh` from the repository root, then build again.',
+  )
+}
+copyFileSync(join(SOURCE, 'llms-full.txt'), join(PUBLIC, 'llms-full.txt'))
 
 console.log(`${written} page(s) generated from ${SOURCE} at v${version}`)

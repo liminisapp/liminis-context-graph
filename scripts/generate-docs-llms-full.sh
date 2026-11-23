@@ -4,18 +4,21 @@
 # Usage: scripts/generate-docs-llms-full.sh
 #   Run from the repo root or any directory — uses paths relative to this script.
 #
-# Output: docs/llms-full.txt — committed concatenated bundle checked by CI
+# Output: docs/llms-full.txt — the concatenated bundle. It is GENERATED, git-ignored and not
+#   committed (#904, ADR-0904): docs/llms.txt stays committed, this one does not.
 #
 # The version comes from Cargo.toml's [workspace.package]. It used to live in
 # docs/_config.yml as well, with this script asserting the two matched (FR-010);
 # the Jekyll site is gone and with it that second copy, so there is nothing left
 # to disagree and nothing to check.
 #
-# Workflow:
-#   1. Run this script after modifying any canonical doc page listed in ORDERED below,
-#      or after bumping Cargo.toml's [workspace.package] version
-#   2. Commit docs/llms-full.txt alongside your doc changes
-#   3. CI (docs-drift.yml) verifies the committed file matches what this script produces
+# Where it runs:
+#   - scripts/docs-publish-build.sh runs it before every site build, so each published docs
+#     version serves its own llms-full.txt at the same URL as before (a failure fails the publish)
+#   - docs-drift.yml runs it on every PR, so a docs change this script rejects fails the PR
+#   - locally, run it before `cd site && pnpm build` / `pnpm dev`: site/scripts/sync-docs.mjs
+#     refuses to build without the file
+# Nothing needs committing: there is no output file to keep in step with the docs.
 
 set -euo pipefail
 

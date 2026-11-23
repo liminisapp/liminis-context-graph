@@ -25,6 +25,10 @@ This is the same rule, for the same reason, as `specs/<issue_number>-<slug>/`: a
 
 **For small bug fixes**: The full Spec Kit workflow is overkill — a focused issue with reproduction steps, expected/actual behavior, and acceptance criteria is fine. The Spec Kit threshold is roughly: if the work is large enough to be a "feature" or to have user-facing acceptance scenarios, file it as a Fabrik issue and let the Specify stage handle the spec. If it's a one-line fix or a clearly-scoped regression, just file the issue directly.
 
+## Changelog entries are fragments (NON-NEGOTIABLE)
+
+A PR's changelog entry goes in its own file, `changelog.d/<issue>-<slug>.md` (format: `changelog.d/README.md`) — **do not edit `CHANGELOG.md`**. Every PR used to add to the same `## [Unreleased]` block, which made concurrent PRs overlap so the merge train could not batch them (#904, ADR-0904). The release PR runs `scripts/assemble-changelog.sh` to merge fragments into `CHANGELOG.md`. The CONTRIBUTING rules for raw-socket clients (name the clients, flag **BREAKING**) apply to the fragment text, and a PR that changes `contract/` needs a fragment (CI enforces it). Likewise, `docs/llms-full.txt` is generated at docs publish time and is not committed: never `git add` it.
+
 ## Where work happens (NON-NEGOTIABLE)
 
 Two rules govern how changes land in this repo:
