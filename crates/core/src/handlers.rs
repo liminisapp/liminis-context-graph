@@ -3754,7 +3754,10 @@ fn plan_move_batch(
         }
         move_refused(&refusals)
     })?;
-    md::check_destination_history(conn, group_id, &plan).map_err(|r| move_refused(&r))?;
+    let history = md::check_destination_history(conn, group_id, &plan)?;
+    if !history.is_empty() {
+        return Err(move_refused(&history));
+    }
     Ok(plan)
 }
 

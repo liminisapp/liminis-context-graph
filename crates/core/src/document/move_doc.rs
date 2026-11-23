@@ -569,11 +569,14 @@ pub fn classify_cross_group(
 /// `DocSupersession` record. `apply_plan` re-keys the source's revision and supersession rows into
 /// that `doc_id`, so without this check the destination would hold two unrelated revision
 /// histories and the next `knowledge_process_document` could pick the wrong baseline.
+///
+/// A failure to *read* that state is a database error (`Err`), not a refusal: only a real history
+/// conflict is reported as `destination_has_history`.
 pub fn check_destination_history(
     conn: &Conn<'_>,
     group_id: &str,
     plan: &MovePlan,
-) -> Result<(), Vec<Refusal>> {
+) -> Result<Vec<Refusal>, Error> {
     let mut refusals = Vec::new();
     for m in &plan.moves {
         let Some(dest) = &m.spec.to.doc_id else {
@@ -584,12 +587,10 @@ pub fn check_destination_history(
         }
         let has_revisions = conn
             .doc_revision_rows_for_doc(group_id, dest)
-            .map(|r| !r.is_empty())
-            .map_err(|e| db_refusal(m.index, e))?;
+            .map(|r| !r.is_empty())?;
         let has_supersession = conn
             .doc_supersession_for(group_id, dest)
-            .map(|r| r.is_some())
-            .map_err(|e| db_refusal(m.index, e))?;
+            .map(|r| r.is_some())?;
         if has_revisions || has_supersession {
             refusals.push(Refusal {
                 index: m.index,
@@ -601,19 +602,7 @@ pub fn check_destination_history(
             });
         }
     }
-    if refusals.is_empty() {
-        Ok(())
-    } else {
-        Err(refusals)
-    }
-}
-
-fn db_refusal(index: usize, e: Error) -> Vec<Refusal> {
-    vec![Refusal {
-        index,
-        code: code::DESTINATION_HAS_HISTORY,
-        message: format!("could not read the destination's document state: {e}"),
-    }]
+    Ok(refusals)
 }
 
 /// Writes a validated plan through the recording `Conn` helpers. All statements are uuid- or

@@ -1164,7 +1164,9 @@ pub fn registry() -> Vec<ToolSpec> {
                            offending move with a code (`unknown_source`, `occupied_destination` \
                            — moving into a document that already holds live episodes is a merge, \
                            not a move —, `cross_group`, `chunk_id_collision`, `identical`, \
-                           `duplicate_source`, `duplicate_destination`, `destination_is_source`). \
+                           `duplicate_source`, `duplicate_destination`, `destination_is_source`, \
+                           `destination_has_history` — the destination `doc_id` holds no live \
+                           episodes but still has revision or supersession state). \
                            `from` and `to` must name the same identity kinds. Pages that link to \
                            the moved `doc_id` in `attributes.links` are not rewritten. \
                            `dry_run: true` validates and reports without writing. `group_id` is \
