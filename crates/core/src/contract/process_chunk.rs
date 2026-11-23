@@ -41,9 +41,33 @@ pub struct ChunkWarning {
     pub message: String,
 }
 
+/// `"unchanged"`, the only value `status` takes (#858).
+fn unchanged_status(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "string", "const": "unchanged" })
+}
+
+/// A resubmitted chunk identical to its live episode (#858, `unchanged_noop`): nothing is written,
+/// so the ingest counters, `superseded_episode_uuids` and the oversize `warning` are absent.
 #[derive(JsonSchema)]
 #[allow(dead_code)]
-pub struct ProcessChunkResult {
+pub struct UnchangedChunkResult {
+    pub success: bool,
+    #[schemars(schema_with = "unchanged_status")]
+    pub status: String,
+    pub chunk_id: String,
+    pub source_file: String,
+    /// The existing live episode.
+    pub episode_uuid: String,
+    pub duration_seconds: f64,
+    /// Present only when `group_id` was omitted and the default group was used (#856).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warnings: Option<Vec<String>>,
+}
+
+/// A chunk that was ingested. It carries no `status` key.
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct IngestedChunkResult {
     pub success: bool,
     pub chunk_id: String,
     pub superseded_episode_uuids: Vec<String>,
@@ -75,4 +99,14 @@ pub struct ProcessChunkResult {
     /// because `group_id` was omitted (#856).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
+}
+
+/// The two `knowledge_process_chunk` shapes. They are told apart by `status: "unchanged"` and by
+/// the ingest counters only the ingested shape carries, so this is an `anyOf`.
+#[derive(JsonSchema)]
+#[serde(untagged)]
+#[allow(dead_code, clippy::large_enum_variant)]
+pub enum ProcessChunkResult {
+    Unchanged(UnchangedChunkResult),
+    Ingested(IngestedChunkResult),
 }

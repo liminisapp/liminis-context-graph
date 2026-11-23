@@ -52,8 +52,11 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
     (`episode_uuids`, `source_descriptions`, `source_files`, `episodes_truncated`; #857, #883) as
     optional properties. Additive, not breaking.
   - `contract/knowledge_process_chunk.schema.json`: describes the optional `warnings` array (#856).
-    Additive, not breaking. The `status: "unchanged"` value from #858 is not described yet; #858 adds
-    it to the schema when it lands.
+    Additive, not breaking.
+  - `contract/knowledge_process_chunk.schema.json`: the result is now an `anyOf` of the ingested shape
+    and the #858 unchanged-resubmission shape (`status: "unchanged"` with `success`, `chunk_id`,
+    `source_file`, `episode_uuid`, `duration_seconds` and none of the ingest counters). Additive for
+    readers of the ingested shape: that shape has no `status` key and is unchanged.
   - `contract/knowledge_search_passages.schema.json`: describes the optional `legs` and `lexical_score`
     passage fields (#871). Additive, not breaking.
 

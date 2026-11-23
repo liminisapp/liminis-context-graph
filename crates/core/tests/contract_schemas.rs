@@ -82,6 +82,7 @@ fn make_state(
         ontology_drift: Arc::new(Mutex::new(OntologyDriftState::default())),
         group_ontologies: Arc::new(Mutex::new(HashMap::new())),
         search_stages: Default::default(),
+        chunk_inflight: Default::default(),
         embedding_cache: Arc::new(lcg_core::EmbeddingCache::new()),
     })
 }
@@ -158,6 +159,13 @@ fn rfc3339(us: i64) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
 }
 
+/// Issue #858: an identical resubmission is a no-op, so each submission gets distinct text; a
+/// repeat of a `chunk_id` here is then a genuine correction, as these tests intend.
+fn next_submission() -> usize {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
+
 async fn put(
     state: &Arc<AppState>,
     chunk_id: &str,
@@ -166,7 +174,7 @@ async fn put(
     attributes: Value,
 ) {
     let mut params = json!({
-        "chunk_text": format!("text of {chunk_id}"), "chunk_id": chunk_id,
+        "chunk_text": format!("text of {chunk_id} (submission {})", next_submission()), "chunk_id": chunk_id,
         "source_file": "notes/source-note.md", "group_id": G,
         "reference_time": "2026-08-04T00:00:00Z", "attributes": attributes,
     });
@@ -488,8 +496,45 @@ async fn process_chunk_validates_including_warning_and_dropped_edges() {
     m["warnings"] = Value::Null;
     assert_invalid("knowledge_process_chunk", "warnings: null", &m);
 
-    // Re-ingest under the same chunk id: superseded_episode_uuids is non-empty.
-    let again = call("knowledge_process_chunk", params, &state).await;
+    // Resubmitting the identical chunk is a no-op: `status: "unchanged"`, no ingest counters (#858).
+    let unchanged = call("knowledge_process_chunk", params.clone(), &state).await;
+    assert_eq!(unchanged["status"], "unchanged", "{unchanged}");
+    assert!(unchanged.get("nodes_extracted").is_none(), "{unchanged}");
+    assert_valid("knowledge_process_chunk", &unchanged);
+    let mut m = unchanged.clone();
+    m["status"] = json!("changed");
+    assert_invalid(
+        "knowledge_process_chunk",
+        "unchanged with another status",
+        &m,
+    );
+    let mut m = unchanged.clone();
+    m.as_object_mut().unwrap().remove("episode_uuid");
+    assert_invalid(
+        "knowledge_process_chunk",
+        "unchanged without episode_uuid",
+        &m,
+    );
+    let mut m = unchanged.clone();
+    m["episode_uuid"] = json!(7);
+    assert_invalid(
+        "knowledge_process_chunk",
+        "unchanged episode_uuid retyped",
+        &m,
+    );
+
+    // Re-ingest under the same chunk id with revised text: superseded_episode_uuids is non-empty.
+    let mut revised_params = params;
+    revised_params["chunk_text"] = json!("Alpha uses Beta, revised");
+    let again = call("knowledge_process_chunk", revised_params, &state).await;
+    assert!(again.get("status").is_none(), "{again}");
+    assert!(
+        !again["superseded_episode_uuids"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{again}"
+    );
     assert_valid("knowledge_process_chunk", &again);
 
     // Oversized chunk_text carries the advisory warning.
