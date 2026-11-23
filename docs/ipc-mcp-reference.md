@@ -1353,8 +1353,12 @@ unchanged section is not re-extracted, but each commit re-stamps its episodes wi
 superseded episode keeps the span of the last revision it was live in. Episodes from every other path carry none of these, so chunk-mode reads are unchanged.
 Its `write_path` is `document`, so a chunk-mode revise of the same name never touches it.
 
-**Limits.** A document over `LCG_DOCUMENT_MAX_BYTES` (default 512 KiB) is refused with
-`document_too_large` before any work. An empty, whitespace-only or headings-only document is refused
+**Limits.** A document over the size cap is refused with `document_too_large` before any work,
+and is never truncated: the cap is `LCG_DOCUMENT_MAX_BYTES` in UTF-8 **bytes** (default **2 MiB**,
+at most 256 MiB, a byte count or a `KiB`/`MiB` suffix such as `4MiB`), validated once at startup
+(an invalid value fails startup; see [Configuration](configuration.md) and
+[ADR-0862](adr/0862-document-max-bytes-strict-2mib-default.md)). The message names the cap and the
+variable. A document exactly at the cap is accepted. An empty, whitespace-only or headings-only document is refused
 with `empty_document`. To retire a whole document use `knowledge_retire_document` (or
 `knowledge_supersede_document` when a successor exists); for one chunk use
 `knowledge_mark_chunk_removed`; to destroy the record use `knowledge_delete_by_source`.
@@ -2475,8 +2479,11 @@ result fields exist for that, both introduced in 0.13.2.
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see
   [Configuration](configuration.md)) adds a `warning` field naming the actual and recommended
   character counts, and emits a `chunk_text_oversized` telemetry event. This is visibility only:
-  nothing is truncated, split, or rejected, and the call succeeds exactly as it did before.
-  Splitting oversized input is the caller's responsibility (issue #407).
+  nothing is truncated, split, or rejected, and the call succeeds exactly as it did before. The
+  `warning.message` points at `knowledge_process_document` (issue #862): send a whole document or
+  a long page there and the server chunks it for you (see
+  [Document mode](#document-mode-send-the-whole-document-the-server-does-the-diff-issue-785)).
+  The client is not asked to split it by hand (issue #407, reworded by #862).
 
 - **`dedup_paths` reports how this chunk's entities were resolved.** An additive object of
   per-path tallies for the chunk's Phase B entity resolution

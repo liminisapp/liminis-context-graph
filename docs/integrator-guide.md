@@ -199,7 +199,7 @@ How to choose:
 UTF-8) by default, enough for a web page of about 600,000 characters. A larger document is
 **refused** with `document_too_large`, the message names the cap and `LCG_DOCUMENT_MAX_BYTES`, and
 nothing is written or truncated. The operator raises or lowers the cap with that variable
-(`4MiB`, `512KiB` or a plain byte count, up to 256 MiB), which is checked once at startup. A
+(`4MiB`, `1024KiB` or a plain byte count, up to 256 MiB), which is checked once at startup. A
 client cannot change it; detect the feature with `document_max_bytes_env` and cut the document at
 a section boundary yourself if you must stay under a smaller cap. See
 [Configuration](configuration.md) and [Document mode](ipc-mcp-reference.md#document-mode-send-the-whole-document-the-server-does-the-diff-issue-785).
