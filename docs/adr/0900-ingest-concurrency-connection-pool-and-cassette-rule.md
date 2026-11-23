@@ -37,7 +37,8 @@ consolidation) run without a lock, and only Phase C commits under `write_lock`.
   by `SHUTDOWN_GRACE`) instead of letting `kill_on_drop` SIGKILL it mid-commit, which would leave a
   kept workspace with a torn write. Supersessions,
   `knowledge_build_indices` and the entity-link pass run after the stream is drained. `ingest(t, fx)`
-  is `ingest_with(t, fx, 1)`, so N = 1 is byte-identical and no caller changed.
+  is `ingest_with(t, fx, 1)`, so N = 1 makes the same calls in the same order, with identical
+  metrics, and no caller changed.
 - **The per-call timeout scales with N.** A call's 900 s clock also counts the time it queues
   inside the service (the sidecar pools of `UDS_POOL_SIZE = 4`, ADR-0039/0042, and the Phase C write
   lock), so a run that finishes at N = 1 could fail at N = 12 on queueing alone. A pool of `n`
@@ -47,7 +48,13 @@ consolidation) run without a lock, and only Phase C commits under `write_lock`.
   usage errors) on `retrieval` and on `retrieval-score-probe`, the other caller of `ingest`. It is
   recorded as `ingest_concurrency` in `report.json` `meta` and in the `## Reproduction` block. It is
   **not** added to the `inputs` digest block (ADR-0872), so N = 1 digests and baselines are
-  unchanged. A kept workspace (`--keep-workspace`) records it as `ingest_concurrency` in its
+  unchanged. `meta.ingest_concurrency` is written at N = 1 too (spec FR-007 / SC-006: every report
+  states the concurrency used), so a sequential `report.json` is not byte-identical to one from
+  before this change: it gains that one `meta` key. What N = 1 keeps identical is the call order, the
+  metrics, the `inputs` digests, the cassette sidecar and the workspace manifest. Consumers that
+  compare whole `report.json` files, rather than metrics or digests, will see the added key.
+
+  A kept workspace (`--keep-workspace`) records it as `ingest_concurrency` in its
   `lcg-eval-workspace.json` manifest, only when above 1 (a sequential manifest is byte-identical),
   and `graph-qa` prints a note for such a workspace, so an N > 1 graph is not read as an extraction
   or dedup regression. `retrieval-score-probe` warns when it replays an `order_dependent` cassette,

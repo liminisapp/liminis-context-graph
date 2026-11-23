@@ -122,7 +122,8 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   guidance. `deadline_ms`, joining a duplicate in-flight resubmit and pipelining remain deferred.
 - **`lcg-eval retrieval --ingest-concurrency N` (#900, ADR-0900).** Keeps up to N
   `knowledge_process_chunk` calls in flight during ingest, each on its own socket connection
-  (default 1: behaviour, call order, outputs and digests unchanged). Per-chunk results are folded in
+  (default 1: behaviour, call order, metrics and digests unchanged; `report.json` `meta` gains the
+  `ingest_concurrency` key). Per-chunk results are folded in
   manifest order, a failed chunk still names its note id and chunk index, and supersessions, the
   index build and the entity-link pass run after every chunk. `retrieval-score-probe` accepts it
   too. The value used is recorded in `report.md` and `report.json` `meta.ingest_concurrency`.

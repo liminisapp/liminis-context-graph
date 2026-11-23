@@ -2702,6 +2702,7 @@ mod tests {
         assert_eq!(p.call_timeout(), Duration::from_secs(5));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn pool_retires_a_connection_after_a_failed_or_cancelled_call() {
         let srv = echo_server();
