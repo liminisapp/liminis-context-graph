@@ -15,6 +15,7 @@
  */
 export const PAGES = [
   ['getting-started', 'Getting Started'],
+  ['integrator-guide', 'Integrator Guide'],
   ['configuration', 'Configuration'],
   ['embedding-options', 'Embedding Options'],
   ['ipc-mcp-reference', 'IPC & MCP Reference'],

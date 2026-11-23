@@ -2336,6 +2336,156 @@ mod tests {
         }
     }
 
+    /// The minimal client profile (issue #862, ADR-0862): the methods LCG keeps compatible across
+    /// releases. Listed in `docs/integrator-guide.md` too; `profile_list_matches_the_guide` ties
+    /// the two together.
+    const MINIMAL_PROFILE: &[&str] = &[
+        "health_check",
+        "knowledge_capabilities",
+        "knowledge_delete_by_source",
+        "knowledge_find_entities",
+        "knowledge_get_entity_neighbors",
+        "knowledge_process_chunk",
+        "knowledge_process_document",
+        "knowledge_retire_document",
+        "knowledge_search_passages",
+    ];
+
+    /// Profile methods that are dispatched on the socket but are not MCP tools. Only
+    /// `health_check` qualifies; adding to this list weakens the guarantee, so it needs an ADR.
+    const PROFILE_NON_MCP: &[&str] = &["health_check"];
+
+    /// The required request parameters the profile guarantees (ADR-0862: removing or adding a
+    /// required parameter is a breaking change). `health_check` has no MCP schema.
+    const PROFILE_REQUIRED: &[(&str, &[&str])] = &[
+        ("knowledge_capabilities", &[]),
+        ("knowledge_delete_by_source", &["source_file", "group_ids"]),
+        ("knowledge_find_entities", &["query"]),
+        ("knowledge_get_entity_neighbors", &["entity_uuid"]),
+        (
+            "knowledge_process_chunk",
+            &["chunk_text", "chunk_id", "source_file"],
+        ),
+        ("knowledge_process_document", &["doc_id", "content"]),
+        ("knowledge_retire_document", &["group_id", "doc_id"]),
+        ("knowledge_search_passages", &["query"]),
+    ];
+
+    /// Every profile method stays in the dispatcher, and (bar the named exemption) in the MCP
+    /// registry. The failure names the method.
+    #[test]
+    fn minimal_profile_methods_stay_in_the_dispatcher_and_the_mcp_registry() {
+        let dispatched = lcg_core::capabilities::methods();
+        let registered: HashSet<&str> = registry().iter().map(|t| t.name).collect();
+        for m in MINIMAL_PROFILE {
+            assert!(
+                dispatched.contains(m),
+                "minimal-profile method `{m}` is no longer in the dispatcher \
+                 (lcg_core::write_policy::CLASSIFICATION); removing it breaks the ADR-0862 \
+                 compatibility guarantee"
+            );
+            if !PROFILE_NON_MCP.contains(m) {
+                assert!(
+                    registered.contains(m),
+                    "minimal-profile method `{m}` is no longer in the MCP tool registry; \
+                     removing it breaks the ADR-0862 compatibility guarantee"
+                );
+            }
+        }
+        for m in PROFILE_NON_MCP {
+            assert!(
+                MINIMAL_PROFILE.contains(m),
+                "{m} is exempted but not in the profile"
+            );
+            assert!(
+                !registered.contains(m),
+                "`{m}` is now an MCP tool: remove it from PROFILE_NON_MCP"
+            );
+        }
+    }
+
+    /// The profile's required request parameters do not change (ADR-0862).
+    #[test]
+    fn minimal_profile_required_parameters_are_stable() {
+        let reg = registry();
+        for (name, expected) in PROFILE_REQUIRED {
+            let tool = reg
+                .iter()
+                .find(|t| t.name == *name)
+                .unwrap_or_else(|| panic!("profile tool `{name}` missing from the registry"));
+            let schema = (tool.input_schema)();
+            let required: Vec<&str> = schema
+                .get("required")
+                .and_then(|r| r.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            assert_eq!(
+                &required, expected,
+                "required parameters of profile method `{name}` changed (ADR-0862 breaking \
+                 change)"
+            );
+        }
+        // Every profile method with an MCP tool has an entry above.
+        for m in MINIMAL_PROFILE
+            .iter()
+            .filter(|m| !PROFILE_NON_MCP.contains(m))
+        {
+            assert!(
+                PROFILE_REQUIRED.iter().any(|(n, _)| n == m),
+                "profile method `{m}` has no PROFILE_REQUIRED entry"
+            );
+        }
+    }
+
+    /// The methods listed between the `minimal-profile` markers in the integrator guide.
+    fn guide_profile() -> Vec<String> {
+        let guide = include_str!("../../../../docs/integrator-guide.md");
+        let begin = "<!-- minimal-profile:begin -->";
+        let end = "<!-- minimal-profile:end -->";
+        let from = guide
+            .find(begin)
+            .expect("docs/integrator-guide.md is missing the minimal-profile:begin marker")
+            + begin.len();
+        let to = guide
+            .find(end)
+            .expect("docs/integrator-guide.md is missing the minimal-profile:end marker");
+        assert!(from < to, "minimal-profile markers are out of order");
+        guide[from..to]
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("```"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The guide's list and the test's list cannot drift apart: either changing alone fails.
+    #[test]
+    fn profile_list_matches_the_guide() {
+        let mut in_guide = guide_profile();
+        in_guide.sort();
+        let mut in_test: Vec<String> = MINIMAL_PROFILE.iter().map(|s| s.to_string()).collect();
+        in_test.sort();
+        for m in &in_test {
+            assert!(
+                in_guide.contains(m),
+                "`{m}` is in MINIMAL_PROFILE but not in the docs/integrator-guide.md profile block"
+            );
+        }
+        for m in &in_guide {
+            assert!(
+                in_test.contains(m),
+                "`{m}` is in the docs/integrator-guide.md profile block but not in MINIMAL_PROFILE"
+            );
+        }
+        assert_eq!(in_guide, in_test);
+        let unique: HashSet<&String> = in_guide.iter().collect();
+        assert_eq!(
+            unique.len(),
+            in_guide.len(),
+            "duplicate in the guide's profile block"
+        );
+    }
+
     #[test]
     fn every_schema_is_a_valid_object_schema() {
         for tool in registry() {

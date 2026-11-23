@@ -74,6 +74,7 @@ SITE_URL="https://docs.liminis.app/liminis-context-graph"
 ORDERED=(
   "index.md:${SITE_URL}/"
   "getting-started.md:${SITE_URL}/getting-started"
+  "integrator-guide.md:${SITE_URL}/integrator-guide"
   "configuration.md:${SITE_URL}/configuration"
   "embedding-options.md:${SITE_URL}/embedding-options"
   "ipc-mcp-reference.md:${SITE_URL}/ipc-mcp-reference"
