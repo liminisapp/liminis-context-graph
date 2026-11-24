@@ -28,6 +28,9 @@ This is the record of every retrieval experiment and its result: what was tried,
 - **Methodology:** see [Retrieval-Quality Evaluation](retrieval-quality-evaluation.md) for the harness, corpora and question format.
 - **Graph-QA results** (E13 and later) come from `lcg-eval graph-qa` and nothing else ([#821](https://github.com/liminisapp/liminis-context-graph/issues/821)). There are two steps:
   1. Ingest v2 with `retrieval --ontology crates/eval/fixtures/retrieval-v2/ontology-v3.1.yaml --keep-workspace <ws>`.
+     - **Builds before [#881](https://github.com/liminisapp/liminis-context-graph/issues/881) (merged 2026-11-22):** `--ontology` never reached the spawned service, so those runs extracted **free-form**. Don't reuse a workspace or cassette made with `--ontology` before that fix.
+     - **Entries affected:** of the recorded entries, only E16. E13's ontology graph came from a local probe that did extract under the ontology (28 relation types, cassette `v2-haiku45-onto31`).
+     - **Since #881:** the harness checks the service's `ontology_hash` before ingest and stops on a mismatch.
   2. Run `graph-qa --workspace <ws> --plans crates/eval/fixtures/retrieval-v2/e13-v5-plans.json` over the committed `graph-questions.jsonl`.
 
   Report `route` on E13 (all 129 questions) and on E13/test. Graph-QA uses answer accuracy, not nDCG. See [Standard setup for graph-QA results](retrieval-quality-evaluation.md#standard-setup-for-graph-qa-results).
@@ -48,6 +51,58 @@ This is the record of every retrieval experiment and its result: what was tried,
 ## Experiments
 
 Newest first. **Δ** is against the stated baseline, paired on v2 unless marked.
+
+### E17: ontology extraction re-measured with the ontology loaded (main @ `4555d308`: [#816](https://github.com/liminisapp/liminis-context-graph/issues/816), [#823](https://github.com/liminisapp/liminis-context-graph/issues/823), [#824](https://github.com/liminisapp/liminis-context-graph/issues/824), [#881](https://github.com/liminisapp/liminis-context-graph/issues/881); live Haiku 4.5 v2 extraction, ontology v3.1 strict, 2026-11-22). The graph fixes work; typed walk 0.89, route 0.96
+
+- **Setup:** `lcg-eval retrieval --ontology ontology-v3.1.yaml --ontology-mode strict --keep-workspace … --record-cassette …`, with configs `lcg-passages`, `lcg-entities-facts` and `lcg-passages-belief-rerank`. Extraction used Haiku 4.5: 2,779 cassette records, 0 failures. The #881 check confirmed the service loaded the staged ontology (hash `98aa5f8e…`, strict) before ingest, and the extract prompts carry the entity and relation type sections.
+- **Build caveat:** the E16 and E17 binaries were built from outside the repo, so the `LBUG_VERSION` pin in `.cargo/config.toml` didn't apply. They linked lbug's floating `latest` native bundle (v0.22.3) instead of 0.21.2. The Rust code is main @ `4555d308`, but the workspace's storage format (version 49) can't be read by a correctly pinned build. Passage scores match earlier runs (`lcg-passages` 0.653 in both). Run `cargo` from inside the checkout.
+- **Graph integrity** (`lcg-eval graph-integrity --unstated-breakdown`) against the E13 ontology graph. Both use the same ontology; E13 predates #816, #823 and #824.
+
+| metric | E13 | E17 |
+|---|---|---|
+| graph | 1,202 nodes / 2,620 edges | 1,189 / 3,113 |
+| skeleton entities typed as expected | 47/48 | 47/48 |
+| links with the expected relation type | 59/60 | **60/60** |
+| links in the correct direction (of typed) | 44/59 | **60/60** |
+| value facts stated on the right entity | 293/440 | **392/440** |
+| value facts misattached to another entity (#823) | 27/440 | **0/440** |
+| junk note-ID nodes (#824) | 13 | **0** |
+| signature fit / reversed / neither | 433 / 115 / 344 | 509 / **5** / 369 |
+| `signature_mismatch` marks (#816) | — | 148 |
+| `UNCLASSIFIED` edges | 74 | 184 |
+
+  Of the 48 value facts still not stated: 34 are on another entity, 5 are only in the node summary, 9 are absent (E13: 48 / 77 / 22 of 147).
+- **Graph question answering** (`lcg-eval graph-qa`, 144 questions: the 129 E13 questions plus 15 inverse; live Haiku planner and reader; 0 reader parse errors):
+
+| runner | e13 (129) | e13 test half | all (144) | E13 (e13) |
+|---|---|---|---|---|
+| passages | 0.339 | 0.349 | 0.359 | 0.349 |
+| walk | **0.886** | 0.903 | 0.896 | 0.822 |
+| route | **0.964** | 0.968 | 0.965 | 0.907 |
+
+  By shape, route scores chain-2 0.979, chain-3 1.000, list 0.989, join 0.833, history 0.917 and inverse 0.977. Route differs from walk only on history questions, which it mostly sends to passages. Route minus walk is +0.078 [+0.031, +0.124].
+- **Retrieval (v2 nDCG@10):** passage configs are unchanged, because passage search doesn't use edges: `lcg-passages` 0.653, belief+rerank 0.757. `lcg-entities-facts` rises from 0.377 on the free-form graph (E16) to **0.515**: direct 0.774, answer 0.667, passage 0.734. It is still below belief+rerank (−0.242 [−0.291, −0.194]).
+- **Learned:**
+  - On a fresh extraction, direction (#816), literal self-loops (#823) and the note-ID rule (#824) each remove the defect they targeted.
+  - The cleaner graph lifts the typed walk by +0.064 and the route by +0.057 over E13.
+  - Ingest through a 6-slot subscription bridge kept about one slot busy, so ingest is serial.
+  - Open: join questions (0.833), `UNCLASSIFIED` edges (184) and the 148 signature-mismatch marks.
+
+### E16: summary units in the service ([#850](https://github.com/liminisapp/liminis-context-graph/issues/850), PR #866 @ `c064669c` on main `1b1444c6`, live Haiku 4.5 v2 extraction, 2026-11-21/22). Rejected; closed 2026-11-22
+
+- **Setup:** `lcg-passages-belief-rerank` against `lcg-passages-belief-rerank-summaries`, paired on the same graph. Because of #881 the service extracted free-form, not under the ontology. Passage and summary retrieval are scored on note text and don't use edges, so the comparison stands. The run's graph numbers don't measure #823 or #824; E17 does.
+
+| category | Δ nDCG@10 (summaries − baseline) | 95% interval | bar | |
+|---|---|---|---|---|
+| overall (210) | +0.004 | [−0.015, +0.025] | lower bound > −0.01 | fail |
+| paraphrase (40) | +0.044 | [−0.039, +0.135] | ≥ +0.05, interval excludes 0 | fail |
+| temporal (40) | −0.013 | [−0.026, −0.003] | ≥ −0.01 | fail |
+| multi-hop (30) | −0.022 | [−0.047, −0.001] | ≥ −0.01 | fail |
+| direct (40) | −0.013 | [−0.040, +0.008] | — | noise |
+
+- **Learned:** the service implementation keeps about half of the E14 probe's paraphrase gain (+0.044 against +0.084), and summary units crowd out dated or linking passages on temporal and multi-hop questions.
+- **Decision:** #850 and PR #866 closed unmerged.
+- **Side finding:** the run exposed #881. `lcg-eval --ontology` never reached the spawned service. Fixed in PR #889, which also verifies the service's ontology hash before ingest.
 
 ### E15: score separation and lexical-leg semantics ([#863](https://github.com/liminisapp/liminis-context-graph/issues/863), probe on branch `fabrik/issue-863` @ `e9d5177f`, v2, 2026-11-21). Measured, no product change
 
@@ -448,4 +503,5 @@ The question: does the graph answer what chunk search can't (chains, joins, inve
 2. **Temporal with rerank:** 0.800 on v2 against the 0.85 target. The cross-encoder alone reaches 0.904–0.932 (E8). Consider a belief-aware first stage that is stronger on time, or ordering by belief after rerank.
 3. **Router idea:** graph search wins on direct questions and passage lookups (E12). A per-question router could take some of the oracle headroom (0.814).
 4. **Notes:** rerank is opt-in, and Notes needs a release, then to opt in. When it sends `queries`, its agent prompt needs the rule to keep named entities.
-5. **Lexical leg and abstention (E15 → E16):** the lexical leg is any-term and unfloored, so hybrid answers 25 of 34 off-topic queries under the 0.5 floor. Probe an all-terms leg and a "BM25 must agree with the vector leg" gate (design in [`docs/research/webbrain-retrieval-suggestions.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/research/webbrain-retrieval-suggestions.md)).
+5. **Lexical leg and abstention (E15, next probe):** the lexical leg is any-term and unfloored, so hybrid answers 25 of 34 off-topic queries under the 0.5 floor. Probe an all-terms leg and a "BM25 must agree with the vector leg" gate (design in [`docs/research/webbrain-retrieval-suggestions.md`](https://github.com/liminisapp/liminis-context-graph/blob/main/docs/research/webbrain-retrieval-suggestions.md)).
+6. **Extraction quality after E17:** join questions score 0.833 on route. 184 edges are `UNCLASSIFIED` (74 in E13), and 148 carry `signature_mismatch` marks, 53 of them on `APPLIES_TO`. Next step: hand-label a sample of each to decide between an ontology change, a prompt change or neither. Re-extraction runs are slow because ingest makes one extraction call at a time.
