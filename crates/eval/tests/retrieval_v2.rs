@@ -454,7 +454,7 @@ fn v2_loads_and_has_the_required_scale_and_mix() {
             );
         }
         assert_eq!(fx.manifest.corpus_version, "meridian-notebook-2");
-        assert_eq!(fx.questions_version, "meridian-questions-3");
+        assert_eq!(fx.questions_version, "meridian-questions-4");
     }
 }
 
@@ -2055,7 +2055,13 @@ fn e13_ref_dir() -> PathBuf {
 
 fn generated_graph_questions() -> Vec<GraphQuestion> {
     let sk = Skeleton::from_json(&skeleton_text()).unwrap();
-    graph_questions::generate(&sk).unwrap()
+    graph_questions::generate(&sk, &committed_prose_facts(&sk)).unwrap()
+}
+
+/// The committed `prose-facts.json` overlay (#907), validated against the skeleton.
+fn committed_prose_facts(sk: &Skeleton) -> Vec<graph_questions::ProseFact> {
+    let text = std::fs::read_to_string(v2_dir().join(graph_questions::PROSE_FACTS_FILE)).unwrap();
+    graph_questions::parse_prose_facts(&text, sk).unwrap()
 }
 
 #[test]
@@ -2088,6 +2094,15 @@ fn e13_questions_match_the_reference_set_field_for_field() {
     for (r, g) in reference.iter().zip(&e13) {
         let g = serde_json::to_value(g).unwrap();
         for k in ["id", "family", "cq", "shape", "text", "answers", "hops"] {
+            // #907: the reference gold is skeleton-only; the prose overlay deliberately adds the
+            // stated Telemetry clean-up to these two questions (and nothing else differs).
+            if k == "answers" && matches!(r["id"].as_str(), Some("g072" | "g109")) {
+                let mut want: Vec<String> = serde_json::from_value(r[k].clone()).unwrap();
+                want.push("Telemetry clean-up".into());
+                want.sort();
+                assert_eq!(serde_json::to_value(&want).unwrap(), g[k], "{}", r["id"]);
+                continue;
+            }
             assert_eq!(r[k], g[k], "question {} field {k}", r["id"]);
         }
     }
@@ -2151,6 +2166,7 @@ fn inverse_questions_ask_the_source_side_with_gold_from_the_skeleton() {
         xs.sort();
         xs.last().map(|x| x.1.clone())
     };
+    let prose = committed_prose_facts(&sk);
     let gen = generated_graph_questions();
     let inv: Vec<&GraphQuestion> = gen.iter().filter(|q| q.set == "inverse").collect();
     assert!(inv.len() >= 10, "{}", inv.len());
@@ -2186,7 +2202,14 @@ fn inverse_questions_ask_the_source_side_with_gold_from_the_skeleton() {
                     assert_eq!(cur(a, "Account manager").as_deref(), Some(who));
                 }
                 "projects-of-reports" => {
-                    let owner = cur(a, "Owner").unwrap();
+                    // #907: a stated prose project (not in the skeleton) is owned per the overlay.
+                    let owner = cur(a, "Owner").unwrap_or_else(|| {
+                        prose
+                            .iter()
+                            .find(|p| p.entity == *a)
+                            .map(|p| p.value.clone())
+                            .unwrap_or_else(|| panic!("no owner for {a}"))
+                    });
                     assert_eq!(cur(&owner, "Reports to").as_deref(), Some(target));
                 }
                 f => panic!("unexpected inverse family {f}"),
@@ -2200,7 +2223,11 @@ fn inverse_questions_ask_the_source_side_with_gold_from_the_skeleton() {
 #[test]
 fn retrieval_gen_check_reports_a_hand_edit_of_the_graph_questions() {
     let tmp = tempfile::tempdir().unwrap();
-    for f in ["skeleton.json", graph_questions::FILE] {
+    for f in [
+        "skeleton.json",
+        graph_questions::FILE,
+        graph_questions::PROSE_FACTS_FILE,
+    ] {
         std::fs::copy(v2_dir().join(f), tmp.path().join(f)).unwrap();
     }
     let run = |dir: &Path| {
@@ -2229,4 +2256,246 @@ fn retrieval_gen_check_reports_a_hand_edit_of_the_graph_questions() {
         err.contains("graph-questions.jsonl differs") && err.contains("line 1"),
         "{err}"
     );
+}
+
+#[test]
+fn retrieval_gen_check_fails_when_prose_facts_change_without_the_recorded_hash() {
+    let tmp = tempfile::tempdir().unwrap();
+    for f in [
+        "skeleton.json",
+        graph_questions::FILE,
+        graph_questions::PROSE_FACTS_FILE,
+        "questions.meta.json",
+    ] {
+        std::fs::copy(v2_dir().join(f), tmp.path().join(f)).unwrap();
+    }
+    let run = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_lcg-eval"))
+            .args([
+                "retrieval-gen",
+                "--spec",
+                v2_dir().join("scenario.json").to_str().unwrap(),
+                "--out",
+                tmp.path().to_str().unwrap(),
+                "--check",
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(run().status.success(), "the committed hash must match");
+    // A whitespace-only edit leaves the generated questions alone but still changes the gold's
+    // inputs: it must be caught, not waved through.
+    let p = tmp.path().join(graph_questions::PROSE_FACTS_FILE);
+    let text = std::fs::read_to_string(&p).unwrap();
+    std::fs::write(&p, format!("{text}\n")).unwrap();
+    let out = run();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("prose_facts_hash") && err.contains("questions_version"),
+        "{err}"
+    );
+    // Recording the new hash (as a version bump would) clears it.
+    let meta = tmp.path().join("questions.meta.json");
+    let new_hash = graph_questions::prose_facts_hash(&format!("{text}\n"));
+    let m = std::fs::read_to_string(&meta).unwrap();
+    let recorded = m
+        .lines()
+        .find(|l| l.contains("prose_facts_hash"))
+        .unwrap()
+        .to_string();
+    std::fs::write(
+        &meta,
+        m.replace(
+            &recorded,
+            &format!("  \"prose_facts_hash\": \"{new_hash}\""),
+        ),
+    )
+    .unwrap();
+    assert!(run().status.success());
+}
+
+#[test]
+fn the_committed_prose_facts_are_stated_by_their_cited_notes() {
+    let text = std::fs::read_to_string(v2_dir().join(graph_questions::PROSE_FACTS_FILE)).unwrap();
+    let sk = Skeleton::from_json(&std::fs::read_to_string(v2_dir().join("skeleton.json")).unwrap())
+        .unwrap();
+    let facts = graph_questions::parse_prose_facts(&text, &sk).unwrap();
+    graph_questions::check_prose_citations(&facts, &v2_dir().join("notes")).unwrap();
+}
+
+// ── prose-introduced facts (#907) ───────────────────────────────────────────────
+
+fn graph_questions_on_disk() -> BTreeMap<String, GraphQuestion> {
+    graph_questions::parse_jsonl(
+        &std::fs::read_to_string(v2_dir().join(graph_questions::FILE)).unwrap(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|q| (q.id.clone(), q))
+    .collect()
+}
+
+#[test]
+fn committed_prose_facts_parse_and_cite_real_notes() {
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    let facts = committed_prose_facts(&sk);
+    let got: Vec<(&str, &str, &str, &str, graph_questions::ProseStatus)> = facts
+        .iter()
+        .map(|f| {
+            (
+                f.entity.as_str(),
+                f.attribute.as_str(),
+                f.value.as_str(),
+                f.notes[0].as_str(),
+                f.status,
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (
+                "Telemetry clean-up",
+                "Owner",
+                "Marcus Haddad",
+                "journal-04",
+                graph_questions::ProseStatus::Stated
+            ),
+            (
+                "Routing handover",
+                "Owner",
+                "Priya Varga",
+                "journal-04",
+                graph_questions::ProseStatus::Ambiguous
+            ),
+        ]
+    );
+}
+
+#[test]
+fn prose_facts_change_exactly_the_four_questions_and_only_their_answers() {
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    let with = generated_graph_questions();
+    let without = graph_questions::generate(&sk, &[]).unwrap();
+    assert_eq!(with.len(), without.len());
+    let mut changed = Vec::new();
+    for (a, b) in with.iter().zip(&without) {
+        if a != b {
+            // Ids, text, split, shape, scoring, hops and path are untouched.
+            let mut a2 = a.clone();
+            a2.answers = b.answers.clone();
+            a2.optional_answers = b.optional_answers.clone();
+            assert_eq!(&a2, b, "{}: more than answers changed", a.id);
+            changed.push(a.id.as_str());
+        }
+    }
+    assert_eq!(changed, ["g072", "g109", "i013", "i014"]);
+    assert!(without.iter().all(|q| q.optional_answers.is_empty()));
+}
+
+#[test]
+fn prose_facts_set_the_gold_for_the_four_affected_questions() {
+    let qs = graph_questions_on_disk();
+    let tc = "Telemetry clean-up".to_string();
+    assert_eq!(qs["g109"].answers, ["Orbit Core", "Telemetry clean-up"]);
+    assert!(qs["g072"].answers.contains(&tc));
+    assert!(qs["i014"].answers.contains(&tc));
+    assert!(qs["i013"].optional_answers == ["Routing handover"]);
+    assert!(!qs["i013"].answers.contains(&"Routing handover".to_string()));
+    // Only i013 carries optional answers.
+    let with_optional: Vec<&str> = qs
+        .values()
+        .filter(|q| !q.optional_answers.is_empty())
+        .map(|q| q.id.as_str())
+        .collect();
+    assert_eq!(with_optional, ["i013"]);
+    // The corrected g109 gold scores a perfect run 1.0 (it scored 0.67 against the old gold).
+    let q = &qs["g109"];
+    let run = vec!["Orbit Core".to_string(), "Telemetry clean-up".to_string()];
+    assert_eq!(
+        lcg_eval::graph_qa::scorer::score(&q.scoring, &q.answers, &q.optional_answers, &run),
+        1.0
+    );
+    // i013: returning the optional answer or omitting it scores the same.
+    let q = &qs["i013"];
+    let base = q.answers.clone();
+    let mut plus = base.clone();
+    plus.push("Routing handover".into());
+    let s = |p: &[String]| {
+        lcg_eval::graph_qa::scorer::score(&q.scoring, &q.answers, &q.optional_answers, p)
+    };
+    assert_eq!(s(&base), 1.0);
+    assert_eq!(s(&plus), 1.0);
+}
+
+#[test]
+fn untouched_graph_questions_serialize_without_an_optional_answers_field() {
+    let text = std::fs::read_to_string(v2_dir().join(graph_questions::FILE)).unwrap();
+    let with: Vec<&str> = text
+        .lines()
+        .filter(|l| l.contains("\"optional_answers\""))
+        .collect();
+    assert_eq!(with.len(), 1, "only i013 carries the field");
+}
+
+#[test]
+fn invalid_prose_facts_fail_with_a_clear_error() {
+    let sk = Skeleton::from_json(&skeleton_text()).unwrap();
+    let good = |status: &str, note: &str, attr: &str, value: &str| {
+        format!(
+            r#"[{{"entity":"Telemetry clean-up","attribute":"{attr}","value":"{value}","notes":["{note}"],"status":"{status}"}}]"#
+        )
+    };
+    let ok = good("stated", "journal-04", "Owner", "Marcus Haddad");
+    assert!(graph_questions::parse_prose_facts(&ok, &sk).is_ok());
+    for (text, needle) in [
+        (
+            good("maybe", "journal-04", "Owner", "Marcus Haddad"),
+            "maybe",
+        ),
+        (
+            good("stated", "journal-99", "Owner", "Marcus Haddad"),
+            "journal-99",
+        ),
+        (
+            good("stated", "journal-04", "Location", "Marcus Haddad"),
+            "Location",
+        ),
+        (
+            good("stated", "journal-04", "Owner", "Nobody Here"),
+            "Nobody Here",
+        ),
+        ("not json".to_string(), "prose-facts.json"),
+        (r#"[{"entity":"x"}]"#.to_string(), "prose-facts.json"),
+    ] {
+        let err = graph_questions::parse_prose_facts(&text, &sk).unwrap_err();
+        assert!(err.contains(needle), "{needle}: {err}");
+    }
+}
+
+#[test]
+fn retrieval_gen_rejects_an_invalid_prose_facts_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    for f in ["skeleton.json", graph_questions::FILE] {
+        std::fs::copy(v2_dir().join(f), tmp.path().join(f)).unwrap();
+    }
+    std::fs::write(
+        tmp.path().join(graph_questions::PROSE_FACTS_FILE),
+        r#"[{"entity":"X","attribute":"Owner","value":"Marcus Haddad","notes":["journal-04"],"status":"bogus"}]"#,
+    )
+    .unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lcg-eval"))
+        .args([
+            "retrieval-gen",
+            "--spec",
+            v2_dir().join("scenario.json").to_str().unwrap(),
+            "--out",
+            tmp.path().to_str().unwrap(),
+            "--check",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("prose-facts.json"));
 }

@@ -17,7 +17,7 @@ This is the record of every retrieval experiment and its result: what was tried,
   - Judged runs use a Sonnet 4.6 judge with a judge cache.
 - **Embedder:** BGE base v1.5, Core ML, in the LocalInference sidecar.
 - **Corpora:**
-  - **v2:** `meridian-notebook-2` / `meridian-questions-3`. 408 notes and 244 questions, of which 210 are scored.
+  - **v2:** `meridian-notebook-2` / `meridian-questions-4`. 408 notes and 244 questions, of which 210 are scored.
     - Categories: direct, paraphrase, temporal, answer, multi-hop and passage, plus negatives.
     - **Tune on v2 only.**
   - **v1:** `fernhill-notebook-1`. 31 notes and 40 scored questions.

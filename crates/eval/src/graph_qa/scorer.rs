@@ -4,6 +4,13 @@
 //! * `set`: F1 of the reader's answers against the gold set (lists and joins).
 //! * `ordered`: 1 only for the same number of answers, each matching gold in order (history).
 //!
+//! `set` scoring also takes the question's *optional* answers (#907): values the prose supports only
+//! loosely. A returned answer that equals an optional answer after [`norm`] (and matches no gold
+//! answer) is dropped before precision, and recall is over gold alone, so an optional answer
+//! neither raises nor lowers the score, returned or not. Optional answers are matched by
+//! normalised *equality*, not containment: a fragment of one ("Routing") or a longer string that
+//! contains one is a wrong answer and counts against precision. `single` and `ordered` ignore them.
+//!
 //! Matching is the probe's: both sides are normalised ([`norm`]) and an answer matches when the
 //! gold contains it or it contains the gold (the first only for answers of 3+ characters), so case,
 //! surrounding punctuation and spacing never count as wrong.
@@ -34,8 +41,9 @@ pub fn matches(gold: &str, pred: &str) -> bool {
     p.contains(&g) || (p.chars().count() >= 3 && g.contains(&p))
 }
 
-/// The score of `preds` against `gold` under `scoring` (`single`, `set` or `ordered`).
-pub fn score(scoring: &str, gold: &[String], preds: &[String]) -> f64 {
+/// The score of `preds` against `gold` under `scoring` (`single`, `set` or `ordered`). `optional`
+/// only affects `set` (see the module docs).
+pub fn score(scoring: &str, gold: &[String], optional: &[String], preds: &[String]) -> f64 {
     match scoring {
         "ordered" => {
             let ok =
@@ -46,18 +54,29 @@ pub fn score(scoring: &str, gold: &[String], preds: &[String]) -> f64 {
             if gold.is_empty() {
                 return 0.0;
             }
+            // Gold wins: `matches` is containment-based, so an answer matching both counts as gold.
+            // An optional answer is excused only by normalised equality, never by containment.
+            let optional: Vec<String> = optional.iter().map(|o| norm(o)).collect();
+            let kept: Vec<&String> = preds
+                .iter()
+                .filter(|p| {
+                    gold.iter().any(|g| matches(g, p)) || {
+                        let np = norm(p);
+                        np.is_empty() || !optional.contains(&np)
+                    }
+                })
+                .collect();
             let tp = gold
                 .iter()
                 .filter(|g| preds.iter().any(|p| matches(g, p)))
                 .count() as f64;
-            let prec = if preds.is_empty() {
+            let prec = if kept.is_empty() {
                 0.0
             } else {
-                preds
-                    .iter()
+                kept.iter()
                     .filter(|p| gold.iter().any(|g| matches(g, p)))
                     .count() as f64
-                    / preds.len() as f64
+                    / kept.len() as f64
             };
             let rec = tp / gold.len() as f64;
             if prec + rec > 0.0 {
@@ -113,35 +132,135 @@ mod tests {
     #[test]
     fn single_scores_the_first_answer_only() {
         let g = v(&["Lisbon"]);
-        assert_eq!(score("single", &g, &v(&["lisbon"])), 1.0);
-        assert_eq!(score("single", &g, &v(&["Porto", "Lisbon"])), 0.0);
-        assert_eq!(score("single", &g, &[]), 0.0);
-        assert_eq!(score("single", &g, &v(&["unknown"])), 0.0);
+        assert_eq!(score("single", &g, &[], &v(&["lisbon"])), 1.0);
+        assert_eq!(score("single", &g, &[], &v(&["Porto", "Lisbon"])), 0.0);
+        assert_eq!(score("single", &g, &[], &[]), 0.0);
+        assert_eq!(score("single", &g, &[], &v(&["unknown"])), 0.0);
     }
 
     #[test]
     fn set_is_f1_with_known_arithmetic() {
         let g = v(&["A Core", "B Core", "C Core"]);
-        assert_eq!(score("set", &g, &v(&["a core", "b core", "c core"])), 1.0);
+        assert_eq!(
+            score("set", &g, &[], &v(&["a core", "b core", "c core"])),
+            1.0
+        );
         // 2 of 3 gold found, 2 of 4 predictions right: P = 0.5, R = 2/3, F1 = 4/7.
-        let f1 = score("set", &g, &v(&["A Core", "B Core", "X", "Y"]));
+        let f1 = score("set", &g, &[], &v(&["A Core", "B Core", "X", "Y"]));
         assert!((f1 - 4.0 / 7.0).abs() < 1e-12, "{f1}");
-        assert_eq!(score("set", &g, &[]), 0.0);
-        assert_eq!(score("set", &g, &v(&["none"])), 0.0);
+        assert_eq!(score("set", &g, &[], &[]), 0.0);
+        assert_eq!(score("set", &g, &[], &v(&["none"])), 0.0);
+    }
+
+    #[test]
+    fn an_optional_answer_neither_raises_nor_lowers_a_set_score() {
+        let g = v(&["Orbit Core", "Lumen Core"]);
+        let opt = v(&["Routing handover"]);
+        let base = score("set", &g, &opt, &v(&["Orbit Core", "Lumen Core"]));
+        assert_eq!(base, 1.0);
+        // Returned: same score as without it.
+        let with = score(
+            "set",
+            &g,
+            &opt,
+            &v(&["Orbit Core", "Lumen Core", "Routing handover"]),
+        );
+        assert_eq!(with, base);
+        // The same holds for an imperfect run.
+        let partial = v(&["Orbit Core", "X"]);
+        let a = score("set", &g, &opt, &partial);
+        let mut with_opt = partial.clone();
+        with_opt.push("routing handover".into());
+        assert_eq!(score("set", &g, &opt, &with_opt), a);
+        assert_eq!(score("set", &g, &[], &partial), a, "same as no optional");
+        // Omitting it does not reduce recall (the gold is complete without it).
+        assert_eq!(score("set", &g, &opt, &g), 1.0);
+        // A run returning only the optional answer scores nothing.
+        assert_eq!(score("set", &g, &opt, &opt), 0.0);
+    }
+
+    #[test]
+    fn a_duplicated_optional_answer_is_ignored_both_times() {
+        let g = v(&["Orbit Core"]);
+        let opt = v(&["Routing handover"]);
+        let preds = v(&["Orbit Core", "Routing handover", "routing handover"]);
+        assert_eq!(score("set", &g, &opt, &preds), 1.0);
+    }
+
+    #[test]
+    fn an_answer_matching_gold_and_optional_counts_as_gold() {
+        let g = v(&["Telemetry clean-up"]);
+        let opt = v(&["Telemetry"]);
+        // "Telemetry clean-up" matches both; it must stay a gold hit (not be dropped).
+        assert_eq!(score("set", &g, &opt, &v(&["Telemetry clean-up"])), 1.0);
+        // A wrong extra is still penalised.
+        let f1 = score("set", &g, &opt, &v(&["Telemetry clean-up", "Other"]));
+        assert!((f1 - 2.0 / 3.0).abs() < 1e-12, "{f1}");
+    }
+
+    #[test]
+    fn an_optional_answer_is_matched_by_equality_not_containment() {
+        let g = v(&["Orbit Core"]);
+        let opt = v(&["Routing handover"]);
+        let base = score("set", &g, &opt, &v(&["Orbit Core"]));
+        // Case, punctuation and spacing do not matter.
+        assert_eq!(
+            score("set", &g, &opt, &v(&["Orbit Core", " ROUTING  handover. "])),
+            base
+        );
+        // A fragment of the optional answer, or a string containing it, is a wrong answer.
+        for wrong in ["Routing", "handover", "The Routing handover project"] {
+            let f1 = score("set", &g, &opt, &v(&["Orbit Core", wrong]));
+            assert!((f1 - 2.0 / 3.0).abs() < 1e-12, "{wrong}: {f1}");
+        }
+    }
+
+    #[test]
+    fn a_stated_prose_answer_in_gold_scores_full_marks() {
+        // g109 after #907: gold is [Orbit Core, Telemetry clean-up].
+        let g = v(&["Orbit Core", "Telemetry clean-up"]);
+        assert_eq!(
+            score("set", &g, &[], &v(&["Orbit Core", "Telemetry clean-up"])),
+            1.0
+        );
+        // The old gold scored this run 0.67; the corrected gold does not.
+        let old = score(
+            "set",
+            &v(&["Orbit Core"]),
+            &[],
+            &v(&["Orbit Core", "Telemetry clean-up"]),
+        );
+        assert!((old - 2.0 / 3.0).abs() < 1e-12, "{old}");
+    }
+
+    #[test]
+    fn single_and_ordered_ignore_optional_answers() {
+        let opt = v(&["Routing handover"]);
+        assert_eq!(
+            score("single", &v(&["Lisbon"]), &v(&["Lisbon"]), &v(&["lisbon"])),
+            1.0
+        );
+        assert_eq!(
+            score("single", &v(&["Lisbon"]), &opt, &v(&["Routing handover"])),
+            0.0
+        );
+        let g = v(&["A", "B"]);
+        assert_eq!(score("ordered", &g, &v(&["B"]), &v(&["A", "B"])), 1.0);
+        assert_eq!(score("ordered", &g, &v(&["B"]), &v(&["A"])), 0.0);
     }
 
     #[test]
     fn ordered_needs_every_value_in_order() {
         let g = v(&["Postgres", "MySQL", "SQLite"]);
         assert_eq!(
-            score("ordered", &g, &v(&["postgres", "mysql", "sqlite"])),
+            score("ordered", &g, &[], &v(&["postgres", "mysql", "sqlite"])),
             1.0
         );
         assert_eq!(
-            score("ordered", &g, &v(&["MySQL", "Postgres", "SQLite"])),
+            score("ordered", &g, &[], &v(&["MySQL", "Postgres", "SQLite"])),
             0.0
         );
-        assert_eq!(score("ordered", &g, &v(&["Postgres", "MySQL"])), 0.0);
-        assert_eq!(score("ordered", &g, &[]), 0.0);
+        assert_eq!(score("ordered", &g, &[], &v(&["Postgres", "MySQL"])), 0.0);
+        assert_eq!(score("ordered", &g, &[], &[]), 0.0);
     }
 }

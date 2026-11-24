@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use super::pyrandom::PyRandom;
 use super::skeleton::Skeleton;
+use crate::graph_qa::scorer::norm;
 
 /// The committed file, beside `skeleton.json`.
 pub const FILE: &str = "graph-questions.jsonl";
@@ -72,6 +73,10 @@ pub struct GraphQuestion {
     pub hops: Vec<HopRecord>,
     #[serde(default)]
     pub path: Vec<PathStep>,
+    /// Values the prose supports only loosely (`prose-facts.json`, status `ambiguous`): acceptable
+    /// in a `set` answer but counted towards neither precision nor recall (#907).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional_answers: Vec<String>,
 }
 
 fn default_set() -> String {
@@ -144,6 +149,196 @@ struct Draft {
     shape: &'static str,
     scoring: &'static str,
     path: Vec<PathStep>,
+    optional_answers: Vec<String>,
+}
+
+impl Draft {
+    /// Apply the prose overlay (#907): `stated` values join `answers` as if the skeleton held them,
+    /// `optional` values become `optional_answers` unless they are already gold. History drafts are
+    /// untouched. `hops` stay skeleton-derived.
+    fn overlay(mut self, stated: Vec<String>, optional: Vec<String>) -> Draft {
+        if self.shape == "history" {
+            return self;
+        }
+        self.answers.extend(stated);
+        self.answers = sorted_set(std::mem::take(&mut self.answers));
+        let gold: BTreeSet<&String> = self.answers.iter().collect();
+        let optional: Vec<String> = optional.into_iter().filter(|o| !gold.contains(o)).collect();
+        self.optional_answers = sorted_set(optional);
+        self
+    }
+}
+
+/// How firmly the prose states a [`ProseFact`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProseStatus {
+    /// Unambiguous: treated as a skeleton fact when deriving answers.
+    Stated,
+    /// Supported but not settled: becomes an optional answer.
+    Ambiguous,
+}
+
+/// A fact the LLM-rendered prose states that the skeleton does not (`prose-facts.json`, #907).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProseFact {
+    pub entity: String,
+    pub attribute: String,
+    pub value: String,
+    /// The notes that cite the fact.
+    pub notes: Vec<String>,
+    pub status: ProseStatus,
+}
+
+/// The committed file, beside `skeleton.json`.
+pub const PROSE_FACTS_FILE: &str = "prose-facts.json";
+
+/// Parse and validate `prose-facts.json` against the skeleton. Any malformed entry is an error:
+/// a typo must fail loudly rather than silently change nothing.
+pub fn parse_prose_facts(text: &str, sk: &Skeleton) -> Result<Vec<ProseFact>, String> {
+    let facts: Vec<ProseFact> =
+        serde_json::from_str(text).map_err(|e| format!("{PROSE_FACTS_FILE}: {e}"))?;
+    for (i, f) in facts.iter().enumerate() {
+        let at = format!("{PROSE_FACTS_FILE} entry {i} ({:?})", f.entity);
+        // One entry per (entity, attribute): two entries for the same project, whatever their
+        // owners or statuses, would put it under both owners and make the gold contradictory.
+        // Names compare through `scorer::norm`, so "Telemetry Clean-up" repeats "Telemetry clean-up".
+        let key = norm(&f.entity);
+        if let Some(j) = facts[..i]
+            .iter()
+            .position(|g| norm(&g.entity) == key && g.attribute == f.attribute)
+        {
+            return Err(format!(
+                "{at}: duplicates entry {j}; each (entity, attribute) may appear only once"
+            ));
+        }
+        if f.entity.trim().is_empty() || f.value.trim().is_empty() {
+            return Err(format!("{at}: `entity` and `value` must be non-empty"));
+        }
+        if f.attribute != "Owner" {
+            return Err(format!(
+                "{at}: attribute {:?} is not supported (only \"Owner\" feeds the graph questions)",
+                f.attribute
+            ));
+        }
+        if f.notes.is_empty() {
+            return Err(format!("{at}: `notes` must cite at least one note"));
+        }
+        for n in &f.notes {
+            if !sk.notes.iter().any(|x| &x.id == n) {
+                return Err(format!("{at}: cited note {n:?} is not in the corpus"));
+            }
+        }
+        if !sk
+            .entities
+            .iter()
+            .any(|e| e.kind == "person" && e.name == f.value)
+        {
+            return Err(format!(
+                "{at}: value {:?} is not a skeleton person",
+                f.value
+            ));
+        }
+        if let Some(e) = sk.entities.iter().find(|e| e.name == f.entity) {
+            if e.kind != "project" {
+                return Err(format!(
+                    "{at}: entity is a skeleton {}, but an Owner fact's subject must be a project",
+                    e.kind
+                ));
+            }
+        } else if let Some(e) = sk.entities.iter().find(|e| norm(&e.name) == key) {
+            // Equal to a skeleton entity only after normalising: almost certainly a typo, and an
+            // exact-name lookup would skip the kind and Owner checks for it.
+            return Err(format!(
+                "{at}: entity matches the skeleton {} {:?} only after normalising case and punctuation; spell it exactly",
+                e.kind, e.name
+            ));
+        }
+        // The overlay is for projects the skeleton does not own-assign: a second owner would list
+        // the project under both owners and make the gold contradictory.
+        if sk
+            .notes
+            .iter()
+            .flat_map(|n| &n.facts)
+            .any(|sf| norm(&sf.entity) == key && sf.attribute == "Owner")
+        {
+            return Err(format!(
+                "{at}: the skeleton already states an Owner for this entity; the overlay only covers projects absent from the skeleton's Owner facts"
+            ));
+        }
+    }
+    Ok(facts)
+}
+
+/// Check that every cited note's rendered text names the entity and the value (compared through
+/// [`norm`], so case, punctuation and line wrapping never matter). `notes_dir` is the fixture's
+/// `notes/` directory; a fact citing a note that is not rendered there is an error too.
+pub fn check_prose_citations(
+    facts: &[ProseFact],
+    notes_dir: &std::path::Path,
+) -> Result<(), String> {
+    for (i, f) in facts.iter().enumerate() {
+        let at = format!("{PROSE_FACTS_FILE} entry {i} ({:?})", f.entity);
+        for n in &f.notes {
+            let path = notes_dir.join(format!("{n}.md"));
+            let text = std::fs::read_to_string(&path).map_err(|e| {
+                format!(
+                    "{at}: cited note {n:?} cannot be read ({}): {e}",
+                    path.display()
+                )
+            })?;
+            let text = norm(&text);
+            for (what, needle) in [("entity", &f.entity), ("value", &f.value)] {
+                if !text.contains(&norm(needle)) {
+                    return Err(format!(
+                        "{at}: cited note {n:?} does not mention the {what} {needle:?}; cite the note that states it"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The hash `questions.meta.json` records for `prose-facts.json` (`prose_facts_hash`): the first 16
+/// hex digits of the file's SHA-256. It makes an edit to the overlay visible to
+/// `retrieval-gen --check` (#907).
+pub fn prose_facts_hash(text: &str) -> String {
+    super::skeleton::skeleton_hash(text)
+}
+
+/// The prose `Owner` facts, as (project, owner) pairs per status.
+struct Overlay<'a> {
+    stated: Vec<(&'a str, &'a str)>,
+    ambiguous: Vec<(&'a str, &'a str)>,
+}
+
+impl<'a> Overlay<'a> {
+    fn new(prose: &'a [ProseFact]) -> Self {
+        let pairs = |s: ProseStatus| {
+            prose
+                .iter()
+                .filter(|p| p.status == s && p.attribute == "Owner")
+                .map(|p| (p.entity.as_str(), p.value.as_str()))
+                .collect()
+        };
+        Overlay {
+            stated: pairs(ProseStatus::Stated),
+            ambiguous: pairs(ProseStatus::Ambiguous),
+        }
+    }
+
+    /// (stated, ambiguous) projects whose prose owner satisfies `pred`.
+    fn projects(&self, pred: impl Fn(&str) -> bool) -> (Vec<&'a str>, Vec<&'a str>) {
+        let pick = |xs: &[(&'a str, &'a str)]| {
+            xs.iter()
+                .filter(|(_, o)| pred(o))
+                .map(|(p, _)| *p)
+                .collect::<Vec<_>>()
+        };
+        (pick(&self.stated), pick(&self.ambiguous))
+    }
 }
 
 /// (reference_time, value, note id) of one primary statement.
@@ -263,6 +458,7 @@ fn draft(
         shape,
         scoring: scoring_for_shape(shape),
         path,
+        optional_answers: Vec::new(),
     }
 }
 
@@ -272,7 +468,7 @@ fn fam(out: &mut Vec<Draft>, rng: &mut PyRandom, cap: usize, mut items: Vec<Draf
     out.extend(items.into_iter().take(cap));
 }
 
-fn e13(sk: &Skeleton, f: &Facts) -> Vec<Draft> {
+fn e13(sk: &Skeleton, f: &Facts, ov: &Overlay) -> Vec<Draft> {
     let by_kind = |k: &str| -> Vec<&str> {
         sk.entities
             .iter()
@@ -432,18 +628,27 @@ fn e13(sk: &Skeleton, f: &Facts) -> Vec<Draft> {
             .iter()
             .filter_map(|h| {
                 let xs = f.inverse(attr, subjects, h);
+                let (st, am) = if attr == OW {
+                    ov.projects(|o| o == *h)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                // Selection gates on skeleton answers only: the overlay never creates a question.
                 if xs.len() < min.max(1) {
                     return None;
                 }
-                Some(draft(
-                    family,
-                    cq,
-                    text(h),
-                    strings(&xs),
-                    xs.iter().map(|x| f.hop(x, attr)).collect(),
-                    "list",
-                    path_of(&[attr], true),
-                ))
+                Some(
+                    draft(
+                        family,
+                        cq,
+                        text(h),
+                        strings(&xs),
+                        xs.iter().map(|x| f.hop(x, attr)).collect(),
+                        "list",
+                        path_of(&[attr], true),
+                    )
+                    .overlay(strings(&st), strings(&am)),
+                )
             })
             .collect()
     };
@@ -498,6 +703,8 @@ fn e13(sk: &Skeleton, f: &Facts) -> Vec<Draft> {
                 .copied()
                 .filter(|p| f.cur2(f.cur(p, OW), LO) == Some(c))
                 .collect();
+            let (st, am) = ov.projects(|o| f.cur(o, LO) == Some(c));
+            // Selection gates on skeleton answers only: the overlay never creates a question.
             if ps.is_empty() {
                 return None;
             }
@@ -505,15 +712,18 @@ fn e13(sk: &Skeleton, f: &Facts) -> Vec<Draft> {
                 .iter()
                 .flat_map(|p| [f.hop(p, OW), f.hop(f.cur(p, OW).unwrap_or_default(), LO)])
                 .collect();
-            Some(draft(
-                "projects-by-owner-city",
-                "R1+L1 join",
-                format!("Which projects are owned by someone based in {c}?"),
-                strings(&ps),
-                hops,
-                "join",
-                path_of(&[OW, LO], true),
-            ))
+            Some(
+                draft(
+                    "projects-by-owner-city",
+                    "R1+L1 join",
+                    format!("Which projects are owned by someone based in {c}?"),
+                    strings(&ps),
+                    hops,
+                    "join",
+                    path_of(&[OW, LO], true),
+                )
+                .overlay(strings(&st), strings(&am)),
+            )
         })
         .collect();
     fam(&mut q, &mut rng, E13_CAP, items);
@@ -620,7 +830,7 @@ fn e13(sk: &Skeleton, f: &Facts) -> Vec<Draft> {
 
 /// The inverse-direction family (FR-010): the source side of `REPORTS_TO`, `CONTACT_FOR` and
 /// `OWNS` given the target, none of which E13 asks.
-fn inverse_family(sk: &Skeleton, f: &Facts) -> Vec<Draft> {
+fn inverse_family(sk: &Skeleton, f: &Facts, ov: &Overlay) -> Vec<Draft> {
     let by_kind = |k: &str| -> Vec<&str> {
         sk.entities
             .iter()
@@ -640,6 +850,7 @@ fn inverse_family(sk: &Skeleton, f: &Facts) -> Vec<Draft> {
         shape: "inverse",
         scoring,
         path,
+        optional_answers: Vec::new(),
     };
 
     // A manager with exactly one report: a single-answer inverse (E13 `reports` asks only of
@@ -692,6 +903,8 @@ fn inverse_family(sk: &Skeleton, f: &Facts) -> Vec<Draft> {
                 .copied()
                 .filter(|p| f.cur2(f.cur(p, "Owner"), "Reports to") == Some(h))
                 .collect();
+            let (st, am) = ov.projects(|o| f.cur(o, "Reports to") == Some(h));
+            // Selection gates on skeleton answers only: the overlay never creates a question.
             if ps.is_empty() {
                 return None;
             }
@@ -704,15 +917,18 @@ fn inverse_family(sk: &Skeleton, f: &Facts) -> Vec<Draft> {
                     ]
                 })
                 .collect();
-            Some(mk(
-                "projects-of-reports",
-                "R1+R2 inverse",
-                format!("Which projects are owned by someone who reports to {h}?"),
-                strings(&ps),
-                hops,
-                "set",
-                path_of(&["Owner", "Reports to"], true),
-            ))
+            Some(
+                mk(
+                    "projects-of-reports",
+                    "R1+R2 inverse",
+                    format!("Which projects are owned by someone who reports to {h}?"),
+                    strings(&ps),
+                    hops,
+                    "set",
+                    path_of(&["Owner", "Reports to"], true),
+                )
+                .overlay(strings(&st), strings(&am)),
+            )
         })
         .collect();
     fam(&mut q, &mut rng, INVERSE_CAP, items);
@@ -770,16 +986,22 @@ fn finish(drafts: Vec<Draft>, prefix: &str, set: &str) -> Result<Vec<GraphQuesti
                 scoring: d.scoring.into(),
                 hops: d.hops,
                 path: d.path,
+                optional_answers: d.optional_answers,
             })
         })
         .collect()
 }
 
 /// The full graph question set: the E13 questions (`g000`…), then the inverse family (`i000`…).
-pub fn generate(sk: &Skeleton) -> Result<Vec<GraphQuestion>, String> {
+///
+/// `prose` is the validated `prose-facts.json` overlay ([`parse_prose_facts`]); pass `&[]` for a
+/// skeleton-only set. It never changes which questions exist or the shared shuffles — it only adds
+/// answers to (and decorates) questions the skeleton already selects.
+pub fn generate(sk: &Skeleton, prose: &[ProseFact]) -> Result<Vec<GraphQuestion>, String> {
     let f = Facts::new(sk);
-    let mut out = finish(e13(sk, &f), "g", "e13")?;
-    out.extend(finish(inverse_family(sk, &f), "i", "inverse")?);
+    let ov = Overlay::new(prose);
+    let mut out = finish(e13(sk, &f, &ov), "g", "e13")?;
+    out.extend(finish(inverse_family(sk, &f, &ov), "i", "inverse")?);
     Ok(out)
 }
 
@@ -799,4 +1021,277 @@ pub fn parse_jsonl(text: &str) -> Result<Vec<GraphQuestion>, String> {
         .filter(|(_, l)| !l.trim().is_empty())
         .map(|(i, l)| serde_json::from_str(l).map_err(|e| format!("{FILE} line {}: {e}", i + 1)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sk() -> Skeleton {
+        Skeleton::from_json(include_str!("../../../fixtures/retrieval-v2/skeleton.json"))
+            .expect("committed skeleton parses")
+    }
+
+    fn fact(entity: &str, value: &str, status: ProseStatus) -> ProseFact {
+        ProseFact {
+            entity: entity.into(),
+            attribute: "Owner".into(),
+            value: value.into(),
+            notes: vec!["journal-04".into()],
+            status,
+        }
+    }
+
+    fn by_id(qs: &[GraphQuestion]) -> BTreeMap<&str, &GraphQuestion> {
+        qs.iter().map(|q| (q.id.as_str(), q)).collect()
+    }
+
+    const TC: &str = "Telemetry clean-up";
+
+    #[test]
+    fn an_empty_overlay_is_the_skeleton_only_set() {
+        let qs = generate(&sk(), &[]).unwrap();
+        assert_eq!(qs.len(), 144);
+        assert!(qs.iter().all(|q| q.optional_answers.is_empty()));
+        assert!(!to_jsonl(&qs).contains(TC));
+    }
+
+    #[test]
+    fn a_stated_fact_adds_an_answer_and_nothing_optional() {
+        let sk = sk();
+        let plain = generate(&sk, &[]).unwrap();
+        let qs = generate(&sk, &[fact(TC, "Marcus Haddad", ProseStatus::Stated)]).unwrap();
+        assert_eq!(qs.len(), plain.len());
+        let (p, q) = (by_id(&plain), by_id(&qs));
+        for id in ["g072", "g109", "i014"] {
+            assert!(q[id].answers.contains(&TC.to_string()), "{id}");
+            assert_eq!(q[id].answers.len(), p[id].answers.len() + 1, "{id}");
+            assert!(q[id].optional_answers.is_empty(), "{id}");
+            assert_eq!(q[id].hops, p[id].hops, "{id}: hops stay skeleton-derived");
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_fact_becomes_an_optional_answer_only() {
+        let sk = sk();
+        let plain = generate(&sk, &[]).unwrap();
+        let qs = generate(
+            &sk,
+            &[fact(
+                "Routing handover",
+                "Priya Varga",
+                ProseStatus::Ambiguous,
+            )],
+        )
+        .unwrap();
+        let (p, q) = (by_id(&plain), by_id(&qs));
+        assert_eq!(q["i013"].optional_answers, ["Routing handover"]);
+        assert_eq!(q["i013"].answers, p["i013"].answers);
+        assert!(!q["i013"].answers.contains(&"Routing handover".to_string()));
+    }
+
+    #[test]
+    fn an_ambiguous_fact_creates_no_new_question_and_moves_no_other() {
+        let sk = sk();
+        let plain = generate(&sk, &[]).unwrap();
+        // A person who owns nothing in the skeleton still must not conjure a question.
+        let qs = generate(
+            &sk,
+            &[fact("Ghost project", "Priya Varga", ProseStatus::Ambiguous)],
+        )
+        .unwrap();
+        assert_eq!(qs.len(), plain.len());
+        for (a, b) in qs.iter().zip(&plain) {
+            let mut a2 = a.clone();
+            a2.optional_answers.clear();
+            assert_eq!(&a2, b, "{}", a.id);
+        }
+    }
+
+    #[test]
+    fn a_stated_fact_creates_no_new_question_and_moves_no_other() {
+        let sk = sk();
+        let plain = generate(&sk, &[]).unwrap();
+        // Whoever the stated owner is (so every city and manager is covered, including ones
+        // with no skeleton-owned project), the question set keeps its ids, text and order.
+        for person in sk.entities.iter().filter(|e| e.kind == "person") {
+            let qs = generate(
+                &sk,
+                &[fact("Ghost project", &person.name, ProseStatus::Stated)],
+            )
+            .unwrap();
+            assert_eq!(qs.len(), plain.len(), "{}", person.name);
+            for (a, b) in qs.iter().zip(&plain) {
+                assert_eq!((&a.id, &a.text, &a.split), (&b.id, &b.text, &b.split));
+                assert!(a.answers.len() >= b.answers.len(), "{}", a.id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_stated_duplicate_of_a_skeleton_fact_adds_nothing() {
+        let sk = sk();
+        let plain = generate(&sk, &[]).unwrap();
+        // Marcus Haddad already owns Orbit Core in the skeleton.
+        let qs = generate(
+            &sk,
+            &[fact("Orbit Core", "Marcus Haddad", ProseStatus::Stated)],
+        )
+        .unwrap();
+        assert_eq!(qs, plain);
+    }
+
+    #[test]
+    fn an_ambiguous_value_already_gold_stays_in_answers_only() {
+        let sk = sk();
+        let plain = generate(&sk, &[]).unwrap();
+        let qs = generate(
+            &sk,
+            &[fact("Orbit Core", "Marcus Haddad", ProseStatus::Ambiguous)],
+        )
+        .unwrap();
+        assert_eq!(qs, plain);
+        assert!(qs.iter().all(|q| q.optional_answers.is_empty()));
+    }
+
+    #[test]
+    fn history_drafts_ignore_the_overlay() {
+        let d = draft(
+            "change-history",
+            "D1+D2",
+            "q".into(),
+            vec!["a".into(), "b".into(), "a".into()],
+            vec![],
+            "history",
+            vec![],
+        )
+        .overlay(vec!["z".into()], vec!["y".into()]);
+        assert_eq!(d.answers, ["a", "b", "a"]);
+        assert!(d.optional_answers.is_empty());
+    }
+
+    #[test]
+    fn invalid_entries_are_rejected() {
+        let sk = sk();
+        let one = |f: &ProseFact| serde_json::to_string(&[f]).unwrap();
+        let good = fact(TC, "Marcus Haddad", ProseStatus::Stated);
+        assert!(parse_prose_facts(&one(&good), &sk).is_ok());
+
+        let mut bad = good.clone();
+        bad.entity = " ".into();
+        assert!(parse_prose_facts(&one(&bad), &sk).is_err());
+        let mut bad = good.clone();
+        bad.notes.clear();
+        assert!(parse_prose_facts(&one(&bad), &sk)
+            .unwrap_err()
+            .contains("notes"));
+        let mut bad = good.clone();
+        bad.notes = vec!["no-such-note".into()];
+        assert!(parse_prose_facts(&one(&bad), &sk)
+            .unwrap_err()
+            .contains("no-such-note"));
+        let mut bad = good.clone();
+        bad.attribute = "Supplier".into();
+        assert!(parse_prose_facts(&one(&bad), &sk)
+            .unwrap_err()
+            .contains("Supplier"));
+        let mut bad = good.clone();
+        bad.value = "Nobody".into();
+        assert!(parse_prose_facts(&one(&bad), &sk)
+            .unwrap_err()
+            .contains("Nobody"));
+        // An existing non-project entity cannot be an Owner fact's subject.
+        let mut bad = good.clone();
+        bad.entity = "Marcus Haddad".into();
+        assert!(parse_prose_facts(&one(&bad), &sk)
+            .unwrap_err()
+            .contains("project"));
+        // A project the skeleton already assigns an Owner cannot get a second one from the overlay.
+        let owned = sk
+            .notes
+            .iter()
+            .flat_map(|n| &n.facts)
+            .find(|sf| sf.attribute == "Owner")
+            .map(|sf| sf.entity.clone())
+            .expect("the skeleton has an Owner fact");
+        let mut bad = good.clone();
+        bad.entity = owned;
+        assert!(parse_prose_facts(&one(&bad), &sk)
+            .unwrap_err()
+            .contains("already states an Owner"));
+        // The same (entity, attribute) twice is rejected, even with a different owner or status.
+        let mut other = good.clone();
+        other.value = "Priya Varga".into();
+        other.status = ProseStatus::Ambiguous;
+        let dup = serde_json::to_string(&[&good, &other]).unwrap();
+        assert!(parse_prose_facts(&dup, &sk)
+            .unwrap_err()
+            .contains("duplicates entry 0"));
+        // Names compare after normalising: a case or punctuation variant of a skeleton entity is a
+        // typo (it would otherwise skip the kind and Owner checks), and of an earlier entry a repeat.
+        let owned = sk
+            .notes
+            .iter()
+            .flat_map(|n| &n.facts)
+            .find(|sf| sf.attribute == "Owner")
+            .map(|sf| sf.entity.clone())
+            .unwrap();
+        let mut bad = good.clone();
+        bad.entity = owned.to_uppercase();
+        assert!(parse_prose_facts(&one(&bad), &sk)
+            .unwrap_err()
+            .contains("only after normalising"));
+        let mut other = good.clone();
+        other.entity = "TELEMETRY Clean-Up".into();
+        other.value = "Priya Varga".into();
+        let dup = serde_json::to_string(&[&good, &other]).unwrap();
+        assert!(parse_prose_facts(&dup, &sk)
+            .unwrap_err()
+            .contains("duplicates entry 0"));
+        // Unknown status and unknown fields.
+        let json = r#"[{"entity":"X","attribute":"Owner","value":"Marcus Haddad","notes":["journal-04"],"status":"maybe"}]"#;
+        assert!(parse_prose_facts(json, &sk).is_err());
+        let json = r#"[{"entity":"X","attribute":"Owner","value":"Marcus Haddad","notes":["journal-04"],"status":"stated","extra":1}]"#;
+        assert!(parse_prose_facts(json, &sk).is_err());
+    }
+
+    #[test]
+    fn optional_answers_are_additive_in_the_file_format() {
+        // An old line (no field) parses; an empty field is not serialized.
+        let old = r#"{"id":"g000","family":"f","shape":"list","text":"t","answers":["a"],"scoring":"set","split":"dev"}"#;
+        let q: GraphQuestion = serde_json::from_str(old).unwrap();
+        assert!(q.optional_answers.is_empty());
+        assert!(!serde_json::to_string(&q)
+            .unwrap()
+            .contains("optional_answers"));
+    }
+    #[test]
+    fn citations_must_name_the_entity_and_the_value() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("n1.md"),
+            "The telemetry\nclean-up will continue with Marcus Haddad as owner.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("n2.md"), "Nothing relevant here.\n").unwrap();
+        let mut f = fact(TC, "Marcus Haddad", ProseStatus::Stated);
+        f.notes = vec!["n1".into()];
+        // Case, punctuation and line wrapping do not matter.
+        check_prose_citations(&[f.clone()], dir.path()).unwrap();
+        let mut bad = f.clone();
+        bad.notes = vec!["n2".into()];
+        assert!(check_prose_citations(&[bad], dir.path())
+            .unwrap_err()
+            .contains("does not mention the entity"));
+        let mut bad = f.clone();
+        bad.value = "Priya Varga".into();
+        assert!(check_prose_citations(&[bad], dir.path())
+            .unwrap_err()
+            .contains("does not mention the value"));
+        let mut bad = f;
+        bad.notes = vec!["missing".into()];
+        assert!(check_prose_citations(&[bad], dir.path())
+            .unwrap_err()
+            .contains("cannot be read"));
+    }
 }

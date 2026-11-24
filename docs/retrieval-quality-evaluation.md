@@ -862,7 +862,8 @@ the regression check for `knowledge_walk` (#820).
 ### The graph question set
 
 `crates/eval/fixtures/retrieval-v2/graph-questions.jsonl` is generated from the skeleton by
-`retrieval-gen`, and `retrieval-gen --check` reports any drift. It has 144 questions:
+`retrieval-gen`, and `retrieval-gen --check` reports any drift. It has 144 questions. The gold is
+the skeleton's facts plus the prose-introduced facts in `prose-facts.json` (see below):
 
 - **E13** (`set: "e13"`, ids `g000`–`g128`): 129 questions, the same as the E13 reference
   question for question. By shape: chain-2 48, chain-3 24, list 31, join 14, history 12. They fall
@@ -876,8 +877,43 @@ the regression check for `knowledge_walk` (#820).
 
 Each line carries `id`, `set`, `family`, `cq`, `shape`, `text`, `answers` (ordered for history),
 `scoring` (`single`, `set` or `ordered`), `split` (`dev` or `test`), `hops` (the facts a complete
-answer rests on, with every primary note stating each value) and `path` (the expected relation
-types and directions, for later path-level analysis).
+answer rests on, with every primary note stating each value), `path` (the expected relation
+types and directions, for later path-level analysis) and, only where the prose is ambiguous,
+`optional_answers`.
+
+**Prose-introduced facts (#907).** The v2 prose was rendered by an LLM from the skeleton, and it
+introduced two project owners the skeleton does not contain, both in `notes/journal-04.md`. A system
+that reads the corpus correctly returns them, and gold derived from the skeleton alone would score
+that as a precision loss. `crates/eval/fixtures/retrieval-v2/prose-facts.json` records such facts
+(`entity`, `attribute`, `value`, `notes`, `status`) and `retrieval-gen` reads it:
+
+| `status` | Meaning | Effect |
+|---|---|---|
+| `stated` | The prose states it unambiguously. | Treated as a skeleton fact when deriving `answers` for the list (`owned-by`), join (`projects-by-owner-city`) and inverse (`projects-of-reports`) questions. |
+| `ambiguous` | The wording supports it but does not settle it. | Added to the question's `optional_answers`, not `answers`. |
+
+The initial entries are *Telemetry clean-up* (Owner: Marcus Haddad, `stated`: "will continue with
+Marcus Haddad as owner") and *Routing handover* (Owner: Priya Varga, `ambiguous`: "led by"). They
+change `answers` on g072, g109 and i014 and `optional_answers` on i013, and nothing else. `hops` stay
+skeleton-derived, the overlay never adds or reselects a question, and generation fails for an entry
+with an unknown `status`, an unsupported attribute, an unknown owner, an unknown note, a cited note
+whose rendered text does not name both the entity and the value, a repeated `(entity, attribute)`,
+or an entity that already has a skeleton Owner or that equals a skeleton entity only after
+normalising case and punctuation (a typo). Names compare through the scorer's `norm`. The gold
+depends on the file, so `questions.meta.json` records its `prose_facts_hash` and
+`retrieval-gen --check` fails when the file changes without that hash: bump `questions_version`,
+regenerate and record the new hash together.
+
+**Scoring optional answers.** For `set` questions, a returned answer that equals an optional
+answer after normalising case, punctuation and spacing (and matches no gold answer) is dropped
+before precision, and recall is over `answers` alone. So an optional answer neither raises nor
+lowers the score, whether the run returns it, omits it or repeats it. Optional answers match by
+equality, not containment: a fragment of one ("Routing") or a longer string containing it is a wrong
+answer and counts against precision. `single` and `ordered` scoring ignore `optional_answers`. The
+per-question graph-qa report rows carry `optional_answers` where there are some, so an extra answer
+that cost nothing can be explained. The set was `meridian-questions-3`
+before this change and is `meridian-questions-4` after it: **graph-qa scores from the two are not
+comparable for g072, g109, i013 and i014** (the report itself records no question-set version).
 
 **Dev/test split.** The split is fixed, with seed 815. For each family, in order of first
 appearance, its ids are shuffled with one shared `random.Random(815)`, and the first half (rounded

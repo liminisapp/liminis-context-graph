@@ -197,6 +197,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0900](0900-ingest-concurrency-connection-pool-and-cassette-rule.md) | `lcg-eval` Ingest Concurrency — a Connection Pool, Ordered Folding, and the Cassette Rule | 2026-11-23 |
 | [0903](0903-move-document-rekey.md) | Move a document by re-keying its episodes, not re-extracting | 2026-11-23 |
 | [0904](0904-changelog-fragments-and-generated-llms-full.md) | Changelog Fragments, and `llms-full.txt` Generated at Publish Time | 2026-11-23 |
+| [0907](0907-graph-gold-skeleton-plus-prose-overlay.md) | Graph-Question Gold Is the Skeleton Plus a Prose Overlay; Optional Answers Are Score-Neutral | 2026-11-23 |
 
 ## Historical numbering
 

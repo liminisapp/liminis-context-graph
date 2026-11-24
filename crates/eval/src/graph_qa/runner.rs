@@ -437,7 +437,7 @@ pub async fn run(inp: Inputs<'_>) -> Result<RunOutput, RunError> {
             let text = &reads[index[&prompts::reader_user(c, &q.text)]];
             let parsed = prompts::parse_answers(text);
             let answers = parsed.clone().unwrap_or_default();
-            let score = scorer::score(&q.scoring, &q.answers, &answers);
+            let score = scorer::score(&q.scoring, &q.answers, &q.optional_answers, &answers);
             qr.per_runner.insert(
                 runner.clone(),
                 RunnerAnswer {
