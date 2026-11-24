@@ -85,7 +85,7 @@ as not live. That difference was recorded above without justification and is not
 - **Caps stay different.** 50 per entity (newest first, `episodes_truncated` only when `true`)
   versus 20 per edge (recorded order, `episodes_truncated` always present). The unit and ordering
   differ and an entity has far more mentions than an edge has producers; aligning would change
-  shipped 0.19.2 behaviour for one side. The reference states both. The cap is applied after the
+  shipped 0.20.0 behaviour for one side. The reference states both. The cap is applied after the
   liveness filter on both.
 - "Neighbors parity reads as live subset" still holds: the live set only shrank, so it remains a
   subset of what `get_entity_neighbors` reports.

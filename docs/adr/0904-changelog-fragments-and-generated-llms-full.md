@@ -11,7 +11,7 @@ Two files were edited by almost every PR: the `## [Unreleased]` block of `CHANGE
 required it, and the #852 guard failed a `contract/` PR that did not touch it), and the committed,
 generated `docs/llms-full.txt` (drift-checked by `docs-drift.yml`). Concurrent PRs therefore always
 overlapped. The Fabrik merge train cannot batch overlapping PRs, so it landed them one at a time with a
-full ~40 minute CI run per landing; during 0.19.2 every member was deferred at least once for
+full ~40 minute CI run per landing; during the 0.20.0 cycle every member was deferred at least once for
 "overlaps #N on CHANGELOG.md", and each landing forced the others through another rebase.
 
 The published outputs of both files are still needed and must not change: the CHANGELOG feeds the

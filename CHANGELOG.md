@@ -9,61 +9,52 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
-### Fixed
+## [0.20.0] - 2026-11-24
 
-- **`find_entities` `include_episodes` no longer reports episodes of a pending document revision
-  (#883, ADR-0857 addendum).** The entity provenance read used a supersession-only liveness check,
-  so an episode written by an uncommitted `knowledge_process_document` revision was cited as a
-  live mention while `knowledge_walk` `include_provenance`, search and belief treated it as not
-  live. It now uses the belief/search predicate (`live_at`): the episode is absent before commit
-  and present after. `support`, `corroboration` and edge `support` (plus the `origins` filter) on
-  `find_entities` / `find_relationships` follow the same predicate, so **their values change while
-  a document revision is pending** (pending content is not counted until it commits); nothing
-  changes otherwise, and no response shape changes. The ingest veto for derived/answer content is
-  deliberately unchanged. The reference now states why the per-entity cap (50) and the per-edge
-  walk cap (20) differ.
+### Upgrading
 
-### Response schemas
-
-- **Published JSON Schemas for the responses consumers read (#852, ADR-0852).** Consumers knew lcg's
-  method names but not the shapes of the results, and typed them by guessing: a notebook-health view read
-  `knowledge_lint` details by the wrong keys (`details.derived_document`, the `causes` map and
-  `finding.reason`) and shipped a bug that no lcg test could catch.
-  - New `contract/<method>.schema.json` (JSON Schema draft-07, self-contained) for the result of
-    `health_check`, `knowledge_status` (including `wal` and `wal_groups`), `knowledge_search_passages`,
-    `knowledge_find_entities` (including the #857 provenance fields), `knowledge_find_relationships`
-    (including `belief`), `knowledge_process_chunk` and `knowledge_lint` (per-category `details`).
-    Every release attaches them, with a generated `contract-manifest.json` naming the lcg version, so a
-    consumer fetches them at the pinned version like the binary and validates a recorded response or
-    generates types with no running engine.
-  - lcg's own tests validate real handler responses against the committed schemas, so renaming,
-    removing or retyping a field fails lcg's CI first; a second test fails when the committed files are
-    stale. A PR that changes a schema must update this changelog.
-  - Compatibility policy, judged from the reader's side (the schemas describe what lcg emits): removing
-    or renaming a field, widening a type (`T` to `T|null`), making an always-present field optional or
-    adding a union alternative is **BREAKING**; adding an optional field, narrowing a type or making an
-    optional field always present is not. Additional properties are allowed.
-  - No wire change: handlers are untouched and the schemas were written against the real responses
-    (the shapes pinned include `derived_document`, the `causes` map and `finding.reason`).
-  - `contract/knowledge_status.schema.json`: describes the opt-in `episode_breakdown` block (#884,
-    `include_episode_breakdown: true`) and `episode_breakdown_unavailable` as optional properties.
-    Additive, not breaking.
-  - `contract/knowledge_find_entities.schema.json`: describes the `include_episodes` provenance fields
-    (`episode_uuids`, `source_descriptions`, `source_files`, `episodes_truncated`; #857, #883) as
-    optional properties. Additive, not breaking.
-  - `contract/knowledge_process_chunk.schema.json`: describes the optional `warnings` array (#856).
-    Additive, not breaking.
-  - `contract/knowledge_process_chunk.schema.json`: the result is now an `anyOf` of the ingested shape
-    and the #858 unchanged-resubmission shape (`status: "unchanged"` with `success`, `chunk_id`,
-    `source_file`, `episode_uuid`, `duration_seconds` and none of the ingest counters). Additive for
-    readers of the ingested shape: that shape has no `status` key and is unchanged.
-  - `contract/knowledge_search_passages.schema.json`: describes the optional `legs` and `lexical_score`
-    passage fields (#871). Additive, not breaking.
+- **Source identity columns (#853), no storage-version change.** `Episodic` gains two nullable
+  columns, `source_file` and `chunk_id`. Existing rows read them as NULL and are matched by the
+  legacy rule; nothing is backfilled, so legacy episodes report neither field. A 0.19.1 binary
+  still opens and operates on an upgraded database, but it cannot *rebuild* from a WAL this release
+  wrote: the new `CREATE (:Episodic …)` statements fail to prepare on its schema and those episodes
+  are dropped. The #752, #292 and #785 columns already carry the same limitation.
+- **`knowledge_search_passages` result order changes by default** (#806): see *Changed*. Callers that
+  rely on cosine `score` thresholds or on the old order should send `belief_aware: false` or set
+  `LCG_PASSAGE_BELIEF_AWARE=off`.
+- **Additive schema, no storage-version change.** `Episodic` gains six nullable columns
+  (`revision_id`, `revision_committed_at`, `byte_start`, `byte_end`, `heading_path`, `chunk_hash`)
+  and a `DocRevision` table appears. Existing rows read them as NULL; nothing is backfilled. Across
+  the release the MCP registry grows from 52 to 60 tools and the IPC surface from 53 to 61 methods;
+  the per-entry counts below are as of each change. lbug stays 0.21.2 and `PROTOCOL_VERSION` stays 1.
+- **Moving a client to document mode re-extracts once.** The server's chunker will not match a
+  client's own boundaries, so the first `knowledge_process_document` of a note re-extracts its
+  sections. The change is additive (ADR-0705) and visible through
+  `knowledge_get_correction_changes`; section names are stable from then on.
+- **Source matching is exact (#829, #830, #853): BREAKING for raw-socket clients that relied on
+  prefix or substring matching.** `knowledge_delete_by_source` and `knowledge_get_entities_by_source`
+  match the stored `source_file` byte for byte, and entities-by-source counts live episodes only. See
+  *Fixed*.
+- **`knowledge_process_chunk` has a second result shape (#858): BREAKING for strict readers.** An
+  identical resubmission returns `{"status": "unchanged", "episode_uuid": ...}` with none of the ingest
+  counters. The published schema is now an `anyOf` of the two shapes; a reader that assumes the counters
+  are always present must handle it. See *Added*.
+- **A client that fully closes its connection mid-ingest now cancels the ingest (#861).** Before, a
+  `process_chunk` or `process_document` request ran to completion after the client went away. A client
+  that only half-closes its write side is unaffected. Keep the connection open until the answer arrives.
+- **`LCG_DOCUMENT_MAX_BYTES` is now validated strictly at startup (#862).** An invalid value now
+  **fails startup** with an error naming the variable and the value, where it used to log a warning and
+  fall back to the default. Invalid means empty, non-numeric, `0`, negative, a decimal, `4MB`/`4m`
+  (only a byte count or a `KiB`/`MiB` suffix is accepted) or above 256 MiB. **An empty
+  `LCG_DOCUMENT_MAX_BYTES=` is fatal too**: unset the variable instead of exporting it empty. Check
+  the environment your launcher or service manager passes before upgrading. Affects every deployment
+  that sets the variable. The default
+  rises from 512 KiB to 2 MiB, which refuses nothing that was accepted before.
 
 ### Added
 
-- **`knowledge_capabilities` advertises eight 0.19.2 capabilities that shipped without a feature
-  string (#885).** New `features` entries, all additive (`PROTOCOL_VERSION` stays 1, no runtime
+- **`knowledge_capabilities` advertises eight capabilities from this release that shipped without
+  a feature string (#885).** New `features` entries, all additive (`PROTOCOL_VERSION` stays 1, no runtime
   behaviour changes): `search_min_score_env` (#812, `LCG_SEARCH_MIN_SCORE` default floor),
   `ready_for_reads` (#809/#855, `health_check` field), `test_providers` (#851, built-in
   deterministic embedder/extractor mode; build support, not "active"), `exact_source_match` (#853,
@@ -325,50 +316,6 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `0.0`) always wins, and it applies to both `vector` and `hybrid` modes. `knowledge_status` gains
   an additive top-level `search_min_score_default` field.
 
-### Changed
-
-- **The edge extraction prompt changes in every mode (#816, ADR-0816).** It now defines `source_name`
-  as the subject of the relation as its type name reads, and open-mode relation lists render declared
-  signatures. This relaxes ADR-0310's byte-identical open-mode constraint for the edge prompt.
-  **Recorded extraction cassettes hash the prompt, so any cassette with `extract` calls (including
-  `crates/eval/fixtures/retrieval-v2/cassette.jsonl`) must be re-recorded to re-extract.**
-
-- **Behaviour change: `knowledge_search_passages` is belief-aware by default (#806, ADR-0806).**
-  A request that omits `belief_aware` now ranks a derived page below the primary note it cites and a
-  superseded passage below its successor, in `vector` mode as well as `hybrid` (which already did).
-  **Results are re-ordered by default** where a corpus has such pages or supersessions, and a
-  demoted passage's `score` is lowered to just below the passage it ranks under, so the `score` can
-  differ as well as the order. On the v2 retrieval corpus this is +0.081 nDCG@10 overall (0.568 to
-  0.649) and +0.174 on temporal questions, with unchanged latency. The default mode stays `vector`.
-  **To restore the previous ordering**, send `belief_aware: false` on the request, or set
-  `LCG_PASSAGE_BELIEF_AWARE=off` for the service; either gives the pre-change output byte-for-byte
-  in `vector` mode. An explicit request value wins over the environment switch. With the switch off
-  `hybrid` yields weighted RRF without the rules, which differs from the old hybrid default.
-  The eval's `lcg-passages` now means the shipped default; the new opt-in `lcg-passages-raw`
-  (`belief_aware: false`) is the old baseline.
-
-### Upgrading
-
-- **Source identity columns (#853), no storage-version change.** `Episodic` gains two nullable
-  columns, `source_file` and `chunk_id`. Existing rows read them as NULL and are matched by the
-  legacy rule; nothing is backfilled, so legacy episodes report neither field. A 0.19.1 binary
-  still opens and operates on an upgraded database, but it cannot *rebuild* from a WAL this release
-  wrote: the new `CREATE (:Episodic …)` statements fail to prepare on its schema and those episodes
-  are dropped. The #752, #292 and #785 columns already carry the same limitation.
-- **`knowledge_search_passages` result order changes by default** (#806): see *Changed*. Callers that
-  rely on cosine `score` thresholds or on the old order should send `belief_aware: false` or set
-  `LCG_PASSAGE_BELIEF_AWARE=off`.
-- **Additive schema, no storage-version change.** `Episodic` gains six nullable columns
-  (`revision_id`, `revision_committed_at`, `byte_start`, `byte_end`, `heading_path`, `chunk_hash`)
-  and a `DocRevision` table appears. Existing rows read them as NULL; nothing is backfilled. The MCP
-  registry grows from 52 to 54 tools.
-- **Moving a client to document mode re-extracts once.** The server's chunker will not match a
-  client's own boundaries, so the first `knowledge_process_document` of a note re-extracts its
-  sections. The change is additive (ADR-0705) and visible through
-  `knowledge_get_correction_changes`; section names are stable from then on.
-
-### Added
-
 - **Replay embedding recompute retries transient embedder failures and records the rows it could
   not embed (#808, ADR-0808).** During WAL replay, a timeout, connection reset, HTTP 5xx/503 or 429
   from the embedder is now retried with exponential backoff and jitter instead of zero-filling a
@@ -443,10 +390,99 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   failed or cancelled call retires nothing; its pending episodes are never believed. Episodes carry
   the server-minted `revision_id` and their `byte_start`/`byte_end` span. The first document-mode
   ingest of a `doc_id` supersedes its chunk-mode episodes. New settings `LCG_DOCUMENT_MAX_BYTES`
-  (default 512 KiB) and `LCG_DOCUMENT_CHUNK_MAX_CHARS` (default 6000). `knowledge_process_chunk` is
+  (default 512 KiB at the time; 2 MiB as released, #862) and `LCG_DOCUMENT_CHUNK_MAX_CHARS` (default 6000). `knowledge_process_chunk` is
   unchanged.
 
+- **Embedder roles and instruction profiles (#790, ADR-0790).** Every embed call now states whether
+  the text is a query (a search string) or a document (stored text), so asymmetric models (BGE,
+  nomic, e5) can get the prefixes they were trained with.
+  - `LCG_EMBEDDING_PROFILE` takes `none` (default), `bge-v1.5`, `nomic-v1.5`, `e5` or `embedder`;
+    `LCG_EMBEDDING_QUERY_PREFIX` and `LCG_EMBEDDING_DOCUMENT_PREFIX` override one side each. An unknown
+    profile fails startup and lists the valid names. With `embedder`, the embedder applies its own
+    instruction when it advertises support (`input_type`), and a text never receives two instructions.
+  - **With no configuration nothing changes:** under `none` every string sent to the embedder is
+    byte-identical to before.
+  - The document prefix is part of the workspace's embedding identity, so changing it reports
+    `mismatch` until a rebuild records the new one; the query prefix is not, and needs no re-embed.
+  - `knowledge_status` gains additive `embedding_instructions` and `embedding_doc_prefix` fields. The
+    macOS sidecar accepts an optional `input_type` and reports its real model id
+    (`coreml-<model file stem>`, still `coreml-bge-base-en-v1.5` by default).
+  - See [configuration](docs/configuration.md#embedding-instruction-profiles).
+
+- **Integrator guide and minimal client profile (#862, ADR-0862).** New
+  [`docs/integrator-guide.md`](docs/integrator-guide.md), linked from the docs index and the README:
+  the transport (socket, newline-delimited JSON-RPC, one request at a time per connection, timeouts),
+  discovery with `knowledge_capabilities`, groups and their defaults, ingest / update / retire / delete
+  side by side, search and neighbours with recommended parameters (`min_score`,
+  `LCG_SEARCH_MIN_SCORE`, `include_episodes`), provenance and citations, and health checks. It
+  defines a **minimal client profile** of nine methods whose names, required parameters, documented
+  result fields and error codes are kept compatible across releases: `health_check`,
+  `knowledge_capabilities`, `knowledge_process_chunk`, `knowledge_process_document`,
+  `knowledge_retire_document`, `knowledge_delete_by_source`, `knowledge_search_passages`,
+  `knowledge_find_entities` and `knowledge_get_entity_neighbors`. A test fails if one leaves the
+  dispatcher or the MCP registry (bar `health_check`, which is not an MCP tool), if a required
+  parameter changes, or if the guide's list and the test's disagree.
+- **`document_max_bytes_env` capability feature (#862).** Advertised by `knowledge_capabilities`
+  when the server has the 2 MiB default and the strictly validated `LCG_DOCUMENT_MAX_BYTES`.
+
+- **Nine more `knowledge_capabilities` feature strings for this release's changes (#885 follow-up).**
+  The release runbook's coverage step found changes that shipped with neither a string nor a stated
+  reason. New `features` entries, all additive (`PROTOCOL_VERSION` stays 1, no runtime behaviour
+  changes): `belief_aware_passages` (#806), `delete_orphan_prune` (#859), `embedding_profiles` (#790),
+  `literal_object_edges` (#823), `ontology_edge_direction` (#816), `ontology_hash` (#881),
+  `passage_expansion` and `passage_rerank` (#796), and `passage_query_variants` (#802). The IPC
+  reference's "Changes deliberately not advertised" now lists the bug fixes and `lcg-eval` changes
+  that need no string, and why.
+
+- **`knowledge_move_document`: rename or move a document without re-extracting it (#903,
+  [ADR-0903](docs/adr/0903-move-document-rekey.md), feature `move_document`).** A consumer that
+  renamed a note had to remove it and ingest it again, paying for extraction twice on unchanged
+  text. The new `write`-scope method re-keys a document's episodes from an old `doc_id` / source
+  path to a new one (optionally rewriting chunk ids by prefix) with no extractor, LLM or embedder
+  call; entities, relationships, embeddings, belief history and origin are untouched. `moves` is a
+  batch applied all-or-nothing (a folder rename is one call). The destination must have no episodes
+  or document state of any kind (no episode of any liveness at the new `doc_id`, path or chunk-id
+  prefix, no revision or supersession record for the new `doc_id`); anything live in the way is
+  `occupied_destination` (a merge, not a move), anything else `destination_has_history`. Also
+  refused, with nothing changed and nothing logged: unknown source, cross-group, a chunk-id
+  collision between moves of one batch, identical identity and batch conflicts.
+  The batch is applied in one database transaction, so a failure part-way leaves nothing changed or
+  logged and re-sending works; the refusals are also returned as structured `error.data.refusals`
+  (`{index, code, message}`); and a move waits (up to 30 s) for an in-flight `knowledge_process_chunk`
+  of the moving chunks.
+  Re-keys the document-mode revision and document-supersession state too, so the next ingest at the
+  new `doc_id` is still a no-op. Logged as fixed-valued, uuid-keyed updates, so rebuild, dump and
+  overlapping replay agree. `dry_run` supported. MCP tool count 59 → 60, IPC methods 60 → 61.
+  - Raw-socket clients: purely additive (a new method and the `move_document` feature string); no
+    existing method's scope or response semantics change, so this is not breaking and
+    `PROTOCOL_VERSION` is unchanged.
+
+- **Changelog fragments: one file per PR instead of editing `CHANGELOG.md` (#904,
+  ADR-0904).** Every PR used to add its entry to the same `## [Unreleased]` block, so concurrent PRs
+  always overlapped and the merge train landed them one at a time. A PR now adds
+  `changelog.d/<issue>-<slug>.md` using the usual `###` section headings, and the release PR runs
+  `scripts/assemble-changelog.sh` before renaming `[Unreleased]`, which merges the fragments (and any
+  entries already under `[Unreleased]`) into one grouped section and deletes them.
+  - `scripts/assemble-changelog.sh --check` validates every fragment (known section, entries under
+    every heading, file name) and runs on every PR, including docs-only ones.
+  - The contract guard (#852) accepts a `changelog.d/` fragment as the changelog entry for a
+    `contract/` change. Editing `CHANGELOG.md` directly still works during the transition.
+  - The published `CHANGELOG.md`, the GitHub Release body and the release archives are unchanged.
+  - The "CHANGELOG rules for raw-socket clients" in CONTRIBUTING apply to fragment text.
+
 ### Fixed
+
+- **`find_entities` `include_episodes` no longer reports episodes of a pending document revision
+  (#883, ADR-0857 addendum).** The entity provenance read used a supersession-only liveness check,
+  so an episode written by an uncommitted `knowledge_process_document` revision was cited as a
+  live mention while `knowledge_walk` `include_provenance`, search and belief treated it as not
+  live. It now uses the belief/search predicate (`live_at`): the episode is absent before commit
+  and present after. `support`, `corroboration` and edge `support` (plus the `origins` filter) on
+  `find_entities` / `find_relationships` follow the same predicate, so **their values change while
+  a document revision is pending** (pending content is not counted until it commits); nothing
+  changes otherwise, and no response shape changes. The ingest veto for derived/answer content is
+  deliberately unchanged. The reference now states why the per-entity cap (50) and the per-edge
+  walk cap (20) differ.
 
 - **`lcg-eval --ontology` never reached the spawned service (#881).** `spawn_service` staged
   `.lcg/ontology.yaml` but did not set `LIMINIS_WORKSPACE_ROOT`, the only way the service finds its
@@ -494,6 +530,103 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   Operators may now see a `-32003` refusal for a group with a missing stamp and stale identity-kind
   data, where it was previously accepted.
 
+- **Extraction no longer creates entities named after a note ID (#824).** Under an ontology with a
+  `Document` type, extraction could return an entity that was really a note ID cited as a
+  `[[wikilink]]` (`Sources: [[project-quill-core-1]]`), which absorbed edges that belonged to real
+  entities and showed up in walks and entity search. The text prompt now says such citations are not
+  entities, and an extracted entity whose normalised name equals the episode's own source ID is
+  dropped. The host-asserted `Document` / `Source` entity is unaffected. Existing graphs are not
+  repaired.
+
+- **`knowledge_walk` no longer drops an answer reached on the previous hop through a sibling edge (#912).** A hop's candidate rule excluded every entity already visited, including the current frontier, so when hop 1 reached both a supplier and one of its projects, hop 2 could not take the `project -SUPPLIED_BY-> supplier` edge and the walk dead-ended or lost the answer (E17 graph-qa g116). From hop 2 on, only the start entities and entities of earlier hops are excluded, so walks still never cycle back. An edge between two frontier entities is now a candidate in both orientations, each scored against the hop's direction, and ranking keeps the better one so it takes one beam slot. This also fixes the latent wrong `direction_matched` for such edges on `in` hops. Affects `knowledge_walk` raw-socket clients and graph-qa; not BREAKING (no schema change), but `candidate_count` can be higher than before on hop 2 and later. Sideways edges (both ends in the frontier) rank below forward edges on equal score, are limited to the beam slots forward edges do not need (at least half the beam) while forward edges compete, carry both ends into the next frontier, and do not stop a `hard` direction hop from falling back.
+
+### Changed
+
+- **The edge extraction prompt changes in every mode (#816, ADR-0816).** It now defines `source_name`
+  as the subject of the relation as its type name reads, and open-mode relation lists render declared
+  signatures. This relaxes ADR-0310's byte-identical open-mode constraint for the edge prompt.
+  **Recorded extraction cassettes hash the prompt, so any cassette with `extract` calls (including
+  `crates/eval/fixtures/retrieval-v2/cassette.jsonl`) must be re-recorded to re-extract.**
+
+- **Behaviour change: `knowledge_search_passages` is belief-aware by default (#806, ADR-0806).**
+  A request that omits `belief_aware` now ranks a derived page below the primary note it cites and a
+  superseded passage below its successor, in `vector` mode as well as `hybrid` (which already did).
+  **Results are re-ordered by default** where a corpus has such pages or supersessions, and a
+  demoted passage's `score` is lowered to just below the passage it ranks under, so the `score` can
+  differ as well as the order. On the v2 retrieval corpus this is +0.081 nDCG@10 overall (0.568 to
+  0.649) and +0.174 on temporal questions, with unchanged latency. The default mode stays `vector`.
+  **To restore the previous ordering**, send `belief_aware: false` on the request, or set
+  `LCG_PASSAGE_BELIEF_AWARE=off` for the service; either gives the pre-change output byte-for-byte
+  in `vector` mode. An explicit request value wins over the environment switch. With the switch off
+  `hybrid` yields weighted RRF without the rules, which differs from the old hybrid default.
+  The eval's `lcg-passages` now means the shipped default; the new opt-in `lcg-passages-raw`
+  (`belief_aware: false`) is the old baseline.
+
+- **`knowledge_process_document` accepts documents up to 2 MiB by default (#862, ADR-0862).** The
+  cap was 512 KiB, which refused real web pages of about 600 K characters. A larger document is
+  still refused with `document_too_large` (the message names the cap and `LCG_DOCUMENT_MAX_BYTES`)
+  and is never truncated. A 2 MiB document of mock-provider ingest peaked at about 0.6 to 0.7 GB
+  RSS in a debug build and took 17 to 41 s; see the ADR for the measurements.
+- **The oversize `knowledge_process_chunk` `warning` and tool description now point at
+  `knowledge_process_document` (#862)** instead of telling the caller to split the input. The
+  warning's `type` and fields are unchanged; only the `message` text changed.
+
+- **`docs/llms-full.txt` is no longer committed (#904, ADR-0904).** `scripts/generate-docs-llms-full.sh`
+  runs when the docs site is built and published, so the site still serves `llms-full.txt` at the same
+  URL. The `docs-drift` check now runs the generator on each PR (it still rejects the same constructs)
+  instead of diffing a committed copy, and a docs build fails if the file is missing rather than
+  publishing without it. The raw `docs/llms-full.txt` link on github.com no longer resolves.
+
+- **Graph-question gold answers include facts the v2 prose states (#907, ADR-0907).** The LLM-rendered
+  corpus introduced two project owners the skeleton lacks, so a correct extraction was marked wrong
+  (g109 scored 0.67 for `[Orbit Core, Telemetry clean-up]`). A new fixture
+  `crates/eval/fixtures/retrieval-v2/prose-facts.json` records them; `retrieval-gen` folds a `stated`
+  fact into the gold and lists an `ambiguous` one under a new optional, additive `optional_answers`
+  field, which `lcg-eval graph-qa` excludes from both precision and recall for `set` questions.
+  `graph-questions.jsonl` is regenerated: only g072, g109, i013 and i014 change (ids, text and splits
+  do not), and the question-set version is now `meridian-questions-4`, so **graph-qa scores from
+  before and after are not comparable on those four questions**. The corpus and cassette are
+  unchanged. Optional answers match by normalised equality (a fragment such as "Routing" still costs
+  precision), per-question graph-qa report rows list `optional_answers` where there are some, and
+  `questions.meta.json` records a `prose_facts_hash` that `retrieval-gen --check` verifies.
+
+### Response schemas
+
+- **Published JSON Schemas for the responses consumers read (#852, ADR-0852).** Consumers knew lcg's
+  method names but not the shapes of the results, and typed them by guessing: a notebook-health view read
+  `knowledge_lint` details by the wrong keys (`details.derived_document`, the `causes` map and
+  `finding.reason`) and shipped a bug that no lcg test could catch.
+  - New `contract/<method>.schema.json` (JSON Schema draft-07, self-contained) for the result of
+    `health_check`, `knowledge_status` (including `wal` and `wal_groups`), `knowledge_search_passages`,
+    `knowledge_find_entities` (including the #857 provenance fields), `knowledge_find_relationships`
+    (including `belief`), `knowledge_process_chunk` and `knowledge_lint` (per-category `details`).
+    Every release attaches them, with a generated `contract-manifest.json` naming the lcg version, so a
+    consumer fetches them at the pinned version like the binary and validates a recorded response or
+    generates types with no running engine.
+  - lcg's own tests validate real handler responses against the committed schemas, so renaming,
+    removing or retyping a field fails lcg's CI first; a second test fails when the committed files are
+    stale. A PR that changes a schema must update this changelog.
+  - Compatibility policy, judged from the reader's side (the schemas describe what lcg emits): removing
+    or renaming a field, widening a type (`T` to `T|null`), making an always-present field optional or
+    adding a union alternative is **BREAKING**; adding an optional field, narrowing a type or making an
+    optional field always present is not. Additional properties are allowed.
+  - No wire change: handlers are untouched and the schemas were written against the real responses
+    (the shapes pinned include `derived_document`, the `causes` map and `finding.reason`).
+  - `contract/knowledge_status.schema.json`: describes the opt-in `episode_breakdown` block (#884,
+    `include_episode_breakdown: true`) and `episode_breakdown_unavailable` as optional properties.
+    Additive, not breaking.
+  - `contract/knowledge_find_entities.schema.json`: describes the `include_episodes` provenance fields
+    (`episode_uuids`, `source_descriptions`, `source_files`, `episodes_truncated`; #857, #883) as
+    optional properties. Additive, not breaking.
+  - `contract/knowledge_process_chunk.schema.json`: describes the optional `warnings` array (#856).
+    Additive, not breaking.
+  - `contract/knowledge_process_chunk.schema.json`: the result is now an `anyOf` of the ingested shape
+    and the #858 unchanged-resubmission shape (`status: "unchanged"` with `success`, `chunk_id`,
+    `source_file`, `episode_uuid`, `duration_seconds` and none of the ingest counters). Additive for
+    readers of the ingested shape: that shape has no `status` key and is unchanged.
+  - `contract/knowledge_search_passages.schema.json`: describes the optional `legs` and `lexical_score`
+    passage fields (#871). Additive, not breaking.
+
 ### Documentation
 
 - **`health_check` field semantics, and a new `ready_for_reads` field (#855, ADR-0855).** Since
@@ -505,6 +638,14 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
   `busy`; `false` only when `degraded`) for read availability. `busy` still reports
   `healthy: false`. See the IPC reference's health check contract and
   [`docs/releases/0.16.1.md`](docs/releases/0.16.1.md).
+
+### Known issues
+
+- **Windows (#719):** unchanged from 0.18.x. lbug's CHECKPOINT can silently corrupt some STRING and
+  INT8/UINT8 data. The fix is merged upstream (LadybugDB/ladybug#1593) but isn't in an lbug release yet;
+  it will arrive with the lbug upgrade (#718). `knowledge_rebuild_from_wal` restores a graph.
+- **Part 2 of #836 is not in this release:** `deadline_ms`, joining a duplicate in-flight resubmit and
+  pipelining on one connection (#914).
 
 ## [0.19.1] - 2026-11-16
 

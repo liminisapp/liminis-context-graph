@@ -259,7 +259,7 @@ Treat that as "older than the capabilities method" and fall back to your own pro
 Every string in `features`, with the issue that introduced it. A string advertises that **this
 build supports** the capability; it never reports run-time state (whether a mode is active, what
 an operator configured) and does not promise a field is populated on every call. Strings added
-by #885 name capabilities that shipped in 0.19.2 without one.
+by #885 name capabilities that were added in 0.20.0 without one.
 
 | Feature | Introduced | Meaning |
 |---|---|---|
