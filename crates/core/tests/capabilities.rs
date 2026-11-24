@@ -114,6 +114,15 @@ async fn reports_version_protocol_and_seeded_features() {
         "zero_vector_record",
         "chunk_progress",
         "cancel_on_disconnect",
+        "belief_aware_passages",
+        "delete_orphan_prune",
+        "embedding_profiles",
+        "literal_object_edges",
+        "ontology_edge_direction",
+        "ontology_hash",
+        "passage_expansion",
+        "passage_query_variants",
+        "passage_rerank",
     ] {
         assert!(features.iter().any(|x| x == f), "missing feature {f}");
     }

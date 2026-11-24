@@ -230,12 +230,16 @@ lets a client ask the running service what it is and what it supports. It takes 
 during a rebuild and under any `--writable-groups` policy.
 
 ```json
-{"server_version": "0.19.1", "protocol_version": 1,
- "features": ["cancel_on_disconnect", "chunk_progress", "chunk_supersede", "document_max_bytes_env", "entity_provenance",
-              "episode_source_fields", "exact_source_match", "hybrid_passage_search", "implicit_default_group_warning",
-              "lint", "move_document", "origin", "passage_legs", "process_document", "ready_for_reads",
-              "retire_document", "search_min_score_env", "status_episode_breakdown", "test_providers",
-              "unchanged_noop", "walk", "walk_provenance", "writable_groups", "zero_vector_record"],
+{"server_version": "0.20.0", "protocol_version": 1,
+ "features": ["belief_aware_passages", "cancel_on_disconnect", "chunk_progress", "chunk_supersede",
+              "delete_orphan_prune", "document_max_bytes_env", "embedding_profiles",
+              "entity_provenance", "episode_source_fields", "exact_source_match",
+              "hybrid_passage_search", "implicit_default_group_warning", "lint",
+              "literal_object_edges", "move_document", "ontology_edge_direction", "ontology_hash",
+              "origin", "passage_expansion", "passage_legs", "passage_query_variants",
+              "passage_rerank", "process_document", "ready_for_reads", "retire_document",
+              "search_min_score_env", "status_episode_breakdown", "test_providers", "unchanged_noop",
+              "walk", "walk_provenance", "writable_groups", "zero_vector_record"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -259,19 +263,28 @@ by #885 name capabilities that shipped in 0.19.2 without one.
 
 | Feature | Introduced | Meaning |
 |---|---|---|
+| `belief_aware_passages` | #806 ([ADR-0806](adr/0806-belief-aware-passage-ranking-default.md)) | `knowledge_search_passages` accepts `belief_aware` and applies it by default in `vector` and `hybrid` mode: a derived page ranks below the primary note it cites and a superseded passage below its successor. `belief_aware: false` or `LCG_PASSAGE_BELIEF_AWARE=off` restores the previous order. |
 | `cancel_on_disconnect` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | A client disconnect cancels an in-flight `knowledge_process_chunk` or `knowledge_process_document` before commit; a commit that has started finishes. |
 | `chunk_progress` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | `knowledge_process_chunk` streams `embed`, `extract` and `commit` progress frames when given a `_progress_token`. |
 | `chunk_supersede` | closest known origin: #785 ([ADR-0292](adr/0292-chunk-ingest-never-supersedes-unattributed-episodes.md)); seeded by #854 | Chunk ingest can supersede earlier episodes of the same document. |
+| `delete_orphan_prune` | #859 ([ADR-0859](adr/0859-retire-document-and-orphan-reporting.md)) | `knowledge_delete_by_source` and `knowledge_delete_chunk_episode` report `orphaned_entity_uuids`, `orphaned_entity_count`, `pruned_entity_count` and `pruned_edge_count`, and accept `prune_orphans: true`. |
 | `document_max_bytes_env` | #862 ([ADR-0862](adr/0862-document-max-bytes-strict-2mib-default.md)) | `knowledge_process_document` accepts documents up to a 2 MiB default that the operator can change with `LCG_DOCUMENT_MAX_BYTES`, validated strictly at startup. The configured value is not exposed. |
+| `embedding_profiles` | #790 ([ADR-0790](adr/0790-embedder-roles-and-instruction-profiles.md)) | Embed calls carry a query or document role, and the operator can choose role prefixes with `LCG_EMBEDDING_PROFILE` (and the prefix overrides). `knowledge_status` reports `embedding_instructions` and `embedding_doc_prefix`. The configured profile is not exposed here. |
 | `entity_provenance` | #857 ([ADR-0857](adr/0857-find-entities-episode-provenance.md)) | `knowledge_find_entities` can return episode provenance and filter by `uuids`. |
 | `episode_source_fields` | #853 ([ADR-0853](adr/0853-episode-source-identity-and-exact-source-matching.md)) | Episodes carry stored `source_file` and `chunk_id`. Independent of `exact_source_match`. |
 | `exact_source_match` | #853 ([ADR-0853](adr/0853-episode-source-identity-and-exact-source-matching.md)) | `knowledge_delete_by_source` matches the source exactly, with the safe legacy rule for episodes that predate stored source fields. |
 | `hybrid_passage_search` | #789 ([ADR-0789](adr/0789-hybrid-passage-search-rrf-top-rank-bonus.md)) | Passage search offers the hybrid BM25 + vector mode. |
 | `implicit_default_group_warning` | #856 | A write that omits `group_id` gets a `warnings` entry; pass an explicit `group_id` to avoid it. |
 | `lint` | #755 ([ADR-0755](adr/0755-knowledge-lint-deterministic-health.md)) | `knowledge_lint` deterministic graph-health checks. |
+| `literal_object_edges` | #823 ([ADR-0823](adr/0823-literal-object-edges-as-self-loops.md)) | Under an ontology, a literal-valued fact can be stored as a self-loop on its entity marked `literal_object`, and an edge whose value fact names only one endpoint is marked `suspected_misattachment`. `knowledge_walk` returns such self-loops on the last hop of a value walk. |
 | `move_document` | #903 ([ADR-0903](adr/0903-move-document-rekey.md)) | `knowledge_move_document` re-keys a document's episodes to a new `doc_id` / source path without re-extraction. |
+| `ontology_edge_direction` | #816 ([ADR-0816](adr/0816-ontology-edge-direction-check-and-repair.md)) | Ontology relation types accept `source_type` / `target_type` lists, `inverse_aliases` and `symmetric`; ingest swaps reversed edges or marks `signature_mismatch`, and `knowledge_canonicalize_relations` applies the same rules and reports `swapped_count` and `signature_mismatch_count`. |
+| `ontology_hash` | #881 ([ADR-0881](adr/0881-eval-verifies-service-reported-ontology.md)) | `knowledge_get_ontology` returns `ontology_hash`, the semantic hash of the loaded ontology (`"none"` without one). |
 | `origin` | #752 ([ADR-0752](adr/0752-episode-origin-and-corroboration.md)) | Episodes record an `origin`, distinguishing primary sources from corroboration. |
+| `passage_expansion` | #796 ([ADR-0796](adr/0796-passage-rerank-and-query-expansion.md)) | `knowledge_search_passages` accepts `expand`. Whether the stage runs depends on the operator's expander configuration; each call reports it with `applied`. |
 | `passage_legs` | #871 | Hybrid passage results carry `legs` (per-leg evidence). Present on hybrid results only; absent or null in other modes. |
+| `passage_query_variants` | #802 ([ADR-0802](adr/0802-caller-supplied-query-variants-weighted-rrf.md)) | `knowledge_search_passages` accepts `queries` (caller-written variants of `query`, fused by weighted RRF), and each passage then carries `matched_queries`. |
+| `passage_rerank` | #796 ([ADR-0796](adr/0796-passage-rerank-and-query-expansion.md)) | `knowledge_search_passages` accepts `rerank` and `rerank_candidates`. Whether the stage runs depends on the operator's reranker configuration; each call reports it with `applied`. |
 | `process_document` | #785 | `knowledge_process_document` document mode. |
 | `ready_for_reads` | #809, #855 ([ADR-0855](adr/0855-health-check-ready-for-reads.md)) | `health_check` carries `ready_for_reads`, present in every state. |
 | `retire_document` | #859 ([ADR-0859](adr/0859-retire-document-and-orphan-reporting.md)) | `knowledge_retire_document` supersedes every live episode of a document with reason `document_removed`, deleting nothing. |
@@ -289,6 +302,13 @@ by #885 name capabilities that shipped in 0.19.2 without one.
 - **`knowledge_reembed_missing`** (#809, [ADR-0809](adr/0809-reembed-missing-zero-vectors.md), PR #826):
   a new method is already visible by membership in `methods`, so a string adds nothing. The status
   record it repairs has its own string, `zero_vector_record`.
+- **Bug fixes that restore documented behaviour** carry no string, because there is nothing new
+  for a client to detect: `knowledge_walk` reaching an answer through a sibling edge (#912),
+  `knowledge_dump_wal` keeping uuid-less MENTIONS edges (#882), the pending-revision liveness of
+  `find_entities` provenance and support counts (#883), the D1 identity-removal check with a missing
+  stamp (#778), and dropping extracted entities named after the episode's own source ID (#824).
+- **`lcg-eval` changes** (#821, #847, #872, #881's eval checks, #900, #907) and the published
+  response schemas (#852) are not socket capabilities.
 
 ### Health check contract
 
