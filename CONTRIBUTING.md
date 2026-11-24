@@ -276,7 +276,7 @@ never commit release prep directly to `main` — then tag the merge commit.
    needs no string, since it is already visible in `methods`. For a change with neither, either add
    the string (sorted, `lower_snake_case`, append-only) before tagging, or record the reason in the
    release PR and under "Changes deliberately not advertised" in the reference. Nothing enforces this
-   mechanically; it is how 0.19.2 shipped eight changes without a string (#885).
+   mechanically; it is how 0.20.0 nearly shipped eight changes without a string (#885).
 4. **Assemble the changelog fragments.** First make sure `CHANGELOG.md` has a `## [Unreleased]`
    heading (it should: step 5 of the previous release leaves one; the script exits 3 without it). If
    no entries were maintained anywhere, write the section from the merged PRs since the last tag
