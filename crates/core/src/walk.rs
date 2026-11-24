@@ -8,7 +8,10 @@
 //! The algorithm is E13's v5, kept generic (no relation names, entity names or paths are
 //! hard-coded). Per hop:
 //!
-//! 1. candidates = edges incident to the frontier whose far end has not been visited; on the
+//! 1. candidates = edges incident to the frontier whose far end is not a start entity or an
+//!    entity of an earlier hop (the *current* frontier is not excluded, so an edge between two
+//!    frontier entities can be the hop's answer, #912; it is a candidate in both orientations,
+//!    each with its own `direction_matched`, and step 5 keeps the better one); on the
 //!    **last** hop of a value walk (`answer_type` absent or `"value"`), also the frontier
 //!    entities' own self-loops, which carry literal-valued facts (#823, ADR-0823). A self-loop
 //!    matches either direction (`direction_matched` is `null`; it gets the soft bonus and is
@@ -20,9 +23,13 @@
 //! 3. on the last hop, when `answer_type` is an entity type and the mode is not `history`:
 //!    keep far ends of that type (none = fall back to all, recorded);
 //! 4. direction: `soft` adds [`DIRECTION_BONUS`] to matching edges; `hard` keeps only matching
-//!    edges (none = fall back to all, recorded); `any` applies nothing;
-//! 5. rank by cosine(hop phrase, fact embedding) + bonus, ties broken by edge uuid, keep the top
-//!    B ([`BEAM_SINGLE`] / [`BEAM_LIST`]); their far ends become the next frontier.
+//!    edges (none = fall back to all, recorded; sideways edges, which always have a matching
+//!    orientation, do not count as a match while forward edges exist); `any` applies nothing;
+//! 5. rank by cosine(hop phrase, fact embedding) + bonus, ties broken forward-before-sideways and
+//!    then by edge uuid, keeping only the better-ranked orientation of an edge between two
+//!    frontier entities so it takes one slot, and for sideways edges only the slots the forward
+//!    edges do not need (at least half the beam) while forward edges exist; keep the top B ([`BEAM_SINGLE`] / [`BEAM_LIST`]). Their far ends
+//!    become the next frontier, and a kept sideways edge carries both its ends into it.
 //!
 //! If the planned hops end on no entity of `answer_type`, one *completion hop* runs: edges from
 //! the final frontier to entities of that type, ranked by cosine(query, fact embedding).
@@ -309,7 +316,8 @@ pub struct WalkHop {
     /// 1-based hop number; the completion hop is `hops.len() + 1`.
     pub hop: usize,
     pub completion: bool,
-    /// Candidates remaining after the visited-node exclusion, before any filtering.
+    /// Candidates remaining after the start/earlier-hop exclusion, before any filtering or
+    /// orientation dedup (an edge between two frontier entities counts once per orientation).
     pub candidate_count: usize,
     pub edges: Vec<WalkEdge>,
 }
@@ -405,6 +413,10 @@ struct Candidate {
     /// A frontier entity's own self-loop (a literal-object fact, ADR-0823). Only offered on the
     /// last hop of a value walk; it matches either direction and never extends the frontier.
     self_loop: bool,
+    /// Both ends of the edge are in the current frontier (#912). Such an edge is a "sideways"
+    /// move: it reaches no new entity, so it ranks below forward edges on equal score, is capped
+    /// in the beam, and is ignored when deciding whether a hard direction hop found a match.
+    sideways: bool,
     score: f32,
 }
 
@@ -538,16 +550,18 @@ impl<'a, G: WalkGraph> Walker<'a, G> {
         }
     }
 
-    /// Candidates at a frontier: incident edges whose far end is unvisited, oriented against
-    /// `direction`. A frontier entity is always visited, so this excludes self-loops, unless
-    /// `include_self_loops` is set (the last hop of a value walk, #823 / ADR-0823). Then a
+    /// Candidates at a frontier: incident edges whose far end is not in `excluded` (the start
+    /// entities and entities of earlier hops; the current frontier is *not* excluded, #912),
+    /// oriented against `direction`. An edge whose two ends are both in the frontier yields one
+    /// candidate per orientation, each with its own `matched`; `rank()` keeps one. Self-loops are
+    /// excluded unless `include_self_loops` is set (the last hop of a value walk, #823 / ADR-0823). Then a
     /// frontier entity's own self-loops (its literal-valued facts) are candidates too, marked
     /// [`Candidate::self_loop`]: they match either direction (`matched` is `None`) and never
     /// extend the frontier.
     fn candidates(
         &self,
         frontier: &[String],
-        visited: &HashSet<String>,
+        excluded: &HashSet<String>,
         include_invalidated: bool,
         direction: Direction,
         include_self_loops: bool,
@@ -563,6 +577,7 @@ impl<'a, G: WalkGraph> Walker<'a, G> {
                         far,
                         matched: None,
                         self_loop: true,
+                        sideways: false,
                         score: 0.0,
                     });
                 }
@@ -570,28 +585,33 @@ impl<'a, G: WalkGraph> Walker<'a, G> {
             }
             let src_in = fset.contains(edge.source_node_uuid.as_str());
             let tgt_in = fset.contains(edge.target_node_uuid.as_str());
-            let far = if src_in {
-                edge.target_node_uuid.clone()
-            } else if tgt_in {
-                edge.source_node_uuid.clone()
-            } else {
-                continue;
-            };
-            if visited.contains(&far) {
-                continue;
+            // `(current, far)` orientations of this edge. An edge between two frontier entities
+            // is a candidate in both orientations (#912); `rank()` keeps the better one.
+            let mut orientations: Vec<(bool, String)> = Vec::with_capacity(2);
+            if src_in {
+                orientations.push((true, edge.target_node_uuid.clone()));
             }
-            let matched = match direction {
-                Direction::Out => Some(src_in),
-                Direction::In => Some(tgt_in),
-                Direction::Any => None,
-            };
-            out.push(Candidate {
-                edge,
-                far,
-                matched,
-                self_loop: false,
-                score: 0.0,
-            });
+            if tgt_in {
+                orientations.push((false, edge.source_node_uuid.clone()));
+            }
+            for (current_is_source, far) in orientations {
+                if excluded.contains(&far) {
+                    continue;
+                }
+                let matched = match direction {
+                    Direction::Out => Some(current_is_source),
+                    Direction::In => Some(!current_is_source),
+                    Direction::Any => None,
+                };
+                out.push(Candidate {
+                    edge: edge.clone(),
+                    far,
+                    matched,
+                    self_loop: false,
+                    sideways: src_in && tgt_in,
+                    score: 0.0,
+                });
+            }
         }
         Ok(out)
     }
@@ -607,7 +627,10 @@ fn has_usable_embedding(c: &Candidate, target: &[f32]) -> bool {
 }
 
 /// Scores `cands` against `target` (+ `bonus` for direction matches), sorts best-first (edges
-/// without a usable embedding last; ties by uuid) and keeps the top `beam`.
+/// without a usable embedding last; equal scores put forward edges before sideways ones, then
+/// uuid, then far end), keeps only the best-ranked orientation of each edge (#912), limits
+/// sideways edges to the slots the forward edges do not need (but at least half the beam) when
+/// forward edges compete with them, and keeps the top `beam`.
 fn rank(cands: &mut Vec<Candidate>, target: &[f32], bonus: f32, beam: usize) {
     let usable: HashSet<String> = cands
         .iter()
@@ -627,8 +650,29 @@ fn rank(cands: &mut Vec<Candidate>, target: &[f32], bonus: f32, beam: usize) {
             .contains(&b.edge.uuid)
             .cmp(&usable.contains(&a.edge.uuid))
             .then_with(|| b.score.total_cmp(&a.score))
+            .then_with(|| a.sideways.cmp(&b.sideways))
             .then_with(|| a.edge.uuid.cmp(&b.edge.uuid))
+            .then_with(|| a.far.cmp(&b.far))
     });
+    // An edge between two frontier entities has two orientations; the first (best) one wins.
+    let mut seen: HashSet<String> = HashSet::new();
+    cands.retain(|c| seen.insert(c.edge.uuid.clone()));
+    // Sideways edges reach no new entity. A tightly connected frontier must not fill the whole
+    // beam and push out the forward edges, so while forward edges exist they are limited to the
+    // slots the forward edges do not need, but never below half the beam: a few forward edges
+    // leave most of the beam to sideways answers (the g116 shape), many keep half for each.
+    let forward = cands.iter().filter(|c| !c.sideways && !c.self_loop).count();
+    if forward > 0 {
+        let cap = beam.div_ceil(2).max(beam.saturating_sub(forward)).max(1);
+        let mut kept = 0;
+        cands.retain(|c| {
+            if !c.sideways {
+                return true;
+            }
+            kept += 1;
+            kept <= cap
+        });
+    }
     cands.truncate(beam);
 }
 
@@ -680,9 +724,23 @@ pub fn run_with_ontologies<'a, G: WalkGraph>(
         // self-loops are candidates too, so the walk can return the entity's values. Never on
         // an earlier hop: they would take beam slots meant for moving to the next entity.
         let include_self_loops = i == last && plan.answer_type.is_none();
+        // #912: hop 1 excludes the start entities (the frontier *is* the start set). Later hops
+        // exclude the start and earlier hops' entities but not the current frontier, so an edge
+        // between two frontier entities can be this hop's answer. An entity in both an earlier
+        // hop and the current frontier counts as frontier.
+        let excluded: HashSet<String> = if i == 0 {
+            visited.clone()
+        } else {
+            let fset: HashSet<&String> = frontier.iter().collect();
+            visited
+                .iter()
+                .filter(|u| !fset.contains(u))
+                .cloned()
+                .collect()
+        };
         let mut cands = w.candidates(
             &frontier,
-            &visited,
+            &excluded,
             include_invalidated,
             hop.direction,
             include_self_loops,
@@ -743,11 +801,16 @@ pub fn run_with_ontologies<'a, G: WalkGraph>(
                     // The match/fallback decision is over *moving* candidates only: a self-loop
                     // (#823) fits either direction, so letting it count as a match would hide
                     // the fallback for real edges. Self-loops are kept either way.
-                    if cands.iter().any(|c| !c.self_loop) {
-                        if cands
-                            .iter()
-                            .any(|c| !c.self_loop && c.matched == Some(true))
-                        {
+                    //
+                    // Sideways edges (#912) always have exactly one matching orientation, so they
+                    // must not decide it either: when forward edges exist, only they do, and a
+                    // sideways edge is kept only alongside matching forward edges. Only if there
+                    // are no forward edges at all do the sideways ones decide.
+                    let decides = |c: &Candidate| !c.self_loop && !c.sideways;
+                    let has_forward = cands.iter().any(decides);
+                    let decides = |c: &Candidate| !c.self_loop && (!has_forward || !c.sideways);
+                    if cands.iter().any(decides) {
+                        if cands.iter().any(|c| decides(c) && c.matched == Some(true)) {
                             cands.retain(Candidate::fits_direction);
                         } else {
                             fallbacks.direction.push(n);
@@ -786,6 +849,8 @@ pub fn run_with_ontologies<'a, G: WalkGraph>(
                 let reached = frontier.iter().any(|u| has_type(w.labels(u), at));
                 if !reached {
                     let n = plan.hops.len() + 1;
+                    // Full `visited` (frontier included), not the relaxed per-hop exclusion:
+                    // the completion hop is unchanged by #912 (FR-007).
                     let mut cands =
                         w.candidates(&frontier, &visited, false, Direction::Any, false)?;
                     let candidate_count = cands.len();
@@ -963,14 +1028,30 @@ fn push_distinct<'a>(out: &mut Vec<String>, vals: impl Iterator<Item = &'a str>)
 }
 
 /// The next frontier: the distinct far ends of the kept candidates. A self-loop never extends
-/// the frontier (its far end is the entity it sits on, already visited).
+/// the frontier (its far end is the entity it sits on, already visited). A kept sideways edge
+/// (#912) carries *both* its ends: both were already reached, and which orientation `rank()` kept
+/// is an arbitrary tie-break that must not decide which end the walk continues from.
 fn unique_far_ends(cands: &[Candidate]) -> Vec<String> {
     let mut seen = HashSet::new();
-    cands
-        .iter()
-        .filter(|c| !c.self_loop && seen.insert(c.far.clone()))
-        .map(|c| c.far.clone())
-        .collect()
+    let mut out = Vec::new();
+    for c in cands.iter().filter(|c| !c.self_loop) {
+        let near = if c.sideways {
+            let e = &c.edge;
+            Some(if e.source_node_uuid == c.far {
+                e.target_node_uuid.clone()
+            } else {
+                e.source_node_uuid.clone()
+            })
+        } else {
+            None
+        };
+        for u in std::iter::once(c.far.clone()).chain(near) {
+            if seen.insert(u.clone()) {
+                out.push(u);
+            }
+        }
+    }
+    out
 }
 
 /// Parses `hops` (absent ⇒ empty). Each hop: `{relation_types?, phrase, direction?}`;
@@ -1537,6 +1618,366 @@ mod tests {
         assert_eq!(uuids(&o.hops[0]), vec!["e1", "e2"]);
         // Hop 2 from b: the edges back to `a` are excluded; only b→c remains.
         assert_eq!(uuids(&o.hops[1]), vec!["e3"]);
+    }
+
+    /// #912 / E17 g116: hop 1 reaches both `p` and `s`; hop 2 must be able to take the edge
+    /// between them (`p -SUPPLIED_BY-> s`, an `in` hop from `s`'s side).
+    #[test]
+    fn frontier_entity_can_be_the_next_hops_answer() {
+        let mut g = MemGraph::default();
+        g.ent("a", "Person").ent("p", "Project").ent("s", "Org");
+        g.edge("e1", "a", "p", "WORKS_WITH", [1.0, 0.0])
+            .edge("e2", "a", "s", "CONTACT_FOR", [1.0, 0.0])
+            .edge("e3", "p", "s", "SUPPLIED_BY", [1.0, 0.0]);
+        let mut pl = plan(
+            "a",
+            vec![
+                hop(&["WORKS_WITH", "CONTACT_FOR"], Direction::Out),
+                hop(&["SUPPLIED_BY"], Direction::In),
+            ],
+        );
+        pl.mode = WalkMode::List;
+        pl.answer_type = Some("Project".into());
+        let o = run(&g, None, &pl, &emb(2)).unwrap();
+        assert_eq!(o.dead_end_at, None);
+        assert_eq!(uuids(&o.hops[0]), vec!["e1", "e2"]);
+        // Once, correctly oriented, and no edge back to `a`.
+        assert_eq!(uuids(&o.hops[1]), vec!["e3"]);
+        assert_eq!(o.hops[1].edges[0].direction_matched, Some(true));
+    }
+
+    /// An edge between two frontier entities is a candidate in both orientations, each with its
+    /// own `matched`; excluded far ends are still dropped per orientation.
+    #[test]
+    fn frontier_to_frontier_edge_yields_both_orientations() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T").ent("p", "T").ent("s", "T");
+        g.edge("e1", "p", "s", "R", [1.0, 0.0])
+            .edge("e2", "a", "p", "R", [1.0, 0.0]);
+        let w = Walker {
+            graph: &g,
+            ontologies: &|_| None,
+            entities: HashMap::new(),
+        };
+        let frontier: Vec<String> = vec!["p".into(), "s".into()];
+        let excluded: HashSet<String> = ["a".to_string()].into_iter().collect();
+        let of_e1 = |dir| {
+            let mut v: Vec<(String, Option<bool>)> = w
+                .candidates(&frontier, &excluded, false, dir, false)
+                .unwrap()
+                .into_iter()
+                .filter(|c| c.edge.uuid == "e1")
+                .map(|c| (c.far, c.matched))
+                .collect();
+            v.sort();
+            v
+        };
+        // Out: current = source `p` matches; current = target `s` does not.
+        assert_eq!(
+            of_e1(Direction::Out),
+            vec![("p".into(), Some(false)), ("s".into(), Some(true))]
+        );
+        assert_eq!(
+            of_e1(Direction::In),
+            vec![("p".into(), Some(true)), ("s".into(), Some(false))]
+        );
+        assert_eq!(
+            of_e1(Direction::Any),
+            vec![("p".into(), None), ("s".into(), None)]
+        );
+        // `e2` (a→p): its far end `a` is excluded, so it is not a candidate at all.
+        let all = w
+            .candidates(&frontier, &excluded, false, Direction::Any, false)
+            .unwrap();
+        assert!(all.iter().all(|c| c.edge.uuid != "e2"));
+        // Both orientations counted before rank(); rank() keeps one.
+        assert_eq!(all.len(), 2);
+        let mut all = all;
+        rank(&mut all, &[1.0, 0.0], 0.0, 10);
+        assert_eq!(all.len(), 1);
+    }
+
+    /// A frontier-to-frontier edge takes one beam slot and is reported once. Beam is 3 (Single);
+    /// had the edge kept both orientations, the third-best competitor would be evicted.
+    #[test]
+    fn frontier_to_frontier_edge_takes_one_beam_slot() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T")
+            .ent("p", "T")
+            .ent("s", "T")
+            .ent("x1", "T")
+            .ent("x2", "T")
+            .ent("x3", "T");
+        g.edge("e1", "a", "p", "R", [1.0, 0.0])
+            .edge("e2", "a", "s", "R", [1.0, 0.0])
+            // Hop 2: the p—s edge scores best; competitors score 0.949, 0.707, 0.447.
+            .edge("e3", "p", "s", "R", [1.0, 0.0])
+            .edge("e4", "p", "x1", "R", [3.0, 1.0])
+            .edge("e5", "p", "x2", "R", [1.0, 1.0])
+            .edge("e6", "s", "x3", "R", [1.0, 2.0]);
+        let p = plan(
+            "a",
+            vec![hop(&[], Direction::Any), hop(&[], Direction::Any)],
+        );
+        let o = run(&g, None, &p, &emb(2)).unwrap();
+        assert_eq!(uuids(&o.hops[0]), vec!["e1", "e2"]);
+        assert_eq!(uuids(&o.hops[1]), vec!["e3", "e4", "e5"]);
+        // e3 counted once per orientation before the beam cut: e3 ×2, e4, e5, e6.
+        assert_eq!(o.hops[1].candidate_count, 5);
+    }
+
+    /// Hard direction: of a frontier-to-frontier edge's two orientations exactly one matches, so
+    /// the hop does not fall back (previously both always "matched").
+    #[test]
+    fn hard_direction_picks_the_matching_orientation_of_a_frontier_edge() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T").ent("p", "T").ent("s", "T");
+        g.edge("e1", "a", "p", "R", [1.0, 0.0])
+            .edge("e2", "a", "s", "R", [1.0, 0.0])
+            .edge("e3", "p", "s", "R", [1.0, 0.0]);
+        let mut pl = plan("a", vec![hop(&[], Direction::Any), hop(&[], Direction::In)]);
+        pl.direction_mode = DirectionMode::Hard;
+        let o = run(&g, None, &pl, &emb(2)).unwrap();
+        assert!(o.fallbacks.direction.is_empty());
+        assert_eq!(uuids(&o.hops[1]), vec!["e3"]);
+        assert_eq!(o.hops[1].edges[0].direction_matched, Some(true));
+    }
+
+    /// 3-hop walk: edges back to the start and to an earlier hop's entity stay excluded.
+    #[test]
+    fn later_hops_still_exclude_the_start_and_earlier_hops() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T").ent("b", "T").ent("c", "T").ent("d", "T");
+        g.edge("e1", "a", "b", "R1", [1.0, 0.0])
+            .edge("e2", "b", "c", "R2", [1.0, 0.0])
+            .edge("e3", "c", "a", "R3", [1.0, 0.0]) // back to the start
+            .edge("e4", "c", "b", "R3", [1.0, 0.0]) // back to a hop-1 entity
+            .edge("e5", "c", "d", "R4", [1.0, 0.0]);
+        let p = plan(
+            "a",
+            vec![
+                hop(&["R1"], Direction::Out),
+                hop(&["R2"], Direction::Out),
+                hop(&[], Direction::Out),
+            ],
+        );
+        let o = run(&g, None, &p, &emb(3)).unwrap();
+        assert_eq!(uuids(&o.hops[2]), vec!["e5"]);
+        assert_eq!(o.hops[2].candidate_count, 1);
+    }
+
+    /// An entity of an earlier hop that is re-selected into the current frontier counts as
+    /// frontier, not as excluded: hop 3 may take an edge between two hop-2 frontier entities.
+    /// Run with both name orders so the result cannot depend on which end sorts first.
+    #[test]
+    fn current_frontier_wins_over_earlier_hop_exclusion() {
+        for (p_name, s_name) in [("p", "s"), ("s", "p")] {
+            let mut g = MemGraph::default();
+            g.ent("a", "T")
+                .ent(p_name, "T")
+                .ent(s_name, "T")
+                .ent("q", "T");
+            g.edge("e1", "a", p_name, "R", [1.0, 0.0])
+                .edge("e2", "a", s_name, "R", [1.0, 0.0])
+                // hop 2 re-selects hop-1 entity `p`
+                .edge("e3", s_name, p_name, "R", [1.0, 0.0])
+                .edge("e4", s_name, "q", "R", [3.0, 1.0])
+                // hop 3: between two frontier entities
+                .edge("e5", "q", p_name, "R2", [1.0, 0.0]);
+            let p = plan(
+                "a",
+                vec![
+                    hop(&["R"], Direction::Any),
+                    hop(&["R"], Direction::Any),
+                    hop(&["R2"], Direction::Any),
+                ],
+            );
+            let o = run(&g, None, &p, &emb(3)).unwrap();
+            assert_eq!(uuids(&o.hops[1]), vec!["e3", "e4"]);
+            assert_eq!(uuids(&o.hops[2]), vec!["e5"], "names {p_name}/{s_name}");
+        }
+    }
+
+    /// Hard direction: sideways edges always have one matching orientation, so they must not
+    /// cancel the fallback when no forward edge matches (#912 review). Before the sideways edge
+    /// existed the hop fell back and returned the forward edges; it still must.
+    #[test]
+    fn hard_direction_fallback_is_not_cancelled_by_a_sideways_edge() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T")
+            .ent("p", "T")
+            .ent("s", "T")
+            .ent("x1", "T")
+            .ent("x2", "T");
+        g.edge("e1", "a", "p", "R", [1.0, 0.0])
+            .edge("e2", "a", "s", "R", [1.0, 0.0])
+            .edge("e3", "p", "s", "R", [1.0, 0.0]) // sideways
+            .edge("e4", "p", "x1", "R", [1.0, 0.0]) // out of p: does not match `in`
+            .edge("e5", "s", "x2", "R", [1.0, 0.0]); // out of s: does not match `in`
+        let mut pl = plan("a", vec![hop(&[], Direction::Any), hop(&[], Direction::In)]);
+        pl.direction_mode = DirectionMode::Hard;
+        let o = run(&g, None, &pl, &emb(2)).unwrap();
+        assert_eq!(o.fallbacks.direction, vec![2]);
+        let h2 = uuids(&o.hops[1]);
+        assert!(h2.contains(&"e4") && h2.contains(&"e5"), "{h2:?}");
+
+        // A matching forward edge makes the hop decide by direction: forward edges that do not
+        // match are dropped, and the sideways edge is kept alongside the matching one.
+        g.edge("e6", "x3", "p", "R", [1.0, 0.0]).ent("x3", "T");
+        let o = run(&g, None, &pl, &emb(2)).unwrap();
+        assert!(o.fallbacks.direction.is_empty());
+        let h2 = uuids(&o.hops[1]);
+        assert!(h2.contains(&"e6") && h2.contains(&"e3"), "{h2:?}");
+        assert!(!h2.contains(&"e4") && !h2.contains(&"e5"), "{h2:?}");
+    }
+
+    /// A kept sideways edge carries both its ends into the next frontier, so hop 3 continues from
+    /// either end whatever order the two ends sort in (#912 review).
+    #[test]
+    fn sideways_edge_carries_both_ends_to_the_next_hop() {
+        for (x, y) in [("p", "s"), ("s", "p")] {
+            let mut g = MemGraph::default();
+            g.ent("a", "T")
+                .ent(x, "T")
+                .ent(y, "T")
+                .ent("t1", "T")
+                .ent("t2", "T");
+            g.edge("e1", "a", x, "R1", [1.0, 0.0])
+                .edge("e2", "a", y, "R1", [1.0, 0.0])
+                .edge("e3", x, y, "R2", [1.0, 0.0])
+                .edge("e4", x, "t1", "R3", [1.0, 0.0])
+                .edge("e5", y, "t2", "R3", [1.0, 0.0]);
+            let p = plan(
+                "a",
+                vec![
+                    hop(&["R1"], Direction::Out),
+                    hop(&["R2"], Direction::Any),
+                    hop(&["R3"], Direction::Out),
+                ],
+            );
+            let o = run(&g, None, &p, &emb(3)).unwrap();
+            assert_eq!(uuids(&o.hops[1]), vec!["e3"], "names {x}/{y}");
+            assert_eq!(o.dead_end_at, None);
+            assert_eq!(uuids(&o.hops[2]), vec!["e4", "e5"], "names {x}/{y}");
+        }
+    }
+
+    /// Mutually connected hop-1 entities must not fill the beam with sideways edges: forward
+    /// edges ("colleagues of colleagues") still get slots (#912 review). Beam is 3 (Single).
+    #[test]
+    fn sideways_edges_do_not_fill_the_beam() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T")
+            .ent("b", "T")
+            .ent("c", "T")
+            .ent("d", "T")
+            .ent("x", "T")
+            .ent("y", "T")
+            .ent("z", "T");
+        g.edge("e1", "a", "b", "WORKS_WITH", [1.0, 0.0])
+            .edge("e2", "a", "c", "WORKS_WITH", [1.0, 0.0])
+            .edge("e3", "a", "d", "WORKS_WITH", [1.0, 0.0])
+            // b, c, d all work with each other, and score best
+            .edge("e4", "b", "c", "WORKS_WITH", [1.0, 0.0])
+            .edge("e5", "b", "d", "WORKS_WITH", [1.0, 0.0])
+            .edge("e6", "c", "d", "WORKS_WITH", [1.0, 0.0])
+            // two-hop people score lower
+            .edge("e7", "b", "x", "WORKS_WITH", [1.0, 1.0])
+            .edge("e8", "c", "y", "WORKS_WITH", [1.0, 2.0])
+            .edge("e9", "d", "z", "WORKS_WITH", [0.0, 1.0]);
+        let p = plan(
+            "a",
+            vec![
+                hop(&["WORKS_WITH"], Direction::Out),
+                hop(&["WORKS_WITH"], Direction::Any),
+            ],
+        );
+        let o = run(&g, None, &p, &emb(2)).unwrap();
+        // At most 2 of the 3 slots go to sideways edges; the best forward edge gets the third.
+        assert_eq!(uuids(&o.hops[1]), vec!["e4", "e5", "e7"]);
+    }
+
+    /// A single forward edge must not hold back sideways answers that outrank it: sideways edges
+    /// get every slot the forward edges do not need, not just half the beam (#912 review).
+    #[test]
+    fn sideways_edges_use_the_slots_forward_edges_do_not_need() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T").ent("x", "T");
+        for n in ["b1", "b2", "b3", "b4"] {
+            g.ent(n, "T");
+        }
+        g.edge("e1", "a", "b1", "R", [1.0, 0.0])
+            .edge("e2", "a", "b2", "R", [1.0, 0.0])
+            .edge("e3", "a", "b3", "R", [1.0, 0.0])
+            .edge("e4", "a", "b4", "R", [1.0, 0.0])
+            // six sideways edges among the hop-1 entities, all scoring best
+            .edge("s1", "b1", "b2", "R", [1.0, 0.0])
+            .edge("s2", "b1", "b3", "R", [1.0, 0.0])
+            .edge("s3", "b1", "b4", "R", [1.0, 0.0])
+            .edge("s4", "b2", "b3", "R", [1.0, 0.0])
+            .edge("s5", "b2", "b4", "R", [1.0, 0.0])
+            .edge("s6", "b3", "b4", "R", [1.0, 0.0])
+            // one lower-scoring forward edge
+            .edge("f1", "b1", "x", "R", [0.0, 1.0]);
+        let mut p = plan(
+            "a",
+            vec![hop(&[], Direction::Any), hop(&[], Direction::Any)],
+        );
+        p.mode = WalkMode::List;
+        let o = run(&g, None, &p, &emb(2)).unwrap();
+        // Beam is 10: all six sideways edges and the forward edge fit (a half-beam cap of 5
+        // would have dropped one sideways answer).
+        assert_eq!(
+            uuids(&o.hops[1]),
+            vec!["s1", "s2", "s3", "s4", "s5", "s6", "f1"]
+        );
+    }
+
+    /// On equal score a forward edge ranks before a sideways one.
+    #[test]
+    fn forward_edges_outrank_sideways_edges_on_equal_score() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T")
+            .ent("b", "T")
+            .ent("c", "T")
+            .ent("x", "T")
+            .ent("y", "T");
+        g.edge("e1", "a", "b", "R", [1.0, 0.0])
+            .edge("e2", "a", "c", "R", [1.0, 0.0])
+            .edge("e3", "b", "c", "R", [1.0, 0.0]) // sideways, sorts first by uuid
+            .edge("e4", "b", "x", "R", [1.0, 0.0])
+            .edge("e5", "c", "y", "R", [1.0, 0.0]);
+        let mut p = plan(
+            "a",
+            vec![hop(&[], Direction::Any), hop(&[], Direction::Any)],
+        );
+        p.mode = WalkMode::List;
+        let o = run(&g, None, &p, &emb(2)).unwrap();
+        assert_eq!(uuids(&o.hops[1]), vec!["e4", "e5", "e3"]);
+    }
+
+    /// The completion hop still excludes the whole frontier: a frontier-to-frontier edge is not
+    /// a completion candidate and does not count toward its `candidate_count`.
+    #[test]
+    fn completion_hop_is_unchanged_by_frontier_edges() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T")
+            .ent("x", "Thing")
+            .ent("y", "Thing")
+            .ent("o", "Org");
+        g.edge("e1", "a", "x", "R", [1.0, 0.0])
+            .edge("e2", "a", "y", "R", [1.0, 0.0])
+            .edge("e3", "x", "y", "R", [1.0, 0.0])
+            .edge("e4", "x", "o", "R", [1.0, 0.0]);
+        let mut pl = plan("a", vec![hop(&[], Direction::Any)]);
+        pl.answer_type = Some("Org".into());
+        pl.query = Some("q".into());
+        let o = run(&g, None, &pl, &emb(1)).unwrap();
+        assert!(o.completion_hop_ran);
+        let c = o.hops.last().unwrap();
+        assert!(c.completion);
+        assert_eq!(uuids(c), vec!["e4"]);
+        assert_eq!(c.candidate_count, 1);
     }
 
     #[test]
