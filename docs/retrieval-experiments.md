@@ -28,6 +28,9 @@ This is the record of every retrieval experiment and its result: what was tried,
 - **Methodology:** see [Retrieval-Quality Evaluation](retrieval-quality-evaluation.md) for the harness, corpora and question format.
 - **Graph-QA results** (E13 and later) come from `lcg-eval graph-qa` and nothing else ([#821](https://github.com/liminisapp/liminis-context-graph/issues/821)). There are two steps:
   1. Ingest v2 with `retrieval --ontology crates/eval/fixtures/retrieval-v2/ontology-v3.1.yaml --keep-workspace <ws>`.
+     - **Builds before [#881](https://github.com/liminisapp/liminis-context-graph/issues/881) (merged 2026-11-22):** `--ontology` never reached the spawned service, so those runs extracted **free-form**. Don't reuse a workspace or cassette made with `--ontology` before that fix.
+     - **Entries affected:** of the recorded entries, only E16. E13's ontology graph came from a local probe that did extract under the ontology (28 relation types, cassette `v2-haiku45-onto31`).
+     - **Since #881:** the harness checks the service's `ontology_hash` before ingest and stops on a mismatch.
   2. Run `graph-qa --workspace <ws> --plans crates/eval/fixtures/retrieval-v2/e13-v5-plans.json` over the committed `graph-questions.jsonl`.
 
   Report `route` on E13 (all 129 questions) and on E13/test. Graph-QA uses answer accuracy, not nDCG. See [Standard setup for graph-QA results](retrieval-quality-evaluation.md#standard-setup-for-graph-qa-results).
