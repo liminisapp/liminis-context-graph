@@ -2110,9 +2110,9 @@ Algorithm (E13's v5, generic — no relation names are hard-coded). Per hop:
    embedding) plus the bonus. On equal score a forward edge (one that reaches a new entity) ranks
    before a sideways edge (both ends in the frontier), then ties break by edge uuid. Edges with no
    usable fact embedding rank after every embedded edge (score 0.0). Each edge is kept in one
-   orientation only. While forward edges are candidates, sideways edges take at most half of the
-   beam (rounded up), so a tightly connected frontier cannot crowd out the walk's next
-   entities. The top B are kept; their far ends are the next frontier, and a kept sideways edge
+   orientation only. While forward edges are candidates, sideways edges are limited to the slots the
+   forward edges do not need (and never below half of the beam, rounded up), so a tightly
+   connected frontier cannot crowd out the walk's next entities. The top B are kept; their far ends are the next frontier, and a kept sideways edge
    carries **both** of its ends into it (both were already reached, and which orientation was
    kept is only a tie-break).
 

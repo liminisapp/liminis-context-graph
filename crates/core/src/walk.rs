@@ -27,8 +27,8 @@
 //!    orientation, do not count as a match while forward edges exist); `any` applies nothing;
 //! 5. rank by cosine(hop phrase, fact embedding) + bonus, ties broken forward-before-sideways and
 //!    then by edge uuid, keeping only the better-ranked orientation of an edge between two
-//!    frontier entities so it takes one slot, and at most half the beam for sideways edges while
-//!    forward edges exist; keep the top B ([`BEAM_SINGLE`] / [`BEAM_LIST`]). Their far ends
+//!    frontier entities so it takes one slot, and for sideways edges only the slots the forward
+//!    edges do not need (at least half the beam) while forward edges exist; keep the top B ([`BEAM_SINGLE`] / [`BEAM_LIST`]). Their far ends
 //!    become the next frontier, and a kept sideways edge carries both its ends into it.
 //!
 //! If the planned hops end on no entity of `answer_type`, one *completion hop* runs: edges from
@@ -629,7 +629,8 @@ fn has_usable_embedding(c: &Candidate, target: &[f32]) -> bool {
 /// Scores `cands` against `target` (+ `bonus` for direction matches), sorts best-first (edges
 /// without a usable embedding last; equal scores put forward edges before sideways ones, then
 /// uuid, then far end), keeps only the best-ranked orientation of each edge (#912), limits
-/// sideways edges to half the beam when forward edges compete with them, and keeps the top `beam`.
+/// sideways edges to the slots the forward edges do not need (but at least half the beam) when
+/// forward edges compete with them, and keeps the top `beam`.
 fn rank(cands: &mut Vec<Candidate>, target: &[f32], bonus: f32, beam: usize) {
     let usable: HashSet<String> = cands
         .iter()
@@ -657,9 +658,12 @@ fn rank(cands: &mut Vec<Candidate>, target: &[f32], bonus: f32, beam: usize) {
     let mut seen: HashSet<String> = HashSet::new();
     cands.retain(|c| seen.insert(c.edge.uuid.clone()));
     // Sideways edges reach no new entity. A tightly connected frontier must not fill the whole
-    // beam and push out the forward edges, so while forward edges exist they get at most half.
-    if cands.iter().any(|c| !c.sideways && !c.self_loop) {
-        let cap = beam.div_ceil(2).max(1);
+    // beam and push out the forward edges, so while forward edges exist they are limited to the
+    // slots the forward edges do not need, but never below half the beam: a few forward edges
+    // leave most of the beam to sideways answers (the g116 shape), many keep half for each.
+    let forward = cands.iter().filter(|c| !c.sideways && !c.self_loop).count();
+    if forward > 0 {
+        let cap = beam.div_ceil(2).max(beam.saturating_sub(forward)).max(1);
         let mut kept = 0;
         cands.retain(|c| {
             if !c.sideways {
@@ -1891,6 +1895,42 @@ mod tests {
         let o = run(&g, None, &p, &emb(2)).unwrap();
         // At most 2 of the 3 slots go to sideways edges; the best forward edge gets the third.
         assert_eq!(uuids(&o.hops[1]), vec!["e4", "e5", "e7"]);
+    }
+
+    /// A single forward edge must not hold back sideways answers that outrank it: sideways edges
+    /// get every slot the forward edges do not need, not just half the beam (#912 review).
+    #[test]
+    fn sideways_edges_use_the_slots_forward_edges_do_not_need() {
+        let mut g = MemGraph::default();
+        g.ent("a", "T").ent("x", "T");
+        for n in ["b1", "b2", "b3", "b4"] {
+            g.ent(n, "T");
+        }
+        g.edge("e1", "a", "b1", "R", [1.0, 0.0])
+            .edge("e2", "a", "b2", "R", [1.0, 0.0])
+            .edge("e3", "a", "b3", "R", [1.0, 0.0])
+            .edge("e4", "a", "b4", "R", [1.0, 0.0])
+            // six sideways edges among the hop-1 entities, all scoring best
+            .edge("s1", "b1", "b2", "R", [1.0, 0.0])
+            .edge("s2", "b1", "b3", "R", [1.0, 0.0])
+            .edge("s3", "b1", "b4", "R", [1.0, 0.0])
+            .edge("s4", "b2", "b3", "R", [1.0, 0.0])
+            .edge("s5", "b2", "b4", "R", [1.0, 0.0])
+            .edge("s6", "b3", "b4", "R", [1.0, 0.0])
+            // one lower-scoring forward edge
+            .edge("f1", "b1", "x", "R", [0.0, 1.0]);
+        let mut p = plan(
+            "a",
+            vec![hop(&[], Direction::Any), hop(&[], Direction::Any)],
+        );
+        p.mode = WalkMode::List;
+        let o = run(&g, None, &p, &emb(2)).unwrap();
+        // Beam is 10: all six sideways edges and the forward edge fit (a half-beam cap of 5
+        // would have dropped one sideways answer).
+        assert_eq!(
+            uuids(&o.hops[1]),
+            vec!["s1", "s2", "s3", "s4", "s5", "s6", "f1"]
+        );
     }
 
     /// On equal score a forward edge ranks before a sideways one.
