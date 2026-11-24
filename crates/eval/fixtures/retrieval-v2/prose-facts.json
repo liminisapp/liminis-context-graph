@@ -1,0 +1,16 @@
+[
+  {
+    "entity": "Telemetry clean-up",
+    "attribute": "Owner",
+    "value": "Marcus Haddad",
+    "notes": ["journal-04"],
+    "status": "stated"
+  },
+  {
+    "entity": "Routing handover",
+    "attribute": "Owner",
+    "value": "Priya Varga",
+    "notes": ["journal-04"],
+    "status": "ambiguous"
+  }
+]
