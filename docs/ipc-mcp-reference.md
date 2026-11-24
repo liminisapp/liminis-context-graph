@@ -107,11 +107,11 @@ new one:
   still safe: an identical resubmission is a no-op (`unchanged_noop`, issue #858) that returns the
   existing episode, and a changed one supersedes it as usual.
 
-## IPC methods (60)
+## IPC methods (61)
 
-The socket dispatch handles **60 methods**: 59 `knowledge_*` methods plus `health_check`.
+The socket dispatch handles **61 methods**: 60 `knowledge_*` methods plus `health_check`.
 `health_check` is the one method not prefixed `knowledge_*`, and it is the reason the IPC
-surface (60) and the MCP tool registry (59, below) differ by exactly one — `health_check` is
+surface (61) and the MCP tool registry (60, below) differ by exactly one — `health_check` is
 not exposed as an MCP tool. MCP clients have no health tool; the `ok` / `healthy` /
 `ready_for_reads` semantics they would otherwise look for are in the
 [Health check contract](#health-check-contract) below
@@ -133,6 +133,7 @@ not exposed as an MCP tool. MCP clients have no health tool; the `ok` / `healthy
 | Deletion | `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_delete_by_group`, `knowledge_clear_all` |
 | Supersession | `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_retire_document` |
 | Episode origin | `knowledge_stamp_origin` |
+| Document rename / move | `knowledge_move_document` |
 | Curation | `knowledge_merge_entities`, `knowledge_validate_corrections`, `knowledge_apply_corrections`, `knowledge_reprocess_entity_types` |
 | Ontology | `knowledge_reload_ontology` |
 | Relation typing | `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types` (deprecated), `knowledge_reprocess_relation_types` |
@@ -232,7 +233,7 @@ during a rebuild and under any `--writable-groups` policy.
 {"server_version": "0.19.1", "protocol_version": 1,
  "features": ["cancel_on_disconnect", "chunk_progress", "chunk_supersede", "document_max_bytes_env", "entity_provenance",
               "episode_source_fields", "exact_source_match", "hybrid_passage_search", "implicit_default_group_warning",
-              "lint", "origin", "passage_legs", "process_document", "ready_for_reads",
+              "lint", "move_document", "origin", "passage_legs", "process_document", "ready_for_reads",
               "retire_document", "search_min_score_env", "status_episode_breakdown", "test_providers",
               "unchanged_noop", "walk", "walk_provenance", "writable_groups", "zero_vector_record"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
@@ -268,6 +269,7 @@ by #885 name capabilities that shipped in 0.19.2 without one.
 | `hybrid_passage_search` | #789 ([ADR-0789](adr/0789-hybrid-passage-search-rrf-top-rank-bonus.md)) | Passage search offers the hybrid BM25 + vector mode. |
 | `implicit_default_group_warning` | #856 | A write that omits `group_id` gets a `warnings` entry; pass an explicit `group_id` to avoid it. |
 | `lint` | #755 ([ADR-0755](adr/0755-knowledge-lint-deterministic-health.md)) | `knowledge_lint` deterministic graph-health checks. |
+| `move_document` | #903 ([ADR-0903](adr/0903-move-document-rekey.md)) | `knowledge_move_document` re-keys a document's episodes to a new `doc_id` / source path without re-extraction. |
 | `origin` | #752 ([ADR-0752](adr/0752-episode-origin-and-corroboration.md)) | Episodes record an `origin`, distinguishing primary sources from corroboration. |
 | `passage_legs` | #871 | Hybrid passage results carry `legs` (per-leg evidence). Present on hybrid results only; absent or null in other modes. |
 | `process_document` | #785 | `knowledge_process_document` document mode. |
@@ -505,7 +507,7 @@ union of all active scopes.
 | Scope | Methods |
 |-------|---------|
 | `read` | `knowledge_status`, `knowledge_capabilities`, `knowledge_find_entities`, `knowledge_resolve_entity`, `knowledge_find_relationships`, `knowledge_get_episodes`, `knowledge_get_nodes_by_group`, `knowledge_get_edges_by_group`, `knowledge_get_edges_by_uuids`, `knowledge_search_passages`, `knowledge_list_entities`, `knowledge_list_relationships`, `knowledge_get_entity_neighbors`, `knowledge_get_ontology`, `knowledge_walk`, `knowledge_get_entities_by_source`, `knowledge_rebuild_status`, `knowledge_validate_corrections`, `knowledge_get_correction_changes`, `knowledge_get_affected_work`, `knowledge_lint`, `knowledge_preview_chunks` |
-| `write` | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_retire_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
+| `write` | `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_add_episode`, `knowledge_delete_episode`, `knowledge_delete_by_source`, `knowledge_delete_chunk_episode`, `knowledge_mark_chunk_removed`, `knowledge_supersede_document`, `knowledge_move_document`, `knowledge_retire_document`, `knowledge_clear_all`, `knowledge_apply_corrections`, `knowledge_merge_entities`, `knowledge_reprocess_entity_types`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_reprocess_relation_types`, `knowledge_add_cross_group_edge`, `knowledge_assert_entity`, `knowledge_assert_relationship` |
 | `cypher` | `knowledge_query_cypher` |
 | `admin` | `knowledge_dump_wal`, `knowledge_strip_wal_embeddings`, `knowledge_prepare_checkpoint`, `knowledge_wal_mark_create`, `knowledge_wal_mark_list`, `knowledge_wal_mark_delete`, `knowledge_rebuild_from_wal`, `knowledge_recover`, `knowledge_recover_full`, `knowledge_close`, `knowledge_build_indices`, `knowledge_rebind_pointers`, `knowledge_delete_by_group`, `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing`, `knowledge_reload_ontology`, `knowledge_stamp_origin` |
 | `all` | every scope above (default) |
@@ -548,7 +550,7 @@ The check is made against the groups a call **actually changes**, not every grou
 | Tool(s) | Group(s) that must be listed |
 |---------|------------------------------|
 | `knowledge_add_episode`, `knowledge_process_chunk`, `knowledge_process_document`, `knowledge_assert_entity`, `knowledge_assert_relationship`, `knowledge_merge_entities`, `knowledge_add_cross_group_edge`, `knowledge_reprocess_entity_types`, `knowledge_reprocess_relation_types` | `group_id` (default group if omitted) |
-| `knowledge_supersede_document`, `knowledge_retire_document`, `knowledge_stamp_origin`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing`, `knowledge_reload_ontology` | the required `group_id` |
+| `knowledge_supersede_document`, `knowledge_retire_document`, `knowledge_stamp_origin`, `knowledge_move_document`, `knowledge_canonicalize_relations`, `knowledge_backfill_relation_types`, `knowledge_backfill_summary_embeddings`, `knowledge_reembed_missing`, `knowledge_reload_ontology` | the required `group_id` |
 | `knowledge_delete_by_source`, `knowledge_delete_chunk_episode` | every entry of `group_ids`; with `prune_orphans: true`, **also** every group owning a cross-group pointer row into them (the prune re-checks and rewrites those rows — issue #859, ADR-0385) |
 | `knowledge_mark_chunk_removed` | every entry of `group_ids` |
 | `knowledge_delete_episode` | the group that owns the episode (looked up; a missing episode is a no-op) |
@@ -927,6 +929,7 @@ each method already did. The classes:
 | `knowledge_supersede_document` | refused | `group_id` is required; an omitted one is an error |
 | `knowledge_retire_document` | refused | `group_id` is required; an omitted one is an error |
 | `knowledge_stamp_origin` | refused | `group_id` is required; an omitted one is an error |
+| `knowledge_move_document` | refused | `group_id` is required; an omitted one is an error |
 | `knowledge_canonicalize_relations` | refused | `group_id` is required; an omitted one is an error |
 | `knowledge_backfill_relation_types` | refused | `group_id` is required; an omitted one is an error |
 | `knowledge_backfill_summary_embeddings` | refused | `group_id` is required; an omitted one is an error |
@@ -1486,6 +1489,94 @@ supersessions and invalidations already made are not revisited. Episodes with
 and `"external"` for clipped material; leave notes unmarked. Search with
 `origins: ["primary", "external"]` while the agent refreshes a page. To adopt this on an existing
 notebook, run `knowledge_stamp_origin` as a dry run, check `changes`, then run it for real.
+
+### Moving a document: `knowledge_move_document` (issue #903)
+
+A rename or a folder move changes a document's path, not its words. Removing the document and
+ingesting it again under the new path would extract every fact a second time at full LLM cost.
+`knowledge_move_document` (`write` scope; feature string `move_document`;
+[ADR-0903](adr/0903-move-document-rekey.md)) instead **re-keys the document's existing episodes**:
+no extractor, LLM or embedder call, and entities, relationships, embeddings and belief history stay
+exactly as they are.
+
+```json
+{"group_id": "liminis", "moves": [
+  {"from": {"doc_id": "meetings/standup.md", "source_path": "meetings/standup.md"},
+   "to":   {"doc_id": "archive/standup.md",  "source_path": "archive/standup.md"},
+   "chunk_id_prefix": {"from": "meetings/standup.md::", "to": "archive/standup.md::"}}
+]}
+```
+
+| Parameter | Meaning |
+|---|---|
+| `group_id` | Required. A missing one is an error (see the omitted-group table). |
+| `moves` | Required, non-empty array. One item is a single move; many are one batch. |
+| `moves[].from` / `to` | `{doc_id?, source_path?}`. Name a `doc_id`, a source path, or both, and the **same kinds on both sides**. A document with no `doc_id` is moved by source path alone. With both kinds, an episode must match both. Only the named identities are rewritten, so a consumer whose `doc_id` and path differ passes both. |
+| `moves[].chunk_id_prefix` | Optional `{from, to}`. Chunk ids (episode `name` / `chunk_id`) that start with `from` are rewritten; without it chunk ids are left as they are. Document-mode chunk ids (`<doc_id>::<hex>`) are opaque keys, so leaving them is safe; pass the prefix when your chunk ids embed the path (`<file>::<heading-path>::<n>`) and you want search to cite the new one. |
+| `dry_run` | `true` validates and reports; writes nothing to the graph or the WAL. |
+
+**What changes.** On every episode of the document: `doc_id`, the stored source file (`source_file`),
+`source_description` (recomposed as `<source_file>:<chunk_id>`), and with a prefix the chunk id.
+The document's `DocRevision` rows (so the next `knowledge_process_document` at the new `doc_id`
+finds its baseline and does not re-extract) and its document-supersession records, on both sides, are
+re-keyed too. A document is *identified* by its live episodes, but its superseded revisions are
+history that belongs to it and move with it, so `knowledge_delete_by_source` on the old path finds
+nothing and `knowledge_lint` citations of earlier revisions name the new identity. Search, the find
+methods, `knowledge_status`, `knowledge_lint` (`stale_derived_page`) and citations read the stored
+fields, so they report the new path at once, with no rebuild.
+
+**What does not change.** Origin: a move never re-evaluates it. If the new location implies a
+different origin, call `knowledge_stamp_origin` afterwards. Other documents' `attributes.links`
+entries that point at the moved `doc_id` are *not* rewritten; re-send the pages that link to it.
+
+**Refusals.** Everything is validated against the state before the batch, under the per-document
+locks and the write lock, before the first write. If any move is refused, **nothing is applied and
+nothing is written to the WAL**; the error (message prefixed `move_refused:`, code `-32000`) names each
+offending move by index with one of these codes, and carries them as structured data:
+`error.data` is `{"reason": "move_refused", "refusals": [{"index": 1, "code": "unknown_source",
+"message": "…"}, …]}` (over MCP it is the same `data` on the tool error).
+
+| Code | Meaning |
+|---|---|
+| `unknown_source` | The old identity matches no live episode in the group. Re-sending a move that was already applied is refused this way. |
+| `occupied_destination` | The destination is not empty and something under it is live: a live episode at the new `doc_id`, at the new source path, or under the rewritten chunk-id prefix. **That is a merge, not a move, and is always refused.** |
+| `cross_group` | The old identity has live episodes only in a different group. Moves never cross groups. |
+| `destination_has_history` | The destination is not empty, but nothing under it is live: retired or superseded episodes at the new `doc_id`, path or chunk-id prefix, a `DocRevision` row (a hard delete keeps them), or a `DocSupersession` record for the new `doc_id` on either side (as the superseded or the superseding document), or an episode whose `superseded_by` names it. Moving into it would merge two histories. |
+| `chunk_id_collision` | Two moves of one batch would rewrite into the same chunk id. (A chunk id that already exists is an `occupied_destination` or `destination_has_history`, since it is under the destination.) |
+| `identical` | `from` and `to` are the same identity. |
+| `duplicate_source`, `duplicate_destination` | Two moves in the batch name the same source or destination. |
+| `destination_is_source` | A move's destination is another move's source: chains and swaps are not supported; issue separate calls. |
+
+An empty `moves` array and mismatched `from` / `to` kinds are request errors.
+
+**The destination must be empty.** A move's destination has to have **no episodes and no document state of any kind** in the group: no episode of any liveness (live, superseded or retired) at the new `doc_id`, at the new source path, or under the rewritten chunk-id prefix; no `DocRevision` row and no `DocSupersession` record for the new `doc_id`, on either side; and no episode whose `superseded_by` names it. The moving document's own rows do not count. A `doc_id`-only move of a document whose source file is its `doc_id` (document mode with no `source_path`) also stores the new `doc_id` as its source file, so that string counts as a destination path too. Anything live in the way is `occupied_destination`; anything else is `destination_has_history`. "Live" is the same test `knowledge_delete_by_source` uses, so a document between `knowledge_retire_document(effective_at: <future>)` and that date is still live. The check is the same whether the move names a `doc_id`, a path or both, and a failure to read the database is an error, never a refusal. **Clearing a destination:** `knowledge_delete_by_source` removes the *episodes* at a source path, which clears an `occupied_destination` / path-level `destination_has_history`; it does **not** remove a `doc_id`'s `DocRevision` rows or `DocSupersession` records (a hard delete keeps them). A `doc_id` that has any of that cannot be used as a move destination: pick a different `doc_id`.
+
+**Reply.** `{success, dry_run, group_id, moved, episodes_rekeyed, moves: [{from, to, episodes,
+chunk_ids_rewritten}]}`. `episodes` counts episodes; `chunk_ids_rewritten` counts distinct chunk ids
+(the units of one split chunk are several episodes that share one chunk id). There is no per-episode
+list, because a folder rename covers hundreds of documents.
+
+**Durability and atomicity.** Each episode is one fixed-valued, uuid-keyed `SET`, flushed as one WAL
+chunk, so a rebuild from the WAL, a dump and an overlapping tail replay give the same graph (the same
+approach as `knowledge_stamp_origin`). A batch is applied after full validation **in one database
+transaction**: if anything fails part-way, the transaction is rolled back and nothing is logged, so
+neither the graph nor the WAL has a trace of the move, and re-sending the same batch simply works. (A
+graph whose full-text index is stale fails the whole move with an index error rather than
+half-applying it; rebuild the indexes and retry.)
+
+**Concurrent ingest.** A move takes the per-document locks that `knowledge_process_document` holds, so
+it waits for an ingest of the same `doc_id` (source or destination) and the two never interleave.
+`knowledge_process_chunk` takes no document lock, so the move instead waits, for up to 30 seconds, for
+any in-flight chunk call of the moving chunks to finish; if one is still running it fails with
+nothing changed and the caller retries. The moving chunks are registered as in flight for the whole
+call, so an identical resubmission that arrives meanwhile is not answered `unchanged` and then moved
+away. A chunk ingest *into the destination* that is still extracting when the move runs cannot be
+detected in chunk mode (its chunk id is not known yet): send moves while the affected notes are not
+being ingested. The same gap exists for a move that names only a destination *path* (no `doc_id`): the
+`doc_id` a document ingest will use at that path is not known, so no document lock covers it, and a
+`knowledge_process_document` that is still extracting into that path when the move commits is not
+detected. Both documents then share the source path, and `knowledge_delete_by_source` on it deletes
+both. A move that names the destination `doc_id` is covered by the lock.
 
 ### Query variants: `knowledge_search_passages` `queries` (issue #802)
 

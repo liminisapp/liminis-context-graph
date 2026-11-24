@@ -8106,6 +8106,77 @@ async fn origin_is_additive_for_clients_that_never_send_it_752() {
     );
 }
 
+// ── #903: knowledge_move_document — documented reply shape, refusals, group requirement ──────
+
+/// A legacy episode (no stored `source_file`, no `doc_id`) is moved by source path alone; the
+/// reply has the documented shape, a refusal carries the `move_refused:` prefix and a code, and a
+/// missing `group_id` is an error.
+#[tokio::test]
+async fn move_document_answers_with_its_documented_shape_903() {
+    let (db, _dir) = make_db(4);
+    insert_test_episode(&db, "ep-legacy", "legacy", "g", "2026-01-01 00:00:00");
+    let state = make_state_with_mock_embed(db);
+    let moves = json!([{"from": {"source_path": "doc"}, "to": {"source_path": "doc-renamed"}}]);
+
+    let v = dispatch_val(
+        1,
+        "knowledge_move_document",
+        json!({"group_id": "g", "dry_run": true, "moves": moves}),
+        Arc::clone(&state),
+    )
+    .await;
+    let r = &v["result"];
+    assert_eq!(r["success"], true, "{v}");
+    assert_eq!(r["dry_run"], true);
+    assert_eq!(r["group_id"], "g");
+    assert_eq!(
+        (r["moved"].as_u64(), r["episodes_rekeyed"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert_eq!(r["moves"][0]["from"]["source_path"], "doc");
+    assert_eq!(r["moves"][0]["to"]["source_path"], "doc-renamed");
+    assert_eq!(r["moves"][0]["episodes"], 1);
+    assert_eq!(r["moves"][0]["chunk_ids_rewritten"], 0);
+
+    let v = dispatch_val(
+        2,
+        "knowledge_move_document",
+        json!({"group_id": "g", "moves": moves}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(v["result"]["dry_run"], false, "{v}");
+    let v = dispatch_val(
+        3,
+        "knowledge_get_episodes",
+        json!({"group_ids": ["g"]}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(
+        v["result"]["episodes"][0]["source_description"], "doc-renamed",
+        "{v}"
+    );
+
+    // The old identity is gone: a repeat is refused, with a stable prefix and code.
+    let v = dispatch_val(
+        4,
+        "knowledge_move_document",
+        json!({"group_id": "g", "moves": moves}),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_eq!(v["error"]["code"], -32000, "{v}");
+    let m = v["error"]["message"].as_str().unwrap();
+    assert!(
+        m.contains("move_refused:") && m.contains("unknown_source"),
+        "{m}"
+    );
+
+    let v = dispatch_val(5, "knowledge_move_document", json!({"moves": moves}), state).await;
+    assert_eq!(v["error"]["code"], -32000, "{v}");
+}
+
 /// `reference_time` is optional in `knowledge_add_episode`'s schema. Omitting it, or sending an
 /// empty string, used to fail with "Conversion exception: Error occurred during parsing TIMESTAMP.
 /// Given: \"\"". It now defaults to the current time, as `knowledge_process_chunk` does.

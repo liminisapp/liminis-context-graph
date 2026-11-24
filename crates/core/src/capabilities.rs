@@ -53,6 +53,7 @@ pub const FEATURES: &[&str] = &[
     "hybrid_passage_search",
     "implicit_default_group_warning",
     "lint",
+    "move_document",
     "origin",
     "passage_legs",
     "process_document",

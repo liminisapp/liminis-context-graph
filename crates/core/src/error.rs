@@ -117,6 +117,15 @@ pub enum Error {
         message: String,
     },
 
+    /// `knowledge_move_document` refused the batch (ADR-0903): nothing was changed and nothing was
+    /// logged. `refusals` is one `{index, code, message}` object per refused move — the same
+    /// information as the message, as structured `error.data` for raw-socket clients.
+    #[error("{message}")]
+    MoveRefused {
+        message: String,
+        refusals: Vec<serde_json::Value>,
+    },
+
     /// A client write was refused by the daemon-wide `--writable-groups` allow-list (issue #742,
     /// ADR-0742). `reason` is one of `group_not_writable`, `raw_cypher_disabled`,
     /// `all_groups_required`, `unclassified_method`; `group_ids` names the offending group(s).

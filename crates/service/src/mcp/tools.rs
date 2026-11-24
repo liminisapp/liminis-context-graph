@@ -167,7 +167,7 @@ fn prune_orphans_prop() -> Value {
     })
 }
 
-/// The full, ordered registry — one entry per `knowledge_*` dispatch method (59 total),
+/// The full, ordered registry — one entry per `knowledge_*` dispatch method (60 total),
 /// matching FR-004's scope table exactly.
 pub fn registry() -> Vec<ToolSpec> {
     vec![
@@ -960,7 +960,7 @@ pub fn registry() -> Vec<ToolSpec> {
                 })
             },
         },
-        // ── write (19) ────────────────────────────────────────────────────────────
+        // ── write (20) ────────────────────────────────────────────────────────────
         ToolSpec {
             name: "knowledge_process_chunk",
             description: "Ingest a text chunk as an episode: extracts entities/relationships \
@@ -1145,6 +1145,68 @@ pub fn registry() -> Vec<ToolSpec> {
                         "episode_uuid": {"type": "string", "description": "Episode UUID (required)."}
                     },
                     "required": ["episode_uuid"]
+                })
+            },
+        },
+        ToolSpec {
+            name: "knowledge_move_document",
+            description: "Rename or move a document WITHOUT re-extracting it (issue #903): re-keys \
+                           the document's episodes from one identity (`doc_id` and/or source \
+                           path) to another — live episodes identify it, \
+                           superseded revisions move with it. No extractor, LLM or embedder call. Rewrites \
+                           `doc_id`, the stored source file, `source_description` and — with an \
+                           optional `chunk_id_prefix` {from, to} — the chunk ids that start with \
+                           the old prefix; also re-keys the document-mode revision and document \
+                           supersession state so the next ingest at the new `doc_id` finds its \
+                           baseline. Entities, relationships, embeddings, belief history and \
+                           ORIGIN are untouched (call `knowledge_stamp_origin` afterwards if the \
+                           new location implies another origin). `moves` is a batch applied \
+                           all-or-nothing: any refusal changes nothing and the error names each \
+                           offending move with a code. The destination must have no episodes or \
+                           document state of any kind (no episode of any liveness at the new \
+                           `doc_id`, path or chunk-id prefix; no revision or supersession record for \
+                           the new `doc_id`): `occupied_destination` if anything under it is live \
+                           (a merge, not a move), `destination_has_history` otherwise. Other \
+                           codes: `unknown_source`, `cross_group`, `chunk_id_collision` (two moves \
+                           rewriting into one chunk id), `identical`, `duplicate_source`, \
+                           `duplicate_destination`, `destination_is_source`. \
+                           `from` and `to` must name the same identity kinds. Pages that link to \
+                           the moved `doc_id` in `attributes.links` are not rewritten. \
+                           The batch is applied in one transaction (a failure leaves \
+                           nothing changed or logged) and waits for in-flight chunk ingests of \
+                           the moving chunks. Refusals are also in `error.data.refusals`. \
+                           `dry_run: true` validates and reports without writing. `group_id` is \
+                           required. Recorded in the WAL as fixed-valued, uuid-keyed updates, so \
+                           a rebuild gives an identical graph.",
+            scope: Scope::Write,
+            input_schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "group_id": {"type": "string", "description": "Group the document lives in (required, non-empty)."},
+                        "moves": {
+                            "type": "array", "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "from": {"type": "object", "properties": {
+                                        "doc_id": {"type": "string"}, "source_path": {"type": "string"}},
+                                        "description": "Old identity: doc_id, source_path, or both (both must match)."},
+                                    "to": {"type": "object", "properties": {
+                                        "doc_id": {"type": "string"}, "source_path": {"type": "string"}},
+                                        "description": "New identity; must name the same kinds as `from`."},
+                                    "chunk_id_prefix": {"type": "object", "properties": {
+                                        "from": {"type": "string"}, "to": {"type": "string"}},
+                                        "required": ["from", "to"],
+                                        "description": "Optional chunk-id prefix rewrite, e.g. {from: \"old/a.md::\", to: \"new/a.md::\"}."}
+                                },
+                                "required": ["from", "to"]
+                            },
+                            "description": "The moves; applied all-or-nothing. One item is a single move."
+                        },
+                        "dry_run": {"type": "boolean", "default": false, "description": "Validate and report what would change; write nothing."}
+                    },
+                    "required": ["group_id", "moves"]
                 })
             },
         },
@@ -2249,11 +2311,11 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn registry_has_59_unique_tools() {
+    fn registry_has_60_unique_tools() {
         let r = registry();
-        assert_eq!(r.len(), 59);
+        assert_eq!(r.len(), 60);
         let names: HashSet<&str> = r.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), 59, "tool names must be unique");
+        assert_eq!(names.len(), 60, "tool names must be unique");
     }
 
     #[test]
@@ -2261,7 +2323,7 @@ mod tests {
         let r = registry();
         let count = |s: Scope| r.iter().filter(|t| t.scope == s).count();
         assert_eq!(count(Scope::Read), 22);
-        assert_eq!(count(Scope::Write), 19);
+        assert_eq!(count(Scope::Write), 20);
         assert_eq!(count(Scope::Cypher), 1);
         assert_eq!(count(Scope::Admin), 17);
     }

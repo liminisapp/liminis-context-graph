@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -2991,6 +2991,282 @@ impl<'db> Conn<'db> {
         )
     }
 
+    // ── Document move (issue #903, ADR-0903) ───────────────────────────────────
+
+    /// Every episode of `group_id` (all groups when `None`) as the identity columns a move
+    /// matches and rewrites — no content, no embedding — flagged `live` by the
+    /// `delete_by_source` live predicate. A document's superseded revisions are part of its
+    /// history and move with it, so they are returned too (`group_id = None` is used only to tell
+    /// a cross-group request from an unknown source). Ordered by uuid.
+    pub fn move_candidates(
+        &self,
+        group_id: Option<&str>,
+        live_at: &str,
+    ) -> Result<Vec<MoveCandidate>, Error> {
+        let group_pred = if group_id.is_some() {
+            "ep.group_id = $gid AND "
+        } else {
+            ""
+        };
+        let mut params = serde_json::json!({ "live_at": live_at });
+        if let Some(g) = group_id {
+            params["gid"] = serde_json::json!(g);
+        }
+        let live: HashSet<String> = self
+            .query_params(
+                &format!(
+                    "MATCH (ep:Episodic) WHERE {group_pred}{LIVE_EPISODE_PREDICATE} \
+                     RETURN ep.uuid"
+                ),
+                params.clone(),
+            )?
+            .into_iter()
+            .map(|r| value_as_string(&r[0]))
+            .collect();
+        let cypher = format!(
+            "MATCH (ep:Episodic) WHERE {group_pred}true \
+             RETURN ep.uuid, ep.group_id, ep.doc_id, ep.source_file, ep.source_description, \
+             ep.name, ep.chunk_id, ep.write_path ORDER BY ep.uuid"
+        );
+        Ok(self
+            .query_params(&cypher, params)?
+            .into_iter()
+            .map(|r| {
+                let uuid = value_as_string(&r[0]);
+                MoveCandidate {
+                    live: live.contains(&uuid),
+                    uuid,
+                    group_id: value_as_string(&r[1]),
+                    doc_id: value_as_optional_string(&r[2]).filter(|s| !s.is_empty()),
+                    source_file: value_as_optional_string(&r[3]).filter(|s| !s.is_empty()),
+                    source_description: value_as_string(&r[4]),
+                    name: value_as_string(&r[5]),
+                    chunk_id: value_as_optional_string(&r[6]).filter(|s| !s.is_empty()),
+                    write_path: value_as_optional_string(&r[7]),
+                }
+            })
+            .collect())
+    }
+
+    /// Sets the changed identity columns of one episode to their final values. uuid-keyed and
+    /// fixed-valued (never derived from the current row), so replaying it — also over an
+    /// overlapping tail range — is idempotent. Only columns the move changes are `SET`, so every
+    /// bound value is a concrete string (no untyped NULL parameter).
+    pub fn rekey_episode(&self, uuid: &str, change: &EpisodeRekey) -> Result<(), Error> {
+        let mut sets: Vec<&str> = Vec::new();
+        let mut params = serde_json::json!({ "uuid": uuid });
+        for (col, val) in [
+            ("doc_id", &change.doc_id),
+            ("source_file", &change.source_file),
+            ("source_description", &change.source_description),
+            ("name", &change.name),
+            ("chunk_id", &change.chunk_id),
+        ] {
+            if let Some(v) = val {
+                sets.push(col);
+                params[col] = serde_json::json!(v);
+            }
+        }
+        if sets.is_empty() {
+            return Ok(());
+        }
+        let set_clause = sets
+            .iter()
+            .map(|c| format!("ep.{c} = ${c}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.exec_params(
+            &format!("MATCH (ep:Episodic) WHERE ep.uuid = $uuid SET {set_clause}"),
+            params,
+        )
+    }
+
+    /// The identity-bearing columns of every `DocRevision` row of `(group_id, doc_id)`.
+    pub fn doc_revision_rows_for_doc(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+    ) -> Result<Vec<DocRevisionKeys>, Error> {
+        let rows = match self.query_params(
+            "MATCH (r:DocRevision) WHERE r.group_id = $gid AND r.doc_id = $doc_id \
+             RETURN r.uuid, r.source_path, r.chunk_names ORDER BY r.uuid",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        ) {
+            Err(e) if e.to_string().contains("does not exist") => return Ok(Vec::new()),
+            other => other?,
+        };
+        Ok(rows
+            .into_iter()
+            .map(|r| DocRevisionKeys {
+                uuid: value_as_string(&r[0]),
+                source_path: value_as_optional_string(&r[1]),
+                chunk_names: value_as_str_list(&r[2]),
+            })
+            .collect())
+    }
+
+    /// The document-level state `(group_id, doc_id)` carries outside `Episodic`, for every id in
+    /// `doc_ids` at once (a folder rename is hundreds of destinations, so this is four queries,
+    /// not four per move): `DocRevision` rows, a `DocSupersession` record as the superseded
+    /// and as the superseding document, and episodes whose `superseded_by` names it. Ids with no
+    /// such state are absent from the map. A missing table (a graph that never used the feature)
+    /// reads as no state.
+    pub fn destination_doc_state(
+        &self,
+        group_id: &str,
+        doc_ids: &[String],
+    ) -> Result<HashMap<String, DestDocState>, Error> {
+        let mut out: HashMap<String, DestDocState> = HashMap::new();
+        if doc_ids.is_empty() {
+            return Ok(out);
+        }
+        let params = serde_json::json!({ "gid": group_id, "ids": doc_ids });
+        let mut read =
+            |cypher: &str, bump: &mut dyn FnMut(&mut DestDocState)| -> Result<(), Error> {
+                let rows = match self.query_params(cypher, params.clone()) {
+                    Err(e) if e.to_string().contains("does not exist") => return Ok(()),
+                    other => other?,
+                };
+                for r in rows {
+                    bump(out.entry(value_as_string(&r[0])).or_default());
+                }
+                Ok(())
+            };
+        read(
+            "MATCH (r:DocRevision) WHERE r.group_id = $gid AND r.doc_id IN $ids RETURN r.doc_id",
+            &mut |st| st.revisions += 1,
+        )?;
+        read(
+            "MATCH (d:DocSupersession) WHERE d.group_id = $gid AND d.superseded_doc_id IN $ids \
+             RETURN d.superseded_doc_id",
+            &mut |st| st.superseded_record = true,
+        )?;
+        read(
+            "MATCH (d:DocSupersession) WHERE d.group_id = $gid AND d.superseding_doc_id IN $ids \
+             RETURN d.superseding_doc_id",
+            &mut |st| st.superseding_records += 1,
+        )?;
+        read(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.superseded_by_kind = 'document' \
+             AND ep.superseded_by IN $ids RETURN ep.superseded_by",
+            &mut |st| st.superseded_by_episodes += 1,
+        )?;
+        Ok(out)
+    }
+
+    /// Re-keys one `DocRevision` row to its final `doc_id`, `source_path` and `chunk_names`
+    /// (uuid-keyed, fixed-valued).
+    pub fn rekey_doc_revision(
+        &self,
+        uuid: &str,
+        doc_id: &str,
+        source_path: Option<&str>,
+        chunk_names: &[String],
+    ) -> Result<(), Error> {
+        match source_path {
+            Some(sp) => self.exec_params(
+                "MATCH (r:DocRevision) WHERE r.uuid = $uuid \
+                 SET r.doc_id = $doc_id, r.source_path = $source_path, \
+                 r.chunk_names = $chunk_names",
+                serde_json::json!({
+                    "uuid": uuid, "doc_id": doc_id, "source_path": sp, "chunk_names": chunk_names,
+                }),
+            ),
+            None => self.exec_params(
+                "MATCH (r:DocRevision) WHERE r.uuid = $uuid \
+                 SET r.doc_id = $doc_id, r.chunk_names = $chunk_names",
+                serde_json::json!({
+                    "uuid": uuid, "doc_id": doc_id, "chunk_names": chunk_names,
+                }),
+            ),
+        }
+    }
+
+    /// Deletes the `DocSupersession` record keyed by `(group_id, superseded_doc_id)`. Used with
+    /// [`Self::create_doc_supersession`] to re-key a record: its primary key is derived from the
+    /// superseded `doc_id`, and a primary key cannot be `SET`.
+    pub fn delete_doc_supersession(
+        &self,
+        group_id: &str,
+        superseded_doc_id: &str,
+    ) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (d:DocSupersession) WHERE d.key = $key DELETE d",
+            serde_json::json!({ "key": doc_supersession_key(group_id, superseded_doc_id) }),
+        )
+    }
+
+    /// Points the `DocSupersession` record of `superseded_doc_id` at a new superseding document
+    /// (uuid-free but fixed-valued: keyed by the record's primary key).
+    pub fn set_doc_supersession_superseding(
+        &self,
+        group_id: &str,
+        superseded_doc_id: &str,
+        superseding_doc_id: &str,
+    ) -> Result<(), Error> {
+        self.exec_params(
+            "MATCH (d:DocSupersession) WHERE d.key = $key SET d.superseding_doc_id = $superseding",
+            serde_json::json!({
+                "key": doc_supersession_key(group_id, superseded_doc_id),
+                "superseding": superseding_doc_id,
+            }),
+        )
+    }
+
+    /// `DocSupersession` records of `group_id` where `doc_id` is the superseding document.
+    pub fn doc_supersessions_superseded_by(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+    ) -> Result<Vec<String>, Error> {
+        match self.query_params(
+            "MATCH (d:DocSupersession) WHERE d.group_id = $gid AND d.superseding_doc_id = $doc_id \
+             RETURN d.superseded_doc_id ORDER BY d.superseded_doc_id",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        ) {
+            Err(e) if e.to_string().contains("does not exist") => Ok(Vec::new()),
+            other => Ok(other?.into_iter().map(|r| value_as_string(&r[0])).collect()),
+        }
+    }
+
+    /// UUIDs of `group_id`'s episodes whose `superseded_by` (kind `document`) is `doc_id`.
+    pub fn episode_uuids_superseded_by_doc(
+        &self,
+        group_id: &str,
+        doc_id: &str,
+    ) -> Result<Vec<String>, Error> {
+        let rows = self.query_params(
+            "MATCH (ep:Episodic) WHERE ep.group_id = $gid AND ep.superseded_by_kind = 'document' \
+             AND ep.superseded_by = $doc_id RETURN ep.uuid ORDER BY ep.uuid",
+            serde_json::json!({ "gid": group_id, "doc_id": doc_id }),
+        )?;
+        Ok(rows.into_iter().map(|r| value_as_string(&r[0])).collect())
+    }
+
+    /// Rewrites `superseded_by` (a superseding document's `doc_id`) on the given episodes.
+    pub fn set_superseded_by_doc(&self, uuids: &[String], doc_id: &str) -> Result<(), Error> {
+        if uuids.is_empty() {
+            return Ok(());
+        }
+        self.exec_params(
+            "MATCH (ep:Episodic) WHERE ep.uuid IN $uuids AND ep.superseded_by_kind = 'document' \
+             SET ep.superseded_by = $superseded_by",
+            serde_json::json!({ "uuids": uuids, "superseded_by": doc_id }),
+        )
+    }
+
+    /// The `DocSupersession` record superseded by `(group_id, superseded_doc_id)`, if any.
+    pub fn doc_supersession_for(
+        &self,
+        group_id: &str,
+        superseded_doc_id: &str,
+    ) -> Result<Option<crate::belief::DocSupersessionRecord>, Error> {
+        let key = (group_id.to_string(), superseded_doc_id.to_string());
+        Ok(self
+            .get_doc_supersessions(std::slice::from_ref(&key))?
+            .remove(&key))
+    }
+
     // ── Notebook lint scans (issue #755, ADR-0755) ────────────────────────────
     //
     // Read-only, keyset-chunked (`uuid > $after ORDER BY uuid LIMIT $limit`) scans that fill a
@@ -4324,12 +4600,8 @@ impl<'db> Conn<'db> {
             params["gids"] = serde_json::json!(gids);
         }
         if let Some(at) = live_at {
-            cypher.push_str(
-                " AND (ep.superseded_at IS NULL \
-                   OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
-                       AND ep.superseded_at > $live_at)) \
-                 AND (ep.revision_id IS NULL OR ep.revision_committed_at IS NOT NULL)",
-            );
+            cypher.push_str(" AND ");
+            cypher.push_str(LIVE_EPISODE_PREDICATE);
             params["live_at"] = serde_json::json!(at);
         }
         cypher.push_str(
@@ -6531,6 +6803,7 @@ pub(crate) fn doc_supersession_key(group_id: &str, superseded_doc_id: &str) -> S
 /// | `update_relates_to_attributes` (#369)   | `exec_params`    | ✓ no timestamp fields       |
 /// | `create_relates_to_direct` (#369)       | `exec_params`    | ✓ exec_params gate          |
 /// | `create_doc_supersession` (#707)        | `exec_params`    | ✓ exec_params gate          |
+/// | `rekey_episode`/`rekey_doc_revision` (#903) | `exec_params` | ✓ no timestamp fields       |
 /// | `delete_relates_to_direct` (#369)       | `exec_params`    | ✓ no timestamp fields       |
 /// | `dump.rs` (all node/edge types)         | `WalWriter`      | ✓ RFC-3339+µs WAL; Cypher   |
 /// |                                         |                  |   wrapper coerces on replay |
@@ -6769,6 +7042,63 @@ pub struct SiblingEdgeRow {
     pub target_uuid: String,
     pub name: String,
     pub episodes: Vec<String>,
+}
+
+/// The identity columns of one live episode, as `knowledge_move_document` reads them (#903).
+#[derive(Debug, Clone)]
+pub struct MoveCandidate {
+    pub uuid: String,
+    /// Believed now (the `delete_by_source` live predicate); a superseded revision is history.
+    pub live: bool,
+    pub group_id: String,
+    pub doc_id: Option<String>,
+    pub source_file: Option<String>,
+    pub source_description: String,
+    pub name: String,
+    pub chunk_id: Option<String>,
+    pub write_path: Option<String>,
+}
+
+/// The canonical "believed now" test on an `ep` `Episodic` row (binds `$live_at`): never
+/// superseded, or superseded only at a *future* instant by a document supersession (#707) or a
+/// document retirement (#859, `document_removed`), and not part of an uncommitted document
+/// revision. `delete_by_source` and `knowledge_move_document` share it, so a note that is between
+/// `knowledge_retire_document(effective_at: future)` and that date is live to both.
+pub(crate) const LIVE_EPISODE_PREDICATE: &str = "(ep.superseded_at IS NULL \
+     OR ((ep.superseded_by_kind = 'document' OR ep.supersession_reason = 'document_removed') \
+         AND ep.superseded_at > $live_at)) \
+     AND (ep.revision_id IS NULL OR ep.revision_committed_at IS NOT NULL)";
+
+/// What a `doc_id` carries outside `Episodic` (#903): see [`Conn::destination_doc_state`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DestDocState {
+    /// `DocRevision` rows of the document.
+    pub revisions: usize,
+    /// It is the superseded side of a `DocSupersession` record.
+    pub superseded_record: bool,
+    /// `DocSupersession` records naming it as the superseding document.
+    pub superseding_records: usize,
+    /// Episodes (of other documents) whose `superseded_by` names it.
+    pub superseded_by_episodes: usize,
+}
+
+/// The identity-bearing columns of a `DocRevision` row (#903).
+#[derive(Debug, Clone)]
+pub struct DocRevisionKeys {
+    pub uuid: String,
+    pub source_path: Option<String>,
+    pub chunk_names: Vec<String>,
+}
+
+/// The final values of the identity columns one move changes on one episode (#903). A `None`
+/// column is left untouched.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EpisodeRekey {
+    pub doc_id: Option<String>,
+    pub source_file: Option<String>,
+    pub source_description: Option<String>,
+    pub name: Option<String>,
+    pub chunk_id: Option<String>,
 }
 
 /// The columns an origin-stamp rule selects on (issue #752).
