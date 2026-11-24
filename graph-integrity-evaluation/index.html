@@ -1,0 +1,575 @@
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-fukyquvz"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Graph-Integrity Evaluation | liminis-context-graph</title><link rel="canonical" href="https://docs.liminis.app/liminis-context-graph/graph-integrity-evaluation/"/><link rel="sitemap" href="/liminis-context-graph/sitemap-index.xml"/><link rel="shortcut icon" href="/liminis-context-graph/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v7.4.5"/><meta name="generator" content="Starlight v0.42.8"/><meta property="og:title" content="Graph-Integrity Evaluation"/><meta property="og:type" content="article"/><meta property="og:url" content="https://docs.liminis.app/liminis-context-graph/graph-integrity-evaluation/"/><meta property="og:locale" content="en"/><meta property="og:description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><meta property="og:site_name" content="liminis-context-graph"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><script>
+	window.StarlightThemeProvider = (() => {
+		const storedTheme =
+			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		const theme =
+			storedTheme ||
+			(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+		document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+		return {
+			updatePickers(theme = storedTheme || 'auto') {
+				document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+					const select = picker.querySelector('select');
+					if (select) select.value = theme;
+					/** @type {HTMLTemplateElement | null} */
+					const tmpl = document.querySelector(`#theme-icons`);
+					const newIcon = tmpl && tmpl.content.querySelector('.' + theme);
+					if (newIcon) {
+						const oldIcon = picker.querySelector('svg.label-icon');
+						if (oldIcon) {
+							oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+						}
+					}
+				});
+			},
+		};
+	})();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M5 12a1 1 0 0 0-1-1H3a1 1 0 0 0 0 2h1a1 1 0 0 0 1-1Zm.64 5-.71.71a1 1 0 0 0 0 1.41 1 1 0 0 0 1.41 0l.71-.71A1 1 0 0 0 5.64 17ZM12 5a1 1 0 0 0 1-1V3a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1Zm5.66 2.34a1 1 0 0 0 .7-.29l.71-.71a1 1 0 1 0-1.41-1.41l-.66.71a1 1 0 0 0 0 1.41 1 1 0 0 0 .66.29Zm-12-.29a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1.004 1.004 0 1 0-1.43 1.41l.73.71ZM21 11h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2Zm-2.64 6A1 1 0 0 0 17 18.36l.71.71a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.76-.66ZM12 6.5a5.5 5.5 0 1 0 5.5 5.5A5.51 5.51 0 0 0 12 6.5Zm0 9a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm0 3.5a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1Z"/></svg><svg aria-hidden="true" class="dark astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.049 8.049 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05Zm-9.5 6.69A8.14 8.14 0 0 1 7.08 5.22v.27a10.15 10.15 0 0 0 10.14 10.14 9.784 9.784 0 0 0 2.1-.22 8.11 8.11 0 0 1-7.18 4.32v-.04Z"/></svg><svg aria-hidden="true" class="auto astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg></template><link rel="stylesheet" href="/liminis-context-graph/_astro/print.ehPL0gv-.css" media="print"><link rel="stylesheet" href="/liminis-context-graph/_astro/common.B52tZYWF.css"><script type="module" src="/liminis-context-graph/_astro/page.cNngjUgL.js"></script></head><body class="astro-fukyquvz"><a class="sl-skip-link astro-q5liodmp" href="#_top">Skip to content</a><div class="page sl-flex astro-njfv6ihu"><header class="header astro-njfv6ihu"><div class="header astro-ywwums27"><div class="title-wrapper sl-flex astro-ywwums27"><a href="/liminis-context-graph/" class="site-title sl-flex astro-hdkc3bqx"><span class="astro-hdkc3bqx" translate="no">liminis-context-graph</span></a></div><div class="sl-flex print:hidden astro-ywwums27"><site-search class="astro-ywwums27 astro-5aflyiwm" data-translations="{&quot;placeholder&quot;:&quot;Search&quot;}"><button data-open-modal disabled aria-label="Search" aria-keyshortcuts="Control+K" class="astro-5aflyiwm"><svg aria-hidden="true" class="astro-5aflyiwm astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.71 20.29 18 16.61A9 9 0 1 0 16.61 18l3.68 3.68a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.39ZM11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z"/></svg><span class="sl-hidden md:sl-block astro-5aflyiwm" aria-hidden="true">Search</span><kbd class="sl-hidden md:sl-flex astro-5aflyiwm" style="display: none;"><kbd class="astro-5aflyiwm">Ctrl</kbd><kbd class="astro-5aflyiwm">K</kbd></kbd></button><dialog style="padding:0" aria-label="Search" class="astro-5aflyiwm"><div class="dialog-frame sl-flex astro-5aflyiwm"><button data-close-modal class="sl-flex md:sl-hidden astro-5aflyiwm">Cancel</button><div class="search-container astro-5aflyiwm"><div id="starlight__search" class="astro-5aflyiwm"></div></div></div></dialog></site-search><script>
+	(() => {
+		const openBtn = document.querySelector('button[data-open-modal]');
+		const shortcut = openBtn?.querySelector('kbd');
+		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
+		const platformKey = shortcut.querySelector('kbd');
+		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+			platformKey.textContent = '⌘';
+			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
+		}
+		shortcut.style.display = '';
+	})();
+</script><script type="module" src="/liminis-context-graph/_astro/Search.astro_astro_type_script_index_0_lang.BgrXaG1M.js"></script></div><div class="sl-hidden md:sl-flex print:hidden right-group astro-ywwums27"><div class="sl-flex social-icons astro-ywwums27"><a href="https://github.com/liminisapp/liminis-context-graph" rel="me" class="sl-flex astro-5xq5qeho"><span class="sr-only astro-5xq5qeho">GitHub</span><svg aria-hidden="true" class="astro-5xq5qeho astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-6qubd2ms"><span class="sr-only astro-6qubd2ms">Select theme</span><svg aria-hidden="true" class="icon label-icon astro-6qubd2ms astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-6qubd2ms"><option value="dark" class="astro-6qubd2ms">Dark</option><option value="light" class="astro-6qubd2ms">Light</option><option value="auto" selected class="astro-6qubd2ms">Auto</option></select><svg aria-hidden="true" class="icon caret astro-6qubd2ms astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script><script type="module">var e=`starlight-theme`,t=e=>e===`auto`||e===`dark`||e===`light`?e:`auto`,n=()=>t(typeof localStorage<`u`&&localStorage.getItem(e));function r(t){typeof localStorage<`u`&&localStorage.setItem(e,t===`light`||t===`dark`?t:``)}var i=()=>matchMedia(`(prefers-color-scheme: light)`).matches?`light`:`dark`;function a(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e===`auto`?i():e,r(e)}matchMedia(`(prefers-color-scheme: light)`).addEventListener(`change`,()=>{n()===`auto`&&a(`auto`)});var o=class extends HTMLElement{constructor(){super(),a(n()),this.querySelector(`select`)?.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&a(t(e.currentTarget.value))})}};customElements.define(`starlight-theme-select`,o);</script><script type="module">var e=class extends HTMLElement{constructor(){super();let e=this.querySelector(`select`);e&&(e.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=e.currentTarget.value)}),window.addEventListener(`pageshow`,t=>{if(!t.persisted)return;let n=e.querySelector(`option[selected]`)?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}};customElements.define(`starlight-lang-select`,e);</script></div></div></header><nav class="sidebar print:hidden astro-njfv6ihu" aria-label="Main"><button popovertarget="starlight__sidebar" class="sl-menu-button sl-flex md:sl-hidden print:hidden astro-ihv5aybq"><svg aria-hidden="true" class="open-menu astro-ihv5aybq astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg><svg aria-hidden="true" class="close-menu astro-ihv5aybq astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="m13.41 12 6.3-6.29a1.004 1.004 0 1 0-1.42-1.42L12 10.59l-6.29-6.3a1.004 1.004 0 0 0-1.42 1.42l6.3 6.29-6.3 6.29a1 1 0 0 0 0 1.42.998.998 0 0 0 1.42 0l6.29-6.3 6.29 6.3a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.42L13.41 12Z"/></svg><span class="sr-only astro-ihv5aybq">Menu</span></button><script type="module">var e=class extends HTMLElement{constructor(){super();let e=matchMedia(`(min-width: 50em)`),t=()=>{this.popover=e.matches?null:`auto`};t(),e.addEventListener(`change`,()=>t()),this.addEventListener(`toggle`,({newState:e})=>this.trapFocus(e===`open`))}trapFocus(e){document.querySelectorAll(`.main-frame, .sl-skip-link`).forEach(t=>{t.toggleAttribute(`inert`,e)})}};customElements.define(`sl-sidebar-pane`,e);</script><sl-sidebar-pane popover id="starlight__sidebar" class="sidebar-pane astro-njfv6ihu"><div class="sidebar-content sl-flex astro-njfv6ihu"><sl-sidebar-state-persist data-hash="1g69bsn" class="astro-fx7qtsym"><script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script><ul class="top-level astro-u2gumobk"><li class="astro-u2gumobk"><a href="/liminis-context-graph/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Overview</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/getting-started/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Getting Started</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/integrator-guide/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Integrator Guide</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/configuration/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Configuration</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/embedding-options/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Embedding Options</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/ipc-mcp-reference/" class="large astro-u2gumobk"><span class="astro-u2gumobk">IPC &amp; MCP Reference</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/telemetry/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Telemetry</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/ontology/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Ontology</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/operations/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Operations</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/testing-and-evaluation/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Testing &amp; Evaluation</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/eval-full-corpus-runbook/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Full-Corpus Benchmark Runbook</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/extraction-quality-evaluation/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Extraction-Quality Evaluation</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/retrieval-quality-evaluation/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Retrieval-Quality Evaluation</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/graph-integrity-evaluation/" aria-current="page" class="large astro-u2gumobk"><span class="astro-u2gumobk">Graph-Integrity Evaluation</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/retrieval-experiments/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Retrieval Experiments</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/release-process/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Release Process</span></a></li><li class="astro-u2gumobk"><a href="https://github.com/liminisapp/liminis-context-graph/blob/main/docs/adr/index.md" class="large astro-u2gumobk" target="_blank" rel="noopener"><span class="astro-u2gumobk">Decision records</span><span class="sl-badge note small  astro-u2gumobk astro-umvtzzz4">GitHub</span></a></li></ul><script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script></sl-sidebar-state-persist><div class="md:sl-hidden"><div class="mobile-preferences sl-flex astro-h6srokaj"><div class="social-icons astro-h6srokaj"><a href="https://github.com/liminisapp/liminis-context-graph" rel="me" class="sl-flex astro-5xq5qeho"><span class="sr-only astro-5xq5qeho">GitHub</span><svg aria-hidden="true" class="astro-5xq5qeho astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-6qubd2ms"><span class="sr-only astro-6qubd2ms">Select theme</span><svg aria-hidden="true" class="icon label-icon astro-6qubd2ms astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-6qubd2ms"><option value="dark" class="astro-6qubd2ms">Dark</option><option value="light" class="astro-6qubd2ms">Light</option><option value="auto" selected class="astro-6qubd2ms">Auto</option></select><svg aria-hidden="true" class="icon caret astro-6qubd2ms astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script></div></div></div></sl-sidebar-pane></nav><div class="main-frame astro-njfv6ihu"><script type="module">var e=document.getElementById(`starlight__sidebar`),t=e?.querySelector(`sl-sidebar-state-persist`),n=`sl-sidebar-state`,r=()=>{let r=[],i=t?.dataset.hash||``;try{let e=sessionStorage.getItem(n),t=JSON.parse(e||`{}`);Array.isArray(t.open)&&t.hash===i&&(r=t.open)}catch{}return{hash:i,open:r,scroll:e?.scrollTop||0}},i=e=>{try{sessionStorage.setItem(n,JSON.stringify(e))}catch{}},a=()=>i(r()),o=(e,t)=>{let n=r();n.open[t]=e,i(n)};t?.addEventListener(`click`,e=>{if(!(e.target instanceof Element))return;let t=e.target.closest(`summary`)?.closest(`details`);if(!t)return;let n=t.querySelector(`sl-sidebar-restore`),r=parseInt(n?.dataset.index||``);isNaN(r)||o(!t.open,r)}),addEventListener(`visibilitychange`,()=>{document.visibilityState===`hidden`&&a()});</script><div class="lg:sl-flex astro-3345ic74"><aside class="right-sidebar-container print:hidden astro-3345ic74"><div class="right-sidebar astro-3345ic74"><div class="lg:sl-hidden astro-t7rani4u"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-f27wupty"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-f27wupty"><details id="starlight__mobile-toc" class="astro-f27wupty"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-f27wupty"><span class="toggle sl-flex astro-f27wupty">On this page<svg aria-hidden="true" class="caret astro-f27wupty astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></span><span class="display-current astro-f27wupty"></span></summary><div class="dropdown astro-f27wupty"><ul class="isMobile astro-y7fviyz6" style="--depth: 0;"><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#_top" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Overview</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#why-it-exists" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Why it exists</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#running-it" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Running it</span></a><ul class="isMobile astro-y7fviyz6" style="--depth: 1;"><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#how-it-reads-without-writing" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">How it reads without writing</span></a></li></ul></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#the-mapping-file" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">The mapping file</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#matching-rules" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Matching rules</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#metrics" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Metrics</span></a><ul class="isMobile astro-y7fviyz6" style="--depth: 1;"><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#typing" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Typing</span></a></li><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#links-per-attribute-and-in-total" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Links, per attribute and in total</span></a></li><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#value-facts" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Value facts</span></a></li><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#junk" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Junk</span></a></li><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#signature" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Signature</span></a></li></ul></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#comparing-two-graphs" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Comparing two graphs</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#determinism" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Determinism</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#reconciliation-with-the-e13-baseline" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Reconciliation with the E13 baseline</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#value-fact-misattachment-823" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Value-fact misattachment (#823)</span></a><ul class="isMobile astro-y7fviyz6" style="--depth: 1;"><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#why-value-facts-are-not-stated-free-form-proxy" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Why value facts are not stated: free-form proxy</span></a></li><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#before-and-after-maintainer-reported-pending" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Before and after (maintainer-reported, pending)</span></a></li></ul></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#not-covered" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Not covered</span></a></li></ul></div></details></nav></mobile-starlight-toc><script type="module" src="/liminis-context-graph/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C3fM4Kra.js"></script></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-t7rani4u"><div class="sl-container astro-t7rani4u"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-y7fviyz6" style="--depth: 0;"><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#_top" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Overview</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#why-it-exists" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Why it exists</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#running-it" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Running it</span></a><ul class="astro-y7fviyz6" style="--depth: 1;"><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#how-it-reads-without-writing" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">How it reads without writing</span></a></li></ul></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#the-mapping-file" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">The mapping file</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#matching-rules" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Matching rules</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#metrics" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Metrics</span></a><ul class="astro-y7fviyz6" style="--depth: 1;"><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#typing" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Typing</span></a></li><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#links-per-attribute-and-in-total" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Links, per attribute and in total</span></a></li><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#value-facts" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Value facts</span></a></li><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#junk" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Junk</span></a></li><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#signature" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Signature</span></a></li></ul></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#comparing-two-graphs" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Comparing two graphs</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#determinism" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Determinism</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#reconciliation-with-the-e13-baseline" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Reconciliation with the E13 baseline</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#value-fact-misattachment-823" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Value-fact misattachment (#823)</span></a><ul class="astro-y7fviyz6" style="--depth: 1;"><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#why-value-facts-are-not-stated-free-form-proxy" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Why value facts are not stated: free-form proxy</span></a></li><li style="--depth: 1;" class="astro-y7fviyz6"><a href="#before-and-after-maintainer-reported-pending" style="--depth: 1;" class="astro-y7fviyz6"><span style="--depth: 1;" class="astro-y7fviyz6">Before and after (maintainer-reported, pending)</span></a></li></ul></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#not-covered" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Not covered</span></a></li></ul></nav></starlight-toc><script type="module" src="/liminis-context-graph/_astro/TableOfContents.astro_astro_type_script_index_0_lang.BpJaGz7G.js"></script></div></div></div></aside><div class="main-pane astro-3345ic74"><main data-pagefind-body class="astro-fukyquvz" lang="en" dir="ltr"><div class="content-panel astro-bhs5emkk"><div class="sl-container astro-bhs5emkk"><h1 id="_top" class="astro-iubplflu">Graph-Integrity Evaluation</h1></div></div><div class="content-panel astro-bhs5emkk"><div class="sl-container astro-bhs5emkk"><div class="sl-markdown-content"><p><code dir="auto">lcg-eval graph-integrity</code> is a deterministic report on the <strong>graph</strong> an ingest produced. It reads
+the nodes and edges of an ingested workspace and scores them against a fixture’s <code dir="auto">skeleton.json</code>,
+the ground truth the fixture was generated from. No LLM, no judge, no network and no extraction
+provider is involved, and the workspace is never written.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="why-it-exists">Why it exists</h2><a class="sl-anchor-link" href="#why-it-exists"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Why it exists”</span></a></div>
+<p>The retrieval evaluation (<a href="../retrieval-quality-evaluation/">retrieval-quality-evaluation.md</a>)
+scores passage ranking (nDCG over notes). That path never reads an edge’s type, direction or
+endpoints, so a badly wrong graph can score well. It happened: about a third of typed edges on
+known-true links pointed the wrong way (#816) and no test or eval had flagged it. This command makes
+typing, links, direction and value-fact attachment into numbers, so a fix can be shown to move them.</p>
+<p>It measures. It does not repair anything.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="running-it">Running it</h2><a class="sl-anchor-link" href="#running-it"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Running it”</span></a></div>
+<div class="expressive-code"><link rel="stylesheet" href="/liminis-context-graph/_astro/ec.w36nc.css"><script type="module" src="/liminis-context-graph/_astro/ec.0vx5m.js"></script><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">cargo</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">build</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--release</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-p</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">lcg-eval</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">target/release/lcg-eval</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">graph-integrity</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--workspace</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">&#x3C;kept-workspace></span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--out</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">/tmp/gi-ontology</span></div></div><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># before/after: deltas against an earlier report</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">target/release/lcg-eval</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">graph-integrity</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--workspace</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">&#x3C;other-workspace></span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--out</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">/tmp/gi-repaired</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--compare</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">/tmp/gi-ontology/report.json</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="cargo build --release -p lcg-evaltarget/release/lcg-eval graph-integrity --workspace <kept-workspace> --out /tmp/gi-ontologytarget/release/lcg-eval graph-integrity --workspace <other-workspace> --out /tmp/gi-repaired \  --compare /tmp/gi-ontology/report.json"><div></div></button></div></figure></div>
+<p>The input is a workspace directory that a service has ingested into. The usual source is
+<code dir="auto">lcg-eval retrieval --keep-workspace &#x3C;DIR></code> (#821), which keeps the ingested workspace (with
+<code dir="auto">--ontology &#x3C;file></code>, one built under that ontology) instead of removing its temporary workspace;
+see <a href="../retrieval-quality-evaluation/#ingesting-under-an-ontology-and-keeping-the-workspace-821">Ingesting under an ontology and keeping the workspace</a>.
+The command accepts any workspace whose DB a service could open.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Flag</th><th>Default</th><th>Meaning</th></tr></thead><tbody><tr><td><code dir="auto">--workspace &#x3C;DIR></code></td><td>required</td><td>The ingested workspace.</td></tr><tr><td><code dir="auto">--group &#x3C;ID></code></td><td><code dir="auto">retrieval-eval</code></td><td>Only this group is read.</td></tr><tr><td><code dir="auto">--skeleton &#x3C;FILE></code></td><td><code dir="auto">crates/eval/fixtures/retrieval-v2/skeleton.json</code></td><td>Ground truth.</td></tr><tr><td><code dir="auto">--mapping &#x3C;FILE></code></td><td><code dir="auto">graph-mapping.json</code> next to the skeleton</td><td>Skeleton → graph expectations.</td></tr><tr><td><code dir="auto">--ontology &#x3C;FILE></code></td><td>the workspace’s own</td><td>Ontology for the signature section.</td></tr><tr><td><code dir="auto">--db-path &#x3C;PATH></code></td><td><code dir="auto">.lcg/db/liminis.db</code>, then <code dir="auto">.graphiti/db</code></td><td>DB location relative to the workspace.</td></tr><tr><td><code dir="auto">--out &#x3C;DIR></code></td><td>none</td><td>Also write <code dir="auto">report.md</code> and <code dir="auto">report.json</code> (the layout <code dir="auto">lcg-eval retrieval --out</code> uses); with <code dir="auto">--compare</code> also <code dir="auto">compare.md</code>. The markdown is always printed to stdout.</td></tr><tr><td><code dir="auto">--compare &#x3C;FILE></code></td><td>none</td><td>An earlier <code dir="auto">report.json</code>; print per-metric deltas.</td></tr><tr><td><code dir="auto">--unstated-breakdown</code></td><td>off</td><td>Also classify the value facts not stated on any edge of their entity by cause (see <a href="#value-facts">Value facts</a>). Adds a report section and an <code dir="auto">unstated_breakdown</code> JSON key; without the flag the report is unchanged. Not part of <code dir="auto">--compare</code>.</td></tr></tbody></table>
+<p><strong>Workspace ontology default.</strong> The group’s own <code dir="auto">.lcg/ontology/&#x3C;group>.yaml</code> wins, then the
+workspace-wide <code dir="auto">.lcg/ontology.yaml</code> (the order the service resolves it); with neither, the graph is
+treated as free-form and the fit section is not applicable. The report states which one was used.</p>
+<p><strong>Exit codes.</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Code</th><th>Meaning</th></tr></thead><tbody><tr><td>0</td><td>Success.</td></tr><tr><td>1</td><td>Runtime error: unreadable skeleton or mapping, an invalid <code dir="auto">--compare</code> file (the message names it), an unloadable <code dir="auto">--ontology</code>, an unwritable <code dir="auto">--out</code>.</td></tr><tr><td>2</td><td>Usage error, or <code dir="auto">--compare</code> against a report produced with a different skeleton or mapping. (<code dir="auto">lcg-eval retrieval --compare</code> follows the same shape with its own hard/soft input policy; see <a href="../retrieval-quality-evaluation/#comparing-two-runs">retrieval-quality-evaluation.md</a>.)</td></tr><tr><td>3</td><td>The workspace is unusable: missing, not an ingested workspace, its DB cannot be opened or queried (degraded or corrupt; nothing is repaired), or it holds no nodes in the group. An all-zero report is never produced.</td></tr></tbody></table>
+<div class="sl-heading-wrapper level-h3"><h3 id="how-it-reads-without-writing">How it reads without writing</h3><a class="sl-anchor-link" href="#how-it-reads-without-writing"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “How it reads without writing”</span></a></div>
+<p>Opening a lbug database can replay and checkpoint its WAL, and starting the service migrates,
+binds a socket and heals indexes. So the original is never opened: the DB file and its sidecars
+(<code dir="auto">liminis.db.*</code>) are copied into a temporary directory and the <strong>copy</strong> is opened in-process
+(<code dir="auto">lcg_core::db::Db</code>, then the same read queries <code dir="auto">knowledge_get_nodes_by_group</code> and
+<code dir="auto">knowledge_get_edges_by_group</code> use). The workspace itself is only read, including the ontology
+files, so a run (successful or failed) leaves it byte-identical. No service process or embedder is
+started. See <a href="https://github.com/liminisapp/liminis-context-graph/blob/main/docs/adr/0819-graph-integrity-eval.md">ADR-0819</a>.</p>
+<p>The vector/FTS extensions that opening needs are loaded the way the service loads them (a staged
+bundle, or lbug’s own install into your home directory). They are never written into the workspace.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="the-mapping-file">The mapping file</h2><a class="sl-anchor-link" href="#the-mapping-file"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “The mapping file”</span></a></div>
+<p>The mapping is data, kept next to the fixture (<code dir="auto">crates/eval/fixtures/retrieval-v2/graph-mapping.json</code>),
+so a second corpus or a different relation vocabulary needs no code change.</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#096E72">"mapping_version"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#F78C6C;--1:#AA0982">1</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#096E72">"kinds"</span><span style="--0:#D6DEEB;--1:#403F53">: { </span><span style="--0:#7FDBCA;--1:#096E72">"project"</span><span style="--0:#D6DEEB;--1:#403F53">: { </span><span style="--0:#7FDBCA;--1:#096E72">"node_types"</span><span style="--0:#D6DEEB;--1:#403F53">: [</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">Project</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">] }, </span><span style="--0:#7FDBCA;--1:#096E72">"vendor"</span><span style="--0:#D6DEEB;--1:#403F53">: { </span><span style="--0:#7FDBCA;--1:#096E72">"node_types"</span><span style="--0:#D6DEEB;--1:#403F53">: [</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">Vendor</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">Organization</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">] } },</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#096E72">"links"</span><span style="--0:#D6DEEB;--1:#403F53">: {</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#7FDBCA;--1:#096E72">"Owner"</span><span style="--0:#D6DEEB;--1:#403F53">: { </span><span style="--0:#7FDBCA;--1:#096E72">"relation_types"</span><span style="--0:#D6DEEB;--1:#403F53">: [</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">      </span></span><span style="--0:#D6DEEB;--1:#403F53">{ </span><span style="--0:#7FDBCA;--1:#096E72">"name"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">OWNED_BY</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#7FDBCA;--1:#096E72">"direction"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">subject_to_object</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53"> },</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">      </span></span><span style="--0:#D6DEEB;--1:#403F53">{ </span><span style="--0:#7FDBCA;--1:#096E72">"name"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">OWNS</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">,     </span><span style="--0:#7FDBCA;--1:#096E72">"direction"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">object_to_subject</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53"> } ] }</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">  </span></span><span style="--0:#D6DEEB;--1:#403F53">},</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#7FDBCA;--1:#096E72">"junk"</span><span style="--0:#D6DEEB;--1:#403F53">: { </span><span style="--0:#7FDBCA;--1:#096E72">"prefixes"</span><span style="--0:#D6DEEB;--1:#403F53">: [</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">recap-</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">digest-</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">] }</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">}</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="{  &#x22;mapping_version&#x22;: 1,  &#x22;kinds&#x22;: { &#x22;project&#x22;: { &#x22;node_types&#x22;: [&#x22;Project&#x22;] }, &#x22;vendor&#x22;: { &#x22;node_types&#x22;: [&#x22;Vendor&#x22;, &#x22;Organization&#x22;] } },  &#x22;links&#x22;: {    &#x22;Owner&#x22;: { &#x22;relation_types&#x22;: [      { &#x22;name&#x22;: &#x22;OWNED_BY&#x22;, &#x22;direction&#x22;: &#x22;subject_to_object&#x22; },      { &#x22;name&#x22;: &#x22;OWNS&#x22;,     &#x22;direction&#x22;: &#x22;object_to_subject&#x22; } ] }  },  &#x22;junk&#x22;: { &#x22;prefixes&#x22;: [&#x22;recap-&#x22;, &#x22;digest-&#x22;] }}"><div></div></button></div></figure></div>
+<ul>
+<li><code dir="auto">kinds</code>: skeleton entity <code dir="auto">kind</code> → the node type labels accepted for it.</li>
+<li><code dir="auto">links</code>: skeleton fact attribute → the accepted relation types. <code dir="auto">direction</code> is stated <strong>relative to
+the skeleton fact’s subject</strong> (the fact’s <code dir="auto">entity</code>): <code dir="auto">subject_to_object</code> means the edge source is
+the subject and the target is the value entity; <code dir="auto">object_to_subject</code> is the reverse. Direction is
+declared per accepted relation type and is never inferred. Accepting a free-form name
+(<code dir="auto">MANAGES</code>) is how the same format covers graphs built without an ontology.</li>
+<li><code dir="auto">junk.prefixes</code>: first slug segments that mark a note ID (see <a href="#junk">Junk</a>).</li>
+<li>A kind in the skeleton with no <code dir="auto">kinds</code> entry, or a link-shaped attribute with no <code dir="auto">links</code> entry, is
+listed in the report as <strong>unmapped</strong> and <strong>excluded</strong> from the relevant denominators; it is not
+counted as a failure.</li>
+</ul>
+<p>The report records the SHA-256 of the skeleton and the mapping. <code dir="auto">--compare</code> refuses two reports
+whose hashes differ.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="matching-rules">Matching rules</h2><a class="sl-anchor-link" href="#matching-rules"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Matching rules”</span></a></div>
+<p>Each rule is defined once, in <code dir="auto">crates/eval/src/graph_integrity/rules.rs</code>.</p>
+<ul>
+<li><strong>Normalisation.</strong> Lowercase; <code dir="auto">_</code>, <code dir="auto">-</code> and any whitespace read as one space; ends trimmed. So
+<code dir="auto">Cedar_Core</code>, <code dir="auto">CEDAR-CORE</code> and <code dir="auto">cedar  core</code> are the same name, and <code dir="auto">OWNED_BY</code> equals <code dir="auto">owned by</code>.</li>
+<li><strong>Name match.</strong> Equality of normalised names. Never a substring, never an alias, never fuzzy:
+<code dir="auto">Cedar Core</code> does not match <code dir="auto">Cedar Supply</code> or <code dir="auto">Cedar</code>.</li>
+<li><strong>Node of an entity.</strong> Every node whose normalised name equals the entity’s. Several nodes means
+the entity is <em>split</em>; edges on any of them count as incident to the entity.</li>
+<li><strong>Type match.</strong> Some entry of the node’s <code dir="auto">labels</code> (the type plus its ancestors) equals,
+case-insensitively, one of the mapping’s <code dir="auto">node_types</code> for the kind. The implicit <code dir="auto">Entity</code> label
+never counts. <code dir="auto">labels</code> is used rather than <code dir="auto">kind</code>, which is an identity field that is <code dir="auto">Entity</code>
+unless the ontology marks the type identity-bearing.</li>
+<li><strong>Edge type.</strong> The stored <code dir="auto">relation_type</code> when non-empty, else the edge <code dir="auto">name</code>, compared through
+normalisation against the mapping’s <code dir="auto">name</code>s.</li>
+<li><strong>Value text.</strong> The normalised value must occur in the normalised edge <code dir="auto">fact</code> at alphanumeric word
+boundaries (so <code dir="auto">6</code> does not match inside <code dir="auto">96</code>). This is an exact-string rule: a fact restated
+as <code dir="auto">4200</code> for <code dir="auto">$4,200</code> is “not stated” although the value is present. <strong>“Not stated” therefore
+over-counts the true misses (it is an upper bound on them) and “stated” under-counts, so “stated”
+is a lower bound.</strong> The word-boundary containment can push the other way only in rare cases (a short
+value such as <code dir="auto">9</code> found in an unrelated mention on an incident edge), so neither figure is exact.</li>
+</ul>
+<div class="sl-heading-wrapper level-h2"><h2 id="metrics">Metrics</h2><a class="sl-anchor-link" href="#metrics"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Metrics”</span></a></div>
+<p>All counts are reported as numerator/denominator where a denominator is meaningful, identically in
+<code dir="auto">report.md</code> and <code dir="auto">report.json</code>.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="typing">Typing</h3><a class="sl-anchor-link" href="#typing"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Typing”</span></a></div>
+<ul>
+<li><strong>Found</strong>: skeleton entities with at least one matching node, of all skeleton entities.</li>
+<li><strong>Split</strong>: entities matched by two or more nodes (a count).</li>
+<li><strong>Typed</strong>: entities, among those whose kind is mapped, with at least one matching node carrying
+an accepted type. An absent entity is not typed. The denominator is the number of mapped entities.</li>
+</ul>
+<div class="sl-heading-wrapper level-h3"><h3 id="links-per-attribute-and-in-total">Links, per attribute and in total</h3><a class="sl-anchor-link" href="#links-per-attribute-and-in-total"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Links, per attribute and in total”</span></a></div>
+<p>A <em>true link</em> is a skeleton fact whose value is itself a skeleton entity and whose attribute has a
+<code dir="auto">links</code> entry, de-duplicated by (subject, attribute, value entity). Per link:</p>
+<ul>
+<li><strong>Present</strong>: any edge, of any type and in either direction, between a node of the subject and a
+node of the value entity.</li>
+<li><strong>Expected relation type</strong>: among those edges, at least one whose type is accepted for the
+attribute.</li>
+<li><strong>Direction correct</strong>: among links with the expected type, at least one expected-type edge whose
+orientation matches that relation type’s declared <code dir="auto">direction</code>. Judged only among edges of the
+expected type; a link with both a forward and a reversed edge counts as correct. The denominator
+is the number of links with the expected type, so <code dir="auto">56/71</code> reads “56 of the 71 typed links point the
+right way”.</li>
+</ul>
+<div class="sl-heading-wrapper level-h3"><h3 id="value-facts">Value facts</h3><a class="sl-anchor-link" href="#value-facts"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Value facts”</span></a></div>
+<p>A <em>value fact</em> is a skeleton fact whose attribute is not a mapped link and whose value is not a
+skeleton entity, de-duplicated by (entity, attribute, value). The denominator is all of them.</p>
+<ul>
+<li><strong>Stated</strong>: some edge incident to a node of the entity has the value in its <code dir="auto">fact</code> text.</li>
+<li><strong>Misattached</strong>: some such edge that states the value has, as its other endpoint, a node that is a
+<em>different</em> skeleton entity, and its <code dir="auto">fact</code> text does not name that entity. For example
+“Marlin Core has a monthly budget of $4,200” stored as <code dir="auto">Marlin Core HAS_MEASURE Tomas Kowalski</code>.
+An edge whose text does name the other entity (a person set the budget) is a legitimate relation,
+not misattached. The two flags are independent: that Marlin Core edge is both stated and
+misattached; each fact is counted once per flag.</li>
+</ul>
+<p>A self-loop on the entity (the representation of a literal-valued fact under an ontology since
+#823, see <a href="../ontology/#literal-valued-facts">ontology.md</a>) that states the value counts as stated
+and is never misattached, since its other end is the entity itself.</p>
+<p><strong>Why a fact is not stated (<code dir="auto">--unstated-breakdown</code>, #823).</strong> “Stated” reads only edge <code dir="auto">fact</code> text,
+so a value can be in the graph and still count as not stated. With the flag, each not-stated value
+fact is put in the first of these that holds:</p>
+<ol>
+<li><strong>Only in the entity’s node summary</strong>: the value (exact bounded match, as for “stated”) is in a
+<code dir="auto">summary</code> of one of the entity’s own nodes.</li>
+<li><strong>On another entity</strong>: the value is on an edge <em>not</em> incident to the entity, or in another node’s
+name or summary. For example “The offsite will take place in Aarhus” on an <code dir="auto">offsite</code> node’s edge.</li>
+<li><strong>Present in another surface form</strong>: an incident edge or the entity’s own summary states it in a
+form the exact match misses. A <code dir="auto">[day] Month YYYY</code> value matches its ISO (<code dir="auto">2027-03</code>, <code dir="auto">2026-11-02</code>)
+and abbreviated (<code dir="auto">Mar 2027</code>) spellings; any other value with digits matches when all its number
+tokens appear, separators removed (<code dir="auto">$4,200</code> ≈ <code dir="auto">4200 USD</code>, <code dir="auto">98.5%</code> ≈ <code dir="auto">98.5 percent</code>). This is
+loose, since a small number can match an unrelated figure, so this group is an upper bound.</li>
+<li><strong>Absent</strong>: none of the above.</li>
+</ol>
+<p>The breakdown is diagnostic and does not change the stated or misattached definitions.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="junk">Junk</h3><a class="sl-anchor-link" href="#junk"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Junk”</span></a></div>
+<p>Nodes <strong>named like a note ID</strong>. A node is junk when it is not a skeleton entity and either its
+normalised name equals a normalised note ID from the skeleton (<code dir="auto">project-cedar-core-1</code>), or its raw
+name is lowercase slug-shaped (<code dir="auto">[a-z0-9]+(-[a-z0-9]+)+</code>), starts with one of <code dir="auto">junk.prefixes</code> and has
+an all-digit segment (<code dir="auto">recap-01-aiko-osei</code>, <code dir="auto">digest-047</code>). A node that merely looks unusual is not
+junk. This is measured here and fixed elsewhere.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="signature">Signature</h3><a class="sl-anchor-link" href="#signature"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Signature”</span></a></div>
+<ul>
+<li><strong>Marks</strong>: the number of edges carrying a stored <code dir="auto">signature_mismatch</code> mark (#816), per edge type,
+read from the edge <code dir="auto">attributes</code> JSON key <code dir="auto">signature_mismatch</code> (null or <code dir="auto">false</code> do not count; the
+key name is the constant <code dir="auto">SIGNATURE_MARK_KEY</code>). When <strong>no</strong> edge carries the key, the report says
+marks are <em>absent</em> (a graph or build without #816) so that zero is not read as “clean”.</li>
+<li><strong>Fit / reversed / neither</strong>, per edge type, against the ontology’s declared signature
+(<code dir="auto">source_type</code> → <code dir="auto">target_type</code>, each a name or a list since #816): <em>fit</em> when the source node’s
+labels include any of the source types and the target’s include any of the target types (labels
+already include ancestors); <em>reversed</em> when they satisfy it swapped and do not fit; <em>neither</em>
+otherwise. The declared types are resolved as #816’s ingest check resolves them (names the
+ontology does not declare are ignored). An empty side matches anything; a relation with no
+endpoint types, and a <code dir="auto">symmetric</code> relation, is counted as <em>unconstrained</em>. Edge types in the graph
+that the ontology does not declare are listed separately. With no ontology, or an ontology with no
+signatures, the section is reported as not applicable.</li>
+</ul>
+<div class="sl-heading-wrapper level-h2"><h2 id="comparing-two-graphs">Comparing two graphs</h2><a class="sl-anchor-link" href="#comparing-two-graphs"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Comparing two graphs”</span></a></div>
+<p><code dir="auto">--compare &#x3C;report.json></code> prints, for every metric, the earlier value, this run’s value, the signed
+delta (<code dir="auto">this − earlier</code>) and whether it is an improvement (higher is better for found, typed, links
+and stated; lower is better for split, misattached, junk, marks, reversed and neither). <code dir="auto">run_meta</code>
+(workspace path, version, timestamp) is ignored. For ratio metrics the verdict is judged by the
+rate (<code dir="auto">num/den</code>), not the numerator, because the denominator can differ between graphs (for example
+direction-correct is <code dir="auto">35/35</code> on a free-form graph and <code dir="auto">56/71</code> under an ontology: the delta is <code dir="auto">+21</code>
+but the verdict is “worse rate”); such rows are marked “(denominators differ)”. A different skeleton
+or mapping hash exits 2, but <code dir="auto">report.md</code> and <code dir="auto">report.json</code> are still written to <code dir="auto">--out</code> first; a file
+that is not a valid report exits 1 naming the file.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="determinism">Determinism</h2><a class="sl-anchor-link" href="#determinism"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Determinism”</span></a></div>
+<p>The same workspace, skeleton, mapping and ontology give identical JSON. The only run-dependent data
+(workspace path, tool version, timestamp) is in a separate <code dir="auto">run_meta</code> block.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="reconciliation-with-the-e13-baseline">Reconciliation with the E13 baseline</h2><a class="sl-anchor-link" href="#reconciliation-with-the-e13-baseline"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Reconciliation with the E13 baseline”</span></a></div>
+<p>The E13 table in #819 came from a one-off script outside LCG that is not in this repository.</p>
+<blockquote>
+<p><strong>Provenance of the figures below.</strong> The numbers in this section are <strong>maintainer-reported</strong>: the
+maintainer ran the command on three kept v2 workspaces (free-form, ontology v3.1, v3.1 after the
+#816 repair) and reported the results on PR #822, including that the workspaces were byte-identical
+afterwards and that a run takes about 0.14 s. The kept workspaces and the E13 script are not in
+this repository, so these figures cannot be reproduced from the repo alone, and SC-001 is not
+verified by anything committed here. The repo’s own checks are the unit tests (including the
+hand-built graph and the shipped-mapping coverage test).</p>
+</blockquote>
+<p><strong>Denominators.</strong> The command finds <strong>60</strong> true links (five attributes × 12 pairs) and <strong>440</strong>
+literal value facts; E13 used 72 and 428 (the same sum of 500). The difference is the 12 <code dir="auto">Location</code>
+links: E13 scored them as links because the value resolves to a graph node, while here a skeleton
+fact is a link only when its value is a skeleton entity, so <code dir="auto">Location</code> counts as a value fact. Excluding
+<code dir="auto">Location</code> from E13’s figures gives this command’s link rows:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th></th><th>expected relation type</th><th>direction correct</th></tr></thead><tbody><tr><td>ontology v3.1</td><td>59/60</td><td><strong>44/59</strong> (Account manager 6/12, Exception approver 5/12)</td></tr><tr><td>v3.1 after #816 repair</td><td>59/60</td><td><strong>59/59</strong></td></tr><tr><td>free-form</td><td>53/60</td><td>53/53</td></tr></tbody></table>
+<p>As reported, these equal E13’s 56/71 → 44/59 and 71/71 → 59/59 once its 12 <code dir="auto">Location</code> links are removed. Scoring
+<code dir="auto">Location</code> as a link (<code dir="auto">LOCATED_IN</code>, subject to object, when its value resolves to a graph node, as E13
+did) is a possible later extension of the mapping and the scoring rule.</p>
+<p><strong>Other rows (maintainer-reported).</strong> Typing is 47/48 on the ontology graphs with all 48 entities found; junk nodes are 13
+on the ontology graphs (the same list as E13); value facts are 293/440 stated with 27 misattached,
+against E13’s 290/428 and 29 under its looser matching; all 975 <code dir="auto">signature_mismatch</code> marks written by
+the #816 repair are read on the repaired workspace.</p>
+<p><strong>The mapping must name the ontology’s relation types.</strong> A link attribute whose mapping lists only
+free-form names scores 0/12 expected type and 0/0 direction on an ontology graph, which hides the
+defect the report exists to catch. This happened for <code dir="auto">Account manager</code> (<code dir="auto">CONTACT_FOR</code>) and
+<code dir="auto">Exception approver</code> (<code dir="auto">APPROVES</code>) until they were added. The unit test
+<code dir="auto">shipped_v2_mapping_covers_the_ontology_relation_types</code> requires every v2 ontology relation type
+(<code dir="auto">OWNS</code>, <code dir="auto">SUPPLIED_BY</code>, <code dir="auto">CONTACT_FOR</code>, <code dir="auto">APPROVES</code>, <code dir="auto">REPORTS_TO</code>) to be in the mapping with the
+expected direction. A mapping for another corpus needs the same check against its ontology.</p>
+<p>Remaining residuals come from the string rules above: the junk count depends on the note-ID rule (an
+exact ID or a prefixed slug with a digit segment), and free-form typing depends on the <code dir="auto">node_types</code>
+list in the mapping, which is the tuning point for a free-form graph’s labels.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="value-fact-misattachment-823">Value-fact misattachment (#823)</h2><a class="sl-anchor-link" href="#value-fact-misattachment-823"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Value-fact misattachment (#823)”</span></a></div>
+<p>Under an ontology, value facts were pinned to unrelated entities (27 of 440 misattached on the
+ontology v3.1 graph above, against 2 free-form). #823 stores a literal-valued fact as a self-loop on
+the entity it describes (<a href="https://github.com/liminisapp/liminis-context-graph/blob/main/docs/adr/0823-literal-object-edges-as-self-loops.md">ADR-0823</a>). The acceptance
+targets: misattached at most 3 under ontology v3.1, stated not lower than the baseline, and the other
+metrics within ±1 of a baseline from the same commit (direction-correct compared as a rate when the
+denominators differ), with free-form unchanged within ±1.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="why-value-facts-are-not-stated-free-form-proxy">Why value facts are not stated: free-form proxy</h3><a class="sl-anchor-link" href="#why-value-facts-are-not-stated-free-form-proxy"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Why value facts are not stated: free-form proxy”</span></a></div>
+<blockquote>
+<p><strong>Provenance.</strong> Research for #823 analysed the checked-in free-form v2 cassette
+(<code dir="auto">crates/eval/fixtures/retrieval-v2/cassette.jsonl</code>, recorded 2026-11-18 with Haiku 4.5, from
+prompts that predate #816 and #824) with a script kept outside the repository. It counts the
+<em>union of extractions</em> across the cassette’s 1,006 calls, not a stored graph, so its figures
+approximate the command’s rather than reproduce them (252/440 stated, against E13’s free-form
+259/428; 2 misattached, matching E13). The ontology v3.1 graph is not in the
+repository; its breakdown comes from <code dir="auto">--unstated-breakdown</code> on the maintainer’s kept workspace
+(below).</p>
+</blockquote>
+<p>Of the 440 value facts, 201 were not stated on any edge of their entity in the stating note:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Cause</th><th>Facts</th></tr></thead><tbody><tr><td>Only in the entity’s node summary</td><td><strong>138</strong></td></tr><tr><td>On another entity: an edge not incident to it</td><td>23</td></tr><tr><td>On another entity: another node’s name or summary</td><td>13</td></tr><tr><td>Present in another surface form</td><td>3</td></tr><tr><td>Absent</td><td>24</td></tr></tbody></table>
+<p>Most of the gap is not missing data: two thirds of it sits in the entity’s summary, which “stated”
+does not read. Only about 24 facts (5%) look genuinely absent, so a follow-up fix for the gap is
+warranted only if the ontology graph’s breakdown differs materially. 335 of the 1,006 chunks had
+fewer than two entities, which the free-form prompt gives no way to carry an edge for.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="before-and-after-maintainer-reported-pending">Before and after (maintainer-reported, pending)</h3><a class="sl-anchor-link" href="#before-and-after-maintainer-reported-pending"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Before and after (maintainer-reported, pending)”</span></a></div>
+<blockquote>
+<p><strong>Provenance.</strong> To be filled in from the figures the maintainer reports on the #823 PR. Like
+#819’s, these runs need kept v2 workspaces and live extraction, which the repository alone cannot
+reproduce. The repository’s own checks are the deterministic tests (<code dir="auto">crates/core/tests/literal_object_edges.rs</code>,
+the prompt golden file, and the graph-integrity unit tests).</p>
+</blockquote>
+<p>Produce each arm from a fresh extraction with the same model and settings. <strong>Before</strong> is <code dir="auto">main</code> at
+the merge base without this change, <strong>after</strong> is this branch. Ontology-mode ingest uses
+<code dir="auto">lcg-eval retrieval --ontology</code> and kept workspaces (#821, ADR-0821), now on <code dir="auto">main</code>:</p>
+<div class="expressive-code"><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="sh"><code><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5F636F"># per arm and mode: extract v2 into a kept workspace, then</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">target/release/lcg-eval</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">graph-integrity</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--workspace</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">&#x3C;ws-before></span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--unstated-breakdown</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--out</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">&#x3C;dir-before></span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">target/release/lcg-eval</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">graph-integrity</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--workspace</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">&#x3C;ws-after></span><span style="--0:#D6DEEB;--1:#403F53">  </span><span style="--0:#82AAFF;--1:#3B61B0">--unstated-breakdown</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--out</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">&#x3C;dir-after></span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">  </span><span style="--0:#82AAFF;--1:#3B61B0">--compare</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">&#x3C;dir-before>/report.json</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="target/release/lcg-eval graph-integrity --workspace <ws-before> --unstated-breakdown --out <dir-before>target/release/lcg-eval graph-integrity --workspace <ws-after>  --unstated-breakdown --out <dir-after> \  --compare <dir-before>/report.json"><div></div></button></div></figure></div>
+<p>Also read a sample of the after-change <code dir="auto">HAS_MEASURE</code>, <code dir="auto">HAS_TERM</code> and <code dir="auto">SCHEDULED_FOR</code> edges: a pin
+moved into a compound fact that names the other entity passes the metric while staying wrong.</p>
+<p><strong>Ontology v3.1</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Metric</th><th>Before</th><th>After</th><th>Target</th></tr></thead><tbody><tr><td>Value facts stated</td><td><em>pending</em></td><td><em>pending</em></td><td>≥ before</td></tr><tr><td>Value facts misattached</td><td><em>pending</em></td><td><em>pending</em></td><td>≤ 3</td></tr><tr><td>Entities found</td><td><em>pending</em></td><td><em>pending</em></td><td>±1</td></tr><tr><td>Typed as expected</td><td><em>pending</em></td><td><em>pending</em></td><td>±1</td></tr><tr><td>True links present</td><td><em>pending</em></td><td><em>pending</em></td><td>±1</td></tr><tr><td>Expected relation type</td><td><em>pending</em></td><td><em>pending</em></td><td>±1</td></tr><tr><td>Direction correct</td><td><em>pending</em></td><td><em>pending</em></td><td>±1 (rate)</td></tr><tr><td>Junk nodes</td><td><em>pending</em></td><td><em>pending</em></td><td>not higher</td></tr><tr><td><code dir="auto">edges_literal_object</code> / <code dir="auto">edges_suspected_misattachment</code> (ingest totals)</td><td>—</td><td><em>pending</em></td><td>reported</td></tr></tbody></table>
+<p><strong>Free-form</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Metric</th><th>Before</th><th>After</th><th>Target</th></tr></thead><tbody><tr><td>Every graph-integrity metric</td><td><em>pending</em></td><td><em>pending</em></td><td>±1</td></tr><tr><td>Value facts misattached</td><td><em>pending</em></td><td><em>pending</em></td><td>≤ 3</td></tr><tr><td>Junk nodes</td><td><em>pending</em></td><td><em>pending</em></td><td>not higher</td></tr></tbody></table>
+<p><strong>Ontology v3.1, not-stated value facts by cause (<code dir="auto">--unstated-breakdown</code>)</strong></p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Cause</th><th>Before</th><th>After</th></tr></thead><tbody><tr><td>Only in the entity’s node summary</td><td><em>pending</em></td><td><em>pending</em></td></tr><tr><td>On another entity</td><td><em>pending</em></td><td><em>pending</em></td></tr><tr><td>Present in another surface form</td><td><em>pending</em></td><td><em>pending</em></td></tr><tr><td>Absent</td><td><em>pending</em></td><td><em>pending</em></td></tr></tbody></table>
+<div class="sl-heading-wrapper level-h2"><h2 id="not-covered">Not covered</h2><a class="sl-anchor-link" href="#not-covered"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Not covered”</span></a></div>
+<p>Repairing misattached or missing value facts in stored graphs (#823 prevents new misattachments at
+ingest but does not repair existing graphs), fixing note-ID junk nodes, running this in CI on every
+PR (it needs a kept workspace), and corpora without a skeleton.</p></div><footer class="sl-flex astro-li2vjuw6"><div class="meta sl-flex astro-li2vjuw6"><a href="https://github.com/liminisapp/liminis-context-graph/edit/main/docs/graph-integrity-evaluation.md" class="sl-flex print:hidden astro-puwp67qq"><svg aria-hidden="true" class="astro-puwp67qq astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg>Edit page</a></div><div class="pagination-links print:hidden astro-2un4dhw6" dir="ltr"><a href="/liminis-context-graph/retrieval-quality-evaluation/" rel="prev" class="astro-2un4dhw6"><svg aria-hidden="true" class="astro-2un4dhw6 astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg><span class="astro-2un4dhw6">Previous<br class="astro-2un4dhw6"><span class="link-title astro-2un4dhw6">Retrieval-Quality Evaluation</span></span></a><a href="/liminis-context-graph/retrieval-experiments/" rel="next" class="astro-2un4dhw6"><svg aria-hidden="true" class="astro-2un4dhw6 astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg><span class="astro-2un4dhw6">Next<br class="astro-2un4dhw6"><span class="link-title astro-2un4dhw6">Retrieval Experiments</span></span></a></div></footer><p class="lcg-version astro-jo6i4kqk">Documents <code class="astro-jo6i4kqk">liminis-context-graph</code> v0.20.0.<span id="version-switcher" class="astro-jo6i4kqk"></span></p><script type="module">fetch(`/liminis-context-graph/versions.json`).then(e=>e.ok?e.json():null).then(e=>{if(!e||!Array.isArray(e.versions)||e.versions.length===0)return;let t=document.getElementById(`version-switcher`);if(!t)return;let n=document.createElement(`select`);n.setAttribute(`aria-label`,`Switch documented version`);let r=e.versions.filter(e=>!e.includes(`-`)),i=r.length>0?r[0]:e.versions[0],a=document.createElement(`option`);a.value=`/liminis-context-graph/`,a.textContent=`latest (v${i})`,n.appendChild(a);for(let t of e.versions){let e=document.createElement(`option`);e.value=`/liminis-context-graph/v${t}/`,e.textContent=`v${t}`,window.location.pathname.startsWith(e.value)&&(e.selected=!0),n.appendChild(e)}n.addEventListener(`change`,()=>{window.location.href=n.value}),t.appendChild(n)}).catch(()=>{});</script></div></div></main></div></div></div></div></body></html>
