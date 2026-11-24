@@ -2103,10 +2103,18 @@ Algorithm (E13's v5, generic — no relation names are hard-coded). Per hop:
    edges whose far end has that type (a supertype counts); if none do, keep all and record it.
 4. **Direction**: `out` means the frontier entity is the edge's source as its type reads, `in` that
    it is the target. `soft` adds a fixed **0.05** cosine bonus to matching edges; `hard` keeps only
-   matching edges, falling back to all (recorded) if none match. `any` applies neither.
+   matching edges, falling back to all (recorded) if none match. Sideways edges (both ends in
+   the frontier) never decide that match-or-fall-back question while forward edges exist, because one
+   orientation of a sideways edge always matches. `any` applies neither.
 5. **Rank** by cosine(embedding of `phrase` with the query-side instruction, the edge's fact
-   embedding) plus the bonus; ties break by edge uuid. Edges with no usable fact embedding rank
-   after every embedded edge (score 0.0). The top B are kept (one orientation per edge); their far ends are the next frontier.
+   embedding) plus the bonus. On equal score a forward edge (one that reaches a new entity) ranks
+   before a sideways edge (both ends in the frontier), then ties break by edge uuid. Edges with no
+   usable fact embedding rank after every embedded edge (score 0.0). Each edge is kept in one
+   orientation only. While forward edges are candidates, sideways edges take at most half of the
+   beam (rounded up), so a tightly connected frontier cannot crowd out the walk's next
+   entities. The top B are kept; their far ends are the next frontier, and a kept sideways edge
+   carries **both** of its ends into it (both were already reached, and which orientation was
+   kept is only a tie-break).
 
 If the hops end on no entity of an entity-type `answer_type` and `query` is given (and mode is not
 `history`), one **completion hop** runs: edges from the final frontier to entities of that type,
