@@ -5,9 +5,11 @@
 //! * `ordered`: 1 only for the same number of answers, each matching gold in order (history).
 //!
 //! `set` scoring also takes the question's *optional* answers (#907): values the prose supports only
-//! loosely. A returned answer that matches an optional answer (and no gold answer) is dropped before
-//! precision, and recall is over gold alone, so an optional answer neither raises nor lowers the
-//! score, returned or not. `single` and `ordered` ignore them.
+//! loosely. A returned answer that equals an optional answer after [`norm`] (and matches no gold
+//! answer) is dropped before precision, and recall is over gold alone, so an optional answer
+//! neither raises nor lowers the score, returned or not. Optional answers are matched by
+//! normalised *equality*, not containment: a fragment of one ("Routing") or a longer string that
+//! contains one is a wrong answer and counts against precision. `single` and `ordered` ignore them.
 //!
 //! Matching is the probe's: both sides are normalised ([`norm`]) and an answer matches when the
 //! gold contains it or it contains the gold (the first only for answers of 3+ characters), so case,
@@ -53,10 +55,15 @@ pub fn score(scoring: &str, gold: &[String], optional: &[String], preds: &[Strin
                 return 0.0;
             }
             // Gold wins: `matches` is containment-based, so an answer matching both counts as gold.
+            // An optional answer is excused only by normalised equality, never by containment.
+            let optional: Vec<String> = optional.iter().map(|o| norm(o)).collect();
             let kept: Vec<&String> = preds
                 .iter()
                 .filter(|p| {
-                    gold.iter().any(|g| matches(g, p)) || !optional.iter().any(|o| matches(o, p))
+                    gold.iter().any(|g| matches(g, p)) || {
+                        let np = norm(p);
+                        np.is_empty() || !optional.contains(&np)
+                    }
                 })
                 .collect();
             let tp = gold
@@ -189,6 +196,23 @@ mod tests {
         // A wrong extra is still penalised.
         let f1 = score("set", &g, &opt, &v(&["Telemetry clean-up", "Other"]));
         assert!((f1 - 2.0 / 3.0).abs() < 1e-12, "{f1}");
+    }
+
+    #[test]
+    fn an_optional_answer_is_matched_by_equality_not_containment() {
+        let g = v(&["Orbit Core"]);
+        let opt = v(&["Routing handover"]);
+        let base = score("set", &g, &opt, &v(&["Orbit Core"]));
+        // Case, punctuation and spacing do not matter.
+        assert_eq!(
+            score("set", &g, &opt, &v(&["Orbit Core", " ROUTING  handover. "])),
+            base
+        );
+        // A fragment of the optional answer, or a string containing it, is a wrong answer.
+        for wrong in ["Routing", "handover", "The Routing handover project"] {
+            let f1 = score("set", &g, &opt, &v(&["Orbit Core", wrong]));
+            assert!((f1 - 2.0 / 3.0).abs() < 1e-12, "{wrong}: {f1}");
+        }
     }
 
     #[test]

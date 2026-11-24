@@ -895,13 +895,23 @@ that as a precision loss. `crates/eval/fixtures/retrieval-v2/prose-facts.json` r
 The initial entries are *Telemetry clean-up* (Owner: Marcus Haddad, `stated`: "will continue with
 Marcus Haddad as owner") and *Routing handover* (Owner: Priya Varga, `ambiguous`: "led by"). They
 change `answers` on g072, g109 and i014 and `optional_answers` on i013, and nothing else. `hops` stay
-skeleton-derived, the overlay never adds or reselects a question, and an entry with an unknown
-`status`, an unsupported attribute, an unknown note or an unknown owner fails generation.
+skeleton-derived, the overlay never adds or reselects a question, and generation fails for an entry
+with an unknown `status`, an unsupported attribute, an unknown owner, an unknown note, a cited note
+whose rendered text does not name both the entity and the value, a repeated `(entity, attribute)`,
+or an entity that already has a skeleton Owner or that equals a skeleton entity only after
+normalising case and punctuation (a typo). Names compare through the scorer's `norm`. The gold
+depends on the file, so `questions.meta.json` records its `prose_facts_hash` and
+`retrieval-gen --check` fails when the file changes without that hash: bump `questions_version`,
+regenerate and record the new hash together.
 
-**Scoring optional answers.** For `set` questions, a returned answer that matches an optional
-answer (and no gold answer) is dropped before precision, and recall is over `answers` alone. So an
-optional answer neither raises nor lowers the score, whether the run returns it, omits it or
-repeats it. `single` and `ordered` scoring ignore `optional_answers`. The set was `meridian-questions-3`
+**Scoring optional answers.** For `set` questions, a returned answer that equals an optional
+answer after normalising case, punctuation and spacing (and matches no gold answer) is dropped
+before precision, and recall is over `answers` alone. So an optional answer neither raises nor
+lowers the score, whether the run returns it, omits it or repeats it. Optional answers match by
+equality, not containment: a fragment of one ("Routing") or a longer string containing it is a wrong
+answer and counts against precision. `single` and `ordered` scoring ignore `optional_answers`. The
+per-question graph-qa report rows carry `optional_answers` where there are some, so an extra answer
+that cost nothing can be explained. The set was `meridian-questions-3`
 before this change and is `meridian-questions-4` after it: **graph-qa scores from the two are not
 comparable for g072, g109, i013 and i014** (the report itself records no question-set version).
 

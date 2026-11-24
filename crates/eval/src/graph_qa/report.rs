@@ -303,10 +303,16 @@ impl Report<'_> {
                         )
                     })
                     .collect();
-                json!({"id": r.id, "set": q.set, "shape": q.shape, "family": q.family,
+                let mut row = json!({"id": r.id, "set": q.set, "shape": q.shape, "family": q.family,
                        "split": q.split, "text": q.text, "gold": q.answers, "scoring": q.scoring,
                        "plan_source": r.plan_source, "plan": r.plan, "plan_error": r.plan_error,
-                       "route": r.route, "start_resolved": r.start_resolved, "runners": runners})
+                       "route": r.route, "start_resolved": r.start_resolved, "runners": runners});
+                // Only where there are some (#907), so every other row is unchanged: it explains
+                // why an extra answer on such a question cost nothing.
+                if !q.optional_answers.is_empty() {
+                    row["optional_answers"] = json!(q.optional_answers);
+                }
+                row
             })
             .collect()
     }

@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use super::pyrandom::PyRandom;
 use super::skeleton::Skeleton;
+use crate::graph_qa::scorer::norm;
 
 /// The committed file, beside `skeleton.json`.
 pub const FILE: &str = "graph-questions.jsonl";
@@ -202,9 +203,11 @@ pub fn parse_prose_facts(text: &str, sk: &Skeleton) -> Result<Vec<ProseFact>, St
         let at = format!("{PROSE_FACTS_FILE} entry {i} ({:?})", f.entity);
         // One entry per (entity, attribute): two entries for the same project, whatever their
         // owners or statuses, would put it under both owners and make the gold contradictory.
+        // Names compare through `scorer::norm`, so "Telemetry Clean-up" repeats "Telemetry clean-up".
+        let key = norm(&f.entity);
         if let Some(j) = facts[..i]
             .iter()
-            .position(|g| g.entity == f.entity && g.attribute == f.attribute)
+            .position(|g| norm(&g.entity) == key && g.attribute == f.attribute)
         {
             return Err(format!(
                 "{at}: duplicates entry {j}; each (entity, attribute) may appear only once"
@@ -244,6 +247,13 @@ pub fn parse_prose_facts(text: &str, sk: &Skeleton) -> Result<Vec<ProseFact>, St
                     e.kind
                 ));
             }
+        } else if let Some(e) = sk.entities.iter().find(|e| norm(&e.name) == key) {
+            // Equal to a skeleton entity only after normalising: almost certainly a typo, and an
+            // exact-name lookup would skip the kind and Owner checks for it.
+            return Err(format!(
+                "{at}: entity matches the skeleton {} {:?} only after normalising case and punctuation; spell it exactly",
+                e.kind, e.name
+            ));
         }
         // The overlay is for projects the skeleton does not own-assign: a second owner would list
         // the project under both owners and make the gold contradictory.
@@ -251,7 +261,7 @@ pub fn parse_prose_facts(text: &str, sk: &Skeleton) -> Result<Vec<ProseFact>, St
             .notes
             .iter()
             .flat_map(|n| &n.facts)
-            .any(|sf| sf.entity == f.entity && sf.attribute == "Owner")
+            .any(|sf| norm(&sf.entity) == key && sf.attribute == "Owner")
         {
             return Err(format!(
                 "{at}: the skeleton already states an Owner for this entity; the overlay only covers projects absent from the skeleton's Owner facts"
@@ -259,6 +269,43 @@ pub fn parse_prose_facts(text: &str, sk: &Skeleton) -> Result<Vec<ProseFact>, St
         }
     }
     Ok(facts)
+}
+
+/// Check that every cited note's rendered text names the entity and the value (compared through
+/// [`norm`], so case, punctuation and line wrapping never matter). `notes_dir` is the fixture's
+/// `notes/` directory; a fact citing a note that is not rendered there is an error too.
+pub fn check_prose_citations(
+    facts: &[ProseFact],
+    notes_dir: &std::path::Path,
+) -> Result<(), String> {
+    for (i, f) in facts.iter().enumerate() {
+        let at = format!("{PROSE_FACTS_FILE} entry {i} ({:?})", f.entity);
+        for n in &f.notes {
+            let path = notes_dir.join(format!("{n}.md"));
+            let text = std::fs::read_to_string(&path).map_err(|e| {
+                format!(
+                    "{at}: cited note {n:?} cannot be read ({}): {e}",
+                    path.display()
+                )
+            })?;
+            let text = norm(&text);
+            for (what, needle) in [("entity", &f.entity), ("value", &f.value)] {
+                if !text.contains(&norm(needle)) {
+                    return Err(format!(
+                        "{at}: cited note {n:?} does not mention the {what} {needle:?}; cite the note that states it"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The hash `questions.meta.json` records for `prose-facts.json` (`prose_facts_hash`): the first 16
+/// hex digits of the file's SHA-256. It makes an edit to the overlay visible to
+/// `retrieval-gen --check` (#907).
+pub fn prose_facts_hash(text: &str) -> String {
+    super::skeleton::skeleton_hash(text)
 }
 
 /// The prose `Owner` facts, as (project, owner) pairs per status.
@@ -1180,6 +1227,27 @@ mod tests {
         assert!(parse_prose_facts(&dup, &sk)
             .unwrap_err()
             .contains("duplicates entry 0"));
+        // Names compare after normalising: a case or punctuation variant of a skeleton entity is a
+        // typo (it would otherwise skip the kind and Owner checks), and of an earlier entry a repeat.
+        let owned = sk
+            .notes
+            .iter()
+            .flat_map(|n| &n.facts)
+            .find(|sf| sf.attribute == "Owner")
+            .map(|sf| sf.entity.clone())
+            .unwrap();
+        let mut bad = good.clone();
+        bad.entity = owned.to_uppercase();
+        assert!(parse_prose_facts(&one(&bad), &sk)
+            .unwrap_err()
+            .contains("only after normalising"));
+        let mut other = good.clone();
+        other.entity = "TELEMETRY Clean-Up".into();
+        other.value = "Priya Varga".into();
+        let dup = serde_json::to_string(&[&good, &other]).unwrap();
+        assert!(parse_prose_facts(&dup, &sk)
+            .unwrap_err()
+            .contains("duplicates entry 0"));
         // Unknown status and unknown fields.
         let json = r#"[{"entity":"X","attribute":"Owner","value":"Marcus Haddad","notes":["journal-04"],"status":"maybe"}]"#;
         assert!(parse_prose_facts(json, &sk).is_err());
@@ -1196,5 +1264,34 @@ mod tests {
         assert!(!serde_json::to_string(&q)
             .unwrap()
             .contains("optional_answers"));
+    }
+    #[test]
+    fn citations_must_name_the_entity_and_the_value() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("n1.md"),
+            "The telemetry\nclean-up will continue with Marcus Haddad as owner.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("n2.md"), "Nothing relevant here.\n").unwrap();
+        let mut f = fact(TC, "Marcus Haddad", ProseStatus::Stated);
+        f.notes = vec!["n1".into()];
+        // Case, punctuation and line wrapping do not matter.
+        check_prose_citations(&[f.clone()], dir.path()).unwrap();
+        let mut bad = f.clone();
+        bad.notes = vec!["n2".into()];
+        assert!(check_prose_citations(&[bad], dir.path())
+            .unwrap_err()
+            .contains("does not mention the entity"));
+        let mut bad = f.clone();
+        bad.value = "Priya Varga".into();
+        assert!(check_prose_citations(&[bad], dir.path())
+            .unwrap_err()
+            .contains("does not mention the value"));
+        let mut bad = f;
+        bad.notes = vec!["missing".into()];
+        assert!(check_prose_citations(&[bad], dir.path())
+            .unwrap_err()
+            .contains("cannot be read"));
     }
 }

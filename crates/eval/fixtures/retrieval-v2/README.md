@@ -93,11 +93,14 @@ target/release/lcg-eval retrieval-render --dir crates/eval/fixtures/retrieval-v2
    listed under the question's `optional_answers` instead: for `set` scoring it counts towards
    neither precision nor recall. Only `Owner` facts are supported, `notes` must name real notes,
    the entity must be a project the skeleton gives no Owner (a second owner would make the gold
-   contradictory), each (entity, attribute) appears once, and `retrieval-gen` fails on any other
-   entry. The overlay changes `answers`/`optional_answers` only: `hops` still describe the
-   skeleton's facts, and it never adds or reselects a question. The prose itself is never edited
-   (that would change the corpus hash and invalidate the cassette). Changing the file means
-   regenerating `graph-questions.jsonl` and bumping `questions_version`.
+   contradictory), each (entity, attribute) appears once (names compare after normalising case and
+   punctuation), each cited note's text names the entity and the value, and `retrieval-gen` fails
+   on any other entry. `questions.meta.json` records `prose_facts_hash`, and `retrieval-gen --check`
+   fails when the file changes without it. The overlay changes `answers`/`optional_answers` only:
+   `hops` still describe the skeleton's facts, and it never adds or reselects a question. The prose
+   itself is never edited (that would change the corpus hash and invalidate the cassette). Changing
+   the file means regenerating `graph-questions.jsonl`, bumping `questions_version` and recording
+   the new `prose_facts_hash`.
 
    To produce graph-QA numbers, ingest under `ontology-v3.1.yaml` with `--keep-workspace`, then run
    `lcg-eval graph-qa --workspace <dir> --plans crates/eval/fixtures/retrieval-v2/e13-v5-plans.json`.

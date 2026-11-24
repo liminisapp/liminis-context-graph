@@ -9,4 +9,6 @@
   `graph-questions.jsonl` is regenerated: only g072, g109, i013 and i014 change (ids, text and splits
   do not), and the question-set version is now `meridian-questions-4`, so **graph-qa scores from
   before and after are not comparable on those four questions**. The corpus and cassette are
-  unchanged.
+  unchanged. Optional answers match by normalised equality (a fragment such as "Routing" still costs
+  precision), per-question graph-qa report rows list `optional_answers` where there are some, and
+  `questions.meta.json` records a `prose_facts_hash` that `retrieval-gen --check` verifies.

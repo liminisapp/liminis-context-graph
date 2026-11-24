@@ -2258,6 +2258,72 @@ fn retrieval_gen_check_reports_a_hand_edit_of_the_graph_questions() {
     );
 }
 
+#[test]
+fn retrieval_gen_check_fails_when_prose_facts_change_without_the_recorded_hash() {
+    let tmp = tempfile::tempdir().unwrap();
+    for f in [
+        "skeleton.json",
+        graph_questions::FILE,
+        graph_questions::PROSE_FACTS_FILE,
+        "questions.meta.json",
+    ] {
+        std::fs::copy(v2_dir().join(f), tmp.path().join(f)).unwrap();
+    }
+    let run = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_lcg-eval"))
+            .args([
+                "retrieval-gen",
+                "--spec",
+                v2_dir().join("scenario.json").to_str().unwrap(),
+                "--out",
+                tmp.path().to_str().unwrap(),
+                "--check",
+            ])
+            .output()
+            .unwrap()
+    };
+    assert!(run().status.success(), "the committed hash must match");
+    // A whitespace-only edit leaves the generated questions alone but still changes the gold's
+    // inputs: it must be caught, not waved through.
+    let p = tmp.path().join(graph_questions::PROSE_FACTS_FILE);
+    let text = std::fs::read_to_string(&p).unwrap();
+    std::fs::write(&p, format!("{text}\n")).unwrap();
+    let out = run();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("prose_facts_hash") && err.contains("questions_version"),
+        "{err}"
+    );
+    // Recording the new hash (as a version bump would) clears it.
+    let meta = tmp.path().join("questions.meta.json");
+    let new_hash = graph_questions::prose_facts_hash(&format!("{text}\n"));
+    let m = std::fs::read_to_string(&meta).unwrap();
+    let recorded = m
+        .lines()
+        .find(|l| l.contains("prose_facts_hash"))
+        .unwrap()
+        .to_string();
+    std::fs::write(
+        &meta,
+        m.replace(
+            &recorded,
+            &format!("  \"prose_facts_hash\": \"{new_hash}\""),
+        ),
+    )
+    .unwrap();
+    assert!(run().status.success());
+}
+
+#[test]
+fn the_committed_prose_facts_are_stated_by_their_cited_notes() {
+    let text = std::fs::read_to_string(v2_dir().join(graph_questions::PROSE_FACTS_FILE)).unwrap();
+    let sk = Skeleton::from_json(&std::fs::read_to_string(v2_dir().join("skeleton.json")).unwrap())
+        .unwrap();
+    let facts = graph_questions::parse_prose_facts(&text, &sk).unwrap();
+    graph_questions::check_prose_citations(&facts, &v2_dir().join("notes")).unwrap();
+}
+
 // ── prose-introduced facts (#907) ───────────────────────────────────────────────
 
 fn graph_questions_on_disk() -> BTreeMap<String, GraphQuestion> {

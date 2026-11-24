@@ -21,15 +21,21 @@ cassette (ADR-0044).
 1. **Gold = skeleton + `prose-facts.json`.** A committed, hand-edited fixture lists the exceptions
    (`entity`, `attribute`, `value`, `notes`, `status`). `retrieval-gen` reads it from `--out`; a
    missing file means no overlay, an invalid one is an error. Only `Owner` is accepted, and the
-   cited notes and owner must exist in the skeleton, so a typo fails loudly instead of silently
-   changing nothing.
+   cited notes and owner must exist in the skeleton, and each cited note's rendered text must name
+   the entity and the value, so a typo fails loudly instead of silently changing nothing. Names
+   compare through `scorer::norm`: a repeated `(entity, attribute)`, an entity that already has a
+   skeleton Owner, or one that equals a skeleton entity only after normalising is rejected, since
+   each would put a project under two owners or skip the kind check. A misspelling that
+   matches nothing is indistinguishable from a new project and is not caught.
 2. **`stated` is gold, `ambiguous` is optional.** A `stated` fact counts as a skeleton fact for the
    owned-by, projects-by-owner-city and projects-of-reports questions. An `ambiguous` fact goes to a
    new additive `optional_answers` field (omitted when empty, so 140 of 144 lines are byte-identical
    and old consumers still parse the file).
 3. **Optional answers are score-neutral in `set` scoring.** A returned answer matching an optional
    answer and no gold answer is dropped before precision; recall is over gold only. Gold wins when
-   both match, because matching is containment-based. `single` and `ordered` are unchanged.
+   both match, because gold matching is containment-based. Optional answers themselves match by
+   normalised equality, so a fragment of one is a wrong answer. `single` and `ordered` are
+   unchanged. The graph-qa report rows list `optional_answers` where there are some.
 4. **The overlay is applied inside those three families, not merged into the skeleton facts or
    project list.** Merging would add items to other families (owner-manager, supplier-*), shift
    the shared `Random(788)` shuffle and reselect later questions. As built, it never creates,
@@ -41,7 +47,11 @@ cassette (ADR-0044).
    hash are untouched, and `skeleton_hash` (and the copies in `render.json`, `review.json` and
    `questions.meta.json`, which are mechanical) change with the version string. The graph-qa report
    records no question-set version, so old and new scores are distinguished by the fixture and docs
-   only; a report-level marker is a possible follow-up.
+   only; a report-level marker is a possible follow-up. Because the gold also depends on
+   `prose-facts.json`, `questions.meta.json` records its `prose_facts_hash` and
+   `retrieval-gen --check` fails when the file changes without it, forcing the version bump and
+   the new hash to be a deliberate step. The check cannot see the old version, so it enforces the
+   hash, not the bump itself.
 
 ## Consequences
 

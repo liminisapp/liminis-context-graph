@@ -328,6 +328,10 @@ struct MetaFile<'a> {
     render_model: &'a str,
     prompt_version: &'a str,
     skeleton_hash: &'a str,
+    /// Hash of `prose-facts.json` when the fixture has one (#907); `retrieval-gen --check` fails
+    /// when the file changes without this being refreshed alongside a `questions_version` bump.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prose_facts_hash: Option<String>,
 }
 
 /// Writes manifest, notes, questions, `questions.meta.json` and `render.json` for `rendered`.
@@ -379,6 +383,9 @@ pub fn write_fixture(
             render_model: &meta.render_model,
             prompt_version: &meta.prompt_version,
             skeleton_hash: &meta.skeleton_hash,
+            prose_facts_hash: std::fs::read_to_string(dir.join(graph_questions::PROSE_FACTS_FILE))
+                .ok()
+                .map(|t| graph_questions::prose_facts_hash(&t)),
         }),
     )?;
     w("render.json", &pretty(meta))
@@ -594,11 +601,20 @@ fn run_gen(args: &[String]) -> Result<i32, String> {
     // #821 FR-008: the graph question set is generated from the same skeleton, plus the
     // hand-maintained prose overlay (#907): absent means none, present-but-invalid is an error.
     let prose_path = Path::new(&out).join(graph_questions::PROSE_FACTS_FILE);
-    let prose = match std::fs::read_to_string(&prose_path) {
-        Ok(t) => graph_questions::parse_prose_facts(&t, &g.skeleton)?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+    let prose_text = match std::fs::read_to_string(&prose_path) {
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(format!("{}: {e}", prose_path.display())),
     };
+    let prose = match &prose_text {
+        Some(t) => graph_questions::parse_prose_facts(t, &g.skeleton)?,
+        None => Vec::new(),
+    };
+    // Once the notes are rendered, each cited note must actually name the entity and the value.
+    let notes_dir = dir.join("notes");
+    if notes_dir.is_dir() {
+        graph_questions::check_prose_citations(&prose, &notes_dir)?;
+    }
     let graph_text = graph_questions::to_jsonl(&graph_questions::generate(&g.skeleton, &prose)?);
     if check {
         let on_disk = std::fs::read_to_string(dir.join("skeleton.json")).unwrap_or_default();
@@ -615,6 +631,22 @@ fn run_gen(args: &[String]) -> Result<i32, String> {
                 graph_questions::FILE
             );
             failed = true;
+        }
+        // #907: the gold depends on prose-facts.json, so an edit must be a deliberate, versioned one.
+        if let Ok(meta) = std::fs::read_to_string(dir.join("questions.meta.json")) {
+            let recorded = serde_json::from_str::<serde_json::Value>(&meta)
+                .ok()
+                .and_then(|v| v["prose_facts_hash"].as_str().map(str::to_string));
+            let current = prose_text.as_deref().map(graph_questions::prose_facts_hash);
+            if recorded != current {
+                eprintln!(
+                    "  drift: {} ({}) does not match the prose_facts_hash in questions.meta.json ({}): it changes the graph-question gold, so bump `questions_version` in scenario.json, regenerate, and record the new hash",
+                    graph_questions::PROSE_FACTS_FILE,
+                    current.as_deref().unwrap_or("absent"),
+                    recorded.as_deref().unwrap_or("none")
+                );
+                failed = true;
+            }
         }
         if dir.join("render.json").exists() {
             let sk = Skeleton::from_json(&on_disk).unwrap_or_else(|_| g.skeleton.clone());
