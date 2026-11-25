@@ -1,0 +1,481 @@
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-fukyquvz"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Integrator Guide | liminis-context-graph</title><link rel="canonical" href="https://docs.liminis.app/liminis-context-graph/v0.20.1/integrator-guide/"/><link rel="sitemap" href="/liminis-context-graph/v0.20.1/sitemap-index.xml"/><link rel="shortcut icon" href="/liminis-context-graph/v0.20.1/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v7.4.5"/><meta name="generator" content="Starlight v0.42.8"/><meta property="og:title" content="Integrator Guide"/><meta property="og:type" content="article"/><meta property="og:url" content="https://docs.liminis.app/liminis-context-graph/v0.20.1/integrator-guide/"/><meta property="og:locale" content="en"/><meta property="og:description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><meta property="og:site_name" content="liminis-context-graph"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="A local-first context graph engine. One Rust binary that turns a stream of text into a queryable graph of entities, relationships, and episodes."/><script>
+	window.StarlightThemeProvider = (() => {
+		const storedTheme =
+			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		const theme =
+			storedTheme ||
+			(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+		document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+		return {
+			updatePickers(theme = storedTheme || 'auto') {
+				document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+					const select = picker.querySelector('select');
+					if (select) select.value = theme;
+					/** @type {HTMLTemplateElement | null} */
+					const tmpl = document.querySelector(`#theme-icons`);
+					const newIcon = tmpl && tmpl.content.querySelector('.' + theme);
+					if (newIcon) {
+						const oldIcon = picker.querySelector('svg.label-icon');
+						if (oldIcon) {
+							oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+						}
+					}
+				});
+			},
+		};
+	})();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M5 12a1 1 0 0 0-1-1H3a1 1 0 0 0 0 2h1a1 1 0 0 0 1-1Zm.64 5-.71.71a1 1 0 0 0 0 1.41 1 1 0 0 0 1.41 0l.71-.71A1 1 0 0 0 5.64 17ZM12 5a1 1 0 0 0 1-1V3a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1Zm5.66 2.34a1 1 0 0 0 .7-.29l.71-.71a1 1 0 1 0-1.41-1.41l-.66.71a1 1 0 0 0 0 1.41 1 1 0 0 0 .66.29Zm-12-.29a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1.004 1.004 0 1 0-1.43 1.41l.73.71ZM21 11h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2Zm-2.64 6A1 1 0 0 0 17 18.36l.71.71a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.76-.66ZM12 6.5a5.5 5.5 0 1 0 5.5 5.5A5.51 5.51 0 0 0 12 6.5Zm0 9a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm0 3.5a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1Z"/></svg><svg aria-hidden="true" class="dark astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.049 8.049 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05Zm-9.5 6.69A8.14 8.14 0 0 1 7.08 5.22v.27a10.15 10.15 0 0 0 10.14 10.14 9.784 9.784 0 0 0 2.1-.22 8.11 8.11 0 0 1-7.18 4.32v-.04Z"/></svg><svg aria-hidden="true" class="auto astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg></template><link rel="stylesheet" href="/liminis-context-graph/v0.20.1/_astro/print.ehPL0gv-.css" media="print"><link rel="stylesheet" href="/liminis-context-graph/v0.20.1/_astro/common.B52tZYWF.css"><script type="module" src="/liminis-context-graph/v0.20.1/_astro/page.cNngjUgL.js"></script></head><body class="astro-fukyquvz"><a class="sl-skip-link astro-q5liodmp" href="#_top">Skip to content</a><div class="page sl-flex astro-njfv6ihu"><header class="header astro-njfv6ihu"><div class="header astro-ywwums27"><div class="title-wrapper sl-flex astro-ywwums27"><a href="/liminis-context-graph/v0.20.1/" class="site-title sl-flex astro-hdkc3bqx"><span class="astro-hdkc3bqx" translate="no">liminis-context-graph</span></a></div><div class="sl-flex print:hidden astro-ywwums27"><site-search class="astro-ywwums27 astro-5aflyiwm" data-translations="{&quot;placeholder&quot;:&quot;Search&quot;}"><button data-open-modal disabled aria-label="Search" aria-keyshortcuts="Control+K" class="astro-5aflyiwm"><svg aria-hidden="true" class="astro-5aflyiwm astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.71 20.29 18 16.61A9 9 0 1 0 16.61 18l3.68 3.68a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.39ZM11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z"/></svg><span class="sl-hidden md:sl-block astro-5aflyiwm" aria-hidden="true">Search</span><kbd class="sl-hidden md:sl-flex astro-5aflyiwm" style="display: none;"><kbd class="astro-5aflyiwm">Ctrl</kbd><kbd class="astro-5aflyiwm">K</kbd></kbd></button><dialog style="padding:0" aria-label="Search" class="astro-5aflyiwm"><div class="dialog-frame sl-flex astro-5aflyiwm"><button data-close-modal class="sl-flex md:sl-hidden astro-5aflyiwm">Cancel</button><div class="search-container astro-5aflyiwm"><div id="starlight__search" class="astro-5aflyiwm"></div></div></div></dialog></site-search><script>
+	(() => {
+		const openBtn = document.querySelector('button[data-open-modal]');
+		const shortcut = openBtn?.querySelector('kbd');
+		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
+		const platformKey = shortcut.querySelector('kbd');
+		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+			platformKey.textContent = '⌘';
+			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
+		}
+		shortcut.style.display = '';
+	})();
+</script><script type="module" src="/liminis-context-graph/v0.20.1/_astro/Search.astro_astro_type_script_index_0_lang.KoaSCy_e.js"></script></div><div class="sl-hidden md:sl-flex print:hidden right-group astro-ywwums27"><div class="sl-flex social-icons astro-ywwums27"><a href="https://github.com/liminisapp/liminis-context-graph" rel="me" class="sl-flex astro-5xq5qeho"><span class="sr-only astro-5xq5qeho">GitHub</span><svg aria-hidden="true" class="astro-5xq5qeho astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-6qubd2ms"><span class="sr-only astro-6qubd2ms">Select theme</span><svg aria-hidden="true" class="icon label-icon astro-6qubd2ms astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-6qubd2ms"><option value="dark" class="astro-6qubd2ms">Dark</option><option value="light" class="astro-6qubd2ms">Light</option><option value="auto" selected class="astro-6qubd2ms">Auto</option></select><svg aria-hidden="true" class="icon caret astro-6qubd2ms astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script><script type="module">var e=`starlight-theme`,t=e=>e===`auto`||e===`dark`||e===`light`?e:`auto`,n=()=>t(typeof localStorage<`u`&&localStorage.getItem(e));function r(t){typeof localStorage<`u`&&localStorage.setItem(e,t===`light`||t===`dark`?t:``)}var i=()=>matchMedia(`(prefers-color-scheme: light)`).matches?`light`:`dark`;function a(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e===`auto`?i():e,r(e)}matchMedia(`(prefers-color-scheme: light)`).addEventListener(`change`,()=>{n()===`auto`&&a(`auto`)});var o=class extends HTMLElement{constructor(){super(),a(n()),this.querySelector(`select`)?.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&a(t(e.currentTarget.value))})}};customElements.define(`starlight-theme-select`,o);</script><script type="module">var e=class extends HTMLElement{constructor(){super();let e=this.querySelector(`select`);e&&(e.addEventListener(`change`,e=>{e.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=e.currentTarget.value)}),window.addEventListener(`pageshow`,t=>{if(!t.persisted)return;let n=e.querySelector(`option[selected]`)?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}};customElements.define(`starlight-lang-select`,e);</script></div></div></header><nav class="sidebar print:hidden astro-njfv6ihu" aria-label="Main"><button popovertarget="starlight__sidebar" class="sl-menu-button sl-flex md:sl-hidden print:hidden astro-ihv5aybq"><svg aria-hidden="true" class="open-menu astro-ihv5aybq astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg><svg aria-hidden="true" class="close-menu astro-ihv5aybq astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="m13.41 12 6.3-6.29a1.004 1.004 0 1 0-1.42-1.42L12 10.59l-6.29-6.3a1.004 1.004 0 0 0-1.42 1.42l6.3 6.29-6.3 6.29a1 1 0 0 0 0 1.42.998.998 0 0 0 1.42 0l6.29-6.3 6.29 6.3a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.42L13.41 12Z"/></svg><span class="sr-only astro-ihv5aybq">Menu</span></button><script type="module">var e=class extends HTMLElement{constructor(){super();let e=matchMedia(`(min-width: 50em)`),t=()=>{this.popover=e.matches?null:`auto`};t(),e.addEventListener(`change`,()=>t()),this.addEventListener(`toggle`,({newState:e})=>this.trapFocus(e===`open`))}trapFocus(e){document.querySelectorAll(`.main-frame, .sl-skip-link`).forEach(t=>{t.toggleAttribute(`inert`,e)})}};customElements.define(`sl-sidebar-pane`,e);</script><sl-sidebar-pane popover id="starlight__sidebar" class="sidebar-pane astro-njfv6ihu"><div class="sidebar-content sl-flex astro-njfv6ihu"><sl-sidebar-state-persist data-hash="0wm31t7" class="astro-fx7qtsym"><script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script><ul class="top-level astro-u2gumobk"><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Overview</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/getting-started/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Getting Started</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/integrator-guide/" aria-current="page" class="large astro-u2gumobk"><span class="astro-u2gumobk">Integrator Guide</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/configuration/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Configuration</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/embedding-options/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Embedding Options</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/ipc-mcp-reference/" class="large astro-u2gumobk"><span class="astro-u2gumobk">IPC &amp; MCP Reference</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/telemetry/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Telemetry</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/ontology/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Ontology</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/operations/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Operations</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/testing-and-evaluation/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Testing &amp; Evaluation</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/eval-full-corpus-runbook/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Full-Corpus Benchmark Runbook</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/extraction-quality-evaluation/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Extraction-Quality Evaluation</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/retrieval-quality-evaluation/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Retrieval-Quality Evaluation</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/graph-integrity-evaluation/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Graph-Integrity Evaluation</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/retrieval-experiments/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Retrieval Experiments</span></a></li><li class="astro-u2gumobk"><a href="/liminis-context-graph/v0.20.1/release-process/" class="large astro-u2gumobk"><span class="astro-u2gumobk">Release Process</span></a></li><li class="astro-u2gumobk"><a href="https://github.com/liminisapp/liminis-context-graph/blob/main/docs/adr/index.md" class="large astro-u2gumobk" target="_blank" rel="noopener"><span class="astro-u2gumobk">Decision records</span><span class="sl-badge note small  astro-u2gumobk astro-umvtzzz4">GitHub</span></a></li></ul><script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script></sl-sidebar-state-persist><div class="md:sl-hidden"><div class="mobile-preferences sl-flex astro-h6srokaj"><div class="social-icons astro-h6srokaj"><a href="https://github.com/liminisapp/liminis-context-graph" rel="me" class="sl-flex astro-5xq5qeho"><span class="sr-only astro-5xq5qeho">GitHub</span><svg aria-hidden="true" class="astro-5xq5qeho astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a></div><starlight-theme-select><label style="--sl-select-width: 6.25em" class="astro-6qubd2ms"><span class="sr-only astro-6qubd2ms">Select theme</span><svg aria-hidden="true" class="icon label-icon astro-6qubd2ms astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg><select autocomplete="off" class="astro-6qubd2ms"><option value="dark" class="astro-6qubd2ms">Dark</option><option value="light" class="astro-6qubd2ms">Light</option><option value="auto" selected class="astro-6qubd2ms">Auto</option></select><svg aria-hidden="true" class="icon caret astro-6qubd2ms astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg></label></starlight-theme-select><script>
+	StarlightThemeProvider.updatePickers();
+</script></div></div></div></sl-sidebar-pane></nav><div class="main-frame astro-njfv6ihu"><script type="module">var e=document.getElementById(`starlight__sidebar`),t=e?.querySelector(`sl-sidebar-state-persist`),n=`sl-sidebar-state`,r=()=>{let r=[],i=t?.dataset.hash||``;try{let e=sessionStorage.getItem(n),t=JSON.parse(e||`{}`);Array.isArray(t.open)&&t.hash===i&&(r=t.open)}catch{}return{hash:i,open:r,scroll:e?.scrollTop||0}},i=e=>{try{sessionStorage.setItem(n,JSON.stringify(e))}catch{}},a=()=>i(r()),o=(e,t)=>{let n=r();n.open[t]=e,i(n)};t?.addEventListener(`click`,e=>{if(!(e.target instanceof Element))return;let t=e.target.closest(`summary`)?.closest(`details`);if(!t)return;let n=t.querySelector(`sl-sidebar-restore`),r=parseInt(n?.dataset.index||``);isNaN(r)||o(!t.open,r)}),addEventListener(`visibilitychange`,()=>{document.visibilityState===`hidden`&&a()});</script><div class="lg:sl-flex astro-3345ic74"><aside class="right-sidebar-container print:hidden astro-3345ic74"><div class="right-sidebar astro-3345ic74"><div class="lg:sl-hidden astro-t7rani4u"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-f27wupty"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-f27wupty"><details id="starlight__mobile-toc" class="astro-f27wupty"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-f27wupty"><span class="toggle sl-flex astro-f27wupty">On this page<svg aria-hidden="true" class="caret astro-f27wupty astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></span><span class="display-current astro-f27wupty"></span></summary><div class="dropdown astro-f27wupty"><ul class="isMobile astro-y7fviyz6" style="--depth: 0;"><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#_top" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Overview</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#the-minimal-client-profile" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">The minimal client profile</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#connecting" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Connecting</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#discover-the-server" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Discover the server</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#groups" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Groups</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#ingest-update-retire-delete" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Ingest, update, retire, delete</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#search" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Search</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#provenance-and-citations" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Provenance and citations</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#health" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Health</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#where-to-go-next" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Where to go next</span></a></li></ul></div></details></nav></mobile-starlight-toc><script type="module" src="/liminis-context-graph/v0.20.1/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C3fM4Kra.js"></script></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-t7rani4u"><div class="sl-container astro-t7rani4u"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-y7fviyz6" style="--depth: 0;"><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#_top" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Overview</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#the-minimal-client-profile" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">The minimal client profile</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#connecting" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Connecting</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#discover-the-server" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Discover the server</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#groups" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Groups</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#ingest-update-retire-delete" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Ingest, update, retire, delete</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#search" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Search</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#provenance-and-citations" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Provenance and citations</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#health" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Health</span></a></li><li style="--depth: 0;" class="astro-y7fviyz6"><a href="#where-to-go-next" style="--depth: 0;" class="astro-y7fviyz6"><span style="--depth: 0;" class="astro-y7fviyz6">Where to go next</span></a></li></ul></nav></starlight-toc><script type="module" src="/liminis-context-graph/v0.20.1/_astro/TableOfContents.astro_astro_type_script_index_0_lang.BpJaGz7G.js"></script></div></div></div></aside><div class="main-pane astro-3345ic74"><main data-pagefind-body class="astro-fukyquvz" lang="en" dir="ltr"><div class="content-panel astro-bhs5emkk"><div class="sl-container astro-bhs5emkk"><h1 id="_top" class="astro-iubplflu">Integrator Guide</h1></div></div><div class="content-panel astro-bhs5emkk"><div class="sl-container astro-bhs5emkk"><div class="sl-markdown-content"><p>This guide is for a developer building a <strong>client</strong> of <code dir="auto">liminis-context-graph</code> (LCG): something
+that ingests text, searches it, shows what an entity is connected to, and removes content again.
+LCG has about 60 methods; a client like that needs nine of them. This page names those nine,
+shows how to connect, and says which parameters to set. It links to the
+<a href="../ipc-mcp-reference/">IPC &#x26; MCP Reference</a> for every field instead of repeating it, so the
+reference stays the one place a response shape is defined.</p>
+<p>Before you build anything, check the list of methods below. Most of the features a first client
+tries to rebuild already exist: deleting by source (<code dir="auto">knowledge_delete_by_source</code>), ingesting a
+whole page (<code dir="auto">knowledge_process_document</code>), per-episode <code dir="auto">attributes</code> and <code dir="auto">title</code>, and listing the
+entities of a source (<code dir="auto">knowledge_get_entities_by_source</code>).</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="the-minimal-client-profile">The minimal client profile</h2><a class="sl-anchor-link" href="#the-minimal-client-profile"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “The minimal client profile”</span></a></div>
+<p>These nine methods are the <strong>minimal client profile</strong>. LCG keeps their names, required
+parameters, result fields and error codes compatible across releases
+(<a href="https://github.com/liminisapp/liminis-context-graph/blob/main/docs/adr/0862-minimal-client-profile-compatibility.md">ADR-0862</a>). Everything else may change in a
+minor release; build against these and you do not need to track it.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Method</th><th>Use it to</th><th>Scope</th></tr></thead><tbody><tr><td><code dir="auto">knowledge_capabilities</code></td><td>Ask the running server what it is and what it supports.</td><td>read</td></tr><tr><td><code dir="auto">health_check</code></td><td>Check that the server is alive, and ready for reads or writes.</td><td>not an MCP tool</td></tr><tr><td><code dir="auto">knowledge_process_chunk</code></td><td>Ingest one chunk of text (and re-send it to update it).</td><td>write</td></tr><tr><td><code dir="auto">knowledge_process_document</code></td><td>Ingest a whole document or web page, and re-send it to update it.</td><td>write</td></tr><tr><td><code dir="auto">knowledge_retire_document</code></td><td>Stop believing a document that no longer exists, without deleting it.</td><td>write</td></tr><tr><td><code dir="auto">knowledge_delete_by_source</code></td><td>Destroy everything ingested from a source.</td><td>write</td></tr><tr><td><code dir="auto">knowledge_search_passages</code></td><td>Search the ingested text.</td><td>read</td></tr><tr><td><code dir="auto">knowledge_find_entities</code></td><td>Search entities by name or meaning, and get the <code dir="auto">uuid</code> that <code dir="auto">knowledge_get_entity_neighbors</code> needs.</td><td>read</td></tr><tr><td><code dir="auto">knowledge_get_entity_neighbors</code></td><td>Show an entity’s connected facts and neighbouring entities.</td><td>read</td></tr></tbody></table>
+<p><code dir="auto">health_check</code> is dispatched on the socket but is <strong>not</strong> an MCP tool, so an MCP client cannot call
+it; it uses <code dir="auto">knowledge_status</code> and <code dir="auto">knowledge_capabilities</code> instead (see <a href="#health">Health</a>).</p>
+<p>The same list, in the form the compatibility test reads. Do not edit one without the other; the
+test fails when this block and the test’s list disagree.</p>
+<!-- minimal-profile:begin -->
+<div class="expressive-code"><link rel="stylesheet" href="/liminis-context-graph/v0.20.1/_astro/ec.w36nc.css"><script type="module" src="/liminis-context-graph/v0.20.1/_astro/ec.0vx5m.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="text"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">health_check</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">knowledge_capabilities</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">knowledge_delete_by_source</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">knowledge_find_entities</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">knowledge_get_entity_neighbors</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">knowledge_process_chunk</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">knowledge_process_document</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">knowledge_retire_document</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">knowledge_search_passages</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="health_checkknowledge_capabilitiesknowledge_delete_by_sourceknowledge_find_entitiesknowledge_get_entity_neighborsknowledge_process_chunkknowledge_process_documentknowledge_retire_documentknowledge_search_passages"><div></div></button></div></figure></div>
+<!-- minimal-profile:end -->
+<p>What the guarantee covers, and what it does not, is in the ADR. In short: method names, required
+parameters, the names and types of result fields and the documented error codes (for example
+<code dir="auto">document_too_large</code>) stay; new optional parameters and new result fields may be added at any
+time, so <strong>ignore fields you do not know</strong>.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="connecting">Connecting</h2><a class="sl-anchor-link" href="#connecting"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Connecting”</span></a></div>
+<p><strong>Socket.</strong> The service listens on <code dir="auto">&#x3C;workspace>/.lcg/service.sock</code>, a Unix domain socket. On
+Windows it is a named pipe whose name is written to <code dir="auto">.lcg/service.endpoint</code>
+(<a href="../ipc-mcp-reference/#windows-named-pipe">Windows: named pipe</a>). <code dir="auto">LCG_SOCKET_PATH</code> overrides the
+location. The protocol has no authentication; anything that can open the socket can use it.</p>
+<p><strong>Framing.</strong> <a href="https://www.jsonrpc.org/specification">JSON-RPC 2.0</a>, one JSON object per line, in
+each direction, terminated by <code dir="auto">\n</code>. A request needs <code dir="auto">jsonrpc</code>, <code dir="auto">id</code>, <code dir="auto">method</code> and <code dir="auto">params</code>:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="python"><code><div class="ec-line"><div class="code"><span style="--0:#C792EA;--1:#8844AE">import</span><span style="--0:#D6DEEB;--1:#403F53"> json, socket</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">s </span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D6DEEB;--1:#403F53"> socket.</span><span style="--0:#B2CCD6;--1:#096E72">socket</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#82AAFF;--1:#3B61B0">socket.AF_UNIX</span><span style="--0:#D9F5DD;--1:#111111">,</span><span style="--0:#82AAFF;--1:#3B61B0"> socket.SOCK_STREAM</span><span style="--0:#D6DEEB;--1:#403F53">)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">s.</span><span style="--0:#B2CCD6;--1:#096E72">connect</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">.lcg/service.sock</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">f </span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D6DEEB;--1:#403F53"> s.</span><span style="--0:#B2CCD6;--1:#096E72">makefile</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">rw</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">,</span><span style="--0:#82AAFF;--1:#3B61B0"> </span><span style="--0:#D7DBE0;--1:#403F53">encoding</span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">utf-8</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">,</span><span style="--0:#82AAFF;--1:#3B61B0"> </span><span style="--0:#D7DBE0;--1:#403F53">newline</span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#F78C6C;--1:#AA0982">\n</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">)</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#C792EA;--1:#8844AE">def</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">call</span><span style="--0:#D9F5DD;--1:#111111">(</span><span style="--0:#7FDBCA;--1:#096E72">method</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#7FDBCA;--1:#096E72">params=</span><span style="--0:#FF6A83;--1:#A24848">None</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#7FDBCA;--1:#096E72">id=</span><span style="--0:#F78C6C;--1:#AA0982">1</span><span style="--0:#D9F5DD;--1:#111111">)</span><span style="--0:#D6DEEB;--1:#403F53">:</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">f.</span><span style="--0:#B2CCD6;--1:#096E72">write</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#82AAFF;--1:#3B61B0">json.</span><span style="--0:#B2CCD6;--1:#096E72">dumps</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#82AAFF;--1:#3B61B0">{</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">jsonrpc</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">2.0</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">id</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--1:#3B61B0"><span style="--0:#82AAFF">: </span><span style="--0:#C5E478">id</span><span style="--0:#82AAFF">, </span></span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">method</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: method, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">params</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: params </span><span style="--0:#C792EA;--1:#8844AE">or</span><span style="--0:#82AAFF;--1:#3B61B0"> {}}</span><span style="--0:#D6DEEB;--1:#403F53">)</span><span style="--0:#82AAFF;--1:#3B61B0"> </span><span style="--0:#C792EA;--1:#8844AE">+</span><span style="--0:#82AAFF;--1:#3B61B0"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#F78C6C;--1:#AA0982">\n</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">)</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">f.</span><span style="--0:#B2CCD6;--1:#096E72">flush</span><span style="--0:#D6DEEB;--1:#403F53">()</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#D6DEEB;--1:#403F53">    </span></span><span style="--0:#D6DEEB;--1:#403F53">reply </span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D6DEEB;--1:#403F53"> json.</span><span style="--0:#B2CCD6;--1:#096E72">loads</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#82AAFF;--1:#3B61B0">f.</span><span style="--0:#B2CCD6;--1:#096E72">readline</span><span style="--0:#D6DEEB;--1:#403F53">())</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#C792EA;--1:#8844AE">if</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">error</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#C792EA;--1:#8844AE">in</span><span style="--0:#D6DEEB;--1:#403F53"> reply:</span></div></div><div class="ec-line"><div class="code"><span class="indent">        </span><span style="--0:#C792EA;--1:#8844AE">raise</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#C5E478;--1:#3B61B0">RuntimeError</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#82AAFF;--1:#3B61B0">reply</span><span style="--0:#D6DEEB;--1:#403F53">[</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">error</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">])</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#C792EA;--1:#8844AE">return</span><span style="--0:#D6DEEB;--1:#403F53"> reply[</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">result</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">]</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="import json, sockets = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)s.connect(&#x22;.lcg/service.sock&#x22;)f = s.makefile(&#x22;rw&#x22;, encoding=&#x22;utf-8&#x22;, newline=&#x22;\n&#x22;)def call(method, params=None, id=1):    f.write(json.dumps({&#x22;jsonrpc&#x22;: &#x22;2.0&#x22;, &#x22;id&#x22;: id, &#x22;method&#x22;: method, &#x22;params&#x22;: params or {}}) + &#x22;\n&#x22;)    f.flush()    reply = json.loads(f.readline())    if &#x22;error&#x22; in reply:        raise RuntimeError(reply[&#x22;error&#x22;])    return reply[&#x22;result&#x22;]"><div></div></button></div></figure></div>
+<p>A failure comes back as a JSON-RPC <code dir="auto">error</code> object with a <code dir="auto">message</code>; some messages begin with a
+stable code, such as <code dir="auto">document_too_large:</code> or <code dir="auto">empty_document:</code>.</p>
+<p><strong>One request at a time per connection.</strong> The service answers the requests on a connection
+strictly in order. A search sent on the same connection as a slow ingest waits behind it. Open a
+second connection for reads, and one connection per concurrent ingest. Connections do not block
+each other. See
+<a href="../ipc-mcp-reference/#connections-concurrency-and-timeouts-issue-861">Connections, concurrency and timeouts</a>.</p>
+<p><strong>Timeouts.</strong> Ingest time is dominated by the embedder and the LLM, so there is no fixed bound.
+Set the client timeout to the slowest ingest you expect, or send <code dir="auto">"_progress_token": "x"</code> with
+<code dir="auto">knowledge_process_chunk</code> or <code dir="auto">knowledge_process_document</code> and treat silence between lines as the
+timeout: the service streams <code dir="auto">{"type":"progress",...}</code> lines and a <code dir="auto">heartbeat</code> about every 10
+seconds, then the terminal result. If a call times out, <strong>close the connection</strong> and retry on a
+new one: closing cancels the original before its commit, and an identical resubmission is a no-op
+(see <a href="#ingest-update-retire-delete">Ingest, update, retire, delete</a>). Keep reading while a
+request runs; a client that stops reading is treated as disconnected.</p>
+<p>An MCP client uses <code dir="auto">--mcp-stdio</code> instead of the socket and gets the same methods as tools; the
+rest of this guide applies unchanged
+(<a href="../ipc-mcp-reference/#mcp-over-stdio-transport">MCP-over-stdio transport</a>).</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="discover-the-server">Discover the server</h2><a class="sl-anchor-link" href="#discover-the-server"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Discover the server”</span></a></div>
+<p>Call <code dir="auto">knowledge_capabilities</code> first. It takes no parameters, reads no database and answers even
+when the service is degraded:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="json"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">{</span><span style="--0:#7FDBCA;--1:#096E72">"server_version"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">0.19.1</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#7FDBCA;--1:#096E72">"protocol_version"</span><span style="--0:#D6DEEB;--1:#403F53">: </span><span style="--0:#F78C6C;--1:#AA0982">1</span><span style="--0:#D6DEEB;--1:#403F53">,</span></div></div><div class="ec-line"><div class="code"><span class="indent"> </span><span style="--0:#7FDBCA;--1:#096E72">"features"</span><span style="--0:#D6DEEB;--1:#403F53">: [</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">cancel_on_disconnect</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">…</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">], </span><span style="--0:#7FDBCA;--1:#096E72">"methods"</span><span style="--0:#D6DEEB;--1:#403F53">: [</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">health_check</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#C789D6;--1:#7C5686">…</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">]}</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="{&#x22;server_version&#x22;: &#x22;0.19.1&#x22;, &#x22;protocol_version&#x22;: 1, &#x22;features&#x22;: [&#x22;cancel_on_disconnect&#x22;, &#x22;…&#x22;], &#x22;methods&#x22;: [&#x22;health_check&#x22;, &#x22;…&#x22;]}"><div></div></button></div></figure></div>
+<ul>
+<li><code dir="auto">protocol_version</code> changes only on a breaking protocol change. Refuse to run against a version
+you do not know.</li>
+<li><code dir="auto">features</code> is a sorted, append-only list of stable strings. Test for a feature before you use
+what it adds, for example <code dir="auto">process_document</code>, <code dir="auto">retire_document</code>, <code dir="auto">entity_provenance</code>,
+<code dir="auto">walk_provenance</code>, <code dir="auto">unchanged_noop</code> and <code dir="auto">document_max_bytes_env</code>. A missing feature means an
+older server: fall back or tell the user.</li>
+<li><code dir="auto">methods</code> lists every method the dispatcher accepts, so a client never has to probe with a
+trial call.</li>
+</ul>
+<p>The feature table is in <a href="../ipc-mcp-reference/#capabilities">Capabilities</a>.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="groups">Groups</h2><a class="sl-anchor-link" href="#groups"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Groups”</span></a></div>
+<p>A <strong>group</strong> (<code dir="auto">group_id</code>) is a separate graph inside one workspace, with its own entities, episodes
+and WAL stream. <strong>Always pass your own <code dir="auto">group_id</code>.</strong> The default group <code dir="auto">liminis</code> is the Liminis
+app’s own graph: anything you write there is entity-resolved together with the user’s notes.
+Omitting <code dir="auto">group_id</code> on a write still works, goes to <code dir="auto">liminis</code> and returns an
+<code dir="auto">implicit_default_group_warning</code>, so you see it in testing.</p>
+<p>What an omitted group means differs by method; for the profile methods:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Method</th><th>Group parameter</th><th>If you omit it</th></tr></thead><tbody><tr><td><code dir="auto">knowledge_process_chunk</code></td><td><code dir="auto">group_id</code></td><td>Writes to <code dir="auto">liminis</code>, with a warning.</td></tr><tr><td><code dir="auto">knowledge_process_document</code></td><td><code dir="auto">group_id</code></td><td>Writes to <code dir="auto">liminis</code>, with a warning.</td></tr><tr><td><code dir="auto">knowledge_retire_document</code></td><td><code dir="auto">group_id</code></td><td><strong>Refused.</strong> Required.</td></tr><tr><td><code dir="auto">knowledge_delete_by_source</code></td><td><code dir="auto">group_ids</code> (array)</td><td><strong>Refused.</strong> Required and non-empty; there is no all-groups delete.</td></tr><tr><td><code dir="auto">knowledge_search_passages</code></td><td><code dir="auto">group_ids</code> (array)</td><td>Searches <strong>every</strong> group.</td></tr><tr><td><code dir="auto">knowledge_find_entities</code></td><td><code dir="auto">group_ids</code> (array)</td><td>Searches <strong>every</strong> group.</td></tr><tr><td><code dir="auto">knowledge_get_entity_neighbors</code></td><td><code dir="auto">group_ids</code> (array)</td><td>Every group.</td></tr><tr><td><code dir="auto">knowledge_capabilities</code>, <code dir="auto">health_check</code></td><td>none</td><td>Takes no group.</td></tr></tbody></table>
+<p>So: writes take a singular <code dir="auto">group_id</code>, reads and deletes take a plural <code dir="auto">group_ids</code> array, and a
+read that omits it spans every group. Pass <code dir="auto">group_ids: ["your-group"]</code> on every read, or you will
+see other clients’ data. An explicit <code dir="auto">group_id: ""</code> is a distinct group, not the default. The
+full table for all methods is
+<a href="../ipc-mcp-reference/#omitted-group-behaviour-per-method-issue-856">Omitted-group behaviour per method</a>.</p>
+<p>An operator can start the service with <code dir="auto">--writable-groups=&#x3C;your-group></code> (or
+<code dir="auto">LCG_WRITABLE_GROUPS</code>) so that a write to any other group, including the defaulted one, is
+refused (<a href="https://github.com/liminisapp/liminis-context-graph/blob/main/docs/adr/0742-per-group-write-allow-list.md">ADR-0742</a>). A refused write returns error code
+<code dir="auto">-32004</code>.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="ingest-update-retire-delete">Ingest, update, retire, delete</h2><a class="sl-anchor-link" href="#ingest-update-retire-delete"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Ingest, update, retire, delete”</span></a></div>
+<p>The four operations side by side. In every row the group is the one you ingested into.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>You want to</th><th>Call</th><th>What happens</th><th>Reversible?</th></tr></thead><tbody><tr><td><strong>Ingest</strong> a whole document or web page</td><td><code dir="auto">knowledge_process_document</code> with <code dir="auto">doc_id</code>, <code dir="auto">content</code>, <code dir="auto">group_id</code></td><td>The server chunks it by section, extracts each section, and records a revision.</td><td>Yes: retire or delete it.</td></tr><tr><td><strong>Ingest</strong> one chunk you cut yourself</td><td><code dir="auto">knowledge_process_chunk</code> with <code dir="auto">chunk_text</code>, <code dir="auto">chunk_id</code>, <code dir="auto">source_file</code>, <code dir="auto">group_id</code></td><td>One episode. Facts are extracted and written.</td><td>Yes.</td></tr><tr><td><strong>Update</strong> a document</td><td><code dir="auto">knowledge_process_document</code> again, with the same <code dir="auto">doc_id</code> and the new full <code dir="auto">content</code></td><td>Only changed sections are re-extracted, the old versions are superseded, and sections you removed are retired. An identical resend makes no extraction call (<code dir="auto">status: "unchanged"</code>).</td><td>Yes: history is kept.</td></tr><tr><td><strong>Update</strong> a chunk</td><td><code dir="auto">knowledge_process_chunk</code> again, with the same <code dir="auto">chunk_id</code> and new text</td><td>The earlier episode is superseded once the new one succeeds. An identical resend is a no-op (<code dir="auto">status: "unchanged"</code>).</td><td>Yes: history is kept.</td></tr><tr><td><strong>Retire</strong> a document that no longer exists</td><td><code dir="auto">knowledge_retire_document</code> with <code dir="auto">group_id</code>, <code dir="auto">doc_id</code></td><td>Every live episode of it is superseded (<code dir="auto">document_removed</code>). The episodes and facts stay readable as history; searches stop believing them. Idempotent.</td><td>Nothing is deleted; the history stays.</td></tr><tr><td><strong>Delete</strong> a source for good</td><td><code dir="auto">knowledge_delete_by_source</code> with <code dir="auto">source_file</code>, <code dir="auto">group_ids</code></td><td>The episodes whose stored <code dir="auto">source_file</code> equals the value exactly, superseded ones included, are destroyed. Returns the entities it left stranded.</td><td><strong>No.</strong></td></tr></tbody></table>
+<p>How to choose:</p>
+<ul>
+<li><strong>Prefer <code dir="auto">knowledge_process_document</code> for anything longer than a few paragraphs</strong>, including
+web pages. You send the whole document every time; you do not chunk, diff or track what
+changed. Use <code dir="auto">knowledge_process_chunk</code> only when you already have natural chunks with stable
+ids (a chat message, a log entry). A chunk over about 8,000 characters still succeeds but
+returns a <code dir="auto">warning</code> that points you to <code dir="auto">knowledge_process_document</code>.</li>
+<li><strong>Update is just ingest again.</strong> There is no separate update call. Re-send the full document and
+let the server work out what changed.</li>
+<li><strong>Retire when the content is gone but the history matters</strong>; <strong>delete when the record itself
+must go</strong> (a privacy request, a mistake). Retiring deletes nothing; deleting cannot be undone.</li>
+<li><code dir="auto">knowledge_delete_by_source</code> needs <code dir="auto">group_ids</code>, matches <code dir="auto">source_file</code> byte for byte (deleting
+<code dir="auto">https://a.com</code> leaves <code dir="auto">https://a.com:8443/x</code> alone), and by default leaves the entities that
+lost their last mention in place. They are returned as <code dir="auto">orphaned_entity_uuids</code>; pass
+<code dir="auto">"prune_orphans": true</code> to remove them in the same call
+(<a href="../ipc-mcp-reference/#deletion-delete_chunk_episode-delete_by_source">Deletion</a>).</li>
+<li>A document is identified by <code dir="auto">doc_id</code>, a chunk by <code dir="auto">chunk_id</code>, and a source by <code dir="auto">source_file</code>.
+<code dir="auto">knowledge_process_document</code> uses <code dir="auto">source_path</code> (or <code dir="auto">doc_id</code>) as the episode’s source, so
+<code dir="auto">delete_by_source</code> on that value removes the document’s episodes. Pick ids you can reproduce.</li>
+</ul>
+<p><strong>Document size.</strong> <code dir="auto">knowledge_process_document</code> accepts up to <strong>2 MiB</strong> (2,097,152 bytes of
+UTF-8) by default, enough for a web page of about 600,000 characters. A larger document is
+<strong>refused</strong> with <code dir="auto">document_too_large</code>, the message names the cap and <code dir="auto">LCG_DOCUMENT_MAX_BYTES</code>, and
+nothing is written or truncated. The operator raises or lowers the cap with that variable
+(<code dir="auto">4MiB</code>, <code dir="auto">1024KiB</code> or a plain byte count, up to 256 MiB), which is checked once at startup. A
+client cannot change it; detect the feature with <code dir="auto">document_max_bytes_env</code> and cut the document at
+a section boundary yourself if you must stay under a smaller cap. See
+<a href="../configuration/">Configuration</a> and <a href="../ipc-mcp-reference/#document-mode-send-the-whole-document-the-server-does-the-diff-issue-785">Document mode</a>.</p>
+<p>A minimal ingest, update and delete:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="python"><code><div class="ec-line"><div class="code"><span style="--0:#B2CCD6;--1:#096E72">call</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">knowledge_process_document</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">,</span><span style="--0:#82AAFF;--1:#3B61B0"> {</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">group_id</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">my-app</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">doc_id</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">page-42</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">title</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">Release notes</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">source_path</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">https://example.com/notes</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">content</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: page_text,</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">attributes</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: {</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">crawl</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">2026-11-23</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">},   </span><span style="--0:#919F9F;--1:#5F636F"># an object, not a JSON string</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">}</span><span style="--0:#D6DEEB;--1:#403F53">)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#B2CCD6;--1:#096E72">call</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">knowledge_process_document</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">,</span><span style="--0:#82AAFF;--1:#3B61B0"> {   </span><span style="--0:#919F9F;--1:#5F636F"># later: the page changed, send it all again</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">group_id</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">my-app</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">doc_id</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">page-42</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">title</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">Release notes</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">source_path</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">https://example.com/notes</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">content</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: new_page_text,</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">}</span><span style="--0:#D6DEEB;--1:#403F53">)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#B2CCD6;--1:#096E72">call</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">knowledge_delete_by_source</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">,</span><span style="--0:#82AAFF;--1:#3B61B0"> {</span></div></div><div class="ec-line"><div class="code"><span class="indent">    </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">group_ids</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">[</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">my-app</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">]</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">source_file</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">https://example.com/notes</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">,</span></div></div><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">}</span><span style="--0:#D6DEEB;--1:#403F53">)</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="call(&#x22;knowledge_process_document&#x22;, {    &#x22;group_id&#x22;: &#x22;my-app&#x22;, &#x22;doc_id&#x22;: &#x22;page-42&#x22;, &#x22;title&#x22;: &#x22;Release notes&#x22;,    &#x22;source_path&#x22;: &#x22;https://example.com/notes&#x22;, &#x22;content&#x22;: page_text,    &#x22;attributes&#x22;: {&#x22;crawl&#x22;: &#x22;2026-11-23&#x22;},   # an object, not a JSON string})call(&#x22;knowledge_process_document&#x22;, {   # later: the page changed, send it all again    &#x22;group_id&#x22;: &#x22;my-app&#x22;, &#x22;doc_id&#x22;: &#x22;page-42&#x22;, &#x22;title&#x22;: &#x22;Release notes&#x22;,    &#x22;source_path&#x22;: &#x22;https://example.com/notes&#x22;, &#x22;content&#x22;: new_page_text,})call(&#x22;knowledge_delete_by_source&#x22;, {    &#x22;group_ids&#x22;: [&#x22;my-app&#x22;], &#x22;source_file&#x22;: &#x22;https://example.com/notes&#x22;,})"><div></div></button></div></figure></div>
+<div class="sl-heading-wrapper level-h2"><h2 id="search">Search</h2><a class="sl-anchor-link" href="#search"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Search”</span></a></div>
+<p>Two searches, for two questions.</p>
+<p><strong>Passages: “which text says this?”</strong> <code dir="auto">knowledge_search_passages</code> ranks the ingested text.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Parameter</th><th>Recommendation</th></tr></thead><tbody><tr><td><code dir="auto">query</code></td><td>Required. A natural-language question or phrase.</td></tr><tr><td><code dir="auto">group_ids</code></td><td><strong>Always set</strong>, for example <code dir="auto">["my-app"]</code>. Omitted means every group.</td></tr><tr><td><code dir="auto">num_results</code></td><td>Default 10, at most 100. Ask for what you will show.</td></tr><tr><td><code dir="auto">min_score</code></td><td>The floor on the vector cosine similarity (0.0 to 1.0). Omit it to use the server default, <code dir="auto">LCG_SEARCH_MIN_SCORE</code>, which is <strong>0.5</strong> when unset. A model that scores relevant text high and unrelated text only slightly lower needs a higher floor (0.7 or so); the operator who chose the embedder sets it for everyone, and your explicit value, including <code dir="auto">0.0</code>, always wins. <code dir="auto">knowledge_status</code> reports the effective default as <code dir="auto">search_min_score_default</code>.</td></tr><tr><td><code dir="auto">mode</code></td><td><code dir="auto">vector</code> or <code dir="auto">hybrid</code>; omit it to use the server default. In <code dir="auto">hybrid</code>, <code dir="auto">score</code> is a rank-only value (at most about 0.023) and is <strong>not</strong> a relevance. Use <code dir="auto">similarity</code> (the cosine, present when the vector leg matched) and <code dir="auto">legs</code> to judge a hit. <code dir="auto">min_score</code> does not stop lexical-only hits.</td></tr></tbody></table>
+<p>The result is <code dir="auto">{passages, count}</code>. Each passage carries the <code dir="auto">attributes</code> and <code dir="auto">origin</code> of its
+episode, so there is no second fetch for them. Superseded passages are still returned (ranked
+below their successor); see <a href="../ipc-mcp-reference/#hybrid-passage-search-knowledge_search_passages-issue-789">Hybrid passage search</a>.</p>
+<p><strong>Entities: “what do I know about X?”</strong> <code dir="auto">knowledge_find_entities</code> finds entities by name or
+meaning and returns each one’s <code dir="auto">uuid</code>. Set <code dir="auto">group_ids</code> and <code dir="auto">num_results</code> (<code dir="auto">num_results</code>, not
+<code dir="auto">limit</code>; an unknown key is ignored and the default of 10 applies). Add <strong><code dir="auto">include_episodes: true</code></strong> to get, for each entity, the live episodes that mention it: <code dir="auto">episode_uuids</code>,
+<code dir="auto">source_descriptions</code> and <code dir="auto">source_files</code> (at most 50 per entity, newest first; <code dir="auto">episodes_truncated</code>
+says when it was cut). Without the flag those fields are empty lists, which is the single most
+common thing integrators trip over. Feature <code dir="auto">entity_provenance</code>
+(<a href="../ipc-mcp-reference/#entity-provenance-which-episodes-mention-an-entity-issue-857-feature-entity_provenance">Entity provenance</a>).</p>
+<p><strong>Neighbours: “what is it connected to?”</strong> <code dir="auto">knowledge_get_entity_neighbors</code> takes the <code dir="auto">entity_uuid</code>
+from <code dir="auto">knowledge_find_entities</code>, plus <code dir="auto">group_ids</code> and <code dir="auto">num_results</code> (default 50), and returns the
+facts (edges) around it and the entities at their other ends. Unlike <code dir="auto">find_entities include_episodes</code>, its <code dir="auto">episode_uuids</code> include superseded episodes, and an edge’s list is every
+episode that mentions either endpoint, not evidence for that one fact.</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="python"><code><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">hits </span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#B2CCD6;--1:#096E72">call</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">knowledge_find_entities</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">,</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#82AAFF;--1:#3B61B0">            </span></span><span style="--0:#82AAFF;--1:#3B61B0">{</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">query</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">release schedule</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">group_ids</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">[</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">my-app</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">]</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">num_results</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#F78C6C;--1:#AA0982">5</span><span style="--0:#82AAFF;--1:#3B61B0">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">             </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">include_episodes</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#FF6A83;--1:#A24848">True</span><span style="--0:#82AAFF;--1:#3B61B0">}</span><span style="--0:#D6DEEB;--1:#403F53">)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">entity </span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D6DEEB;--1:#403F53"> hits[</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">nodes</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">]</span><span style="--0:#D9F5DD;--1:#111111">[</span><span style="--0:#F78C6C;--1:#AA0982">0</span><span style="--0:#D9F5DD;--1:#111111">]</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">around </span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#B2CCD6;--1:#096E72">call</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">knowledge_get_entity_neighbors</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">,</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#82AAFF;--1:#3B61B0">              </span></span><span style="--0:#82AAFF;--1:#3B61B0">{</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">entity_uuid</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: entity</span><span style="--0:#D6DEEB;--1:#403F53">[</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">uuid</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53">]</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">group_ids</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">[</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">my-app</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">]</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">num_results</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#F78C6C;--1:#AA0982">20</span><span style="--0:#82AAFF;--1:#3B61B0">}</span><span style="--0:#D6DEEB;--1:#403F53">)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#D6DEEB;--1:#403F53">passages </span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#B2CCD6;--1:#096E72">call</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">knowledge_search_passages</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">,</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#82AAFF;--1:#3B61B0">                </span></span><span style="--0:#82AAFF;--1:#3B61B0">{</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">query</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">when is the next release?</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">group_ids</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#D9F5DD;--1:#111111">[</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">my-app</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D9F5DD;--1:#111111">]</span><span style="--0:#82AAFF;--1:#3B61B0">,</span></div></div><div class="ec-line"><div class="code"><span class="indent">                 </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">num_results</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#F78C6C;--1:#AA0982">5</span><span style="--0:#82AAFF;--1:#3B61B0">, </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">min_score</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#82AAFF;--1:#3B61B0">: </span><span style="--0:#F78C6C;--1:#AA0982">0.6</span><span style="--0:#82AAFF;--1:#3B61B0">}</span><span style="--0:#D6DEEB;--1:#403F53">)</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="hits = call(&#x22;knowledge_find_entities&#x22;,            {&#x22;query&#x22;: &#x22;release schedule&#x22;, &#x22;group_ids&#x22;: [&#x22;my-app&#x22;], &#x22;num_results&#x22;: 5,             &#x22;include_episodes&#x22;: True})entity = hits[&#x22;nodes&#x22;][0]around = call(&#x22;knowledge_get_entity_neighbors&#x22;,              {&#x22;entity_uuid&#x22;: entity[&#x22;uuid&#x22;], &#x22;group_ids&#x22;: [&#x22;my-app&#x22;], &#x22;num_results&#x22;: 20})passages = call(&#x22;knowledge_search_passages&#x22;,                {&#x22;query&#x22;: &#x22;when is the next release?&#x22;, &#x22;group_ids&#x22;: [&#x22;my-app&#x22;],                 &#x22;num_results&#x22;: 5, &#x22;min_score&#x22;: 0.6})"><div></div></button></div></figure></div>
+<p><code dir="auto">knowledge_find_entities</code> and <code dir="auto">knowledge_get_entity_neighbors</code> return <code dir="auto">nodes</code> (and <code dir="auto">count</code>; the
+neighbours call also returns <code dir="auto">edges</code>, <code dir="auto">center_uuid</code>, <code dir="auto">node_count</code> and <code dir="auto">edge_count</code>). The snippets
+show the call shape; the response schemas are in
+<a href="../ipc-mcp-reference/#response-contract-json-schemas-issue-852">Response contract</a>.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="provenance-and-citations">Provenance and citations</h2><a class="sl-anchor-link" href="#provenance-and-citations"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Provenance and citations”</span></a></div>
+<p>Every fact traces back to the text it came from, so a client can cite its sources.</p>
+<ul>
+<li><strong>Source identity.</strong> Each episode stores the <code dir="auto">source_file</code> and <code dir="auto">chunk_id</code> it was ingested with
+(feature <code dir="auto">episode_source_fields</code>). A passage result carries them (and so do the items of
+<code dir="auto">knowledge_get_episodes</code>), so a citation is the <code dir="auto">source_file</code> plus the passage text
+(<a href="../ipc-mcp-reference/#source-identity-source_file-and-chunk_id-issue-853">Source identity</a>).</li>
+<li><strong>Entity to episodes.</strong> <code dir="auto">knowledge_find_entities</code> with <code dir="auto">include_episodes: true</code> gives the live
+episodes behind each entity (above). Turn the UUIDs into episodes with <code dir="auto">knowledge_get_episodes</code>
+and its <code dir="auto">uuids</code> parameter.</li>
+<li><strong>Fact to episodes.</strong> <code dir="auto">knowledge_walk</code> with <code dir="auto">include_provenance: true</code> adds, to every edge,
+<code dir="auto">episodes</code> (the live producing episodes, at most 20), <code dir="auto">source_files</code> (the distinct sources of
+<em>all</em> live producers) and <code dir="auto">episodes_truncated</code>. Check the <code dir="auto">walk_provenance</code> feature first
+(<a href="../ipc-mcp-reference/#provenance-include_provenance">Provenance</a>). The walk is outside the
+minimal profile.</li>
+<li><strong>Document spans.</strong> An episode ingested through <code dir="auto">knowledge_process_document</code> carries
+<code dir="auto">revision_id</code>, <code dir="auto">byte_start</code> and <code dir="auto">byte_end</code>: <code dir="auto">content[byte_start..byte_end]</code> of the revision is
+the episode’s text, and <code dir="auto">heading_path</code> locates it, so a citation can link to a section.</li>
+</ul>
+<p>Superseded and retired episodes are never listed as live provenance. To show what was believed
+before a change, read the history reads with <code dir="auto">as_of</code>
+(<a href="../ipc-mcp-reference/#belief-time-corrections-supersede-they-do-not-delete-issue-705">Belief time</a>).</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="health">Health</h2><a class="sl-anchor-link" href="#health"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Health”</span></a></div>
+<p>Run these checks, in this order, before you send work and while you run.</p>
+<ol>
+<li>
+<p><strong>Connect, then ask <code dir="auto">health_check</code>.</strong> A successful <code dir="auto">connect()</code> does <strong>not</strong> mean the service is
+ready: the socket is bound before the database opens. Poll <code dir="auto">health_check</code> until the state you
+need.</p>
+</li>
+<li>
+<p><strong>Read three fields</strong>, each a different fact
+(<a href="../ipc-mcp-reference/#health-check-contract">Health check contract</a>,
+<a href="https://github.com/liminisapp/liminis-context-graph/blob/main/docs/adr/0855-health-check-ready-for-reads.md">ADR-0855</a>):</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Gate on it for</th><th>Meaning</th></tr></thead><tbody><tr><td><code dir="auto">ok</code></td><td>Restart decisions and liveness probes.</td><td>The process is alive and answered.</td></tr><tr><td><code dir="auto">ready_for_reads</code></td><td>Sending reads.</td><td>The database is loaded. <code dir="auto">true</code> even while <code dir="auto">busy</code>.</td></tr><tr><td><code dir="auto">healthy</code></td><td>Sending writes.</td><td>The database is loaded and no write is pending or running. It is <strong>not</strong> a liveness signal.</td></tr></tbody></table>
+<p><code dir="auto">state</code> is <code dir="auto">healthy</code>, <code dir="auto">busy</code> (alive, serving reads, a write is running, such as a rebuild;
+keep waiting for writes and do not restart) or <code dir="auto">degraded</code> (alive but the database did not
+load; see <code dir="auto">reason</code>). <strong>No answer</strong> means dead or wedged: restart it.</p>
+</li>
+<li>
+<p><strong>Do not retry a <code dir="auto">degraded</code> state forever.</strong> It can be a real outcome, such as unrecovered
+corruption; the operator recovers it (<a href="../operations/">Operations</a>).</p>
+</li>
+<li>
+<p><strong>MCP clients</strong> have no <code dir="auto">health_check</code> tool. Call <code dir="auto">knowledge_capabilities</code> for liveness and
+<code dir="auto">knowledge_status</code> for readiness: wait until <code dir="auto">connected</code> and <code dir="auto">queryable</code> are <code dir="auto">true</code> and
+<code dir="auto">initializing</code> is <code dir="auto">false</code>.</p>
+</li>
+</ol>
+<p>Every <code dir="auto">health_check</code> response also carries <code dir="auto">server_version</code> and <code dir="auto">protocol_version</code>, so one call
+is enough to confirm you are talking to a server you support.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="where-to-go-next">Where to go next</h2><a class="sl-anchor-link" href="#where-to-go-next"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 1 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 0 0-1.42-1.42m8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 1 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 0 0 0 1.42 1 1 0 0 0 1.42 0l3.88-3.89a4.49 4.49 0 0 0 0-6.33M8.83 15.17a1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.92-4.92a1 1 0 1 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42"></path></svg></span><span class="sr-only" data-pagefind-ignore="">Section titled “Where to go next”</span></a></div>
+<ul>
+<li><a href="../ipc-mcp-reference/">IPC &#x26; MCP Reference</a>: every method, field and error.</li>
+<li><a href="../configuration/">Configuration</a>: every environment variable and flag, including
+<code dir="auto">LCG_SEARCH_MIN_SCORE</code> and <code dir="auto">LCG_DOCUMENT_MAX_BYTES</code>.</li>
+<li><a href="../test-providers/">Test Providers</a>: <code dir="auto">--embedder test --extractor test</code>, to test your client
+without an LLM or a network.</li>
+<li><a href="../operations/">Operations</a>: the WAL, degraded mode and recovery.</li>
+</ul></div><footer class="sl-flex astro-li2vjuw6"><div class="meta sl-flex astro-li2vjuw6"><a href="https://github.com/liminisapp/liminis-context-graph/edit/main/docs/integrator-guide.md" class="sl-flex print:hidden astro-puwp67qq"><svg aria-hidden="true" class="astro-puwp67qq astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg>Edit page</a></div><div class="pagination-links print:hidden astro-2un4dhw6" dir="ltr"><a href="/liminis-context-graph/v0.20.1/getting-started/" rel="prev" class="astro-2un4dhw6"><svg aria-hidden="true" class="astro-2un4dhw6 astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg><span class="astro-2un4dhw6">Previous<br class="astro-2un4dhw6"><span class="link-title astro-2un4dhw6">Getting Started</span></span></a><a href="/liminis-context-graph/v0.20.1/configuration/" rel="next" class="astro-2un4dhw6"><svg aria-hidden="true" class="astro-2un4dhw6 astro-ebsbxtiy" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg><span class="astro-2un4dhw6">Next<br class="astro-2un4dhw6"><span class="link-title astro-2un4dhw6">Configuration</span></span></a></div></footer><p class="lcg-version astro-jo6i4kqk">Documents <code class="astro-jo6i4kqk">liminis-context-graph</code> v0.20.1.<span id="version-switcher" class="astro-jo6i4kqk"></span></p><script type="module">fetch(`/liminis-context-graph/versions.json`).then(e=>e.ok?e.json():null).then(e=>{if(!e||!Array.isArray(e.versions)||e.versions.length===0)return;let t=document.getElementById(`version-switcher`);if(!t)return;let n=document.createElement(`select`);n.setAttribute(`aria-label`,`Switch documented version`);let r=e.versions.filter(e=>!e.includes(`-`)),i=r.length>0?r[0]:e.versions[0],a=document.createElement(`option`);a.value=`/liminis-context-graph/`,a.textContent=`latest (v${i})`,n.appendChild(a);for(let t of e.versions){let e=document.createElement(`option`);e.value=`/liminis-context-graph/v${t}/`,e.textContent=`v${t}`,window.location.pathname.startsWith(e.value)&&(e.selected=!0),n.appendChild(e)}n.addEventListener(`change`,()=>{window.location.href=n.value}),t.appendChild(n)}).catch(()=>{});</script></div></div></main></div></div></div></div></body></html>
