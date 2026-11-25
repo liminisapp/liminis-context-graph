@@ -103,8 +103,8 @@ mod request_limits_env_tests {
             } else if l.contains("chunk_text size cap") {
                 chunk_log = Some(l);
             }
-            if line_log.is_some() && chunk_log.is_some() {
-                return (line_log.unwrap(), chunk_log.unwrap());
+            if let (Some(a), Some(b)) = (&line_log, &chunk_log) {
+                return (a.clone(), b.clone());
             }
         }
         panic!("service exited without logging both settings: {line_log:?} {chunk_log:?}");

@@ -290,6 +290,7 @@ pub async fn handle_connection_with<S, F, Fut>(
 }
 
 /// [`handle_connection_with`] with an explicit heartbeat period (tests use a short one).
+#[allow(clippy::too_many_arguments)]
 async fn serve_connection<S, F, Fut>(
     stream: S,
     parent: CancellationToken,
