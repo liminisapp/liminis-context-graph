@@ -1028,7 +1028,15 @@ pub fn registry() -> Vec<ToolSpec> {
                            entity with primary/external support, and is refused (error message \
                            prefixed `origin_conflict:`, nothing written) when its `chunk_id` \
                            has a live primary/external episode or its `doc_id` already has a \
-                           different origin.",
+                           different origin. `deadline_ms` (issue #914) bounds the call: a \
+                           request that cannot reach commit within that many milliseconds of \
+                           receipt is abandoned and returns error code -32005 with \
+                           `reason: \"deadline_exceeded\"` and the `phase` reached, writing \
+                           nothing, so a retry is safe; a deadline that passes once the commit \
+                           has started does not stop it, and the result then carries \
+                           `deadline_exceeded: true`. A call identical to one already in flight \
+                           for the same `chunk_id` waits for it instead of extracting again and \
+                           returns the same result with `joined: true`.",
             scope: Scope::Write,
             input_schema: || {
                 json!({
@@ -1046,7 +1054,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "doc_id": {"type": "string", "description": "Stable identity of the logical document this episode came from, unique within the group (issue #707). Optional; an episode without one cannot take part in document supersession. Never defaulted from source_file."},
                         "origin": origin_prop(),
                         "supersede": {"type": "boolean", "default": true, "description": "Set false on every non-final unit of a chunk submitted as several calls under one chunk_id, so a unit does not supersede the previous one."},
-                        "same_revision_episode_uuids": {"type": "array", "items": {"type": "string"}, "description": "On the final unit of a multi-unit revision: episode_uuids returned by the earlier units. They stay live; the chunk's older episodes are superseded."}
+                        "same_revision_episode_uuids": {"type": "array", "items": {"type": "string"}, "description": "On the final unit of a multi-unit revision: episode_uuids returned by the earlier units. They stay live; the chunk's older episodes are superseded."},
+                        "deadline_ms": {"type": "integer", "minimum": 1, "description": "Optional time budget in milliseconds, counted from receipt. If commit cannot start in time the call returns a deadline_exceeded error (code -32005) and writes nothing; a commit that has started finishes and the result carries deadline_exceeded: true."}
                     },
                     "required": ["chunk_text", "chunk_id", "source_file"]
                 })
@@ -1083,7 +1092,13 @@ pub fn registry() -> Vec<ToolSpec> {
                            Documents over the size cap (`LCG_DOCUMENT_MAX_BYTES`, default 2 MiB, \
                            set at startup) are refused with `document_too_large` and never \
                            truncated; empty or headings-only documents are rejected too, with \
-                           nothing written. A request line over `LCG_REQUEST_MAX_BYTES` \
+                           nothing written. `deadline_ms` (issue #914) bounds the call: if the \
+                           revision cannot commit within that many milliseconds of receipt the \
+                           call returns error code -32005 with `reason: \"deadline_exceeded\"`, \
+                           `partial: true` and the `phase` reached; units already committed stay \
+                           in place and nothing is retired. A deadline that passes once the \
+                           revision commit has started does not stop it, and the result carries \
+                           `deadline_exceeded: true`. A request line over `LCG_REQUEST_MAX_BYTES` \
                            (default 16 MiB) is refused by the transport with error `-32005` \
                            before it is parsed. \
                            `knowledge_process_chunk` is otherwise unchanged.",
@@ -1100,7 +1115,8 @@ pub fn registry() -> Vec<ToolSpec> {
                         "origin": origin_prop(),
                         "effective_at": {"type": "string", "format": "date-time", "description": "When this revision took effect; recorded on the revision only (never valid_at, never belief time)."},
                         "reference_time": {"type": "string", "format": "date-time", "description": "Extraction reference time, as for knowledge_process_chunk; defaults to now."},
-                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored on every episode of this revision and on the revision record."}
+                        "attributes": {"type": "object", "description": "Arbitrary JSON object, stored on every episode of this revision and on the revision record."},
+                        "deadline_ms": {"type": "integer", "minimum": 1, "description": "Optional time budget in milliseconds, counted from receipt. If the revision cannot commit in time the call returns a deadline_exceeded error (code -32005, partial: true); units already committed stay and nothing is retired. A commit that has started finishes and the result carries deadline_exceeded: true."}
                     },
                     "required": ["doc_id", "content"]
                 })

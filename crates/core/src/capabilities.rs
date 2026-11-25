@@ -45,6 +45,7 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const FEATURES: &[&str] = &[
     "belief_aware_passages",
     "cancel_on_disconnect",
+    "chunk_join_inflight",
     "chunk_progress",
     "chunk_supersede",
     "delete_orphan_prune",
@@ -65,6 +66,7 @@ pub const FEATURES: &[&str] = &[
     "passage_legs",
     "passage_query_variants",
     "passage_rerank",
+    "process_deadline",
     "process_document",
     "ready_for_reads",
     "request_size_limits",

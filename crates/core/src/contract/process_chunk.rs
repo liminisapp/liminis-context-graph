@@ -59,6 +59,10 @@ pub struct UnchangedChunkResult {
     /// The existing live episode.
     pub episode_uuid: String,
     pub duration_seconds: f64,
+    /// `true`, present only when this request joined an identical in-flight request instead of
+    /// running its own (#914, `chunk_join_inflight`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub joined: Option<bool>,
     /// Present only when `group_id` was omitted and the default group was used (#856).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warnings: Option<Vec<String>>,
@@ -89,6 +93,14 @@ pub struct IngestedChunkResult {
     pub edges_dropped_malformed: u64,
     pub dedup_paths: DedupPaths,
     pub duration_seconds: f64,
+    /// `true`, present only when this request joined an identical in-flight request instead of
+    /// running its own (#914, `chunk_join_inflight`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub joined: Option<bool>,
+    /// `true`, present only when the request's `deadline_ms` had passed by the time its write
+    /// completed: the commit had started, so the write is whole (#914, `process_deadline`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deadline_exceeded: Option<bool>,
     /// Present only when same-named episodes written by another path were left alone (#292).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub left_alone_episode_uuids: Option<Vec<String>>,

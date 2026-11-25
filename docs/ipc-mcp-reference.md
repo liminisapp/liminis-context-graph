@@ -231,16 +231,17 @@ during a rebuild and under any `--writable-groups` policy.
 
 ```json
 {"server_version": "0.20.0", "protocol_version": 1,
- "features": ["belief_aware_passages", "cancel_on_disconnect", "chunk_progress", "chunk_supersede",
-              "delete_orphan_prune", "document_max_bytes_env", "embedding_profiles",
+ "features": ["belief_aware_passages", "cancel_on_disconnect", "chunk_join_inflight",
+              "chunk_progress", "chunk_supersede", "delete_orphan_prune",
+              "document_max_bytes_env", "embedding_profiles",
               "entity_provenance", "episode_source_fields", "exact_source_match",
               "hybrid_passage_search", "implicit_default_group_warning", "lint",
               "literal_object_edges", "move_document", "ontology_edge_direction", "ontology_hash",
               "origin", "passage_expansion", "passage_legs", "passage_query_variants",
-              "passage_rerank", "process_document", "ready_for_reads", "request_size_limits",
-              "retire_document", "search_min_score_env", "status_episode_breakdown", "test_providers",
-              "unchanged_noop", "walk", "walk_provenance", "writable_groups",
-              "zero_vector_record"],
+              "passage_rerank", "process_deadline", "process_document", "ready_for_reads",
+              "request_size_limits", "retire_document", "search_min_score_env",
+              "status_episode_breakdown", "test_providers", "unchanged_noop", "walk",
+              "walk_provenance", "writable_groups", "zero_vector_record"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -266,6 +267,7 @@ by #885 name capabilities that were added in 0.20.0 without one.
 |---|---|---|
 | `belief_aware_passages` | #806 ([ADR-0806](adr/0806-belief-aware-passage-ranking-default.md)) | `knowledge_search_passages` accepts `belief_aware` and applies it by default in `vector` and `hybrid` mode: a derived page ranks below the primary note it cites and a superseded passage below its successor. `belief_aware: false` or `LCG_PASSAGE_BELIEF_AWARE=off` restores the previous order. |
 | `cancel_on_disconnect` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | A client disconnect cancels an in-flight `knowledge_process_chunk` or `knowledge_process_document` before commit; a commit that has started finishes. |
+| `chunk_join_inflight` | #914 ([ADR-0914](adr/0914-process-deadline-and-inflight-join.md)) | A `knowledge_process_chunk` identical to one already in flight for the same `(group_id, chunk_id)` waits for it instead of extracting again and returns the same result with `joined: true`. A cancelled first request is not inherited: the joined one takes over. |
 | `chunk_progress` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | `knowledge_process_chunk` streams `embed`, `extract` and `commit` progress frames when given a `_progress_token`. |
 | `chunk_supersede` | closest known origin: #785 ([ADR-0292](adr/0292-chunk-ingest-never-supersedes-unattributed-episodes.md)); seeded by #854 | Chunk ingest can supersede earlier episodes of the same document. |
 | `delete_orphan_prune` | #859 ([ADR-0859](adr/0859-retire-document-and-orphan-reporting.md)) | `knowledge_delete_by_source` and `knowledge_delete_chunk_episode` report `orphaned_entity_uuids`, `orphaned_entity_count`, `pruned_entity_count` and `pruned_edge_count`, and accept `prune_orphans: true`. |
@@ -286,6 +288,7 @@ by #885 name capabilities that were added in 0.20.0 without one.
 | `passage_legs` | #871 | Hybrid passage results carry `legs` (per-leg evidence). Present on hybrid results only; absent or null in other modes. |
 | `passage_query_variants` | #802 ([ADR-0802](adr/0802-caller-supplied-query-variants-weighted-rrf.md)) | `knowledge_search_passages` accepts `queries` (caller-written variants of `query`, fused by weighted RRF), and each passage then carries `matched_queries`. |
 | `passage_rerank` | #796 ([ADR-0796](adr/0796-passage-rerank-and-query-expansion.md)) | `knowledge_search_passages` accepts `rerank` and `rerank_candidates`. Whether the stage runs depends on the operator's reranker configuration; each call reports it with `applied`. |
+| `process_deadline` | #914 ([ADR-0914](adr/0914-process-deadline-and-inflight-join.md)) | `knowledge_process_chunk` and `knowledge_process_document` accept `deadline_ms`; a request that cannot reach commit in time returns error code `-32005` with `reason: "deadline_exceeded"` and writes nothing, and a deadline that passes once commit has started marks the completed result with `deadline_exceeded: true`. |
 | `process_document` | #785 | `knowledge_process_document` document mode. |
 | `ready_for_reads` | #809, #855 ([ADR-0855](adr/0855-health-check-ready-for-reads.md)) | `health_check` carries `ready_for_reads`, present in every state. |
 | `request_size_limits` | #293 ([ADR-0293](adr/0293-request-line-limit-and-chunk-cap.md)) | The socket and named-pipe transport refuses a request line over `LCG_REQUEST_MAX_BYTES` (default 16 MiB) with error `-32005` and a null `id`, and `knowledge_process_chunk` refuses a `chunk_text` over `LCG_CHUNK_TEXT_MAX_BYTES` (default 512 KiB) with `chunk_text_too_large`. The configured values are not exposed. See [Request limits](#request-limits). |
