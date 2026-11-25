@@ -58,6 +58,7 @@ where
         parent,
         move |req, cancel, tx| handlers::dispatch_cancellable(req, Arc::clone(&state), tx, cancel),
         shutdown_notify,
+        lcg_core::request_limits::request_line_max_bytes(),
     )
     .await;
 }
@@ -1528,6 +1529,36 @@ async fn async_main(
             drop(telemetry_sink);
             sink_drain_handle.await.ok();
             return Err(e.to_string().into());
+        }
+    }
+
+    // Issue #293 / ADR-0293: resolve, validate, log and install the request-line limit
+    // (`LCG_REQUEST_MAX_BYTES`) and the `chunk_text` cap (`LCG_CHUNK_TEXT_MAX_BYTES`), then
+    // require the line limit to be able to carry a maximal document at the effective
+    // `LCG_DOCUMENT_MAX_BYTES`. Strict like the document cap: all failures are fatal.
+    {
+        let resolved = (|| -> Result<_, lcg_core::Error> {
+            let line = lcg_core::request_limits::RequestLimit::from_env()?;
+            let chunk = lcg_core::request_limits::ChunkTextLimit::from_env()?;
+            lcg_core::request_limits::check_consistency(
+                line.max_bytes,
+                lcg_core::document_config::document_max_bytes(),
+            )?;
+            Ok((line, chunk))
+        })();
+        match resolved {
+            Ok((line, chunk)) => {
+                lcg_core::request_limits::install_request_max_bytes(line.max_bytes);
+                lcg_core::request_limits::install_chunk_text_max_bytes(chunk.max_bytes);
+                eprintln!("liminis-context-graph: {}", line.describe());
+                eprintln!("liminis-context-graph: {}", chunk.describe());
+            }
+            Err(e) => {
+                eprintln!("liminis-context-graph: FATAL {e}");
+                drop(telemetry_sink);
+                sink_drain_handle.await.ok();
+                return Err(e.to_string().into());
+            }
         }
     }
 

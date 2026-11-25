@@ -106,6 +106,148 @@ impl PeerProbe for tokio::net::windows::named_pipe::NamedPipeServer {
     }
 }
 
+/// One unit read off the socket by [`BoundedLines`].
+#[derive(Debug, PartialEq, Eq)]
+enum Item {
+    /// A complete line (terminator stripped), at most the limit in length.
+    Line(String),
+    /// A line crossed the limit. Its bytes were dropped without being kept; the reader is now
+    /// skipping to the next newline.
+    TooLarge,
+    /// The oversized line kept going past the discard budget: stop reading and close.
+    DiscardExhausted,
+}
+
+enum ReadState {
+    Reading,
+    /// Skipping the rest of an oversized line; `discarded` counts bytes dropped so far,
+    /// including the ones seen before the limit was crossed.
+    Discarding {
+        discarded: usize,
+    },
+}
+
+/// Chunk size of the buffered reader. Per-line memory is bounded by the limit plus this.
+const READ_BUF_BYTES: usize = 64 * 1024;
+
+/// How many multiples of the limit an oversized line may run on while being discarded before
+/// the connection is closed instead of recovering.
+const DISCARD_BUDGET_FACTOR: usize = 4;
+
+/// Newline-delimited reader that never holds more than `limit` bytes of one line (issue #293,
+/// ADR-0293). Replaces `BufReader::lines()`, which buffers without bound.
+///
+/// **Cancel safety.** [`BoundedLines::next_item`] is used as a `select!` branch while a
+/// cooperative request runs, so dropping its future must not lose bytes. All state lives in the
+/// struct (not in locals), and the only `.await` is `fill_buf`, which is cancel-safe; every
+/// mutation after it is synchronous and ends with the matching `consume`.
+///
+/// **Boundary.** The limit applies to the bytes before `\n`, so the terminator does not count
+/// (a trailing `\r` does). A line of exactly `limit` bytes is accepted; `limit + 1` is refused.
+struct BoundedLines<R> {
+    reader: BufReader<R>,
+    limit: usize,
+    buf: Vec<u8>,
+    state: ReadState,
+}
+
+impl<R: AsyncRead + Unpin> BoundedLines<R> {
+    fn new(reader: R, limit: usize) -> Self {
+        Self {
+            reader: BufReader::with_capacity(READ_BUF_BYTES, reader),
+            limit,
+            buf: Vec::new(),
+            state: ReadState::Reading,
+        }
+    }
+
+    /// Decode a completed line. Non-UTF-8 is `InvalidData`, as with `Lines` before #293.
+    fn finish(&mut self) -> std::io::Result<Item> {
+        let mut bytes = std::mem::take(&mut self.buf);
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+        String::from_utf8(bytes).map(Item::Line).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e.utf8_error().to_string())
+        })
+    }
+
+    /// The next line, oversized-line marker, or `None` at EOF. Cancel-safe.
+    async fn next_item(&mut self) -> std::io::Result<Option<Item>> {
+        loop {
+            let available = self.reader.fill_buf().await?;
+            if available.is_empty() {
+                // EOF. A final unterminated line is still a line (as `Lines` did); EOF in the
+                // middle of an already-refused line just ends the connection.
+                return match self.state {
+                    ReadState::Discarding { .. } => {
+                        self.state = ReadState::Reading;
+                        Ok(None)
+                    }
+                    ReadState::Reading if self.buf.is_empty() => Ok(None),
+                    ReadState::Reading => self.finish().map(Some),
+                };
+            }
+            let newline = available.iter().position(|&b| b == b'\n');
+            let n = available.len();
+            match self.state {
+                ReadState::Discarding { discarded } => match newline {
+                    Some(i) => {
+                        self.reader.consume(i + 1);
+                        self.state = ReadState::Reading;
+                    }
+                    None => {
+                        let discarded = discarded.saturating_add(n);
+                        self.reader.consume(n);
+                        if discarded > self.limit.saturating_mul(DISCARD_BUDGET_FACTOR) {
+                            self.state = ReadState::Reading;
+                            return Ok(Some(Item::DiscardExhausted));
+                        }
+                        self.state = ReadState::Discarding { discarded };
+                    }
+                },
+                ReadState::Reading => {
+                    let take = newline.unwrap_or(n);
+                    let total = self.buf.len().saturating_add(take);
+                    if total > self.limit {
+                        // Over the limit: drop what is held and never decode it.
+                        self.buf.clear();
+                        self.buf.shrink_to_fit();
+                        match newline {
+                            // The whole line, terminator included, was already in this read.
+                            Some(i) => self.reader.consume(i + 1),
+                            None => {
+                                self.reader.consume(n);
+                                self.state = ReadState::Discarding { discarded: total };
+                            }
+                        }
+                        return Ok(Some(Item::TooLarge));
+                    }
+                    self.buf.extend_from_slice(&available[..take]);
+                    match newline {
+                        Some(i) => {
+                            self.reader.consume(i + 1);
+                            return self.finish().map(Some);
+                        }
+                        None => self.reader.consume(n),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Bytes held in queued pipelined lines.
+fn pending_bytes(pending: &VecDeque<Item>) -> usize {
+    pending
+        .iter()
+        .map(|i| match i {
+            Item::Line(l) => l.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
 /// How a cooperative request ended.
 #[allow(clippy::large_enum_variant)]
 enum Served {
@@ -127,6 +269,7 @@ pub async fn handle_connection_with<S, F, Fut>(
     parent: CancellationToken,
     dispatch: F,
     shutdown_notify: std::sync::Arc<Notify>,
+    max_line_bytes: usize,
 ) where
     S: AsyncRead + AsyncWrite + PeerProbe + Send + 'static,
     F: Fn(IpcRequest, CancellationToken, Option<UnboundedSender<Value>>) -> Fut,
@@ -141,6 +284,7 @@ pub async fn handle_connection_with<S, F, Fut>(
         HEARTBEAT_INTERVAL,
         FRAME_WRITE_TIMEOUT,
         peer_gone,
+        max_line_bytes,
     )
     .await;
 }
@@ -154,22 +298,33 @@ async fn serve_connection<S, F, Fut>(
     heartbeat: std::time::Duration,
     write_timeout: std::time::Duration,
     peer_gone: PeerGone,
+    max_line_bytes: usize,
 ) where
     S: AsyncRead + AsyncWrite + Send + 'static,
     F: Fn(IpcRequest, CancellationToken, Option<UnboundedSender<Value>>) -> Fut,
     Fut: Future<Output = IpcResponse> + Send + 'static,
 {
     let (reader, mut writer) = tokio::io::split(stream);
-    let mut lines = BufReader::new(reader).lines();
-    let mut pending: VecDeque<String> = VecDeque::new();
+    let mut lines = BoundedLines::new(reader, max_line_bytes);
+    let mut pending: VecDeque<Item> = VecDeque::new();
 
     loop {
-        let line = match pending.pop_front() {
-            Some(l) => l,
-            None => match lines.next_line().await {
-                Ok(Some(l)) => l,
+        let item = match pending.pop_front() {
+            Some(i) => i,
+            None => match lines.next_item().await {
+                Ok(Some(i)) => i,
                 _ => return,
             },
+        };
+        let line = match item {
+            Item::Line(l) => l,
+            Item::TooLarge => {
+                // Refused before parsing or dispatch. The reader is already skipping the rest
+                // of the line, so the next line on this connection is served normally.
+                write_size_error(&mut writer, max_line_bytes).await;
+                continue;
+            }
+            Item::DiscardExhausted => return,
         };
         let line = line.trim().to_string();
         if line.is_empty() {
@@ -217,6 +372,7 @@ async fn serve_connection<S, F, Fut>(
                 heartbeat,
                 write_timeout,
                 &peer_gone,
+                max_line_bytes,
             )
             .await
             {
@@ -306,12 +462,13 @@ async fn serve_cooperative<Fut, R, W>(
     fut: Fut,
     cancel: &CancellationToken,
     mut rx: Option<UnboundedReceiver<Value>>,
-    lines: &mut tokio::io::Lines<BufReader<R>>,
-    pending: &mut VecDeque<String>,
+    lines: &mut BoundedLines<R>,
+    pending: &mut VecDeque<Item>,
     writer: &mut W,
     heartbeat: std::time::Duration,
     write_timeout: std::time::Duration,
     peer_gone: &PeerGone,
+    max_line_bytes: usize,
 ) -> Served
 where
     Fut: Future<Output = IpcResponse>,
@@ -353,11 +510,20 @@ where
                     disconnected = true;
                 }
             }
-            // `next_line` is cancel-safe: a line that arrives while the request runs is a
-            // pipelined request and is kept for the loop to serve afterwards.
-            line = lines.next_line(), if !reader_done && pending.len() < MAX_PENDING_LINES => {
+            // `next_item` is cancel-safe: a line that arrives while the request runs is a
+            // pipelined request and is kept for the loop to serve afterwards. Read-ahead is
+            // bounded in bytes as well as lines (#293), so a connection holds about twice the
+            // line limit, not nine times. An oversized line is queued as a marker so its
+            // refusal is written after the in-flight response, keeping responses in order.
+            line = lines.next_item(), if !reader_done
+                && pending.len() < MAX_PENDING_LINES
+                && pending_bytes(pending) < max_line_bytes => {
                 match line {
-                    Ok(Some(l)) => pending.push_back(l),
+                    Ok(Some(Item::DiscardExhausted)) => {
+                        reader_done = true;
+                        reader_failed = true;
+                    }
+                    Ok(Some(item)) => pending.push_back(item),
                     // A socket error is a disconnect, and so is EOF once the peer has fully
                     // closed; EOF from a peer that merely half-closed is not (it is still
                     // waiting for the response). A non-UTF-8 pipelined line is a malformed
@@ -441,6 +607,33 @@ async fn write_parse_error<W: AsyncWrite + Unpin>(writer: &mut W, e: serde_json:
     let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
 }
 
+/// JSON-RPC error code for a request line over the limit (distinct from `-32700`).
+pub const REQUEST_TOO_LARGE_CODE: i64 = -32005;
+
+/// Refusal for an oversized request line. The line was never parsed, so the id is null, as for a
+/// parse error; clients match it by `error.code` / `error.data.reason`.
+async fn write_size_error<W: AsyncWrite + Unpin>(writer: &mut W, limit: usize) {
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "error": {
+            "code": REQUEST_TOO_LARGE_CODE,
+            "message": format!(
+                "request line is more than {limit} bytes (limit set by LCG_REQUEST_MAX_BYTES); \
+                 send smaller requests, or raise LCG_REQUEST_MAX_BYTES (and keep it at least \
+                 6 x LCG_DOCUMENT_MAX_BYTES + 64 KiB if you handle large documents)"
+            ),
+            "data": {
+                "reason": "request_too_large",
+                "limit_bytes": limit,
+                "setting": "LCG_REQUEST_MAX_BYTES",
+            }
+        }
+    });
+    let json = serde_json::to_string(&response).unwrap_or_default();
+    let _ = writer.write_all(format!("{json}\n").as_bytes()).await;
+}
+
 /// Streaming dispatch for the non-cooperative methods (rebuild, reprocess, ...): returns
 /// `Some(response)` if the dispatch produced a final response, or `None` if the client
 /// disconnected and the dispatch task was aborted. Unchanged from before #861.
@@ -492,6 +685,9 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, DuplexStream};
+
+    /// Generous default so the pre-#293 tests are unaffected by the limit.
+    const TEST_LIMIT: usize = 1024 * 1024;
 
     /// Duplex streams cannot tell a half-close from a full close, so over them read EOF always
     /// means gone (the pre-half-close behaviour). Real-socket tests below use the real probe.
@@ -556,7 +752,14 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let n = Arc::clone(&notify);
         let h = tokio::spawn(async move {
-            handle_connection_with(server, parent, fake(probe, work_ms, commit_ms), n).await;
+            handle_connection_with(
+                server,
+                parent,
+                fake(probe, work_ms, commit_ms),
+                n,
+                TEST_LIMIT,
+            )
+            .await;
         });
         (h, notify)
     }
@@ -613,6 +816,7 @@ mod tests {
             Duration::from_millis(100),
             FRAME_WRITE_TIMEOUT,
             always_gone(),
+            TEST_LIMIT,
         ));
         client
             .write_all(line(1, "knowledge_process_chunk", true).as_bytes())
@@ -646,6 +850,7 @@ mod tests {
                 CancellationToken::new(),
                 fake(probe, work_ms, commit_ms),
                 notify,
+                TEST_LIMIT,
             )
             .await;
         });
@@ -758,6 +963,7 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_millis(100),
             always_gone(),
+            TEST_LIMIT,
         ));
         client
             .write_all(line(1, "knowledge_process_chunk", true).as_bytes())
@@ -797,6 +1003,7 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_millis(100),
             always_gone(),
+            TEST_LIMIT,
         ));
         client
             .write_all(line(1, "knowledge_process_chunk", true).as_bytes())
@@ -852,6 +1059,7 @@ mod tests {
             Duration::from_millis(50),
             FRAME_WRITE_TIMEOUT,
             always_gone(),
+            TEST_LIMIT,
         ));
         client
             .write_all(line(1, "knowledge_process_chunk", false).as_bytes())
@@ -873,6 +1081,7 @@ mod tests {
             CancellationToken::new(),
             |_req, _cancel, _tx| async { panic!("boom") },
             notify,
+            TEST_LIMIT,
         ));
         client
             .write_all(line(7, "knowledge_process_document", true).as_bytes())
