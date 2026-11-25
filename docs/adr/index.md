@@ -77,6 +77,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0283](0283-name-index-scan-fallback-for-endpoint-authority.md) | Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution | 2026-07-30 |
 | [0291](0291-native-art-index-for-episodic-lookups.md) | Native ART Indexes for Episodic `name` and `doc_id` Lookups | 2026-11-15 |
 | [0292](0292-chunk-ingest-never-supersedes-unattributed-episodes.md) | Chunk Ingest Never Supersedes Episodes It Cannot Attribute To Itself | 2026-11-16 |
+| [0293](0293-request-line-limit-and-chunk-cap.md) | Request Line Limit and `chunk_text` Cap | 2026-11-25 |
 | [0295](0295-github-pages-documentation-site.md) | GitHub Pages Documentation Site | 2026-08-02 |
 | [0298](0298-ci-failure-notification.md) | CI Failure Notification for Non-Gating Workflows | 2026-07-30 |
 | [0306](0306-extraction-failure-sidecar-and-truncation-visibility.md) | Extraction-Failure Sidecar and Truncation Visibility | 2026-08-01 |
