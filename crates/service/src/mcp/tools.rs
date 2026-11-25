@@ -990,6 +990,9 @@ pub fn registry() -> Vec<ToolSpec> {
                            changed. This call still succeeds above the threshold, but the \
                            result gains a `warning` field naming the actual size and the \
                            recommended maximum, and pointing at `knowledge_process_document`. \
+                           A `chunk_text` over the hard cap (`LCG_CHUNK_TEXT_MAX_BYTES`, \
+                           default 512 KiB, set at startup) is refused with \
+                           `chunk_text_too_large` before any extraction or write. \
                            `attributes` (issue #528) is written directly to the resulting \
                            episode node — structured metadata co-located with, but independent \
                            of, the facts extracted from the chunk's prose (reachable from the \
@@ -1080,8 +1083,10 @@ pub fn registry() -> Vec<ToolSpec> {
                            Documents over the size cap (`LCG_DOCUMENT_MAX_BYTES`, default 2 MiB, \
                            set at startup) are refused with `document_too_large` and never \
                            truncated; empty or headings-only documents are rejected too, with \
-                           nothing written. \
-                           `knowledge_process_chunk` is unchanged.",
+                           nothing written. A request line over `LCG_REQUEST_MAX_BYTES` \
+                           (default 16 MiB) is refused by the transport with error `-32005` \
+                           before it is parsed. \
+                           `knowledge_process_chunk` is otherwise unchanged.",
             scope: Scope::Write,
             input_schema: || {
                 json!({

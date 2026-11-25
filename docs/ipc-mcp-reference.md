@@ -237,9 +237,10 @@ during a rebuild and under any `--writable-groups` policy.
               "hybrid_passage_search", "implicit_default_group_warning", "lint",
               "literal_object_edges", "move_document", "ontology_edge_direction", "ontology_hash",
               "origin", "passage_expansion", "passage_legs", "passage_query_variants",
-              "passage_rerank", "process_document", "ready_for_reads", "retire_document",
-              "search_min_score_env", "status_episode_breakdown", "test_providers", "unchanged_noop",
-              "walk", "walk_provenance", "writable_groups", "zero_vector_record"],
+              "passage_rerank", "process_document", "ready_for_reads", "request_size_limits",
+              "retire_document", "search_min_score_env", "status_episode_breakdown", "test_providers",
+              "unchanged_noop", "walk", "walk_provenance", "writable_groups",
+              "zero_vector_record"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -287,6 +288,7 @@ by #885 name capabilities that were added in 0.20.0 without one.
 | `passage_rerank` | #796 ([ADR-0796](adr/0796-passage-rerank-and-query-expansion.md)) | `knowledge_search_passages` accepts `rerank` and `rerank_candidates`. Whether the stage runs depends on the operator's reranker configuration; each call reports it with `applied`. |
 | `process_document` | #785 | `knowledge_process_document` document mode. |
 | `ready_for_reads` | #809, #855 ([ADR-0855](adr/0855-health-check-ready-for-reads.md)) | `health_check` carries `ready_for_reads`, present in every state. |
+| `request_size_limits` | #293 ([ADR-0293](adr/0293-request-line-limit-and-chunk-cap.md)) | The socket and named-pipe transport refuses a request line over `LCG_REQUEST_MAX_BYTES` (default 16 MiB) with error `-32005` and a null `id`, and `knowledge_process_chunk` refuses a `chunk_text` over `LCG_CHUNK_TEXT_MAX_BYTES` (default 512 KiB) with `chunk_text_too_large`. The configured values are not exposed. See [Request limits](#request-limits). |
 | `retire_document` | #859 ([ADR-0859](adr/0859-retire-document-and-orphan-reporting.md)) | `knowledge_retire_document` supersedes every live episode of a document with reason `document_removed`, deleting nothing. |
 | `search_min_score_env` | #812 ([ADR-0812](adr/0812-search-min-score-env-default.md)) | The default passage-search `min_score` floor can be set by the operator with `LCG_SEARCH_MIN_SCORE`. The configured value is not exposed. |
 | `status_episode_breakdown` | #884 ([ADR-0884](adr/0884-status-episode-breakdown-opt-in.md)) | `knowledge_status` can report a per-group live/superseded episode breakdown. |
