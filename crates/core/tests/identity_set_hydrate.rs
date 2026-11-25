@@ -700,3 +700,20 @@ async fn asserted_kinds_beside_an_identity_type_accept_with_stamp_missing() {
     assert_accepted(&ws).await;
     assert_eq!(stamp(ws.root.path()), vec!["Person".to_string()]);
 }
+
+#[tokio::test]
+async fn asserted_kinds_before_the_first_ingest_accept() {
+    // #919's secondary report: when the asserts come before the group's first ingest, 0.20.0
+    // refused that first ingest, so no drift sidecar was written and `ontology.drifted` stayed
+    // false after a later ontology install.
+    let (db, db_dir) = make_db();
+    let ws = Ws {
+        db,
+        root: TempDir::new().unwrap(),
+        wal: TempDir::new().unwrap(),
+        _db_dir: db_dir,
+    };
+    assert_conversation_file(&ws).await;
+    assert!(!ws.stamp_path().exists());
+    assert_accepted(&ws).await;
+}
