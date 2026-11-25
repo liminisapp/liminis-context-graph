@@ -1,6 +1,7 @@
 //! #775 / #776: a group rebuilt from only its WAL into a fresh workspace root (no identity-set
 //! stamp) must stay writable. Covers the kind-aware D1 check (fix B), the stamp restore from the
-//! WAL ontology sidecar (fix A), and the three orderings reported in #775.
+//! WAL ontology sidecar (fix A), the three orderings reported in #775, the missing-stamp cases of
+//! #778 (the data-check ones are ignored since #919), and asserted kinds after a restart (#919).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -482,6 +483,7 @@ async fn removal_refused_when_stamp_missing_sidecar_present() {
 }
 
 #[tokio::test]
+#[ignore = "#778 reopened: the stored-kind data check was withdrawn in 0.20.1 (#919)"]
 async fn removal_refused_when_stamp_and_sidecar_missing() {
     let ws = Ws::new(PERSON_ID, person("Ada")).await;
     ws.delete_stamp();
@@ -491,6 +493,7 @@ async fn removal_refused_when_stamp_and_sidecar_missing() {
 }
 
 #[tokio::test]
+#[ignore = "#778 reopened: the stored-kind data check was withdrawn in 0.20.1 (#919)"]
 async fn removal_refused_when_sidecar_has_no_identity_field() {
     let ws = Ws::new(PERSON_ID, person("Ada")).await;
     ws.delete_stamp();
@@ -504,6 +507,7 @@ async fn removal_refused_when_sidecar_has_no_identity_field() {
 }
 
 #[tokio::test]
+#[ignore = "#778 reopened: the stored-kind data check was withdrawn in 0.20.1 (#919)"]
 async fn removal_refused_when_sidecar_records_empty_set_but_data_has_person_kind() {
     let ws = Ws::new(PERSON_ID, person("Ada")).await;
     ws.delete_stamp();
@@ -516,6 +520,7 @@ async fn removal_refused_when_sidecar_records_empty_set_but_data_has_person_kind
 }
 
 #[tokio::test]
+#[ignore = "#778 reopened: the stored-kind data check was withdrawn in 0.20.1 (#919)"]
 async fn stored_data_wins_over_a_disagreeing_sidecar() {
     // Sidecar says {Organization}, current is {Organization}, but stored kinds are Person.
     let ws = Ws::new(PERSON_ID, person("Ada")).await;
@@ -529,6 +534,7 @@ async fn stored_data_wins_over_a_disagreeing_sidecar() {
 }
 
 #[tokio::test]
+#[ignore = "#778 reopened: the stored-kind data check was withdrawn in 0.20.1 (#919)"]
 async fn mixed_removal_is_refused_when_one_identity_type_stays() {
     let ws = Ws::new(PERSON_ORG_ID, with_orgs()).await;
     ws.delete_stamp();
@@ -539,6 +545,7 @@ async fn mixed_removal_is_refused_when_one_identity_type_stays() {
 }
 
 #[tokio::test]
+#[ignore = "#778 reopened: the stored-kind data check was withdrawn in 0.20.1 (#919)"]
 async fn type_removed_from_ontology_entirely_is_refused() {
     let ws = Ws::new(PERSON_ID, person("Ada")).await;
     ws.delete_stamp();
@@ -631,4 +638,65 @@ async fn distinct_non_default_kinds_is_group_scoped_and_skips_default() {
         .distinct_non_default_kinds(G)
         .unwrap()
         .is_empty());
+}
+
+// ── #919: asserted non-`Entity` kinds are not identity removals ───────────────
+
+const CONV_FILE_FLAGLESS: &str = "mode: open\nentity_types:\n  - name: Conversation\n  - name: File\nrelation_types:\n  - name: DISCUSSED_FILE\n";
+const CONV_FILE_PERSON_ID: &str = "mode: open\nentity_types:\n  - name: Person\n    identity: true\n  - name: Conversation\n  - name: File\nrelation_types:\n  - name: DISCUSSED_FILE\n";
+
+/// Asserts a `Conversation` and a `File` entity with explicit kinds and a relationship between
+/// them, then ingests an episode, all in one process.
+async fn assert_conversation_file(ws: &Ws) {
+    let state = ws.restart();
+    for (kind, name) in [("Conversation", "chat-1"), ("File", "a.md")] {
+        let v = call(
+            &state,
+            "knowledge_assert_entity",
+            json!({"group_id": G, "kind": kind, "name": name, "summary": format!("{kind} {name}")}),
+            false,
+        )
+        .await;
+        assert!(v.get("error").is_none(), "assert {kind}: {v}");
+    }
+    let v = call(
+        &state,
+        "knowledge_assert_relationship",
+        json!({"group_id": G, "source_name": "chat-1", "source_kind": "Conversation",
+               "target_name": "a.md", "target_kind": "File", "predicate": "DISCUSSED_FILE",
+               "fact": "chat-1 discussed a.md"}),
+        false,
+    )
+    .await;
+    assert!(v.get("error").is_none(), "assert relationship: {v}");
+    ingest(&state, 3).await.unwrap();
+}
+
+#[tokio::test]
+async fn asserted_kinds_with_empty_identity_set_accept_after_restart() {
+    // The #919 repro: no type sets `identity`, so no stamp is ever written.
+    let ws = Ws::new(CONV_FILE_FLAGLESS, person("Ada")).await;
+    assert_conversation_file(&ws).await;
+    assert!(!ws.stamp_path().exists());
+    assert_accepted(&ws).await;
+    assert!(!ws.stamp_path().exists());
+}
+
+#[tokio::test]
+async fn asserted_kinds_accept_after_restart_without_sidecar() {
+    // A workspace written by 0.19.1 or earlier may have no ontology sidecar at all.
+    let ws = Ws::new(CONV_FILE_FLAGLESS, person("Ada")).await;
+    assert_conversation_file(&ws).await;
+    let _ = std::fs::remove_file(ws.sidecar_path());
+    assert_accepted(&ws).await;
+}
+
+#[tokio::test]
+async fn asserted_kinds_beside_an_identity_type_accept_with_stamp_missing() {
+    // One identity type (Person, stamped and restorable) plus asserted kinds that never were.
+    let ws = Ws::new(CONV_FILE_PERSON_ID, person("Ada")).await;
+    assert_conversation_file(&ws).await;
+    ws.delete_stamp();
+    assert_accepted(&ws).await;
+    assert_eq!(stamp(ws.root.path()), vec!["Person".to_string()]);
 }

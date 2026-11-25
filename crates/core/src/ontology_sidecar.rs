@@ -181,7 +181,8 @@ pub fn wal_ontology_path(wal_dir: &Path) -> PathBuf {
 /// field consumed is `identity_types` (#776, #778): after a rebuild-from-WAL and on the first
 /// resolve of any group with no stamp, `identity_stamp::restore_stamp_if_absent` uses it to
 /// restore a missing identity-set stamp. Its absence never blocks replay or affects correctness —
-/// the kind-aware D1 check and the stored-kind scan cover a group with no restorable stamp.
+/// the kind-aware D1 check covers a group with no restorable stamp, except an identity removal
+/// made while both the stamp and this field are missing (#778, reopened by #919).
 ///
 /// Reuses [`OntologySidecar`]'s existing shape rather than a second schema, since the two sidecars
 /// (`.lcg/ontology-hash.json` for drift, `.wal-ontology.json` for publish provenance) record the
