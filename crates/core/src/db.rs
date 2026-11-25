@@ -3830,9 +3830,9 @@ impl<'db> Conn<'db> {
     }
 
     /// The distinct stored `kind` values of `Entity` nodes in `group_id`, excluding NULL, `''`
-    /// and the default kind (`types::DEFAULT_KIND`). Used by the D1 guard (#778) to detect an
-    /// identity removal from the stored data when the group's stamp is absent. Group-scoped,
-    /// unindexed; callers run it only when the stamp file is missing.
+    /// and the default kind (`types::DEFAULT_KIND`). Group-scoped and unindexed. The D1 guard
+    /// used it for #778 and stopped in 0.20.1 (#919), because an asserted kind (ADR-0615) is not
+    /// evidence of an identity removal; kept for the follow-up fix of #778.
     pub fn distinct_non_default_kinds(&self, group_id: &str) -> Result<Vec<String>, Error> {
         let rows = self.query_params(
             "MATCH (e:Entity) WHERE e.group_id = $gid AND e.kind IS NOT NULL AND e.kind <> '' \

@@ -52,3 +52,19 @@ resolve per process. Avoiding it would need a persisted marker, which is out of 
   atomic rename and the restore never overwrites, so this is safe.
 - Operator-visible: a group with a missing stamp and stale identity-kind data is now refused where it
   was previously accepted.
+
+## Amendment (0.20.1, #919): the stored-kind check is withdrawn
+
+Decision 2 assumed that every stored non-`Entity` kind came from an identity-bearing type. It
+doesn't: `knowledge_assert_entity` with an explicit `kind` (ADR-0615) creates that kind whatever
+the ontology says. A group whose ontology has no identity type never writes a stamp. After a
+restart, the scan therefore read its asserted `Conversation` / `File` entities as an identity
+removal and refused every `knowledge_add_episode` with `-32003`. A workspace upgraded from 0.19.1
+was refused on its first ingest.
+
+0.20.1 removes Decision 2 from `check_identity_set`. Decision 1 (the lazy restore from the WAL
+sidecar's `identity_types`) stays, and it covers the common way a stamp goes missing. An identity
+removal made while both the stamp and the sidecar's `identity_types` are missing is again not
+detected, as in 0.19.1: #778 is reopened. A proper fix needs to tell an identity-assigned kind
+from an asserted one, which today's stored data cannot do. The tests that need Decision 2 are kept
+in `crates/core/tests/identity_set_hydrate.rs`, marked `#[ignore]`, as the spec for that fix.

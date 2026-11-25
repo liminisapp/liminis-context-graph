@@ -535,10 +535,11 @@ impl AppState {
     ///   (#776): only entities whose `kind` would change under the new set are carriers. Any
     ///   carrier refuses (the stamp is left untouched); otherwise the stamp is rewritten.
     /// - Stamp file absent (#778, ADR-0778): the stamp is first restored from the WAL ontology
-    ///   sidecar if it records `identity_types`; then the group's stored non-default entity kinds
-    ///   not in the current set are unioned in as removals, so a missing stamp cannot hide an
-    ///   identity removal. A consistent group self-heals (a WAL-only rebuild) and a flagless one
-    ///   writes no stamp.
+    ///   sidecar if it records `identity_types`, then compared as above. A flagless group writes
+    ///   no stamp. The stored-kind data check ADR-0778 added is withdrawn (#919): a non-`Entity`
+    ///   kind can also come from an explicit `knowledge_assert_entity` kind (ADR-0615), so it is
+    ///   not evidence of an identity removal. A removal made while both the stamp and the
+    ///   sidecar's `identity_types` are missing is therefore not detected (#778, reopened).
     /// - Sets differ but the DB or stamp cannot be read → `unchecked`, so the caller does not
     ///   cache the entry and the check re-runs rather than silently accepting a flip.
     ///
@@ -552,9 +553,9 @@ impl AppState {
             return (None, None);
         };
         let current = resolved.map(|o| o.identity_set()).unwrap_or_default();
-        // #778: a missing stamp reads as the empty set, which hides an identity removal when
-        // `current` is also empty. Only the absent case gets extra work (restore + data scan),
-        // so stamped groups take exactly the path they always did.
+        // #778: a missing stamp reads as the empty set, so restore it from the WAL ontology
+        // sidecar first when the sidecar records the set. Stamped groups take exactly the path
+        // they always did.
         let stamp_absent = identity_stamp::stamp_path(root, group_id)
             .map(|p| !p.exists())
             .unwrap_or(false);
@@ -575,8 +576,8 @@ impl AppState {
             Ok(r) => r,
             Err(e) => return (None, Some(e)),
         };
-        let mut changed = identity_stamp::changed_labels(&recorded, &current);
-        if changed.is_empty() && !stamp_absent {
+        let changed = identity_stamp::changed_labels(&recorded, &current);
+        if changed.is_empty() {
             return (None, None);
         }
         let db_opt = self.db.load_full();
@@ -585,19 +586,6 @@ impl AppState {
             Some(Err(e)) => return (None, Some(format!("cannot open DB connection: {e}"))),
             None => return (None, Some("DB unavailable".to_string())),
         };
-        if stamp_absent {
-            // Stored data wins over the sidecar: any non-default kind not in the current set
-            // was identity-bearing at creation, so its absence is a removal.
-            match conn.distinct_non_default_kinds(group_id) {
-                Ok(kinds) => {
-                    changed = identity_stamp::merge_stored_kinds(changed, &kinds, &current)
-                }
-                Err(e) => return (None, Some(format!("cannot scan stored entity kinds: {e}"))),
-            }
-            if changed.is_empty() {
-                return (None, None);
-            }
-        }
         match identity_stamp::check_identity_change(&changed, |label, adding| {
             let descendants = match resolved {
                 Some(o) => o.descendants_of(label),

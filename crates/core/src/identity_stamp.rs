@@ -16,8 +16,9 @@
 //! entities already carry the identity kinds is not refused; and the WAL ontology sidecar
 //! records the identity-bearing set, which [`restore_stamp_if_absent`] writes back as the stamp
 //! after a rebuild. Since #778 (ADR-0778) the restore also runs on every first resolve of a
-//! group with no stamp, and the stored entity kinds are checked ([`merge_stored_kinds`]) so an
-//! absent stamp cannot hide an identity removal. See ADR-0616, ADR-0776 and ADR-0778.
+//! group with no stamp. The stored-kind check #778 added ([`merge_stored_kinds`]) was withdrawn
+//! in 0.20.1 (#919) because asserted kinds made it refuse valid groups. See ADR-0616, ADR-0776
+//! and ADR-0778.
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -145,10 +146,12 @@ pub fn changed_labels(
     v
 }
 
-/// Unions stored entity kinds into `changed` as removals (#778). Used when the stamp is absent:
-/// every stored non-default kind that is not in `current` was identity-bearing when the entity
-/// was created, so dropping it from the set is a removal, whatever the stamp says. A kind
-/// already in `changed` is not duplicated. The result is sorted.
+/// Unions stored entity kinds into `changed` as removals (#778). A kind already in `changed` is
+/// not duplicated, and the result is sorted.
+///
+/// Not called by the D1 guard since 0.20.1 (#919): a stored non-default kind can come from an
+/// explicit `knowledge_assert_entity` kind (ADR-0615), not only from an identity-bearing type,
+/// so it is not evidence of a removal. Kept for the follow-up fix of #778.
 pub fn merge_stored_kinds(
     mut changed: Vec<(String, bool)>,
     stored_kinds: &[String],
