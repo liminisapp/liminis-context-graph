@@ -1276,4 +1276,224 @@ mod tests {
             .unwrap();
         settle().await;
     }
+
+    // ---- Request line limit (#293, ADR-0293).
+
+    fn spawn_limited(
+        server: DuplexStream,
+        probe: Arc<Probe>,
+        work_ms: u64,
+        limit: usize,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(serve_connection(
+            server,
+            CancellationToken::new(),
+            fake(probe, work_ms, 0),
+            Arc::new(Notify::new()),
+            HEARTBEAT_INTERVAL,
+            FRAME_WRITE_TIMEOUT,
+            always_gone(),
+            limit,
+        ))
+    }
+
+    async fn items_of(data: &[u8], limit: usize) -> Vec<Item> {
+        let mut r = BoundedLines::new(data, limit);
+        let mut out = Vec::new();
+        while let Some(i) = r.next_item().await.unwrap() {
+            out.push(i);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn line_at_the_limit_is_accepted_and_one_over_is_refused() {
+        let at = "a".repeat(64);
+        let over = "a".repeat(65);
+        let data = format!("{at}\n{over}\n{at}\n");
+        let items = items_of(data.as_bytes(), 64).await;
+        assert_eq!(
+            items,
+            vec![Item::Line(at.clone()), Item::TooLarge, Item::Line(at)]
+        );
+    }
+
+    #[tokio::test]
+    async fn terminator_does_not_count_but_a_carriage_return_does() {
+        let at = "a".repeat(63);
+        // 63 bytes + "\r" is exactly 64 before the "\n": accepted, and the "\r" is stripped.
+        let data = format!("{at}\r\n");
+        assert_eq!(items_of(data.as_bytes(), 64).await, vec![Item::Line(at)]);
+        let over = "a".repeat(64);
+        let data = format!("{over}\r\n");
+        assert_eq!(items_of(data.as_bytes(), 64).await, vec![Item::TooLarge]);
+    }
+
+    #[tokio::test]
+    async fn oversized_line_is_not_buffered_and_reading_stops_near_the_limit() {
+        let limit = 100;
+        let total = 10 * 1024 * 1024;
+        let data = vec![b'x'; total]; // never terminated
+        let mut src: &[u8] = &data;
+        let mut r = BoundedLines::new(&mut src, limit);
+        assert_eq!(r.next_item().await.unwrap(), Some(Item::TooLarge));
+        assert!(
+            r.buf.is_empty() && r.buf.capacity() == 0,
+            "nothing retained"
+        );
+        drop(r);
+        let consumed = total - src.len();
+        assert!(
+            consumed <= limit + READ_BUF_BYTES,
+            "the refusal needed {consumed} bytes of a {total}-byte stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn accumulator_never_exceeds_the_limit() {
+        // Feed a line byte-by-byte across many reads.
+        let (mut client, server) = tokio::io::duplex(8);
+        let mut r = BoundedLines::new(server, 32);
+        let writer = tokio::spawn(async move {
+            for _ in 0..20 {
+                client.write_all(b"yyyyy").await.unwrap();
+            }
+            client.write_all(b"\nok\n").await.unwrap();
+        });
+        let mut items = Vec::new();
+        while let Some(i) = r.next_item().await.unwrap() {
+            assert!(r.buf.len() <= 32);
+            items.push(i);
+        }
+        writer.await.unwrap();
+        assert_eq!(items, vec![Item::TooLarge, Item::Line("ok".into())]);
+    }
+
+    #[tokio::test]
+    async fn discard_budget_exhaustion_is_reported() {
+        let data = vec![b'x'; 200_000]; // far past limit + 4 * limit, no newline
+        let mut r = BoundedLines::new(&data[..], 100);
+        assert_eq!(r.next_item().await.unwrap(), Some(Item::TooLarge));
+        assert_eq!(r.next_item().await.unwrap(), Some(Item::DiscardExhausted));
+    }
+
+    #[tokio::test]
+    async fn multibyte_char_split_at_the_cut_is_still_a_size_error() {
+        // "é" is 2 bytes; with a limit of 11 the cut lands inside the 6th one.
+        let data = format!("{}\nnext\n", "é".repeat(20));
+        let items = items_of(data.as_bytes(), 11).await;
+        assert_eq!(items, vec![Item::TooLarge, Item::Line("next".into())]);
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_within_the_limit_is_still_invalid_data() {
+        let mut r = BoundedLines::new(&b"\xff\xfe\n"[..], 64);
+        let e = r.next_item().await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn final_unterminated_line_is_still_served() {
+        assert_eq!(
+            items_of(b"abc", 64).await,
+            vec![Item::Line("abc".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_line_is_refused_early_then_the_connection_recovers() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let probe = Arc::new(Probe::default());
+        let h = spawn_limited(server, Arc::clone(&probe), 0, 256);
+        // No newline yet: the refusal must arrive while the client is still "sending".
+        client.write_all(&[b'z'; 600]).await.unwrap();
+        let out = read_lines(&mut client, 1).await;
+        let err = &out[0]["error"];
+        assert!(out[0]["id"].is_null());
+        assert_eq!(err["code"], -32005);
+        assert_eq!(err["data"]["reason"], "request_too_large");
+        assert_eq!(err["data"]["limit_bytes"], 256);
+        assert_eq!(err["data"]["setting"], "LCG_REQUEST_MAX_BYTES");
+        let msg = err["message"].as_str().unwrap();
+        assert!(msg.contains("more than 256 bytes"), "{msg}");
+        assert!(msg.contains("LCG_REQUEST_MAX_BYTES"), "{msg}");
+        // Finish the oversized line, then send a good one on the same connection.
+        client.write_all(&[b'z'; 600]).await.unwrap();
+        client.write_all(b"\n").await.unwrap();
+        client
+            .write_all(line(2, "knowledge_status", false).as_bytes())
+            .await
+            .unwrap();
+        let out = read_lines(&mut client, 1).await;
+        assert_eq!(out[0]["id"], 2);
+        assert_eq!(out[0]["result"]["method"], "knowledge_status");
+        // Only the good request ever reached dispatch.
+        assert_eq!(probe.started.load(Ordering::SeqCst), 1);
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+    }
+
+    #[tokio::test]
+    async fn exhausting_the_discard_budget_closes_the_connection() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let h = spawn_limited(server, Arc::new(Probe::default()), 0, 64);
+        let writer = tokio::spawn(async move {
+            // Never sends a newline; stops once the server closes its end.
+            while client.write_all(&[b'q'; 512]).await.is_ok() {}
+            client
+        });
+        tokio::time::timeout(Duration::from_secs(5), h)
+            .await
+            .expect("connection closes once the discard budget is spent")
+            .unwrap();
+        drop(writer.await);
+    }
+
+    #[tokio::test]
+    async fn oversized_line_read_ahead_is_refused_after_the_inflight_response() {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let probe = Arc::new(Probe::default());
+        let h = spawn_limited(server, Arc::clone(&probe), 300, 256);
+        client
+            .write_all(line(1, "knowledge_process_chunk", false).as_bytes())
+            .await
+            .unwrap();
+        // Pipelined while request 1 runs: an oversized line, then a good one.
+        client.write_all(&[b'w'; 1000]).await.unwrap();
+        client.write_all(b"\n").await.unwrap();
+        client
+            .write_all(line(3, "knowledge_status", false).as_bytes())
+            .await
+            .unwrap();
+        let out = read_lines(&mut client, 3).await;
+        assert_eq!(out[0]["id"], 1, "in-flight response first: {out:?}");
+        assert_eq!(out[1]["error"]["code"], -32005);
+        assert_eq!(out[2]["id"], 3);
+        assert_eq!(probe.started.load(Ordering::SeqCst), 2);
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+    }
+
+    #[tokio::test]
+    async fn maximal_document_after_worst_case_escaping_fits_the_default_limit() {
+        use lcg_core::request_limits::{request_line_max_bytes, DEFAULT_REQUEST_MAX_BYTES};
+        // 2 MiB of control characters: every byte becomes the 6-byte escape `\u0001`.
+        let doc_cap = lcg_core::document_config::DEFAULT_MAX_BYTES;
+        let body = "\\u0001".repeat(doc_cap);
+        let request = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"knowledge_process_document\",\
+             \"params\":{{\"content\":\"{body}\"}}}}\n"
+        );
+        assert!(request.len() > 12 * 1024 * 1024);
+        assert!(request.len() < DEFAULT_REQUEST_MAX_BYTES);
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let probe = Arc::new(Probe::default());
+        let h = spawn_limited(server, Arc::clone(&probe), 0, request_line_max_bytes());
+        client.write_all(request.as_bytes()).await.unwrap();
+        let out = read_lines(&mut client, 1).await;
+        assert_eq!(out[0]["result"]["method"], "knowledge_process_document");
+        assert_eq!(probe.started.load(Ordering::SeqCst), 1);
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(5), h).await;
+    }
 }
