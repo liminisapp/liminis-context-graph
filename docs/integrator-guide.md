@@ -93,17 +93,29 @@ stable code, such as `document_too_large:` or `empty_document:`.
 **One request at a time per connection.** The service answers the requests on a connection
 strictly in order. A search sent on the same connection as a slow ingest waits behind it. Open a
 second connection for reads, and one connection per concurrent ingest. Connections do not block
-each other. See
+each other. The service does not pipeline several requests on one connection and answer them out of
+order (considered and declined, [ADR-0914](adr/0914-declined-pipelining-on-one-connection.md)), so
+"open N connections" stays the way to run N requests at once. See
 [Connections, concurrency and timeouts](ipc-mcp-reference.md#connections-concurrency-and-timeouts-issue-861).
 
 **Timeouts.** Ingest time is dominated by the embedder and the LLM, so there is no fixed bound.
 Set the client timeout to the slowest ingest you expect, or send `"_progress_token": "x"` with
 `knowledge_process_chunk` or `knowledge_process_document` and treat silence between lines as the
 timeout: the service streams `{"type":"progress",...}` lines and a `heartbeat` about every 10
-seconds, then the terminal result. If a call times out, **close the connection** and retry on a
-new one: closing cancels the original before its commit, and an identical resubmission is a no-op
-(see [Ingest, update, retire, delete](#ingest-update-retire-delete)). Keep reading while a
-request runs; a client that stops reading is treated as disconnected.
+seconds, then the terminal result. Better still, pass the same budget as **`deadline_ms`** (when
+`knowledge_capabilities` lists `process_deadline`): a request that cannot reach commit in time
+returns a structured error, code `-32005` with `reason: "deadline_exceeded"` and the `phase`
+reached, and **writes nothing**, so you know the retry is safe; if the deadline passes after commit
+has begun, the commit finishes and the result says `"deadline_exceeded": true`. Retrying a chunk
+that is still in flight is cheap: an identical `knowledge_process_chunk` on another connection
+**joins** the running one instead of extracting again and returns the same result with
+`"joined": true` (feature `chunk_join_inflight`). If a call times out client-side instead,
+**close the connection** and retry on a new one: closing cancels the original before its commit,
+and an identical resubmission is a no-op (see
+[Ingest, update, retire, delete](#ingest-update-retire-delete)). Keep reading while a
+request runs; a client that stops reading is treated as disconnected. See
+[Deadline](ipc-mcp-reference.md#deadline-deadline_ms-issue-914) and
+[Joining a duplicate in-flight request](ipc-mcp-reference.md#joining-a-duplicate-in-flight-request-issue-914).
 
 An MCP client uses `--mcp-stdio` instead of the socket and gets the same methods as tools; the
 rest of this guide applies unchanged

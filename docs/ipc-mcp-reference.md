@@ -59,6 +59,11 @@ write lock, and each connection has its own task), so:
   embed/extract phase, which is the slow one.
 - Correlate by connection, not by id: `_progress_token` frames (below) do not echo the token, which
   is safe because a connection never has two requests in flight.
+- **Pipelining on one connection was considered and declined** (issue #914,
+  [ADR-0914](adr/0914-declined-pipelining-on-one-connection.md)): the service will not run several
+  requests on one connection and answer them out of order, so "open one connection per concurrent
+  request" stays the rule. Bound a slow ingest with `deadline_ms` and retry it safely instead
+  (below).
 
 **Disconnect cancels an in-flight ingest (feature `cancel_on_disconnect`).** While a
 `knowledge_process_chunk` or `knowledge_process_document` request is running, the service watches
@@ -95,8 +100,13 @@ not cancelled on disconnect and run to completion as before.
 
 **Choosing a timeout and retrying.** Ingest latency is dominated by the embedder and the LLM, so
 set the client timeout to the slowest chunk you expect (or stream with `_progress_token` and treat
-silence between frames as the timeout). When a call times out, close the connection and retry on a
-new one:
+silence between frames as the timeout). Prefer passing the same budget as **`deadline_ms`** (feature
+`process_deadline`; see [Deadline](#deadline-deadline_ms-issue-914)): the service then abandons the
+request before commit and answers with a structured `deadline_exceeded` error instead of leaving you
+to infer what happened from a dropped connection. Retrying the same chunk while the first attempt is
+still running is cheap: an identical request **joins** the one in flight rather than extracting again
+(feature `chunk_join_inflight`; see [Joining a duplicate in-flight request](#joining-a-duplicate-in-flight-request-issue-914)).
+If you time out on the client side instead, close the connection and retry on a new one:
 
 - If the timeout fired during embed or extract, the disconnect cancelled the original, so the retry
   extracts the chunk **once**, not twice.
@@ -1157,13 +1167,84 @@ episode exists for the `chunk_id`; a live same-named episode was written by anot
 (`knowledge_add_episode`, document mode); the live episode has a pending (future-effective) document supersession; another
 `knowledge_process_chunk` or `knowledge_mark_chunk_removed` call for the same `(group_id,
 chunk_id)` is in flight (the ordinary path then orders the two, so a revert is never lost to an
-earlier edit still extracting); or no live episode exists (never ingested, superseded, or removed
+earlier edit still extracting; an *identical* in-flight `knowledge_process_chunk` is joined instead,
+see below); or no live episode exists (never ingested, superseded, or removed
 with `knowledge_mark_chunk_removed`). With a `doc_id`, the "one document has one origin" refusal
 applies to a no-op as to an ingest. A malformed request is rejected as always, never
 reported as `unchanged`. A change of extractor, model or ontology does not by itself re-extract an
 identical chunk: change the chunk or use the reprocess operations. Discover support with the
 `unchanged_noop` entry in `knowledge_capabilities` `features`. See
 [ADR-0858](adr/0858-unchanged-chunk-resubmission-noop.md).
+
+#### Deadline (`deadline_ms`, issue #914)
+
+`knowledge_process_chunk` and `knowledge_process_document` accept an optional **`deadline_ms`**: a
+positive integer number of milliseconds (feature `process_deadline`). Zero, negatives, floats and
+non-numbers are rejected with the usual `-32000` validation error before any work. Omitted, nothing
+changes. The clock starts when the service has validated the request (not when it was queued behind
+another on the same connection), so client and service clocks do not matter.
+
+- **Within the deadline:** the request runs normally and its result carries no deadline field.
+- **Deadline passes before commit starts:** the request is abandoned at its next cancellation point
+  (the same points as [cancel-on-disconnect](#connections-concurrency-and-timeouts-issue-861),
+  including waiting for the group write lock) and returns error code **`-32005`**:
+
+  ```json
+  {"error": {"code": -32005,
+             "message": "deadline exceeded before commit (phase: extract); nothing was written",
+             "data": {"reason": "deadline_exceeded", "phase": "extract", "committed": false}}}
+  ```
+
+  For `knowledge_process_chunk` **nothing was written** (no episode, entity, edge or WAL record), so
+  retrying is safe. `phase` is the last phase reached: `embed`, `extract` (through resolution and
+  dedup), `awaiting_write_lock` (queued behind another writer), or `awaiting_inflight` (a joined
+  request still waiting, below). Progress frames sent earlier stay valid; the terminal line is this
+  error. For `knowledge_process_document`, `data` also has `"partial": true` and `phase` is
+  `chunked`, `extracting` or `committing`: the call did not complete, units already committed stay in
+  place and nothing is retired (as for any cancelled document ingest); resubmit it to finish.
+- **Deadline passes once the commit has started:** the commit finishes (it is never interrupted)
+  and the success result carries `"deadline_exceeded": true`: the write is complete, but later than
+  you asked. The key is absent when the deadline was met, and on an `unchanged` no-op, which returns
+  before any cancellation point.
+- A request that is disconnected as well is reported as the cancellation it is; shutdown still
+  cancels as before.
+- **Late notice.** A deadline is noticed at cancellation points, so a request can overrun it by up to
+  the time between two points. Three waits have no point at all: the per-document lock of
+  `knowledge_process_document`, the unchanged-check read lock, and an LLM call already in flight
+  between points. A provider may still bill for a request it had already received.
+
+See [ADR-0914](adr/0914-process-deadline-and-inflight-join.md). Both tools list `deadline_ms` in
+their MCP input schemas; over attached MCP the parameter and the `error.data` pass through unchanged.
+
+#### Joining a duplicate in-flight request (issue #914)
+
+A `knowledge_process_chunk` that arrives for a `(group_id, chunk_id)` which already has a request in
+flight with **identical content** (feature `chunk_join_inflight`) does not extract again. It waits for
+the first request and returns the same result with **`"joined": true`**; the extractor is called
+once. "Identical" is the comparison of an unchanged resubmission (above) applied between the two
+requests: `chunk_text`, `attributes`, `origin`, `source_file`, `doc_id` and `reference_time` (both
+omitted, or the same explicit instant). The joined result has its own `duration_seconds` (including
+the wait) and its own `deadline_exceeded` / `warning`; the first request's result has no `joined` key.
+
+- **Not joined:** different content, a different group, `supersede: false`,
+  `same_revision_episode_uuids`, `knowledge_mark_chunk_removed`, `knowledge_process_document`, and a
+  request that arrives while a *differing* request for the same chunk is also in flight. These behave
+  as before, so commit-instant ordering still decides them.
+- **If the first request is cancelled** (its client disconnects, its `deadline_ms` passes, or it
+  panics) the joined request is **not** cancelled with it. It is re-elected: one waiting request
+  becomes the new first request and extracts, and the others join that one. Each still ends in
+  success and exactly one live episode results. The cancelled request's partial extraction is
+  discarded.
+- **If the first request fails** for another reason, joined requests receive the same error (same
+  code and `data`); they do not retry.
+- **A joined request's own `deadline_ms` and disconnect** apply only to it (`deadline_exceeded` with
+  phase `awaiting_inflight`, or dropped); the first request carries on.
+- A joined request with a `_progress_token` receives heartbeats (so an idle read timeout does not drop
+  it) but not the `embed` / `extract` / `commit` frames, which belong to the first request's
+  connection. Shutdown cancels joined requests too.
+
+This supersedes the earlier statement that two identical resubmissions arriving together both extract.
+See [ADR-0914](adr/0914-process-deadline-and-inflight-join.md).
 
 To submit one chunk as several calls under one `chunk_id`, send `supersede: false` on every unit but
 the last, and pass the earlier units' `episode_uuid`s as `same_revision_episode_uuids` on the last:
@@ -2563,6 +2644,9 @@ While a request that sent a token is otherwise silent (the LLM call between `ext
 `commit`), the service writes `{"type":"progress","phase":"heartbeat"}` about every 10 s, so a
 client with a per-line idle read timeout (as the attached MCP backend has, 30 s by default) keeps
 its connection and the ingest alive. Ignore unknown `phase` values; token-less requests get none.
+A request that [joined](#joining-a-duplicate-in-flight-request-issue-914) an identical in-flight one
+receives heartbeats only. A terminal `deadline_exceeded` error (`-32005`) ends a streaming request
+like any other error; frames sent before it stay valid.
 
 `knowledge_process_chunk` reports what it could not write, not only how much. Two additive
 result fields exist for that, both introduced in 0.13.2.
