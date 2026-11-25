@@ -2893,6 +2893,37 @@ mod tests {
         assert!(tool.description.contains("rerank") && tool.description.contains("expand"));
     }
 
+    /// Issue #914: both ingest tools expose `deadline_ms` and describe the `deadline_exceeded`
+    /// error, so an MCP client can discover and use it.
+    #[test]
+    fn ingest_tools_expose_deadline_ms() {
+        for name in ["knowledge_process_chunk", "knowledge_process_document"] {
+            let spec = registry()
+                .into_iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("tool {name} must remain registered"));
+            let schema = (spec.input_schema)();
+            assert_eq!(
+                schema["properties"]["deadline_ms"]["type"], "integer",
+                "{name}"
+            );
+            assert_eq!(schema["properties"]["deadline_ms"]["minimum"], 1, "{name}");
+            assert!(
+                !schema["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r == "deadline_ms"),
+                "{name}: deadline_ms is optional"
+            );
+            assert!(
+                spec.description.contains("deadline_exceeded")
+                    && spec.description.contains("-32005"),
+                "{name} description must document the deadline error"
+            );
+        }
+    }
+
     /// SC-006 (issue #528): every episode-derived MCP tool's description must accurately state
     /// whether `attributes` is included in that tool's response, mirroring the discipline
     /// `edge_tool_descriptions_state_episode_uuids_semantics_accurately` enforces for
