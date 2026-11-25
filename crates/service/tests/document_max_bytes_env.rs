@@ -20,6 +20,8 @@ mod document_max_bytes_env_tests {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_liminis-context-graph"));
         cmd.current_dir(dir.path())
             .env_remove(VAR)
+            .env_remove("LCG_REQUEST_MAX_BYTES")
+            .env_remove("LCG_CHUNK_TEXT_MAX_BYTES")
             .env_remove("LCG_SEARCH_MIN_SCORE")
             .env_remove("LCG_BUFFER_POOL_BYTES")
             .env_remove("LCG_MAX_THREADS")
@@ -63,8 +65,15 @@ mod document_max_bytes_env_tests {
 
     /// Spawns the service and returns the startup log line describing the document cap.
     fn startup_line(value: Option<&str>) -> String {
+        startup_line_with(value, &[])
+    }
+
+    fn startup_line_with(value: Option<&str>, extra_env: &[(&str, &str)]) -> String {
         let dir = TempDir::new().unwrap();
         let mut cmd = base_cmd(&dir);
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
         if let Some(v) = value {
             cmd.env(VAR, v);
         }
@@ -87,7 +96,9 @@ mod document_max_bytes_env_tests {
             unset.ends_with("document size cap: 2097152 bytes (LCG_DOCUMENT_MAX_BYTES unset)"),
             "{unset}"
         );
-        let set = startup_line(Some("4MiB"));
+        // A 4 MiB cap needs a larger line limit than the 16 MiB default (#293); the default
+        // limit with a 4 MiB cap is refused (see request_limits_env.rs).
+        let set = startup_line_with(Some("4MiB"), &[("LCG_REQUEST_MAX_BYTES", "32MiB")]);
         assert!(
             set.ends_with("document size cap: 4194304 bytes (LCG_DOCUMENT_MAX_BYTES)"),
             "{set}"
