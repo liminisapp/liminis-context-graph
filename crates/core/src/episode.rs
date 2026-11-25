@@ -271,6 +271,10 @@ pub struct EpisodeOpts {
     /// Send failures (a closed receiver) are ignored — a dead client is the cancel token's
     /// business, not an ingest error.
     pub progress: Option<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>,
+    /// Records the last phase reached (issue #914, ADR-0914) so a `deadline_exceeded` error can
+    /// name it: `embed`, `extract`, then `awaiting_write_lock`. Never read after the write lock is
+    /// held — a started commit is not interrupted.
+    pub phase: Option<crate::deadline::PhaseCell>,
 }
 
 /// Counts a cancellation in `cancelled_chunks` only when it was caused by process shutdown, so a
@@ -279,6 +283,18 @@ pub(crate) fn note_cancelled(state: &AppState) {
     if state.cancel_token.is_cancelled() {
         state.cancelled_chunks.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Records `phase` in the request's phase cell and emits its progress frame.
+fn enter_phase(
+    cell: &Option<crate::deadline::PhaseCell>,
+    tx: &Option<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>,
+    phase: &'static str,
+) {
+    if let Some(cell) = cell {
+        cell.set(phase);
+    }
+    emit_phase(tx, phase);
 }
 
 fn emit_phase(tx: &Option<tokio::sync::mpsc::UnboundedSender<serde_json::Value>>, phase: &str) {
@@ -717,8 +733,8 @@ pub async fn add_episode_with_opts(
     };
     // Phase A runs embed and extract concurrently; the two frames are start-of-phase markers
     // emitted in a fixed order (issue #861).
-    emit_phase(&opts.progress, "embed");
-    emit_phase(&opts.progress, "extract");
+    enter_phase(&opts.phase, &opts.progress, "embed");
+    enter_phase(&opts.phase, &opts.progress, "extract");
     let (content_embedding, extraction_outcome): (Vec<f32>, ExtractionOutcome) = tokio::select! {
         result = async {
             tokio::try_join!(
@@ -1690,6 +1706,9 @@ pub async fn add_episode_with_opts(
     // completion (FR-003: Phase C must not be torn mid-write).
     // `biased;` with the lock arm first: once the lock is obtainable the commit proceeds, so
     // "commit has started" is deterministic and a ready lock beats a ready cancel (issue #861).
+    if let Some(cell) = &opts.phase {
+        cell.set("awaiting_write_lock");
+    }
     let _write_guard = tokio::select! {
         biased;
         g = state.write_lock.write() => g,
@@ -1701,7 +1720,7 @@ pub async fn add_episode_with_opts(
     // The `commit` frame is sent only once the write lock is held: it means "the commit has
     // started and will finish whatever the client does". A request still waiting for the lock
     // behind another writer has not committed and is still cancellable (issue #861).
-    emit_phase(&opts.progress, "commit");
+    enter_phase(&opts.phase, &opts.progress, "commit");
     // Re-run the D1 guard now that the write lock is held (issue #616). The check at the top ran
     // before extraction, lock-free; a `knowledge_delete_by_group` / `knowledge_clear_all` that
     // completed in between removed this group's stamp and dropped its cached ontology. Without
