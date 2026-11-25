@@ -1985,6 +1985,63 @@ async fn test_knowledge_process_chunk_duplicate_chunk_id() {
     );
 }
 
+/// #293: `chunk_text` over the `LCG_CHUNK_TEXT_MAX_BYTES` cap (default 512 KiB; no installer runs
+/// in this process) is refused before any work or write; at the cap it proceeds. The cap is a
+/// byte count, distinct from the character-based advisory threshold.
+#[tokio::test]
+async fn test_knowledge_process_chunk_size_cap_refusal() {
+    let (db, _dir) = make_db(4);
+    let (state, capture) = make_state_with_capture_sink(db);
+    let cap = lcg_core::request_limits::DEFAULT_CHUNK_TEXT_MAX_BYTES;
+
+    let v = dispatch_val(
+        90,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "a".repeat(cap + 1),
+            "chunk_id": "over-cap",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_err_resp(&v, 90, -32000);
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("chunk_text_too_large:"), "{msg}");
+    assert!(msg.contains(&format!("{} bytes", cap + 1)), "{msg}");
+    assert!(msg.contains(&format!("cap of {cap} bytes")), "{msg}");
+    assert!(msg.contains("LCG_CHUNK_TEXT_MAX_BYTES"), "{msg}");
+    assert!(msg.contains("knowledge_process_document"), "{msg}");
+    assert_eq!(
+        count_chunk_text_oversized_events(&capture),
+        0,
+        "a refused chunk must not reach the advisory path"
+    );
+
+    // No episode was written.
+    let st = dispatch_val(91, "knowledge_status", json!({}), Arc::clone(&state)).await;
+    assert_eq!(st["result"]["episode_count"], 0, "{st}");
+
+    // Exactly at the cap is accepted (and, being far above 8,000 chars, still carries the
+    // existing advisory warning).
+    let v = dispatch_val(
+        92,
+        "knowledge_process_chunk",
+        json!({
+            "chunk_text": "a".repeat(cap),
+            "chunk_id": "at-cap",
+            "source_file": "test.txt",
+            "reference_time": "2024-06-01T12:00:00Z",
+        }),
+        Arc::clone(&state),
+    )
+    .await;
+    assert_ok_resp(&v, 92);
+    assert_eq!(v["result"]["success"], true, "{v}");
+    assert_eq!(v["result"]["warning"]["type"], "chunk_text_oversized");
+}
+
 /// `capture.events()` also contains one `IpcCall` event per dispatch (emitted unconditionally by
 /// `handlers::dispatch`), so tests must filter for `ChunkTextOversized` specifically rather than
 /// asserting on the raw event count.
