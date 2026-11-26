@@ -15,9 +15,10 @@
 //!   shutdown, panic) publishes [`JoinOutcome::Abandoned`]; each follower goes back through
 //!   [`enter`], where one becomes the new leader and the rest join it. A leader that fails for any
 //!   other reason publishes the failure and followers share it.
-//! * **No lost wake-ups, no hangs.** [`LeaderHandle`] removes its registry entry and then
-//!   publishes in `Drop`, so an outcome is always delivered even when the leader's future is
-//!   dropped or panics (`Abandoned`).
+//! * **No lost wake-ups, no hangs.** [`LeaderHandle`] releases its `chunk_inflight` registration
+//!   and removes its registry entry (both under the registry lock), and only then publishes, in
+//!   `Drop`. An outcome is always delivered even when the leader's future is dropped or panics
+//!   (`Abandoned`), and a re-electing follower never sees the departed leader still counted.
 //!
 //! The registry is a process-wide static keyed by the `AppState` address rather than an `AppState`
 //! field, like `document::ingest`'s per-document locks, so the many fixtures that build `AppState`
@@ -110,11 +111,7 @@ fn lock_registry() -> std::sync::MutexGuard<'static, HashMap<Key, Entry>> {
 /// The caller's role for one `process_chunk` request.
 pub enum JoinRole {
     /// First joinable request for the key: do the work, then [`LeaderHandle::finish`].
-    Leader {
-        inflight: ChunkInflightGuard,
-        alone: bool,
-        handle: LeaderHandle,
-    },
+    Leader { alone: bool, handle: LeaderHandle },
     /// An identical request is in flight: wait for it with [`wait`].
     Follower(watch::Receiver<JoinOutcome>),
     /// A different request is in flight (or the leader is not alone): today's independent path.
@@ -156,24 +153,29 @@ pub fn enter(
         },
     );
     JoinRole::Leader {
-        inflight,
         alone,
         handle: LeaderHandle {
             key,
             id,
             tx,
+            inflight: Some(inflight),
             outcome: None,
         },
     }
 }
 
-/// The leader's side of the registry entry. Dropping it removes the entry and then publishes the
+/// The leader's side of the registry entry. Dropping it releases the leader's `chunk_inflight` registration, removes the entry and then publishes the
 /// outcome set by [`LeaderHandle::finish`], or [`JoinOutcome::Abandoned`] if none was set (an
 /// error return, a panic, or the connection task being aborted).
 pub struct LeaderHandle {
     key: Key,
     id: u64,
     tx: Arc<watch::Sender<JoinOutcome>>,
+    /// The leader's `chunk_inflight` registration. Owned here so that [`Drop`] releases it in the
+    /// same critical section that removes the registry entry, before any follower is woken: a
+    /// follower that re-elects must see the count without the departed leader, or a second
+    /// re-electing follower would see `count == 2` and extract independently.
+    inflight: Option<ChunkInflightGuard>,
     outcome: Option<JoinOutcome>,
 }
 
@@ -187,10 +189,14 @@ impl LeaderHandle {
 impl Drop for LeaderHandle {
     fn drop(&mut self) {
         {
+            // Entry removal and the `chunk_inflight` release happen under the registry lock (lock
+            // order: registry, then `chunk_inflight`), so `enter` never observes one without the
+            // other, and the wake-up below comes after both.
             let mut reg = lock_registry();
             if reg.get(&self.key).is_some_and(|e| e.id == self.id) {
                 reg.remove(&self.key);
             }
+            drop(self.inflight.take());
         }
         self.tx
             .send_replace(self.outcome.take().unwrap_or(JoinOutcome::Abandoned));

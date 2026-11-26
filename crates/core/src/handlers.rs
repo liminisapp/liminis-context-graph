@@ -1471,20 +1471,20 @@ async fn handle_knowledge_process_chunk(
     // a request that differs from the in-flight one, registers independently as before.
     let joinable = supersede && keep.is_empty();
     let fingerprint = crate::chunk_join::ChunkFingerprint::from_view(&view);
+    // A leader's own `chunk_inflight` registration lives inside its `LeaderHandle` (released before
+    // followers are woken); every other path holds the guard here.
     let (_inflight, alone, leader) = loop {
         if !joinable {
             let (g, a) = state.chunk_inflight_enter(&group_id, &chunk_id);
-            break (g, a, None);
+            break (Some(g), a, None);
         }
         match crate::chunk_join::enter(&state, &group_id, &chunk_id, fingerprint.clone()) {
-            crate::chunk_join::JoinRole::Leader {
-                inflight,
-                alone,
-                handle,
-            } => break (inflight, alone, Some(handle)),
+            crate::chunk_join::JoinRole::Leader { alone, handle } => {
+                break (None, alone, Some(handle))
+            }
             crate::chunk_join::JoinRole::Independent => {
                 let (g, a) = state.chunk_inflight_enter(&group_id, &chunk_id);
-                break (g, a, None);
+                break (Some(g), a, None);
             }
             crate::chunk_join::JoinRole::Follower(rx) => {
                 use crate::chunk_join::JoinOutcome;
