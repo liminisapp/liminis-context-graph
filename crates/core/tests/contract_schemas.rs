@@ -537,6 +537,21 @@ async fn process_chunk_validates_including_warning_and_dropped_edges() {
     );
     assert_valid("knowledge_process_chunk", &again);
 
+    // #914: a joined result and a deadline-exceeded-but-committed result add optional booleans.
+    let mut m = again.clone();
+    m["joined"] = json!(true);
+    m["deadline_exceeded"] = json!(true);
+    assert_valid("knowledge_process_chunk", &m);
+    let mut m = unchanged.clone();
+    m["joined"] = json!(true);
+    assert_valid("knowledge_process_chunk", &m);
+    let mut m = again.clone();
+    m["joined"] = json!("yes");
+    assert_invalid("knowledge_process_chunk", "joined retyped", &m);
+    let mut m = again.clone();
+    m["deadline_exceeded"] = json!(1);
+    assert_invalid("knowledge_process_chunk", "deadline_exceeded retyped", &m);
+
     // Oversized chunk_text carries the advisory warning.
     let (state2, _db2, _d2) = state_with(vec![fact("Alpha", "Beta", "Alpha uses Beta")], None);
     let big = call(

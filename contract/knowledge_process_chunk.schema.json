@@ -122,6 +122,10 @@
         "chunk_id": {
           "type": "string"
         },
+        "deadline_exceeded": {
+          "description": "`true`, present only when the request's `deadline_ms` had passed by the time its write\ncompleted: the commit had started, so the write is whole (#914, `process_deadline`).",
+          "type": "boolean"
+        },
         "dedup_paths": {
           "$ref": "#/definitions/DedupPaths"
         },
@@ -184,6 +188,10 @@
         },
         "episode_uuid": {
           "type": "string"
+        },
+        "joined": {
+          "description": "`true`, present only when this request joined an identical in-flight request instead of\nrunning its own (#914, `chunk_join_inflight`).",
+          "type": "boolean"
         },
         "left_alone_episode_uuids": {
           "description": "Present only when same-named episodes written by another path were left alone (#292).",
@@ -257,6 +265,10 @@
         "episode_uuid": {
           "description": "The existing live episode.",
           "type": "string"
+        },
+        "joined": {
+          "description": "`true`, present only when this request joined an identical in-flight request instead of\nrunning its own (#914, `chunk_join_inflight`).",
+          "type": "boolean"
         },
         "source_file": {
           "type": "string"

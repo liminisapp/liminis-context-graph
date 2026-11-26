@@ -100,5 +100,8 @@ The cancellation points already existed in `add_episode_with_opts` (the last one
 - Cancellation is cooperative: an in-flight LLM request is abandoned at the next point, and a
   provider may still bill for it.
 - While 8 lines are buffered the reader is not polled, which also pauses disconnect detection.
-- Deferred (part 2 of #836): `deadline_ms`, joining a duplicate in-flight resubmit, and
-  pipelining or concurrent handling of several requests on one connection.
+- Deferred in part 1, resolved in part 2 of #836 (#914): `deadline_ms` and joining a duplicate
+  in-flight resubmit shipped, see [ADR-0914](0914-process-deadline-and-inflight-join.md);
+  pipelining several requests on one connection was declined, see
+  [ADR-0914](0914-declined-pipelining-on-one-connection.md). The disconnect semantics decided
+  here are unchanged.

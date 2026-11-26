@@ -101,8 +101,10 @@ async fn dispatch_inner(
             }
             Err(e) => {
                 use crate::error::Error;
+                // A failure shared with joined requests (#914) keeps its own structured code.
+                let e = e.peeled();
                 match e {
-                    Error::DbUnavailable(ref reason) => (
+                    Error::DbUnavailable(reason) => (
                         IpcResponse::err_with_data(
                             req.id,
                             -32001,
@@ -115,9 +117,9 @@ async fn dispatch_inner(
                     // distinct code with the candidates as structured data, so a caller can retry
                     // with an explicit `kind` instead of parsing the message.
                     Error::AmbiguousEntity {
-                        ref name,
-                        ref group_id,
-                        ref candidates,
+                        name,
+                        group_id,
+                        candidates,
                     } => (
                         IpcResponse::err_with_data(
                             req.id,
@@ -135,8 +137,8 @@ async fn dispatch_inner(
                     // A group's identity-bearing set changed in a way that would reinterpret existing
                     // entities (issue #616, D1). Structured so a client can name the label.
                     Error::IdentitySetChangeRefused {
-                        ref group_id,
-                        ref label,
+                        group_id,
+                        label,
                         count,
                         ..
                     } => (
@@ -155,7 +157,7 @@ async fn dispatch_inner(
                     ),
                     // `knowledge_move_document` refusals (issue #903): code `-32000` as before, now
                     // with every refused move's index and stable code as structured data.
-                    Error::MoveRefused { ref refusals, .. } => (
+                    Error::MoveRefused { refusals, .. } => (
                         IpcResponse::err_with_data(
                             req.id,
                             -32000,
@@ -166,9 +168,7 @@ async fn dispatch_inner(
                     ),
                     // A write refused by the daemon-wide `--writable-groups` allow-list (issue #742).
                     Error::WriteRefused {
-                        reason,
-                        ref group_ids,
-                        ..
+                        reason, group_ids, ..
                     } => (
                         IpcResponse::err_with_data(
                             req.id,
@@ -178,6 +178,21 @@ async fn dispatch_inner(
                         ),
                         false,
                     ),
+                    // The request's `deadline_ms` passed before commit (issue #914, ADR-0914).
+                    Error::DeadlineExceeded { phase, document } => {
+                        let mut data = json!({
+                            "reason": "deadline_exceeded",
+                            "phase": phase,
+                            "committed": false,
+                        });
+                        if *document {
+                            data["partial"] = json!(true);
+                        }
+                        (
+                            IpcResponse::err_with_data(req.id, -32006, e.to_string(), data),
+                            false,
+                        )
+                    }
                     _ => (IpcResponse::err(req.id, -32000, e.to_string()), false),
                 }
             }
@@ -1332,6 +1347,8 @@ async fn handle_knowledge_process_chunk(
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Value, Error> {
     let p = &req.params;
+    // Issue #914: validated before any registration or work.
+    let deadline_ms = crate::deadline::parse_deadline_ms(p)?;
 
     let chunk_text = p["chunk_text"]
         .as_str()
@@ -1426,141 +1443,272 @@ async fn handle_knowledge_process_chunk(
     // Issue #707: never defaulted from `source_file` — omitted means none (FR-001, FR-010).
     let doc_id = optional_doc_id_param(&p["doc_id"])?;
 
+    let view = crate::chunk_unchanged::ChunkRequestView {
+        chunk_text: &chunk_text,
+        chunk_id: &chunk_id,
+        attributes: &attributes,
+        origin: origin.unwrap_or(crate::origin::Origin::Primary),
+        source_file: &source_file,
+        doc_id: doc_id.as_deref(),
+        explicit_reference_time_us,
+    };
+
+    // Issue #914 (ADR-0914): the optional deadline. The clock starts here, after validation; its
+    // token replaces the request's own at every pre-commit cancellation point, so it adds none.
+    let deadline = crate::deadline::RequestDeadline::start(cancel, deadline_ms);
+    let token = deadline.token();
+    let phase = crate::deadline::PhaseCell::new("embed");
+
     // Issue #858 (ADR-0858): register this call as in flight for its chunk until the handler
     // returns, whatever path it takes. The no-op below is taken only when no other
     // `process_chunk` / `mark_chunk_removed` call for the same chunk is in flight (otherwise
     // commit-instant ordering, ADR-0705, must decide), so an acknowledged revert cannot be
     // overwritten by an earlier edit that is still extracting.
-    let (_inflight, alone) = state.chunk_inflight_enter(&group_id, &chunk_id);
+    //
+    // Issue #914 (ADR-0914): a request identical to one already in flight does not extract again.
+    // It waits for that request (the leader) and returns its result, marked `joined`. Only a plain
+    // supersede (`supersede` true, no `same_revision_episode_uuids`) takes part; anything else, and
+    // a request that differs from the in-flight one, registers independently as before.
+    let joinable = supersede && keep.is_empty();
+    let fingerprint = crate::chunk_join::ChunkFingerprint::from_view(&view);
+    // A leader's own `chunk_inflight` registration lives inside its `LeaderHandle` (released before
+    // followers are woken); every other path holds the guard here.
+    let (_inflight, alone, leader) = loop {
+        if !joinable {
+            let (g, a) = state.chunk_inflight_enter(&group_id, &chunk_id);
+            break (Some(g), a, None);
+        }
+        match crate::chunk_join::enter(&state, &group_id, &chunk_id, fingerprint.clone()) {
+            crate::chunk_join::JoinRole::Leader { alone, handle } => {
+                break (None, alone, Some(handle))
+            }
+            crate::chunk_join::JoinRole::Independent => {
+                let (g, a) = state.chunk_inflight_enter(&group_id, &chunk_id);
+                break (Some(g), a, None);
+            }
+            crate::chunk_join::JoinRole::Follower(rx) => {
+                use crate::chunk_join::JoinOutcome;
+                eprintln!(
+                    "liminis-context-graph: process_chunk joined in-flight request \
+                     group={group_id} chunk={chunk_id}"
+                );
+                match crate::chunk_join::wait(rx, &token).await {
+                    Ok(JoinOutcome::Done(body)) => {
+                        return Ok(finish_chunk_response(
+                            (*body).clone(),
+                            start,
+                            true,
+                            &deadline,
+                            chunk_text_chars,
+                            threshold_chars,
+                        ));
+                    }
+                    Ok(JoinOutcome::Failed(e)) => return Err(Error::Shared(e)),
+                    // The leader was cancelled (or vanished): this request must not inherit that.
+                    // Re-elect; one waiter becomes the new leader and the rest join it.
+                    Ok(JoinOutcome::Abandoned) | Ok(JoinOutcome::Pending) => {
+                        if token.is_cancelled() {
+                            return Err(deadline.classify(
+                                Error::Cancelled,
+                                "awaiting_inflight",
+                                false,
+                            ));
+                        }
+                        eprintln!(
+                            "liminis-context-graph: process_chunk join leader abandoned; \
+                             re-electing group={group_id} chunk={chunk_id}"
+                        );
+                    }
+                    Err(e) => return Err(deadline.classify(e, "awaiting_inflight", false)),
+                }
+            }
+        }
+    };
 
-    // A resubmission identical to the chunk's single live episode is a no-op — no embed, no
-    // extract, no write, no WAL record. Runs only after every validation above (FR-008) and never
-    // for a multi-unit revision (FR-007). Fails closed: anything but one chunk-attributable live
-    // episode that matches on every compared field takes the ordinary supersede path below.
-    if supersede && keep.is_empty() && alone {
-        // Refusals (#616 identity drift) apply to a no-op exactly as to an ingest.
-        state.check_identity(&group_id)?;
-        let db = load_db(&state)?;
-        let (gid, cid) = (group_id.clone(), chunk_id.clone());
-        // Read under the shared lock, like the other read handlers, so a rebuild or clear in
-        // progress cannot be observed half-applied. Released before the ingest below, which
-        // takes the exclusive lock itself.
-        let live = {
-            let _read = state.write_lock.read().await;
-            tokio::task::spawn_blocking(move || {
-                let conn = db.connect()?;
-                conn.live_chunk_snapshot_for_chunk(&cid, &gid, &chrono::Utc::now().to_rfc3339())
-            })
-            .await??
-        };
-        let view = crate::chunk_unchanged::ChunkRequestView {
-            chunk_text: &chunk_text,
-            chunk_id: &chunk_id,
-            attributes: &attributes,
-            origin: origin.unwrap_or(crate::origin::Origin::Primary),
-            source_file: &source_file,
-            doc_id: doc_id.as_deref(),
-            explicit_reference_time_us,
-        };
-        if let Some(existing) = crate::chunk_unchanged::unchanged_episode_uuid(&live, &view) {
-            let existing = existing.to_string();
-            // "One document has one origin": a no-op must be refused exactly where the ingest it
-            // replaces would be (the matched row has the request's origin, but the document's
-            // other chunks may not).
-            if doc_id.is_some() {
-                let db = load_db(&state)?;
-                let (gid, cid, did) = (group_id.clone(), chunk_id.clone(), doc_id.clone());
-                let org = origin.unwrap_or(crate::origin::Origin::Primary);
+    let work = async {
+        // A resubmission identical to the chunk's single live episode is a no-op — no embed, no
+        // extract, no write, no WAL record. Runs only after every validation above (FR-008) and
+        // never for a multi-unit revision (FR-007). Fails closed: anything but one
+        // chunk-attributable live episode that matches on every compared field takes the ordinary
+        // supersede path below.
+        if supersede && keep.is_empty() && alone {
+            // Refusals (#616 identity drift) apply to a no-op exactly as to an ingest.
+            state.check_identity(&group_id)?;
+            let db = load_db(&state)?;
+            let (gid, cid) = (group_id.clone(), chunk_id.clone());
+            // Read under the shared lock, like the other read handlers, so a rebuild or clear in
+            // progress cannot be observed half-applied. Released before the ingest below, which
+            // takes the exclusive lock itself.
+            let live = {
                 let _read = state.write_lock.read().await;
                 tokio::task::spawn_blocking(move || {
                     let conn = db.connect()?;
-                    episode::check_origin_guards(&conn, &cid, &gid, org, did.as_deref(), true)
+                    conn.live_chunk_snapshot_for_chunk(&cid, &gid, &chrono::Utc::now().to_rfc3339())
                 })
-                .await??;
+                .await??
+            };
+            if let Some(existing) = crate::chunk_unchanged::unchanged_episode_uuid(&live, &view) {
+                let existing = existing.to_string();
+                // "One document has one origin": a no-op must be refused exactly where the ingest
+                // it replaces would be (the matched row has the request's origin, but the
+                // document's other chunks may not).
+                if doc_id.is_some() {
+                    let db = load_db(&state)?;
+                    let (gid, cid, did) = (group_id.clone(), chunk_id.clone(), doc_id.clone());
+                    let org = origin.unwrap_or(crate::origin::Origin::Primary);
+                    let _read = state.write_lock.read().await;
+                    tokio::task::spawn_blocking(move || {
+                        let conn = db.connect()?;
+                        episode::check_origin_guards(&conn, &cid, &gid, org, did.as_deref(), true)
+                    })
+                    .await??;
+                }
+                return Ok::<Value, Error>(json!({
+                    "success": true,
+                    "status": "unchanged",
+                    "chunk_id": chunk_id,
+                    "source_file": source_file,
+                    "episode_uuid": existing,
+                }));
             }
-            return Ok(json!({
-                "success": true,
-                "status": "unchanged",
-                "chunk_id": chunk_id,
-                "source_file": source_file,
-                "episode_uuid": existing,
-                "duration_seconds": start.elapsed().as_secs_f64(),
-            }));
         }
-    }
-    let opts = episode::EpisodeOpts {
-        supersede: if supersede {
-            episode::SupersedePolicy::ReviseChunk { keep }
-        } else {
-            episode::SupersedePolicy::None
-        },
-        doc_id,
-        origin,
-        // `chunk_id` is a chunk identity here: a derived/answer unit may not revise a primary one.
-        guard_chunk_collision: true,
-        // Issue #292: only this handler stamps `chunk`, which is what makes its own prior
-        // writes recognisable to a later revise.
-        write_path: episode::WritePath::Chunk,
-        document: None,
-        // Issue #853: store the two halves of `source_description` separately.
-        source_file: Some(source_file.clone()),
-        // Issue #861: per-request cancel (client disconnect) and phase progress.
-        cancel: Some(cancel),
-        progress: progress_tx,
-    };
-    let result = episode::add_episode_with_opts(
-        Arc::clone(&state),
-        &chunk_id,
-        &chunk_text,
-        "text",
-        &source_desc,
-        &ref_time,
-        &group_id,
-        source_type,
-        None,
-        &attributes,
-        opts,
-    )
-    .await?;
+        let opts = episode::EpisodeOpts {
+            supersede: if supersede {
+                episode::SupersedePolicy::ReviseChunk { keep: keep.clone() }
+            } else {
+                episode::SupersedePolicy::None
+            },
+            doc_id: doc_id.clone(),
+            origin,
+            // `chunk_id` is a chunk identity here: a derived/answer unit may not revise a primary
+            // one.
+            guard_chunk_collision: true,
+            // Issue #292: only this handler stamps `chunk`, which is what makes its own prior
+            // writes recognisable to a later revise.
+            write_path: episode::WritePath::Chunk,
+            document: None,
+            // Issue #853: store the two halves of `source_description` separately.
+            source_file: Some(source_file.clone()),
+            // Issue #861: per-request cancel (client disconnect) and phase progress. Issue #914:
+            // the cancel token is the deadline's child, and the phase cell names where a deadline
+            // landed.
+            cancel: Some(token.clone()),
+            progress: progress_tx,
+            phase: Some(phase.clone()),
+        };
+        let result = episode::add_episode_with_opts(
+            Arc::clone(&state),
+            &chunk_id,
+            &chunk_text,
+            "text",
+            &source_desc,
+            &ref_time,
+            &group_id,
+            source_type,
+            None,
+            &attributes,
+            opts,
+        )
+        .await?;
 
-    let mut response = json!({
-        "success": true,
-        "chunk_id": chunk_id,
-        "superseded_episode_uuids": result.superseded_episode_uuids,
-        "source_file": source_file,
-        "episode_uuid": result.episode_uuid,
-        "nodes_extracted": result.nodes_extracted,
-        "edges_extracted": result.edges_extracted,
-        "edges_dropped_unresolvable": result.edges_dropped_unresolvable,
-        "edges_dropped_self_loop": result.edges_dropped_self_loop,
-        "dropped_edges": result.dropped_edges,
-        "edges_reclassified_unclassified": result.edges_reclassified_unclassified,
-        "edges_swapped": result.edges_swapped,
-        "edges_signature_mismatch": result.edges_signature_mismatch,
-        "edges_literal_object": result.edges_literal_object,
-        "edges_suspected_misattachment": result.edges_suspected_misattachment,
-        "entities_reclassified_unclassified": result.entities_reclassified_unclassified,
-        "entities_dropped_malformed": result.entities_dropped_malformed,
-        "entities_dropped_source_id": result.entities_dropped_source_id,
-        "edges_dropped_malformed": result.edges_dropped_malformed,
-        "dedup_paths": result.dedup_paths,
-        "duration_seconds": start.elapsed().as_secs_f64(),
-    });
-    // Issue #292: present only when a same-named episode written by another path was left alone,
-    // so an unambiguous call's response is unchanged.
-    if !result.left_alone_episode_uuids.is_empty() {
-        response["left_alone_episode_uuids"] = json!(result.left_alone_episode_uuids);
-    }
-
-    if chunk_text_chars > threshold_chars {
-        state.sink.emit(TelemetryEvent::ChunkTextOversized {
-            ts_ms: now_ms(),
-            chunk_id: chunk_id.clone(),
-            source_file: source_file.clone(),
-            chunk_text_chars,
-            threshold_chars,
+        let mut body = json!({
+            "success": true,
+            "chunk_id": chunk_id,
+            "superseded_episode_uuids": result.superseded_episode_uuids,
+            "source_file": source_file,
+            "episode_uuid": result.episode_uuid,
+            "nodes_extracted": result.nodes_extracted,
+            "edges_extracted": result.edges_extracted,
+            "edges_dropped_unresolvable": result.edges_dropped_unresolvable,
+            "edges_dropped_self_loop": result.edges_dropped_self_loop,
+            "dropped_edges": result.dropped_edges,
+            "edges_reclassified_unclassified": result.edges_reclassified_unclassified,
+            "edges_swapped": result.edges_swapped,
+            "edges_signature_mismatch": result.edges_signature_mismatch,
+            "edges_literal_object": result.edges_literal_object,
+            "edges_suspected_misattachment": result.edges_suspected_misattachment,
+            "entities_reclassified_unclassified": result.entities_reclassified_unclassified,
+            "entities_dropped_malformed": result.entities_dropped_malformed,
+            "entities_dropped_source_id": result.entities_dropped_source_id,
+            "edges_dropped_malformed": result.edges_dropped_malformed,
+            "dedup_paths": result.dedup_paths,
         });
-        response["warning"] = json!({
+        // Issue #292: present only when a same-named episode written by another path was left
+        // alone, so an unambiguous call's response is unchanged.
+        if !result.left_alone_episode_uuids.is_empty() {
+            body["left_alone_episode_uuids"] = json!(result.left_alone_episode_uuids);
+        }
+        // #407: oversize telemetry is the leader's alone — a joined request adds no extraction.
+        if chunk_text_chars > threshold_chars {
+            state.sink.emit(TelemetryEvent::ChunkTextOversized {
+                ts_ms: now_ms(),
+                chunk_id: chunk_id.clone(),
+                source_file: source_file.clone(),
+                chunk_text_chars,
+                threshold_chars,
+            });
+        }
+        Ok(body)
+    };
+    let outcome = work.await;
+
+    let body = match outcome {
+        Ok(body) => {
+            if let Some(handle) = leader {
+                handle.finish(crate::chunk_join::JoinOutcome::Done(Arc::new(body.clone())));
+            }
+            body
+        }
+        Err(e) => {
+            let e = deadline.classify(e, phase.get(), false);
+            return Err(match (e, leader) {
+                // A cancelled leader publishes nothing (`Abandoned` on drop): joined requests
+                // re-elect instead of inheriting the cancellation.
+                (e @ (Error::Cancelled | Error::DeadlineExceeded { .. }), _) => e,
+                // Any other failure is shared with the requests that joined.
+                (e, Some(handle)) => {
+                    let shared = Arc::new(e);
+                    handle.finish(crate::chunk_join::JoinOutcome::Failed(Arc::clone(&shared)));
+                    Error::Shared(shared)
+                }
+                (e, None) => e,
+            });
+        }
+    };
+    Ok(finish_chunk_response(
+        body,
+        start,
+        false,
+        &deadline,
+        chunk_text_chars,
+        threshold_chars,
+    ))
+}
+
+/// Adds a request's own per-request fields to the leader's result body: `duration_seconds`, the
+/// `joined` marker, `deadline_exceeded` when the request overran its deadline but its write
+/// completed (issue #914), and the oversize `warning`. An `unchanged` no-op returned before any
+/// cancellation point, so neither the deadline flag nor the warning applies to it.
+fn finish_chunk_response(
+    mut body: Value,
+    start: Instant,
+    joined: bool,
+    deadline: &crate::deadline::RequestDeadline,
+    chunk_text_chars: usize,
+    threshold_chars: usize,
+) -> Value {
+    body["duration_seconds"] = json!(start.elapsed().as_secs_f64());
+    if joined {
+        body["joined"] = json!(true);
+    }
+    if body["status"] == "unchanged" {
+        return body;
+    }
+    if deadline.exceeded() {
+        body["deadline_exceeded"] = json!(true);
+    }
+    if chunk_text_chars > threshold_chars {
+        body["warning"] = json!({
             "type": "chunk_text_oversized",
             "chunk_text_chars": chunk_text_chars,
             "recommended_max_chars": threshold_chars,
@@ -1573,8 +1721,7 @@ async fn handle_knowledge_process_chunk(
             ),
         });
     }
-
-    Ok(response)
+    body
 }
 
 /// Parses an optional RFC 3339 timestamp param; a present non-string or unparsable value is an
@@ -1612,6 +1759,8 @@ async fn handle_knowledge_process_document(
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Value, Error> {
     let p = &req.params;
+    // Issue #914: validated before any work.
+    let deadline_ms = crate::deadline::parse_deadline_ms(p)?;
     let doc_id = optional_doc_id_param(&p["doc_id"])?.ok_or_else(|| {
         Error::Ipc(
             "doc_id is required: a document-mode ingest is a completeness claim about one document"
@@ -1629,6 +1778,8 @@ async fn handle_knowledge_process_document(
         .to_string();
     let reference_time = optional_rfc3339_param(p, "reference_time")?
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let deadline = crate::deadline::RequestDeadline::start(cancel, deadline_ms);
+    let phase = crate::deadline::PhaseCell::new("chunked");
     let request = crate::document::DocumentRequest {
         doc_id,
         group_id,
@@ -1639,8 +1790,18 @@ async fn handle_knowledge_process_document(
         effective_at: optional_rfc3339_param(p, "effective_at")?,
         reference_time,
         attributes: attributes_param_to_string(&p["attributes"]),
+        phase: Some(phase.clone()),
     };
-    crate::document::process_document(state, request, progress_tx, cancel).await
+    let result = crate::document::process_document(state, request, progress_tx, deadline.token())
+        .await
+        .map_err(|e| deadline.classify(e, phase.get(), true))?;
+    // The revision's commit step is never interrupted: a deadline that passed after it began
+    // leaves a completed write, which the response says (issue #914).
+    let mut result = result;
+    if deadline.exceeded() {
+        result["deadline_exceeded"] = json!(true);
+    }
+    Ok(result)
 }
 
 /// `knowledge_preview_chunks` (issue #785, FR-006): the chunks `knowledge_process_document`

@@ -77,6 +77,10 @@ and is refused where the ingest would be.
   with the rule, such a call takes the ordinary path and ADR-0705's commit-instant ordering decides.
   Two identical resubmissions of a live chunk that arrive together therefore both take the ordinary
   path (one extra extraction) rather than risk a lost revert; sequential ones return `unchanged`.
+  *Superseded in part by [ADR-0914](0914-process-deadline-and-inflight-join.md) (#914):* an identical
+  second request now joins the first when the first is the only one in flight for its key, and shares
+  its result (`joined: true`) instead of extracting again; the ordinary path remains for a second
+  request that arrives while a differing request is also in flight.
   A first-time chunk submitted concurrently takes today's path and ADR-0705's ordering leaves
   exactly one live episode.
 - Other mutators are **not** tracked in `chunk_inflight` (for example `knowledge_delete_chunk_episode`,

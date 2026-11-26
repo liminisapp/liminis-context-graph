@@ -33,6 +33,18 @@ pub enum Error {
     #[error("operation cancelled")]
     Cancelled,
 
+    /// The request's `deadline_ms` passed before its commit started (issue #914, ADR-0914). Nothing
+    /// was written for a chunk request. `phase` is the last phase reached; `document` is true for
+    /// `knowledge_process_document`, where units already committed stay in place.
+    #[error("{}", deadline_message(.phase, *.document))]
+    DeadlineExceeded { phase: &'static str, document: bool },
+
+    /// An error produced once and shared by several requests (issue #914): a joined
+    /// `knowledge_process_chunk` receives the failure of the request it joined. Forwards `Display`;
+    /// the IPC layer looks through it so structured codes are preserved.
+    #[error("{0}")]
+    Shared(std::sync::Arc<Error>),
+
     #[error("configuration error: {0}")]
     Config(String),
 
@@ -136,6 +148,28 @@ pub enum Error {
         group_ids: Vec<String>,
         message: String,
     },
+}
+
+fn deadline_message(phase: &str, document: bool) -> String {
+    if document {
+        format!(
+            "deadline exceeded before the document revision committed (phase: {phase}); the call \
+             did not complete: units already committed stay in place and nothing was retired"
+        )
+    } else {
+        format!("deadline exceeded before commit (phase: {phase}); nothing was written")
+    }
+}
+
+impl Error {
+    /// Looks through [`Error::Shared`] to the underlying error.
+    pub fn peeled(&self) -> &Error {
+        let mut e = self;
+        while let Error::Shared(inner) = e {
+            e = inner;
+        }
+        e
+    }
 }
 
 fn format_candidates(c: &[crate::types::KindCandidate]) -> String {

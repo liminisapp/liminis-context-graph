@@ -110,6 +110,9 @@ pub struct DocumentRequest {
     pub reference_time: String,
     /// A JSON object string, applied to every episode and recorded on the revision.
     pub attributes: String,
+    /// Records the last document phase reached — `chunked`, `extracting`, `committing` — so a
+    /// `deadline_exceeded` error can name it (issue #914). `None` records nothing.
+    pub phase: Option<crate::deadline::PhaseCell>,
 }
 
 // ── Per-document serialization (FR-022) ─────────────────────────────────────
@@ -182,7 +185,10 @@ fn mint_name(doc_id: &str) -> String {
 fn passes_through(e: &Error) -> bool {
     matches!(
         e,
-        Error::Cancelled | Error::DbUnavailable(_) | Error::IdentitySetChangeRefused { .. }
+        Error::Cancelled
+            | Error::DeadlineExceeded { .. }
+            | Error::DbUnavailable(_)
+            | Error::IdentitySetChangeRefused { .. }
     ) || e
         .to_string()
         .contains(crate::origin::ORIGIN_CONFLICT_PREFIX)
@@ -204,6 +210,12 @@ pub async fn process_document(
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<Value, Error> {
     let started = std::time::Instant::now();
+    let set_phase = |phase: &'static str| {
+        if let Some(cell) = &req.phase {
+            cell.set(phase);
+        }
+    };
+    set_phase("chunked");
     let chunked = chunk_for_ingest(&req.content)?;
     let content_hash = crate::sha256_hex::sha256_hex(req.content.as_bytes());
     let origin = req.origin.unwrap_or(Origin::Primary);
@@ -353,6 +365,7 @@ pub async fn process_document(
         let mut unit_uuids = Vec::with_capacity(chunk.units.len());
         let n_units = chunk.units.len();
         for (k, unit) in chunk.units.iter().enumerate() {
+            set_phase("extracting");
             // A cancelled ingest retires nothing: stop before the next unit.
             if cancel.is_cancelled() {
                 crate::episode::note_cancelled(&state);
@@ -392,6 +405,7 @@ pub async fn process_document(
                 // own checks; unit episodes emit no chunk-style progress frames.
                 cancel: Some(cancel.clone()),
                 progress: None,
+                phase: None,
             };
             extraction_calls += 1;
             let result = episode::add_episode_with_opts(
@@ -458,6 +472,7 @@ pub async fn process_document(
         crate::episode::note_cancelled(&state);
         return Err(Error::Cancelled);
     }
+    set_phase("committing");
     progress(
         &progress_tx,
         json!({"type": "progress", "phase": "committing", "chunk_count": chunked.chunks.len()}),
