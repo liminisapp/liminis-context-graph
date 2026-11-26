@@ -123,7 +123,7 @@ when the service is degraded:
   you do not know.
 - `features` is a sorted, append-only list of stable strings. Test for a feature before you use
   what it adds, for example `process_document`, `retire_document`, `entity_provenance`,
-  `walk_provenance`, `unchanged_noop` and `document_max_bytes_env`. A missing feature means an
+  `walk_provenance`, `unchanged_noop`, `document_max_bytes_env` and `request_size_limits`. A missing feature means an
   older server: fall back or tell the user.
 - `methods` lists every method the dispatcher accepts, so a client never has to probe with a
   trial call.
@@ -203,6 +203,15 @@ nothing is written or truncated. The operator raises or lowers the cap with that
 client cannot change it; detect the feature with `document_max_bytes_env` and cut the document at
 a section boundary yourself if you must stay under a smaller cap. See
 [Configuration](configuration.md) and [Document mode](ipc-mcp-reference.md#document-mode-send-the-whole-document-the-server-does-the-diff-issue-785).
+
+**Request size.** Every request is one line, and the service refuses a line over
+`LCG_REQUEST_MAX_BYTES` (default **16 MiB**, enough for a maximal 2 MiB document after JSON
+escaping) with error `-32005` and `id: null`: handle it by `error.code`, since the line was never
+parsed. The same connection keeps working afterwards. `knowledge_process_chunk` also refuses a
+`chunk_text` over `LCG_CHUNK_TEXT_MAX_BYTES` (default **512 KiB**) with `chunk_text_too_large`;
+send long texts to `knowledge_process_document` instead. Both are operator settings, detected with
+the `request_size_limits` feature. See
+[Request limits](ipc-mcp-reference.md#request-limits).
 
 A minimal ingest, update and delete:
 
@@ -328,7 +337,8 @@ is enough to confirm you are talking to a server you support.
 
 - [IPC & MCP Reference](ipc-mcp-reference.md): every method, field and error.
 - [Configuration](configuration.md): every environment variable and flag, including
-  `LCG_SEARCH_MIN_SCORE` and `LCG_DOCUMENT_MAX_BYTES`.
+  `LCG_SEARCH_MIN_SCORE`, `LCG_DOCUMENT_MAX_BYTES`, `LCG_REQUEST_MAX_BYTES` and
+  `LCG_CHUNK_TEXT_MAX_BYTES`.
 - [Test Providers](test-providers.md): `--embedder test --extractor test`, to test your client
   without an LLM or a network.
 - [Operations](operations.md): the WAL, degraded mode and recovery.

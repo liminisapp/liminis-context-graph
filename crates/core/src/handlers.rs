@@ -1339,6 +1339,20 @@ async fn handle_knowledge_process_chunk(
         .ok_or_else(|| Error::Ipc("chunk_text is required and must be non-empty".to_string()))?
         .to_string();
 
+    // #293 / ADR-0293: refuse an oversized chunk before any splitting, extraction or write.
+    // Byte length (O(1)), like the document cap; distinct from the character-based advisory
+    // warning below, which stays unchanged for anything at or under this cap.
+    let chunk_cap = crate::request_limits::chunk_text_max_bytes();
+    if chunk_text.len() > chunk_cap {
+        return Err(Error::Ipc(format!(
+            "chunk_text_too_large: chunk_text is {} bytes, over the LCG_CHUNK_TEXT_MAX_BYTES cap \
+             of {chunk_cap} bytes; split the text into smaller chunks, use \
+             knowledge_process_document for whole documents, or raise LCG_CHUNK_TEXT_MAX_BYTES \
+             (nothing was extracted or written)",
+            chunk_text.len()
+        )));
+    }
+
     let chunk_id = p["chunk_id"]
         .as_str()
         .filter(|s| !s.is_empty())

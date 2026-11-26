@@ -237,9 +237,10 @@ during a rebuild and under any `--writable-groups` policy.
               "hybrid_passage_search", "implicit_default_group_warning", "lint",
               "literal_object_edges", "move_document", "ontology_edge_direction", "ontology_hash",
               "origin", "passage_expansion", "passage_legs", "passage_query_variants",
-              "passage_rerank", "process_document", "ready_for_reads", "retire_document",
-              "search_min_score_env", "status_episode_breakdown", "test_providers", "unchanged_noop",
-              "walk", "walk_provenance", "writable_groups", "zero_vector_record"],
+              "passage_rerank", "process_document", "ready_for_reads", "request_size_limits",
+              "retire_document", "search_min_score_env", "status_episode_breakdown", "test_providers",
+              "unchanged_noop", "walk", "walk_provenance", "writable_groups",
+              "zero_vector_record"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -287,6 +288,7 @@ by #885 name capabilities that were added in 0.20.0 without one.
 | `passage_rerank` | #796 ([ADR-0796](adr/0796-passage-rerank-and-query-expansion.md)) | `knowledge_search_passages` accepts `rerank` and `rerank_candidates`. Whether the stage runs depends on the operator's reranker configuration; each call reports it with `applied`. |
 | `process_document` | #785 | `knowledge_process_document` document mode. |
 | `ready_for_reads` | #809, #855 ([ADR-0855](adr/0855-health-check-ready-for-reads.md)) | `health_check` carries `ready_for_reads`, present in every state. |
+| `request_size_limits` | #293 ([ADR-0293](adr/0293-request-line-limit-and-chunk-cap.md)) | The socket and named-pipe transport refuses a request line over `LCG_REQUEST_MAX_BYTES` (default 16 MiB) with error `-32005` and a null `id`, and `knowledge_process_chunk` refuses a `chunk_text` over `LCG_CHUNK_TEXT_MAX_BYTES` (default 512 KiB) with `chunk_text_too_large`. The configured values are not exposed. See [Request limits](#request-limits). |
 | `retire_document` | #859 ([ADR-0859](adr/0859-retire-document-and-orphan-reporting.md)) | `knowledge_retire_document` supersedes every live episode of a document with reason `document_removed`, deleting nothing. |
 | `search_min_score_env` | #812 ([ADR-0812](adr/0812-search-min-score-env-default.md)) | The default passage-search `min_score` floor can be set by the operator with `LCG_SEARCH_MIN_SCORE`. The configured value is not exposed. |
 | `status_episode_breakdown` | #884 ([ADR-0884](adr/0884-status-episode-breakdown-opt-in.md)) | `knowledge_status` can report a per-group live/superseded episode breakdown. |
@@ -366,6 +368,49 @@ Notes:
 - `busy` has `healthy: false` on purpose: existing pollers that gate on `healthy` keep waiting.
   A liveness probe that only needs "is the process alive" should accept `ok: true`, and a read-only
   client should gate on `ready_for_reads: true`.
+
+### Request limits
+
+Two size limits protect the service from a request it should not have to buffer or process
+([ADR-0293](adr/0293-request-line-limit-and-chunk-cap.md), #293). Both are operator settings,
+validated once at startup (see [Configuration](configuration.md)); a client cannot change them.
+Detect them with the `request_size_limits` capability feature.
+
+| Limit | Setting | Default | At most | Applies to |
+|-------|---------|---------|---------|------------|
+| Request line | `LCG_REQUEST_MAX_BYTES` | 16 MiB | 2 GiB | every method on the socket / named pipe, including `--connect` attached clients (not `--mcp-stdio`) |
+| `chunk_text` | `LCG_CHUNK_TEXT_MAX_BYTES` | 512 KiB | 256 MiB | `knowledge_process_chunk` |
+
+**Request line.** The limit is on the bytes of one request line before its `\n`; the terminator does
+not count, a trailing `\r` does. A line of exactly the limit is accepted and one byte more is
+refused. The service stops buffering at the limit, so memory held for one line is bounded by it
+whatever the client sends, and the refusal is written as soon as the limit is crossed, without
+waiting for the end of the line. It happens before JSON parsing and dispatch: no handler runs and no
+state changes. The error is:
+
+```json
+{"jsonrpc": "2.0", "id": null,
+ "error": {"code": -32005,
+           "message": "request line is more than 16777216 bytes (limit set by LCG_REQUEST_MAX_BYTES); send smaller requests, or raise LCG_REQUEST_MAX_BYTES (and keep it at least 6 x LCG_DOCUMENT_MAX_BYTES + 64 KiB if you handle large documents)",
+           "data": {"reason": "request_too_large", "limit_bytes": 16777216,
+                    "setting": "LCG_REQUEST_MAX_BYTES"}}}
+```
+
+The `id` is `null` because the line was never parsed, as for a `-32700` parse error: match it by
+`error.code` / `error.data.reason`, not by id. The message always says "more than N bytes", never an
+exact size. **After the refusal the connection stays open**: the rest of that line is discarded
+without being kept and the next line is served normally. If the oversized line runs on past four
+times the limit without a newline, the connection is closed instead. When a request is already
+running on the connection (`knowledge_process_chunk` or `knowledge_process_document`) and a client
+pipelines an oversized line behind it, the refusal is written after that request's response, so
+responses stay in order. The default carries a maximal `knowledge_process_document` (2 MiB of body,
+about 12 MiB after worst-case JSON escaping). Startup refuses a configuration where
+`LCG_REQUEST_MAX_BYTES < 6 x LCG_DOCUMENT_MAX_BYTES + 64 KiB`.
+
+**`chunk_text`.** A `chunk_text` over the cap is refused before any extraction or write with a
+`-32000` error whose message starts `chunk_text_too_large:` and names the size, the cap, the
+variable and `knowledge_process_document`. A `chunk_text` at or under the cap behaves as before,
+including the advisory `warning` (see `knowledge_process_chunk`).
 
 ## Response contract (JSON Schemas, issue #852)
 
@@ -2602,7 +2647,9 @@ result fields exist for that, both introduced in 0.13.2.
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see
   [Configuration](configuration.md)) adds a `warning` field naming the actual and recommended
   character counts, and emits a `chunk_text_oversized` telemetry event. This is visibility only:
-  nothing is truncated, split, or rejected, and the call succeeds exactly as it did before. The
+  nothing is truncated or split, and the call succeeds as it did before, unless `chunk_text` is
+  over the hard cap `LCG_CHUNK_TEXT_MAX_BYTES` (default 512 KiB), which is refused with
+  `chunk_text_too_large` (see [Request limits](#request-limits), #293). The
   `warning.message` points at `knowledge_process_document` (issue #862): send a whole document or
   a long page there and the server chunks it for you (see
   [Document mode](#document-mode-send-the-whole-document-the-server-does-the-diff-issue-785)).

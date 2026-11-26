@@ -25,57 +25,9 @@ pub const DEFAULT_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// is refused at startup rather than accepted with a warning.
 pub const MAX_ALLOWED_BYTES: usize = 256 * 1024 * 1024;
 
-const EXPECTED: &str = "a positive byte count (e.g. 4194304) or a count with a KiB or MiB \
-                        suffix (e.g. 4MiB), at most 256MiB";
-
-fn invalid(raw: &str, reason: &str) -> Error {
-    Error::Config(format!(
-        "invalid {ENV_VAR}=\"{raw}\": {reason}; expected {EXPECTED}"
-    ))
-}
-
 /// Strictly parse a raw `LCG_DOCUMENT_MAX_BYTES` value into a byte count.
 pub fn parse_max_bytes(raw: &str) -> Result<usize, Error> {
-    let s = raw.trim();
-    if s.is_empty() {
-        return Err(invalid(raw, "empty value"));
-    }
-    let digits_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-    let (digits, unit) = s.split_at(digits_end);
-    if digits.is_empty() {
-        return Err(invalid(
-            raw,
-            "must start with a digit (no sign or fraction)",
-        ));
-    }
-    let multiplier: usize = match unit {
-        "" => 1,
-        "KiB" => 1024,
-        "MiB" => 1024 * 1024,
-        _ => {
-            return Err(invalid(
-                raw,
-                "unrecognised unit (only KiB and MiB are accepted; no decimals, \
-                 whitespace or underscores)",
-            ))
-        }
-    };
-    let n: usize = digits
-        .parse()
-        .map_err(|_| invalid(raw, "number is too large"))?;
-    if n == 0 {
-        return Err(invalid(raw, "must be greater than zero"));
-    }
-    let bytes = n
-        .checked_mul(multiplier)
-        .ok_or_else(|| invalid(raw, "number is too large"))?;
-    if bytes > MAX_ALLOWED_BYTES {
-        return Err(invalid(
-            raw,
-            &format!("exceeds the upper bound of {MAX_ALLOWED_BYTES} bytes (256 MiB)"),
-        ));
-    }
-    Ok(bytes)
+    crate::size_parse::parse_size_bytes(raw, ENV_VAR, MAX_ALLOWED_BYTES, "256MiB")
 }
 
 /// The resolved startup configuration.

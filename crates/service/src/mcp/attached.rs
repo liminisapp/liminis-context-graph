@@ -305,7 +305,15 @@ impl McpBackend for AttachedBackend {
                     // call's result (Copilot review finding on PR #196). Discard and keep
                     // reading; the loop's per-read timeout re-arms each iteration, so a
                     // straggling stale reply doesn't erode this call's own timeout budget.
-                    if value.get("id").and_then(Value::as_u64) != Some(id) {
+                    //
+                    // Exception (#293): an oversized-request refusal (`-32005`) is written
+                    // before the line is parsed, so it carries a null id. This client has only
+                    // this one request in flight, so it is this call's answer; discarding it
+                    // would turn an actionable error into a 30 s "timed out".
+                    let request_too_large = value.get("id").is_none_or(Value::is_null)
+                        && value.pointer("/error/code").and_then(Value::as_i64)
+                            == Some(crate::connection::REQUEST_TOO_LARGE_CODE);
+                    if !request_too_large && value.get("id").and_then(Value::as_u64) != Some(id) {
                         continue;
                     }
                     return parse_ipc_response(&value);
@@ -324,5 +332,69 @@ impl McpBackend for AttachedBackend {
 
     fn is_attached(&self) -> bool {
         true
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// A stub service that reads one request line and answers with `reply`.
+    async fn stub(dir: &std::path::Path, reply: Value) -> String {
+        let path = dir.join("s.sock").to_string_lossy().to_string();
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            let mut r = BufReader::new(sock);
+            let mut line = String::new();
+            r.read_line(&mut line).await.unwrap();
+            let mut out = serde_json::to_string(&reply).unwrap();
+            out.push('\n');
+            r.get_mut().write_all(out.as_bytes()).await.unwrap();
+            // Keep the connection open: the refusal must not depend on a close.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        path
+    }
+
+    #[tokio::test]
+    async fn null_id_request_too_large_refusal_is_returned_not_timed_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = json!({
+            "jsonrpc": "2.0", "id": null,
+            "error": {"code": -32005, "message": "request line is more than 10 bytes",
+                      "data": {"reason": "request_too_large"}}
+        });
+        let path = stub(dir.path(), reply).await;
+        let mut backend = AttachedBackend::new_lazy(&path);
+        backend.call_timeout = Duration::from_secs(3);
+        let started = std::time::Instant::now();
+        let resp = backend.call("knowledge_status", json!({}), None).await;
+        let v = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["error"]["code"], -32005, "{v}");
+        assert_eq!(v["error"]["data"]["reason"], "request_too_large", "{v}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "must not time out"
+        );
+    }
+
+    #[tokio::test]
+    async fn other_null_id_responses_are_still_discarded_as_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = json!({"jsonrpc": "2.0", "id": null, "result": {"stale": true}});
+        let path = stub(dir.path(), reply).await;
+        let mut backend = AttachedBackend::new_lazy(&path);
+        backend.call_timeout = Duration::from_millis(300);
+        let resp = backend.call("knowledge_status", json!({}), None).await;
+        let v = serde_json::to_value(&resp).unwrap();
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("timed out"),
+            "{v}"
+        );
     }
 }

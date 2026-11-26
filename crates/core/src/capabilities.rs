@@ -67,6 +67,7 @@ pub const FEATURES: &[&str] = &[
     "passage_rerank",
     "process_document",
     "ready_for_reads",
+    "request_size_limits",
     "retire_document",
     "search_min_score_env",
     "status_episode_breakdown",

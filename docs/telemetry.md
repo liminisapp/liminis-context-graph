@@ -309,7 +309,7 @@ threshold (default `8000`, overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` �
 [Configuration](configuration.md)). A lightweight, counting-only event mirroring
 `extraction_truncated`'s shape, so oversized ingestion is visible in aggregate across a telemetry
 stream, not just in the single call's response `warning` field. Ingestion itself is unaffected —
-no rejection, truncation, or splitting — this event is purely observational, and fires on every
+no truncation or splitting, and no rejection below the hard `LCG_CHUNK_TEXT_MAX_BYTES` cap (a chunk over it is refused and emits no event) — this event is purely observational, and fires on every
 oversized call, including repeated resubmissions of the same `chunk_id`.
 
 **The threshold and this event's `chunk_text_chars` field are measured in characters, not
