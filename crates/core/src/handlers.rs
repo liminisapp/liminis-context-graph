@@ -189,7 +189,7 @@ async fn dispatch_inner(
                             data["partial"] = json!(true);
                         }
                         (
-                            IpcResponse::err_with_data(req.id, -32005, e.to_string(), data),
+                            IpcResponse::err_with_data(req.id, -32006, e.to_string(), data),
                             false,
                         )
                     }

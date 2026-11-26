@@ -293,7 +293,7 @@ fn is_cancelled_error(v: &Value) -> bool {
 }
 
 fn assert_deadline_error(v: &Value, phase: &str) {
-    assert_eq!(v["error"]["code"], -32005, "{v}");
+    assert_eq!(v["error"]["code"], -32006, "{v}");
     assert_eq!(v["error"]["data"]["reason"], "deadline_exceeded", "{v}");
     assert_eq!(v["error"]["data"]["phase"], phase, "{v}");
     assert_eq!(v["error"]["data"]["committed"], false, "{v}");
@@ -557,7 +557,7 @@ async fn document_deadline_is_partial_and_commits_no_revision() {
     )
     .await
     .expect("deadline must end the document ingest");
-    assert_eq!(v["error"]["code"], -32005, "{v}");
+    assert_eq!(v["error"]["code"], -32006, "{v}");
     assert_eq!(v["error"]["data"]["reason"], "deadline_exceeded", "{v}");
     assert_eq!(v["error"]["data"]["partial"], true, "{v}");
     assert_eq!(v["error"]["data"]["phase"], "extracting", "{v}");

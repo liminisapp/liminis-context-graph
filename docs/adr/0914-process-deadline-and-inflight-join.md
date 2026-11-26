@@ -44,7 +44,7 @@ This ADR settles two of them.
   `Ok`, the handler compares the clock with the deadline: if it has passed, the success body gains
   `"deadline_exceeded": true`. The key is absent otherwise. An `unchanged` no-op returns before any
   cancellation point, so it is never flagged.
-- **Error shape.** Code `-32005`, `error.data = {"reason": "deadline_exceeded", "phase": …,
+- **Error shape.** Code `-32006`, `error.data = {"reason": "deadline_exceeded", "phase": …,
   "committed": false}`. `process_document` adds `"partial": true` (units already committed stay,
   nothing is retired, [ADR-0785](0785-document-mode-revisions-and-commit-boundary.md)).
 - **Phase vocabulary.** Chunk: `embed`, `extract` (everything through resolution and dedup, up to the

@@ -1030,7 +1030,7 @@ pub fn registry() -> Vec<ToolSpec> {
                            has a live primary/external episode or its `doc_id` already has a \
                            different origin. `deadline_ms` (issue #914) bounds the call: a \
                            request that cannot reach commit within that many milliseconds of \
-                           receipt is abandoned and returns error code -32005 with \
+                           receipt is abandoned and returns error code -32006 with \
                            `reason: \"deadline_exceeded\"` and the `phase` reached, writing \
                            nothing, so a retry is safe; a deadline that passes once the commit \
                            has started does not stop it, and the result then carries \
@@ -1055,7 +1055,7 @@ pub fn registry() -> Vec<ToolSpec> {
                         "origin": origin_prop(),
                         "supersede": {"type": "boolean", "default": true, "description": "Set false on every non-final unit of a chunk submitted as several calls under one chunk_id, so a unit does not supersede the previous one."},
                         "same_revision_episode_uuids": {"type": "array", "items": {"type": "string"}, "description": "On the final unit of a multi-unit revision: episode_uuids returned by the earlier units. They stay live; the chunk's older episodes are superseded."},
-                        "deadline_ms": {"type": "integer", "minimum": 1, "description": "Optional time budget in milliseconds, counted from receipt. If commit cannot start in time the call returns a deadline_exceeded error (code -32005) and writes nothing; a commit that has started finishes and the result carries deadline_exceeded: true."}
+                        "deadline_ms": {"type": "integer", "minimum": 1, "description": "Optional time budget in milliseconds, counted from receipt. If commit cannot start in time the call returns a deadline_exceeded error (code -32006) and writes nothing; a commit that has started finishes and the result carries deadline_exceeded: true."}
                     },
                     "required": ["chunk_text", "chunk_id", "source_file"]
                 })
@@ -1094,7 +1094,7 @@ pub fn registry() -> Vec<ToolSpec> {
                            truncated; empty or headings-only documents are rejected too, with \
                            nothing written. `deadline_ms` (issue #914) bounds the call: if the \
                            revision cannot commit within that many milliseconds of receipt the \
-                           call returns error code -32005 with `reason: \"deadline_exceeded\"`, \
+                           call returns error code -32006 with `reason: \"deadline_exceeded\"`, \
                            `partial: true` and the `phase` reached; units already committed stay \
                            in place and nothing is retired. A deadline that passes once the \
                            revision commit has started does not stop it, and the result carries \
@@ -1116,7 +1116,7 @@ pub fn registry() -> Vec<ToolSpec> {
                         "effective_at": {"type": "string", "format": "date-time", "description": "When this revision took effect; recorded on the revision only (never valid_at, never belief time)."},
                         "reference_time": {"type": "string", "format": "date-time", "description": "Extraction reference time, as for knowledge_process_chunk; defaults to now."},
                         "attributes": {"type": "object", "description": "Arbitrary JSON object, stored on every episode of this revision and on the revision record."},
-                        "deadline_ms": {"type": "integer", "minimum": 1, "description": "Optional time budget in milliseconds, counted from receipt. If the revision cannot commit in time the call returns a deadline_exceeded error (code -32005, partial: true); units already committed stay and nothing is retired. A commit that has started finishes and the result carries deadline_exceeded: true."}
+                        "deadline_ms": {"type": "integer", "minimum": 1, "description": "Optional time budget in milliseconds, counted from receipt. If the revision cannot commit in time the call returns a deadline_exceeded error (code -32006, partial: true); units already committed stay and nothing is retired. A commit that has started finishes and the result carries deadline_exceeded: true."}
                     },
                     "required": ["doc_id", "content"]
                 })
@@ -2918,7 +2918,7 @@ mod tests {
             );
             assert!(
                 spec.description.contains("deadline_exceeded")
-                    && spec.description.contains("-32005"),
+                    && spec.description.contains("-32006"),
                 "{name} description must document the deadline error"
             );
         }

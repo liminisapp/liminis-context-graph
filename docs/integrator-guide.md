@@ -104,7 +104,7 @@ Set the client timeout to the slowest ingest you expect, or send `"_progress_tok
 timeout: the service streams `{"type":"progress",...}` lines and a `heartbeat` about every 10
 seconds, then the terminal result. Better still, pass the same budget as **`deadline_ms`** (when
 `knowledge_capabilities` lists `process_deadline`): a request that cannot reach commit in time
-returns a structured error, code `-32005` with `reason: "deadline_exceeded"` and the `phase`
+returns a structured error, code `-32006` with `reason: "deadline_exceeded"` and the `phase`
 reached, and **writes nothing**, so you know the retry is safe; if the deadline passes after commit
 has begun, the commit finishes and the result says `"deadline_exceeded": true`. Retrying a chunk
 that is still in flight is cheap: an identical `knowledge_process_chunk` on another connection

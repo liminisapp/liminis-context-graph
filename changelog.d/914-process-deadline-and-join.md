@@ -3,11 +3,11 @@
 - **`deadline_ms` on `knowledge_process_chunk` and `knowledge_process_document` (#914, part 2 of #836).**
   An optional positive integer number of milliseconds, counted from when the service starts the
   request. A request that cannot reach commit in time is abandoned at its next cancellation point and
-  returns a new error, JSON-RPC code `-32005` with `error.data = {"reason": "deadline_exceeded",
+  returns a new error, JSON-RPC code `-32006` with `error.data = {"reason": "deadline_exceeded",
   "phase": …, "committed": false}`; nothing is written for a chunk (a document adds `"partial": true`:
   units already committed stay and nothing is retired). A deadline that passes once the commit has
   started does not interrupt it, and the success result carries `"deadline_exceeded": true`. Raw-socket
-  clients: an unknown error code `-32005` is new, and the success key is additive; both are ignorable.
+  clients: an unknown error code `-32006` is new, and the success key is additive; both are ignorable.
   Advertised as the `process_deadline` feature; both MCP tools list the parameter.
 - **A duplicate in-flight `knowledge_process_chunk` joins the first instead of extracting again
   (#914).** An identical request (same text, attributes, origin, `source_file`, `doc_id` and

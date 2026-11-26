@@ -143,7 +143,7 @@ fn deadline_returns_structured_error_before_commit_and_service_stays_healthy() {
     p["deadline_ms"] = json!(300);
     let v = c.call(2, "knowledge_process_chunk", p);
     assert_eq!(v["id"], 2, "{v}");
-    assert_eq!(v["error"]["code"], -32005, "{v}");
+    assert_eq!(v["error"]["code"], -32006, "{v}");
     assert_eq!(v["error"]["data"]["reason"], "deadline_exceeded", "{v}");
     assert_eq!(v["error"]["data"]["committed"], false, "{v}");
     assert!(
