@@ -31,12 +31,22 @@
 # Verified by loading both extensions and running an FTS and a vector-index query under lbug
 # 0.21.1 and 0.21.2 (Python wheels, empty home): osx_arm64 natively, linux_amd64 and linux_arm64
 # in python:3.12-slim. win_amd64 was not run locally.
+#
+# Re-pinned 2026-11-26 (issue #930) for lbug 0.23.0 (storage version 53), which carries the
+# upstream fix for the Windows CHECKPOINT corruption (#719, LadybugDB/ladybug#1447/#1593). The
+# 0.23.0 core's CMake build defines LBUG_EXTENSION_VERSION="0.23.0", so LBUG_EXTENSION_VERSION is
+# now 0.23.0 and the files below come from CDN path v0.23.0/ — the directory is no longer shared
+# with the previous core (v0.21.0/ stays what it was; the old pins are superseded here).
+# Fetched 2026-11-26 ~04:54 UTC (CDN Last-Modified 2026-11-23). Verified by loading both
+# extensions under the 0.23.0 core on macOS arm64 (full lcg suite, issue #930). Windows
+# row-asserting vector/FTS pairing runs are a maintainer step (see ADR-0593 addendum). Upstream
+# has overwritten version directories before (#709): re-fetch and compare before releasing.
 
-osx_arm64 vector 6f878f3c0a2320a34967ff568fcf6bbe9065666e95035f0eddfe28bbc73b53f4
-osx_arm64 fts 777d9b606514d3c45c6196e7a44300b583af6513a34178bf1a7d030f4c888f03
-linux_amd64 vector 571726cc2ea0d202df1909ae5a3b0528c9dea3ea8d40be6c16b310ec14aa8821
-linux_amd64 fts 399c8d883fbe836c4b60bbe9440180cbc0c7fe27ef350a4e1570dccdb93695a7
-linux_arm64 vector 583101f5bf2d0e5d40de2ee8966018a3bdf0fb8ad8951ef51ef46cd59169445f
-linux_arm64 fts 59669d011d485667b7b884f40aa408da0b8f117819eb83ccfa4d935556f16ba5
-win_amd64 vector 73edbde85174b20baa8539be9a50923453eef713553b68d466cf082bd3de9a1c
-win_amd64 fts caa3e2a0ee17a7103702aa6a916cb5f1ab881efb5386b217fb153df4ac12850b
+osx_arm64 vector 057dd938e6d1c8996dacfc5768ae08fb36e8b1ddd3b9c0f7fc29dd23b110fb97
+osx_arm64 fts 167d2989ac9365756650a4fefd637955850332fec9b7fde538b4f03a2451896f
+linux_amd64 vector e869f00b0910108cd21ed2668972b9f0f2aa67d6d496900f2fbc171fe1ca6b9e
+linux_amd64 fts a1f67345b2adbbed42279ad1f2ec8a597e471f14b6100af67b416462c8e9789b
+linux_arm64 vector 50da7e1b695bfb5d8f8e7f72e89e05fbc3e36fe24bd59783d328dbafb0d92ae4
+linux_arm64 fts abdcffd19b7014725e701a7508aa78187c999a6ff157b4eff2b2f571174f97a7
+win_amd64 vector 3801d3f47844d6c6b2d5e58e7db8d95de58ee179a03a1457f2c1b380494eff8a
+win_amd64 fts 29228a3b451877a6c184a934be57b1f9d114cd156fd1e44cae890237aea16891
