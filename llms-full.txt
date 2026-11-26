@@ -10,7 +10,7 @@ HNSW vector search, and full-text search in a single embedded service, built on
 search cluster: everything runs in one process, on your machine, against files in your
 workspace.
 
-This page documents **v0.20.1**, built directly from that release tag's `docs/`
+This page documents **v0.21.0**, built directly from that release tag's `docs/`
 tree — not from `main`. Unreleased changes merged to `main` since this tag are not reflected
 here; use the version switcher in the footer to browse other published releases.
 
@@ -314,17 +314,29 @@ stable code, such as `document_too_large:` or `empty_document:`.
 **One request at a time per connection.** The service answers the requests on a connection
 strictly in order. A search sent on the same connection as a slow ingest waits behind it. Open a
 second connection for reads, and one connection per concurrent ingest. Connections do not block
-each other. See
+each other. The service does not pipeline several requests on one connection and answer them out of
+order (considered and declined, [ADR-0914](adr/0914-declined-pipelining-on-one-connection.md)), so
+"open N connections" stays the way to run N requests at once. See
 [Connections, concurrency and timeouts](ipc-mcp-reference.md#connections-concurrency-and-timeouts-issue-861).
 
 **Timeouts.** Ingest time is dominated by the embedder and the LLM, so there is no fixed bound.
 Set the client timeout to the slowest ingest you expect, or send `"_progress_token": "x"` with
 `knowledge_process_chunk` or `knowledge_process_document` and treat silence between lines as the
 timeout: the service streams `{"type":"progress",...}` lines and a `heartbeat` about every 10
-seconds, then the terminal result. If a call times out, **close the connection** and retry on a
-new one: closing cancels the original before its commit, and an identical resubmission is a no-op
-(see [Ingest, update, retire, delete](#ingest-update-retire-delete)). Keep reading while a
-request runs; a client that stops reading is treated as disconnected.
+seconds, then the terminal result. Better still, pass the same budget as **`deadline_ms`** (when
+`knowledge_capabilities` lists `process_deadline`): a request that cannot reach commit in time
+returns a structured error, code `-32006` with `reason: "deadline_exceeded"` and the `phase`
+reached, and **writes nothing**, so you know the retry is safe; if the deadline passes after commit
+has begun, the commit finishes and the result says `"deadline_exceeded": true`. Retrying a chunk
+that is still in flight is cheap: an identical `knowledge_process_chunk` on another connection
+**joins** the running one instead of extracting again and returns the same result with
+`"joined": true` (feature `chunk_join_inflight`). If a call times out client-side instead,
+**close the connection** and retry on a new one: closing cancels the original before its commit,
+and an identical resubmission is a no-op (see
+[Ingest, update, retire, delete](#ingest-update-retire-delete)). Keep reading while a
+request runs; a client that stops reading is treated as disconnected. See
+[Deadline](ipc-mcp-reference.md#deadline-deadline_ms-issue-914) and
+[Joining a duplicate in-flight request](ipc-mcp-reference.md#joining-a-duplicate-in-flight-request-issue-914).
 
 An MCP client uses `--mcp-stdio` instead of the socket and gets the same methods as tools; the
 rest of this guide applies unchanged
@@ -344,7 +356,7 @@ when the service is degraded:
   you do not know.
 - `features` is a sorted, append-only list of stable strings. Test for a feature before you use
   what it adds, for example `process_document`, `retire_document`, `entity_provenance`,
-  `walk_provenance`, `unchanged_noop` and `document_max_bytes_env`. A missing feature means an
+  `walk_provenance`, `unchanged_noop`, `document_max_bytes_env` and `request_size_limits`. A missing feature means an
   older server: fall back or tell the user.
 - `methods` lists every method the dispatcher accepts, so a client never has to probe with a
   trial call.
@@ -424,6 +436,15 @@ nothing is written or truncated. The operator raises or lowers the cap with that
 client cannot change it; detect the feature with `document_max_bytes_env` and cut the document at
 a section boundary yourself if you must stay under a smaller cap. See
 [Configuration](configuration.md) and [Document mode](ipc-mcp-reference.md#document-mode-send-the-whole-document-the-server-does-the-diff-issue-785).
+
+**Request size.** Every request is one line, and the service refuses a line over
+`LCG_REQUEST_MAX_BYTES` (default **16 MiB**, enough for a maximal 2 MiB document after JSON
+escaping) with error `-32005` and `id: null`: handle it by `error.code`, since the line was never
+parsed. The same connection keeps working afterwards. `knowledge_process_chunk` also refuses a
+`chunk_text` over `LCG_CHUNK_TEXT_MAX_BYTES` (default **512 KiB**) with `chunk_text_too_large`;
+send long texts to `knowledge_process_document` instead. Both are operator settings, detected with
+the `request_size_limits` feature. See
+[Request limits](ipc-mcp-reference.md#request-limits).
 
 A minimal ingest, update and delete:
 
@@ -549,7 +570,8 @@ is enough to confirm you are talking to a server you support.
 
 - [IPC & MCP Reference](ipc-mcp-reference.md): every method, field and error.
 - [Configuration](configuration.md): every environment variable and flag, including
-  `LCG_SEARCH_MIN_SCORE` and `LCG_DOCUMENT_MAX_BYTES`.
+  `LCG_SEARCH_MIN_SCORE`, `LCG_DOCUMENT_MAX_BYTES`, `LCG_REQUEST_MAX_BYTES` and
+  `LCG_CHUNK_TEXT_MAX_BYTES`.
 - [Test Providers](test-providers.md): `--embedder test --extractor test`, to test your client
   without an LLM or a network.
 - [Operations](operations.md): the WAL, degraded mode and recovery.
@@ -623,8 +645,10 @@ Source: https://docs.liminis.app/liminis-context-graph/configuration
 | `LCG_EXTRACTION_MODEL` | No | Model name sent in local extraction requests (default `local`) — decorative against the bundled sidecar (which ignores the request's `model` field), but meaningful for real OpenAI-compatible servers reached via `--extractor-http`. |
 | `LCG_EXTRACTION_API_KEY` | No | Bearer token sent as `Authorization: Bearer <key>` on the HTTP extraction transport (`--extractor-http`/`LCG_EXTRACTION_URL`), for authenticated OpenAI-compatible proxies such as a corporate LLM gateway. Unset sends no header. Never applies to `--extractor-uds`. |
 | `LCG_EXTRACTION_MAX_TOKENS_CEILING` | No | Uniform ceiling (in tokens) on the per-call `max_tokens` budget for entity/edge extraction, across both the hosted Anthropic path and self-hosted/OAI-compatible models (default `32768`). The per-call initial budget scales with input chunk size up to this ceiling; it exists to stop genuine non-termination (a model that never stops generating), not to optimize spend, so it is intentionally generous. An invalid value (non-numeric, or below the compiled-in 4096-token floor) logs a warning to stderr and falls back to the default. Setting it near the floor is valid but self-defeating: since the per-call budget is `clamp(chunk_len_bytes * ratio, 4096, ceiling)`, a ceiling close to 4096 collapses that range and every call effectively gets the same floor-sized budget regardless of chunk size — silently disabling proportional scaling, not just narrowing the runaway guard. |
-| `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` | No | Advisory threshold, in **characters** (not bytes), above which `knowledge_process_chunk`'s `chunk_text` is considered oversized (default `8000`). Ingestion is unaffected — no rejection, truncation, or internal splitting — but a call whose `chunk_text` exceeds this threshold gains a `warning` field in its result naming the actual character count and the recommended maximum, and emits a `chunk_text_oversized` telemetry event (see [Telemetry](telemetry.md)). Extraction quality degrades well before any context-window limit is reached, so for a whole document or a long page, send it to `knowledge_process_document` instead (the server chunks it by section; see the [integrator guide](integrator-guide.md)). An invalid value (non-numeric, zero, or negative) logs a warning to stderr and falls back to the default. |
+| `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` | No | Advisory threshold, in **characters** (not bytes), above which `knowledge_process_chunk`'s `chunk_text` is considered oversized (default `8000`). Ingestion is unaffected below the hard `LCG_CHUNK_TEXT_MAX_BYTES` cap (no truncation or internal splitting), but a call whose `chunk_text` exceeds this threshold gains a `warning` field in its result naming the actual character count and the recommended maximum, and emits a `chunk_text_oversized` telemetry event (see [Telemetry](telemetry.md)). Extraction quality degrades well before any context-window limit is reached, so for a whole document or a long page, send it to `knowledge_process_document` instead (the server chunks it by section; see the [integrator guide](integrator-guide.md)). An invalid value (non-numeric, zero, or negative) logs a warning to stderr and falls back to the default. |
 | `LCG_DOCUMENT_MAX_BYTES` | No | Document-size cap for `knowledge_process_document` and `knowledge_preview_chunks`, in **UTF-8 bytes** (default `2097152`, **2 MiB**). A larger document is refused with `document_too_large` before any extraction or write, never truncated, and the error names the cap and this variable. Accepts a plain byte count or a count with a `KiB` or `MiB` suffix (`4MiB`, `1024KiB`, `4194304`); surrounding whitespace is ignored. Nothing else is accepted: zero, signs, decimals, `_`, inner whitespace, `KB`/`MB`, lower-case or `GiB` units, and any value above **256 MiB** are errors. Like `LCG_SEARCH_MIN_SCORE` it is validated **once at startup**, and an invalid value **fails startup** with an error naming the variable and the value (a stray `0` or typo stops the service rather than silently using the default; fix or unset it). The effective cap is logged at startup. Advertised by the `document_max_bytes_env` capability feature. See [ADR-0862](adr/0862-document-max-bytes-strict-2mib-default.md). |
+| `LCG_REQUEST_MAX_BYTES` | No | Longest IPC request line the socket / named-pipe transport will buffer, in **bytes** of the line before its `\n` (default `16777216`, **16 MiB**; at most **2 GiB**). A longer line is refused with JSON-RPC error `-32005` (`id: null`, `error.data.reason: "request_too_large"`) before it is parsed, and the same connection then serves the next line; the error names the limit and this variable. Same grammar as `LCG_DOCUMENT_MAX_BYTES` (plain byte count or `KiB`/`MiB`/`GiB` suffix); zero, signs, decimals, other units, an empty value and anything above 2 GiB are errors. Validated **once at startup**: an invalid value fails startup naming the variable and value. It must also be able to carry a maximal document: startup is **refused** unless `LCG_REQUEST_MAX_BYTES >= 6 × LCG_DOCUMENT_MAX_BYTES + 64 KiB` (a JSON string can spend six bytes on one body byte), so raising `LCG_DOCUMENT_MAX_BYTES` above about 2.7 MiB means raising this too (the error gives the minimum). The effective value is logged at startup. Applies to every method on the socket / named pipe, including `--connect` attached clients; not to `--mcp-stdio`. Advertised by the `request_size_limits` capability feature. See [ADR-0293](adr/0293-request-line-limit-and-chunk-cap.md). |
+| `LCG_CHUNK_TEXT_MAX_BYTES` | No | Hard cap on `knowledge_process_chunk`'s `chunk_text`, in UTF-8 **bytes** (default `524288`, **512 KiB**; at most **256 MiB**). A larger `chunk_text` is refused with `chunk_text_too_large` before any extraction or write, and the error names the size, the cap and this variable; send whole documents to `knowledge_process_document` instead. Separate from the advisory `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` warning, which is unchanged at or under this cap. Same grammar and startup validation as `LCG_DOCUMENT_MAX_BYTES` (an invalid value fails startup). The effective value is logged at startup. See [ADR-0293](adr/0293-request-line-limit-and-chunk-cap.md). |
 | `LCG_DOCUMENT_CHUNK_MAX_CHARS` | No | Per-unit size, in **characters**, above which document mode splits a section into several extraction units (default `6000`, below the `8000`-character chunk advisory). The units stay one logical chunk for diffing. Changing it changes chunk boundaries, so the next ingest of an existing document re-extracts the sections it re-splits. Invalid values fall back to the default with a warning. |
 | `LCG_RECORD_LLM` | No | Path to an LLM cassette (JSONL). If set, every extraction call is recorded to this file in addition to running live — see [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). Mutually exclusive with `LCG_REPLAY_LLM`. |
 | `LCG_REPLAY_LLM` | No | Path to a previously recorded LLM cassette (JSONL). If set, extraction is served entirely from the cassette — no extractor provider is resolved, no credentials are required, and no network call is ever made. Mutually exclusive with `LCG_RECORD_LLM`. See [Record/replay cassettes](testing-and-evaluation.md#recordreplay-cassettes). |
@@ -1413,6 +1437,11 @@ write lock, and each connection has its own task), so:
   embed/extract phase, which is the slow one.
 - Correlate by connection, not by id: `_progress_token` frames (below) do not echo the token, which
   is safe because a connection never has two requests in flight.
+- **Pipelining on one connection was considered and declined** (issue #914,
+  [ADR-0914](adr/0914-declined-pipelining-on-one-connection.md)): the service will not run several
+  requests on one connection and answer them out of order, so "open one connection per concurrent
+  request" stays the rule. Bound a slow ingest with `deadline_ms` and retry it safely instead
+  (below).
 
 **Disconnect cancels an in-flight ingest (feature `cancel_on_disconnect`).** While a
 `knowledge_process_chunk` or `knowledge_process_document` request is running, the service watches
@@ -1449,8 +1478,13 @@ not cancelled on disconnect and run to completion as before.
 
 **Choosing a timeout and retrying.** Ingest latency is dominated by the embedder and the LLM, so
 set the client timeout to the slowest chunk you expect (or stream with `_progress_token` and treat
-silence between frames as the timeout). When a call times out, close the connection and retry on a
-new one:
+silence between frames as the timeout). Prefer passing the same budget as **`deadline_ms`** (feature
+`process_deadline`; see [Deadline](#deadline-deadline_ms-issue-914)): the service then abandons the
+request before commit and answers with a structured `deadline_exceeded` error instead of leaving you
+to infer what happened from a dropped connection. Retrying the same chunk while the first attempt is
+still running is cheap: an identical request **joins** the one in flight rather than extracting again
+(feature `chunk_join_inflight`; see [Joining a duplicate in-flight request](#joining-a-duplicate-in-flight-request-issue-914)).
+If you time out on the client side instead, close the connection and retry on a new one:
 
 - If the timeout fired during embed or extract, the disconnect cancelled the original, so the retry
   extracts the chunk **once**, not twice.
@@ -1585,15 +1619,17 @@ during a rebuild and under any `--writable-groups` policy.
 
 ```json
 {"server_version": "0.20.0", "protocol_version": 1,
- "features": ["belief_aware_passages", "cancel_on_disconnect", "chunk_progress", "chunk_supersede",
-              "delete_orphan_prune", "document_max_bytes_env", "embedding_profiles",
+ "features": ["belief_aware_passages", "cancel_on_disconnect", "chunk_join_inflight",
+              "chunk_progress", "chunk_supersede", "delete_orphan_prune",
+              "document_max_bytes_env", "embedding_profiles",
               "entity_provenance", "episode_source_fields", "exact_source_match",
               "hybrid_passage_search", "implicit_default_group_warning", "lint",
               "literal_object_edges", "move_document", "ontology_edge_direction", "ontology_hash",
               "origin", "passage_expansion", "passage_legs", "passage_query_variants",
-              "passage_rerank", "process_document", "ready_for_reads", "retire_document",
-              "search_min_score_env", "status_episode_breakdown", "test_providers", "unchanged_noop",
-              "walk", "walk_provenance", "writable_groups", "zero_vector_record"],
+              "passage_rerank", "process_deadline", "process_document", "ready_for_reads",
+              "request_size_limits", "retire_document", "search_min_score_env",
+              "status_episode_breakdown", "test_providers", "unchanged_noop", "walk",
+              "walk_provenance", "writable_groups", "zero_vector_record"],
  "methods": ["health_check", "knowledge_add_episode", "…"]}
 ```
 
@@ -1619,6 +1655,7 @@ by #885 name capabilities that were added in 0.20.0 without one.
 |---|---|---|
 | `belief_aware_passages` | #806 ([ADR-0806](adr/0806-belief-aware-passage-ranking-default.md)) | `knowledge_search_passages` accepts `belief_aware` and applies it by default in `vector` and `hybrid` mode: a derived page ranks below the primary note it cites and a superseded passage below its successor. `belief_aware: false` or `LCG_PASSAGE_BELIEF_AWARE=off` restores the previous order. |
 | `cancel_on_disconnect` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | A client disconnect cancels an in-flight `knowledge_process_chunk` or `knowledge_process_document` before commit; a commit that has started finishes. |
+| `chunk_join_inflight` | #914 ([ADR-0914](adr/0914-process-deadline-and-inflight-join.md)) | A `knowledge_process_chunk` identical to one already in flight for the same `(group_id, chunk_id)` waits for it instead of extracting again and returns the same result with `joined: true`. A cancelled first request is not inherited: the joined one takes over. |
 | `chunk_progress` | #861 ([ADR-0861](adr/0861-process-chunk-progress-and-cancel-on-disconnect.md)) | `knowledge_process_chunk` streams `embed`, `extract` and `commit` progress frames when given a `_progress_token`. |
 | `chunk_supersede` | closest known origin: #785 ([ADR-0292](adr/0292-chunk-ingest-never-supersedes-unattributed-episodes.md)); seeded by #854 | Chunk ingest can supersede earlier episodes of the same document. |
 | `delete_orphan_prune` | #859 ([ADR-0859](adr/0859-retire-document-and-orphan-reporting.md)) | `knowledge_delete_by_source` and `knowledge_delete_chunk_episode` report `orphaned_entity_uuids`, `orphaned_entity_count`, `pruned_entity_count` and `pruned_edge_count`, and accept `prune_orphans: true`. |
@@ -1639,8 +1676,10 @@ by #885 name capabilities that were added in 0.20.0 without one.
 | `passage_legs` | #871 | Hybrid passage results carry `legs` (per-leg evidence). Present on hybrid results only; absent or null in other modes. |
 | `passage_query_variants` | #802 ([ADR-0802](adr/0802-caller-supplied-query-variants-weighted-rrf.md)) | `knowledge_search_passages` accepts `queries` (caller-written variants of `query`, fused by weighted RRF), and each passage then carries `matched_queries`. |
 | `passage_rerank` | #796 ([ADR-0796](adr/0796-passage-rerank-and-query-expansion.md)) | `knowledge_search_passages` accepts `rerank` and `rerank_candidates`. Whether the stage runs depends on the operator's reranker configuration; each call reports it with `applied`. |
+| `process_deadline` | #914 ([ADR-0914](adr/0914-process-deadline-and-inflight-join.md)) | `knowledge_process_chunk` and `knowledge_process_document` accept `deadline_ms`; a request that cannot reach commit in time returns error code `-32006` with `reason: "deadline_exceeded"` and writes nothing, and a deadline that passes once commit has started marks the completed result with `deadline_exceeded: true`. |
 | `process_document` | #785 | `knowledge_process_document` document mode. |
 | `ready_for_reads` | #809, #855 ([ADR-0855](adr/0855-health-check-ready-for-reads.md)) | `health_check` carries `ready_for_reads`, present in every state. |
+| `request_size_limits` | #293 ([ADR-0293](adr/0293-request-line-limit-and-chunk-cap.md)) | The socket and named-pipe transport refuses a request line over `LCG_REQUEST_MAX_BYTES` (default 16 MiB) with error `-32005` and a null `id`, and `knowledge_process_chunk` refuses a `chunk_text` over `LCG_CHUNK_TEXT_MAX_BYTES` (default 512 KiB) with `chunk_text_too_large`. The configured values are not exposed. See [Request limits](#request-limits). |
 | `retire_document` | #859 ([ADR-0859](adr/0859-retire-document-and-orphan-reporting.md)) | `knowledge_retire_document` supersedes every live episode of a document with reason `document_removed`, deleting nothing. |
 | `search_min_score_env` | #812 ([ADR-0812](adr/0812-search-min-score-env-default.md)) | The default passage-search `min_score` floor can be set by the operator with `LCG_SEARCH_MIN_SCORE`. The configured value is not exposed. |
 | `status_episode_breakdown` | #884 ([ADR-0884](adr/0884-status-episode-breakdown-opt-in.md)) | `knowledge_status` can report a per-group live/superseded episode breakdown. |
@@ -1720,6 +1759,49 @@ Notes:
 - `busy` has `healthy: false` on purpose: existing pollers that gate on `healthy` keep waiting.
   A liveness probe that only needs "is the process alive" should accept `ok: true`, and a read-only
   client should gate on `ready_for_reads: true`.
+
+### Request limits
+
+Two size limits protect the service from a request it should not have to buffer or process
+([ADR-0293](adr/0293-request-line-limit-and-chunk-cap.md), #293). Both are operator settings,
+validated once at startup (see [Configuration](configuration.md)); a client cannot change them.
+Detect them with the `request_size_limits` capability feature.
+
+| Limit | Setting | Default | At most | Applies to |
+|-------|---------|---------|---------|------------|
+| Request line | `LCG_REQUEST_MAX_BYTES` | 16 MiB | 2 GiB | every method on the socket / named pipe, including `--connect` attached clients (not `--mcp-stdio`) |
+| `chunk_text` | `LCG_CHUNK_TEXT_MAX_BYTES` | 512 KiB | 256 MiB | `knowledge_process_chunk` |
+
+**Request line.** The limit is on the bytes of one request line before its `\n`; the terminator does
+not count, a trailing `\r` does. A line of exactly the limit is accepted and one byte more is
+refused. The service stops buffering at the limit, so memory held for one line is bounded by it
+whatever the client sends, and the refusal is written as soon as the limit is crossed, without
+waiting for the end of the line. It happens before JSON parsing and dispatch: no handler runs and no
+state changes. The error is:
+
+```json
+{"jsonrpc": "2.0", "id": null,
+ "error": {"code": -32005,
+           "message": "request line is more than 16777216 bytes (limit set by LCG_REQUEST_MAX_BYTES); send smaller requests, or raise LCG_REQUEST_MAX_BYTES (and keep it at least 6 x LCG_DOCUMENT_MAX_BYTES + 64 KiB if you handle large documents)",
+           "data": {"reason": "request_too_large", "limit_bytes": 16777216,
+                    "setting": "LCG_REQUEST_MAX_BYTES"}}}
+```
+
+The `id` is `null` because the line was never parsed, as for a `-32700` parse error: match it by
+`error.code` / `error.data.reason`, not by id. The message always says "more than N bytes", never an
+exact size. **After the refusal the connection stays open**: the rest of that line is discarded
+without being kept and the next line is served normally. If the oversized line runs on past four
+times the limit without a newline, the connection is closed instead. When a request is already
+running on the connection (`knowledge_process_chunk` or `knowledge_process_document`) and a client
+pipelines an oversized line behind it, the refusal is written after that request's response, so
+responses stay in order. The default carries a maximal `knowledge_process_document` (2 MiB of body,
+about 12 MiB after worst-case JSON escaping). Startup refuses a configuration where
+`LCG_REQUEST_MAX_BYTES < 6 x LCG_DOCUMENT_MAX_BYTES + 64 KiB`.
+
+**`chunk_text`.** A `chunk_text` over the cap is refused before any extraction or write with a
+`-32000` error whose message starts `chunk_text_too_large:` and names the size, the cap, the
+variable and `knowledge_process_document`. A `chunk_text` at or under the cap behaves as before,
+including the advisory `warning` (see `knowledge_process_chunk`).
 
 ## Response contract (JSON Schemas, issue #852)
 
@@ -2463,13 +2545,86 @@ episode exists for the `chunk_id`; a live same-named episode was written by anot
 (`knowledge_add_episode`, document mode); the live episode has a pending (future-effective) document supersession; another
 `knowledge_process_chunk` or `knowledge_mark_chunk_removed` call for the same `(group_id,
 chunk_id)` is in flight (the ordinary path then orders the two, so a revert is never lost to an
-earlier edit still extracting); or no live episode exists (never ingested, superseded, or removed
+earlier edit still extracting; an *identical* in-flight `knowledge_process_chunk` is joined instead,
+see below); or no live episode exists (never ingested, superseded, or removed
 with `knowledge_mark_chunk_removed`). With a `doc_id`, the "one document has one origin" refusal
 applies to a no-op as to an ingest. A malformed request is rejected as always, never
 reported as `unchanged`. A change of extractor, model or ontology does not by itself re-extract an
 identical chunk: change the chunk or use the reprocess operations. Discover support with the
 `unchanged_noop` entry in `knowledge_capabilities` `features`. See
 [ADR-0858](adr/0858-unchanged-chunk-resubmission-noop.md).
+
+#### Deadline (`deadline_ms`, issue #914)
+
+`knowledge_process_chunk` and `knowledge_process_document` accept an optional **`deadline_ms`**: a
+positive integer number of milliseconds (feature `process_deadline`). Zero, negatives, floats and
+non-numbers are rejected with the usual `-32000` validation error before any work. Omitted, nothing
+changes. The clock starts when the service has validated the request (not when it was queued behind
+another on the same connection), so client and service clocks do not matter.
+
+- **Within the deadline:** the request runs normally and its result carries no deadline field.
+- **Deadline passes before commit starts:** the request is abandoned at its next cancellation point
+  (the same points as [cancel-on-disconnect](#connections-concurrency-and-timeouts-issue-861),
+  including waiting for the group write lock) and returns error code **`-32006`**:
+
+  ```json
+  {"error": {"code": -32006,
+             "message": "deadline exceeded before commit (phase: extract); nothing was written",
+             "data": {"reason": "deadline_exceeded", "phase": "extract", "committed": false}}}
+  ```
+
+  For `knowledge_process_chunk` **nothing was written** (no episode, entity, edge or WAL record), so
+  retrying is safe. `phase` is the last phase reached: `embed`, `extract` (through resolution and
+  dedup), `awaiting_write_lock` (queued behind another writer), or `awaiting_inflight` (a joined
+  request still waiting, below). Progress frames sent earlier stay valid; the terminal line is this
+  error. For `knowledge_process_document`, `data` also has `"partial": true` and `phase` is
+  `chunked` or `extracting` (the `committing` progress frame is only sent once the revision commit
+  has begun, after the last cancellation check, so it never appears here): the call did not
+  complete, units already committed stay in place and nothing is retired (as for any cancelled
+  document ingest); resubmit it to finish.
+- **Deadline passes once the commit has started:** the commit finishes (it is never interrupted)
+  and the success result carries `"deadline_exceeded": true`: the write is complete, but later than
+  you asked. The key is absent when the deadline was met, and on an `unchanged` no-op, which returns
+  before any cancellation point.
+- A request that is disconnected as well is reported as the cancellation it is; shutdown still
+  cancels as before.
+- **Late notice.** A deadline is noticed at cancellation points, so a request can overrun it by up to
+  the time between two points. Three waits have no point at all: the per-document lock of
+  `knowledge_process_document`, the unchanged-check read lock, and an LLM call already in flight
+  between points. A provider may still bill for a request it had already received.
+
+See [ADR-0914](adr/0914-process-deadline-and-inflight-join.md). Both tools list `deadline_ms` in
+their MCP input schemas; over attached MCP the parameter and the `error.data` pass through unchanged.
+
+#### Joining a duplicate in-flight request (issue #914)
+
+A `knowledge_process_chunk` that arrives for a `(group_id, chunk_id)` which already has a request in
+flight with **identical content** (feature `chunk_join_inflight`) does not extract again. It waits for
+the first request and returns the same result with **`"joined": true`**; the extractor is called
+once. "Identical" is the comparison of an unchanged resubmission (above) applied between the two
+requests: `chunk_text`, `attributes`, `origin`, `source_file`, `doc_id` and `reference_time` (both
+omitted, or the same explicit instant). The joined result has its own `duration_seconds` (including
+the wait) and its own `deadline_exceeded` / `warning`; the first request's result has no `joined` key.
+
+- **Not joined:** different content, a different group, `supersede: false`,
+  `same_revision_episode_uuids`, `knowledge_mark_chunk_removed`, `knowledge_process_document`, and a
+  request that arrives while a *differing* request for the same chunk is also in flight. These behave
+  as before, so commit-instant ordering still decides them.
+- **If the first request is cancelled** (its client disconnects, its `deadline_ms` passes, or it
+  panics) the joined request is **not** cancelled with it. It is re-elected: one waiting request
+  becomes the new first request and extracts, and the others join that one. Each still ends in
+  success and exactly one live episode results. The cancelled request's partial extraction is
+  discarded.
+- **If the first request fails** for another reason, joined requests receive the same error (same
+  code and `data`); they do not retry.
+- **A joined request's own `deadline_ms` and disconnect** apply only to it (`deadline_exceeded` with
+  phase `awaiting_inflight`, or dropped); the first request carries on.
+- A joined request with a `_progress_token` receives heartbeats (so an idle read timeout does not drop
+  it) but not the `embed` / `extract` / `commit` frames, which belong to the first request's
+  connection. Shutdown cancels joined requests too.
+
+This supersedes the earlier statement that two identical resubmissions arriving together both extract.
+See [ADR-0914](adr/0914-process-deadline-and-inflight-join.md).
 
 To submit one chunk as several calls under one `chunk_id`, send `supersede: false` on every unit but
 the last, and pass the earlier units' `episode_uuid`s as `same_revision_episode_uuids` on the last:
@@ -3869,6 +4024,9 @@ While a request that sent a token is otherwise silent (the LLM call between `ext
 `commit`), the service writes `{"type":"progress","phase":"heartbeat"}` about every 10 s, so a
 client with a per-line idle read timeout (as the attached MCP backend has, 30 s by default) keeps
 its connection and the ingest alive. Ignore unknown `phase` values; token-less requests get none.
+A request that [joined](#joining-a-duplicate-in-flight-request-issue-914) an identical in-flight one
+receives heartbeats only. A terminal `deadline_exceeded` error (`-32006`) ends a streaming request
+like any other error; frames sent before it stay valid.
 
 `knowledge_process_chunk` reports what it could not write, not only how much. Two additive
 result fields exist for that, both introduced in 0.13.2.
@@ -3956,7 +4114,9 @@ result fields exist for that, both introduced in 0.13.2.
   (`LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS`, default 8,000 characters — see
   [Configuration](configuration.md)) adds a `warning` field naming the actual and recommended
   character counts, and emits a `chunk_text_oversized` telemetry event. This is visibility only:
-  nothing is truncated, split, or rejected, and the call succeeds exactly as it did before. The
+  nothing is truncated or split, and the call succeeds as it did before, unless `chunk_text` is
+  over the hard cap `LCG_CHUNK_TEXT_MAX_BYTES` (default 512 KiB), which is refused with
+  `chunk_text_too_large` (see [Request limits](#request-limits), #293). The
   `warning.message` points at `knowledge_process_document` (issue #862): send a whole document or
   a long page there and the server chunks it for you (see
   [Document mode](#document-mode-send-the-whole-document-the-server-does-the-diff-issue-785)).
@@ -4356,7 +4516,7 @@ threshold (default `8000`, overridable via `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` �
 [Configuration](configuration.md)). A lightweight, counting-only event mirroring
 `extraction_truncated`'s shape, so oversized ingestion is visible in aggregate across a telemetry
 stream, not just in the single call's response `warning` field. Ingestion itself is unaffected —
-no rejection, truncation, or splitting — this event is purely observational, and fires on every
+no truncation or splitting, and no rejection below the hard `LCG_CHUNK_TEXT_MAX_BYTES` cap (a chunk over it is refused and emits no event) — this event is purely observational, and fires on every
 oversized call, including repeated resubmissions of the same `chunk_id`.
 
 **The threshold and this event's `chunk_text_chars` field are measured in characters, not
@@ -9547,6 +9707,7 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0283](0283-name-index-scan-fallback-for-endpoint-authority.md) | Bounded Scan Fallback and Trust State for NameIndex Endpoint Resolution | 2026-07-30 |
 | [0291](0291-native-art-index-for-episodic-lookups.md) | Native ART Indexes for Episodic `name` and `doc_id` Lookups | 2026-11-15 |
 | [0292](0292-chunk-ingest-never-supersedes-unattributed-episodes.md) | Chunk Ingest Never Supersedes Episodes It Cannot Attribute To Itself | 2026-11-16 |
+| [0293](0293-request-line-limit-and-chunk-cap.md) | Request Line Limit and `chunk_text` Cap | 2026-11-25 |
 | [0295](0295-github-pages-documentation-site.md) | GitHub Pages Documentation Site | 2026-08-02 |
 | [0298](0298-ci-failure-notification.md) | CI Failure Notification for Non-Gating Workflows | 2026-07-30 |
 | [0306](0306-extraction-failure-sidecar-and-truncation-visibility.md) | Extraction-Failure Sidecar and Truncation Visibility | 2026-08-01 |
@@ -9668,6 +9829,8 @@ Numbers are project-local and immutable once assigned. See [ADR-0001](0001-recor
 | [0903](0903-move-document-rekey.md) | Move a document by re-keying its episodes, not re-extracting | 2026-11-23 |
 | [0904](0904-changelog-fragments-and-generated-llms-full.md) | Changelog Fragments, and `llms-full.txt` Generated at Publish Time | 2026-11-23 |
 | [0907](0907-graph-gold-skeleton-plus-prose-overlay.md) | Graph-Question Gold Is the Skeleton Plus a Prose Overlay; Optional Answers Are Score-Neutral | 2026-11-23 |
+| [0914](0914-process-deadline-and-inflight-join.md) | `process_chunk` / `process_document` Deadline (`deadline_ms`), and Joining a Duplicate In-flight Resubmit | 2026-11-25 |
+| [0914](0914-declined-pipelining-on-one-connection.md) | Pipelining Several Requests on One Connection — Declined | 2026-11-25 |
 
 ## Historical numbering
 
