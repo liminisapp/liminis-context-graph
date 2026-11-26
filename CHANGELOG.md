@@ -9,6 +9,94 @@ Pre-1.0 development; see `git log` for history before 0.1.0.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-25
+
+### Upgrading
+
+- **A minor release for one breaking change: size limits on requests (#293).** A request line over
+  16 MiB (`LCG_REQUEST_MAX_BYTES`) and a `knowledge_process_chunk` `chunk_text` over 512 KiB
+  (`LCG_CHUNK_TEXT_MAX_BYTES`) are now refused. Send long texts to `knowledge_process_document`
+  (capped by `LCG_DOCUMENT_MAX_BYTES`, 2 MiB by default). If you raised `LCG_DOCUMENT_MAX_BYTES`
+  above about 2.7 MiB, also raise `LCG_REQUEST_MAX_BYTES` to at least
+  `6 x LCG_DOCUMENT_MAX_BYTES + 64 KiB`, or startup fails and names both settings. An empty or
+  invalid value of either new setting also fails startup.
+- **Two new error codes.** `-32005` (`request_too_large`, #293) and `-32006` (`deadline_exceeded`,
+  #914). The `deadline_ms` parameter and the in-flight join are additive.
+- **No storage, schema or lbug change.** lbug stays 0.21.2, `PROTOCOL_VERSION` stays 1, and the MCP
+  registry stays at 60 tools.
+
+### Added
+
+- **`request_size_limits` capability feature (#293).** Advertised by `knowledge_capabilities` so a
+  client can detect the request-line limit and the `chunk_text` cap.
+- **`deadline_ms` on `knowledge_process_chunk` and `knowledge_process_document` (#914, part 2 of #836).**
+  An optional positive integer number of milliseconds, counted from when the service starts the
+  request. A request that cannot reach commit in time is abandoned at its next cancellation point and
+  returns a new error, JSON-RPC code `-32006` with `error.data = {"reason": "deadline_exceeded",
+  "phase": …, "committed": false}`; nothing is written for a chunk (a document adds `"partial": true`:
+  units already committed stay and nothing is retired). A deadline that passes once the commit has
+  started does not interrupt it, and the success result carries `"deadline_exceeded": true`. Raw-socket
+  clients: an unknown error code `-32006` is new, and the success key is additive; both are ignorable.
+  Advertised as the `process_deadline` feature; both MCP tools list the parameter.
+- **A duplicate in-flight `knowledge_process_chunk` joins the first instead of extracting again
+  (#914).** An identical request (same text, attributes, origin, `source_file`, `doc_id` and
+  `reference_time`) for a `(group_id, chunk_id)` that is already being ingested waits for it and
+  returns the same result with `"joined": true`. If the first request is cancelled by a disconnect or
+  its deadline, the joined ones are not: one of them restarts the ingest and the rest join it. A
+  failure of the first request that is not a cancellation is shared, with its error code. Advertised as the `chunk_join_inflight` feature. Raw-socket clients that
+  retried a timed-out chunk on a new connection and previously paid for a second extraction now get
+  the first one's result.
+
+### Changed
+
+- **BREAKING: request lines over 16 MiB and `chunk_text` over 512 KiB are now refused (#293).**
+  Affects raw-socket clients (the Electron app through `graphiti_service.py`, the attached
+  `--connect` MCP client, and any other client that writes JSON-RPC lines to the socket or named
+  pipe).
+  - The socket read loop used to buffer a request line without bound. It now stops at
+    `LCG_REQUEST_MAX_BYTES` (default 16 MiB, at most 2 GiB; a byte count or a `KiB`/`MiB`/`GiB`
+    suffix) and answers with JSON-RPC error `-32005`, `id: null` and
+    `error.data = {reason: "request_too_large", limit_bytes, setting}`. The line is refused before
+    parsing, so no handler runs. The rest of the line is discarded without being kept and the same
+    connection keeps serving; a line that runs past four times the limit closes the connection.
+    The default carries a maximal 2 MiB `knowledge_process_document` after worst-case JSON escaping.
+  - `knowledge_process_chunk` refuses a `chunk_text` over `LCG_CHUNK_TEXT_MAX_BYTES` (default
+    512 KiB, at most 256 MiB, in UTF-8 bytes) with `chunk_text_too_large`, before any extraction or
+    write. The `LCG_CHUNK_TEXT_ADVISORY_MAX_CHARS` warning is unchanged below the cap. Send long
+    texts to `knowledge_process_document`.
+  - Startup now refuses a configuration whose line limit cannot carry a maximal document:
+    `LCG_REQUEST_MAX_BYTES` must be at least `6 x LCG_DOCUMENT_MAX_BYTES + 64 KiB`. Operators who
+    raised `LCG_DOCUMENT_MAX_BYTES` above about 2.7 MiB must also raise `LCG_REQUEST_MAX_BYTES`;
+    the error names both settings and the minimum. Invalid or empty values of the new settings are
+    fatal, like `LCG_DOCUMENT_MAX_BYTES`.
+- **Two identical resubmissions that arrive together no longer both extract (#914).** The earlier
+  behaviour ([ADR-0858](docs/adr/0858-unchanged-chunk-resubmission-noop.md)) is superseded in part by
+  [ADR-0914](docs/adr/0914-process-deadline-and-inflight-join.md). Not **BREAKING**: results gain only
+  optional keys, and `protocol_version` stays 1.
+
+### Response schemas
+
+- **`knowledge_process_chunk` result gains optional `joined` and `deadline_exceeded` (#914).** Both
+  are booleans that are present only when `true`; additional properties were already allowed.
+
+### Documentation
+
+- **Request limits (#293).** The IPC & MCP reference, integrator guide and configuration reference
+  describe the limits, the `-32005` error and the post-refusal behaviour. ADR-0293 records the
+  decisions.
+- **Pipelining several requests on one connection was considered and declined (#914,
+  [ADR-0914](docs/adr/0914-declined-pipelining-on-one-connection.md)).** The integrator guide and the
+  IPC reference keep "open one connection per concurrent request" and now recommend `deadline_ms` and
+  join for timeout-and-retry.
+
+### Known issues
+
+- **Windows (#719):** unchanged from 0.18.x. lbug's CHECKPOINT can silently corrupt some STRING and
+  INT8/UINT8 data. The fix is merged upstream (LadybugDB/ladybug#1593) but isn't in an lbug release yet;
+  it will arrive with the lbug upgrade (#718). `knowledge_rebuild_from_wal` restores a graph.
+- **#778** stays open, as in 0.20.1: an identity removal made while both a group's stamp and its WAL
+  ontology sidecar's `identity_types` are missing is not detected.
+
 ## [0.20.1] - 2026-11-25
 
 ### Upgrading
