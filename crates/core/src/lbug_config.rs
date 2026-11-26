@@ -155,9 +155,16 @@ impl LbugTuning {
         self.buffer_pool_bytes.is_some() || self.max_threads.is_some()
     }
 
-    /// Build the lbug `SystemConfig`; unset knobs keep lbug's defaults.
+    /// Build the lbug `SystemConfig`; unset knobs keep lbug's defaults, with one exception:
+    /// `enable_multi_writes` is pinned to `false` (issue #930, ADR-0930).
+    ///
+    /// lbug 0.23.0 made multi-writer the engine default (#1435, and the crate's
+    /// `SystemConfig::default()` now defers to the engine instead of the old explicit `false`).
+    /// lcg serialises writes itself (the `RwLock` + WAL-drain model, ADR-0015), so multi-writer
+    /// adds risk and no benefit; pinning keeps the single-writer semantics every earlier lcg
+    /// release ran under.
     pub fn system_config(&self) -> lbug::SystemConfig {
-        let mut cfg = lbug::SystemConfig::default();
+        let mut cfg = lbug::SystemConfig::default().enable_multi_writes(false);
         if let Some(n) = self.buffer_pool_bytes {
             cfg = cfg.buffer_pool_size(n);
         }
@@ -208,6 +215,29 @@ impl LbugTuning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0930: the config must keep lbug single-writer. With multi-writes off, a second
+    /// write transaction opened while another is live is refused; if the engine default
+    /// (`true`) leaked through, both `BEGIN`s would succeed.
+    #[test]
+    fn system_config_pins_single_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = lbug::Database::new(
+            dir.path().join("db"),
+            LbugTuning::default().system_config().max_num_threads(1),
+        )
+        .unwrap();
+        let conn1 = lbug::Connection::new(&db).unwrap();
+        conn1.query("BEGIN TRANSACTION").unwrap();
+        conn1
+            .query("CREATE NODE TABLE t(a INT64, PRIMARY KEY(a))")
+            .unwrap();
+        let conn2 = lbug::Connection::new(&db).unwrap();
+        assert!(
+            conn2.query("BEGIN TRANSACTION").is_err(),
+            "second concurrent write transaction must be refused (enable_multi_writes=false)"
+        );
+    }
 
     #[test]
     fn open_failure_hint_only_when_pool_set() {
