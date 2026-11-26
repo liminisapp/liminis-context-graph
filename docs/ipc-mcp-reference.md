@@ -1200,8 +1200,10 @@ another on the same connection), so client and service clocks do not matter.
   dedup), `awaiting_write_lock` (queued behind another writer), or `awaiting_inflight` (a joined
   request still waiting, below). Progress frames sent earlier stay valid; the terminal line is this
   error. For `knowledge_process_document`, `data` also has `"partial": true` and `phase` is
-  `chunked`, `extracting` or `committing`: the call did not complete, units already committed stay in
-  place and nothing is retired (as for any cancelled document ingest); resubmit it to finish.
+  `chunked` or `extracting` (the `committing` progress frame is only sent once the revision commit
+  has begun, after the last cancellation check, so it never appears here): the call did not
+  complete, units already committed stay in place and nothing is retired (as for any cancelled
+  document ingest); resubmit it to finish.
 - **Deadline passes once the commit has started:** the commit finishes (it is never interrupted)
   and the success result carries `"deadline_exceeded": true`: the write is complete, but later than
   you asked. The key is absent when the deadline was met, and on an `unchanged` no-op, which returns

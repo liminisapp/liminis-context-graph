@@ -50,7 +50,9 @@ This ADR settles two of them.
 - **Phase vocabulary.** Chunk: `embed`, `extract` (everything through resolution and dedup, up to the
   lock wait), `awaiting_write_lock` (the lock wait, still before commit) and, for a joined request,
   `awaiting_inflight`. Progress frames are unchanged: `awaiting_write_lock` and `awaiting_inflight`
-  appear only in errors. Document: `chunked`, `extracting`, `committing`.
+  appear only in errors. Document: `chunked`, `extracting`. The `committing` progress frame
+  is sent after the last cancellation check, once the revision commit has begun, so a
+  `deadline_exceeded` error never reports it.
 - **Known late notice.** Points with no cancellation point (the per-document lock, the unchanged-check
   read lock, an in-flight LLM call between points) notice a deadline late. Same accepted limitation as
   disconnect cancel; provider billing for a request already sent is not recoverable.
