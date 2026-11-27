@@ -71,6 +71,13 @@ through 0.21.2 (each documented at the call site):
   (`mutex lock failed: Invalid argument`). The v47 migration test and a fresh index both fail on
   those bytes. Upstream republished from the release build (LadybugDB/ladybug#1707); the pins in
   `LBUG_EXTENSION_HASHES` are the republished bytes. Details in the ADR-0593 addendum.
+- **macOS arm64 (debug), 2026-11-27, against the republished extensions:** `cargo test -p lcg-core`
+  2723 passed / 0 failed (23 ignored, of which `real_corpus_e2e` and `real_corpus_replay_perf` were
+  then run with `--ignored`: 2/2 and 3/3 passed); `cargo test -p lcg-service -p lcg-eval` 955
+  passed / 0 failed; `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check` clean.
+  The first full run (before the pins above and the classifier change) failed
+  `test_degraded_mode_from_corrupt_wal` and 3 of 6 `fts_lbug020_migration` tests — both are the
+  adaptations recorded in the audit table.
 - **Windows:** `crates/core/tests/windows_checkpoint_719.rs` is the #719 repro; the maintainer's
   real-machine run and the vector/FTS pairing runs (as in #619) remain a manual step.
 
