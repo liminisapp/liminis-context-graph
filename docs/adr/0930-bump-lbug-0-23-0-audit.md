@@ -37,7 +37,7 @@ through 0.21.2 (each documented at the call site):
 | Setting | Pinned | Why |
 |---|---|---|
 | `enable_multi_writes` | `false` | 0.23.0's engine default is multi-writer (#1435). lcg serialises writes itself (ADR-0015); a unit test checks a second concurrent write transaction is refused. |
-| `throw_on_wal_replay_failure` | `true` | **Measured on 0.23.0 with the engine default:** a lbug WAL with one flipped byte (or truncated, or zeroed header) opened *successfully* and replayed only up to the damage — 99 of 200 rows survived, no error. lcg's degraded mode and WAL recovery (ADR-0009/0025/0026) need the open to fail so the operator is told. With the pin, every one of those cases fails the open. |
+| `throw_on_wal_replay_failure` | `true` | **Measured on 0.23.0 with the engine default:** a lbug WAL with *record-body* damage (e.g. one flipped byte) opened *successfully* and replayed only up to the damage — 99 of 200 rows survived, no error. lcg's degraded mode and WAL recovery (ADR-0009/0025/0026) need the open to fail so the operator is told. With the pin, those record-body cases fail the open. **Header damage is not covered by this pin:** a WAL whose header is garbage or zeroed is discarded silently on open, with or without the pin, and the open succeeds (see the #1507/#1516/#1520 row and Consequences). |
 | `enable_checksums` | `true` | The WAL checksum is what makes a flipped byte detectable. |
 | `auto_checkpoint` | `true` | The WAL must keep folding into the database file. |
 
