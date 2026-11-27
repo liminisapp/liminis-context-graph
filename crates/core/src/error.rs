@@ -231,9 +231,17 @@ pub fn is_named_catalog_entry_already_exists_error(err: &Error, name: &str) -> b
 /// absent from an index that was *built by an older lbug* — lbug 0.20 → 0.21 changed how
 /// non-ASCII terms are stored without bumping the storage version. Used by `Conn`'s statement-
 /// level backstop (ADR-0649) to rebuild all 3 FTS indexes and retry the statement once.
+///
+/// lbug 0.23.0 (issue #930) detects the same stale-index condition earlier and reports it as
+/// `Detected a stale string primary-key hash index entry (issue #1092): this index was built by
+/// v0.20.x or earlier ... for an FTS index run CALL DROP_FTS_INDEX followed by CALL
+/// CREATE_FTS_INDEX`, so that wording is matched too. For a *non-FTS* table with a non-ASCII
+/// STRING primary key the engine's remedy is to recreate the table; the backstop's rebuild does
+/// not help there, but it retries once and then returns the engine's error unchanged.
 pub fn is_fts_inconsistent_error(err: &Error) -> bool {
     let s = err.to_string();
-    s.contains("FTS index '") && s.contains("is inconsistent")
+    (s.contains("FTS index '") && s.contains("is inconsistent"))
+        || s.contains("stale string primary-key hash index entry")
 }
 
 /// True if `err` is lbug's "table does not exist" binder exception, raised when a query
@@ -267,6 +275,21 @@ mod is_fts_inconsistent_error_tests {
             "Query execution failed: Runtime exception: FTS index 'episode_content' is \
              inconsistent: term '\u{2014}' is missing during delete. Drop and recreate the FTS \
              index."
+                .to_string(),
+        );
+        assert!(is_fts_inconsistent_error(&err));
+    }
+
+    /// Text as reported by lbug 0.23.0 against a database whose FTS index was built by lbug 0.20
+    /// (issue #930; `tests/fts_lbug020_migration.rs` asserts it against the real engine).
+    #[test]
+    fn matches_lbug_0_23_stale_hash_index_text() {
+        let err = Error::QueryFailed(
+            "Query execution failed: Runtime exception: Detected a stale string primary-key hash \
+             index entry (issue #1092): this index was built by v0.20.x or earlier and misplaces \
+             non-ASCII keys under the current string hash. Rebuild the index: for an FTS index \
+             run CALL DROP_FTS_INDEX followed by CALL CREATE_FTS_INDEX; for a table with a \
+             non-ASCII STRING primary key, recreate the table."
                 .to_string(),
         );
         assert!(is_fts_inconsistent_error(&err));
