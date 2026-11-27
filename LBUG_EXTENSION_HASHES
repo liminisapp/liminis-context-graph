@@ -37,16 +37,24 @@
 # 0.23.0 core's CMake build defines LBUG_EXTENSION_VERSION="0.23.0", so LBUG_EXTENSION_VERSION is
 # now 0.23.0 and the files below come from CDN path v0.23.0/ — the directory is no longer shared
 # with the previous core (v0.21.0/ stays what it was; the old pins are superseded here).
-# Fetched 2026-11-26 ~04:54 UTC (CDN Last-Modified 2026-11-23). Verified by loading both
-# extensions under the 0.23.0 core on macOS arm64 (full lcg suite, issue #930). Windows
-# row-asserting vector/FTS pairing runs are a maintainer step (see ADR-0593 addendum). Upstream
-# has overwritten version directories before (#709): re-fetch and compare before releasing.
+#
+# Re-pinned again 2026-11-27 (issue #930): the first v0.23.0/ files (CDN Last-Modified
+# 2026-11-23) were not the release build — their vector extension failed CREATE_VECTOR_INDEX
+# against the 0.23.0 core with "mutex lock failed: Invalid argument". Upstream republished the
+# v0.23.0/ line from the release build (LadybugDB/ladybug#1707); every platform's vector and fts
+# file now has CDN Last-Modified 2026-11-25 03:12 GMT. Seven of the eight files changed;
+# osx_arm64 fts is byte-identical to the earlier pin. Hashes below are the sha256 of the files
+# downloaded 2026-11-27. Verified by upstream's release CLI on macOS arm64 (CREATE_VECTOR_INDEX
+# and QUERY_VECTOR_INDEX) and by the lcg suite under the 0.23.0 core on macOS arm64 (issue #930).
+# Windows row-asserting vector/FTS pairing runs are a maintainer step (see ADR-0593 addendum).
+# Upstream has overwritten version directories before (#709): re-fetch and compare before
+# releasing.
 
-osx_arm64 vector 057dd938e6d1c8996dacfc5768ae08fb36e8b1ddd3b9c0f7fc29dd23b110fb97
+osx_arm64 vector a069cdccc1846a6942a1827d4798332c5063999ae3236c008f98233a4db913d5
 osx_arm64 fts 167d2989ac9365756650a4fefd637955850332fec9b7fde538b4f03a2451896f
-linux_amd64 vector e869f00b0910108cd21ed2668972b9f0f2aa67d6d496900f2fbc171fe1ca6b9e
-linux_amd64 fts a1f67345b2adbbed42279ad1f2ec8a597e471f14b6100af67b416462c8e9789b
-linux_arm64 vector 50da7e1b695bfb5d8f8e7f72e89e05fbc3e36fe24bd59783d328dbafb0d92ae4
-linux_arm64 fts abdcffd19b7014725e701a7508aa78187c999a6ff157b4eff2b2f571174f97a7
-win_amd64 vector 3801d3f47844d6c6b2d5e58e7db8d95de58ee179a03a1457f2c1b380494eff8a
-win_amd64 fts 29228a3b451877a6c184a934be57b1f9d114cd156fd1e44cae890237aea16891
+linux_amd64 vector 98bd6fba57c042295f41560c9a6b551db463e4287d881b7cc6f06f2311b5803b
+linux_amd64 fts a877c7c48f8402f0f1120c9d03b1590de5f06eb42ef1fd2a154dd00f3d964b2d
+linux_arm64 vector 5620551a09f5941a62fdfece02a42dca5c4c190962e25a6e5592dcfb384432a9
+linux_arm64 fts 57ba0de90e522c9ad14781f60ff036b69d9389925015009cb25cd5e4139eb0cd
+win_amd64 vector 066bd5b9703f3a1733eff6f377e1e884303166c97cd0e12bd4d8b19472025c9e
+win_amd64 fts f6e06e6bcc32345a286a8cee014a868a3d01bf802579bd4bc744c1eba544c33b

@@ -213,9 +213,22 @@ fn fts_rebuild_fires_on_lbug_version_change() {
 
     conn.init_schema(DIM).unwrap();
     assert_eq!(marker(&conn).as_deref(), Some(lbug::VERSION));
+    // `init_schema` buffers its own idempotent DDL / probe statements (the WAL writer filters
+    // non-mutations out); what ADR-0649 forbids is the FTS rebuild and its marker write being
+    // recorded, which would replay a stale-index repair into a rebuilt database.
+    let recorded = conn.drain_mutations();
+    let rebuild_recorded: Vec<_> = recorded
+        .iter()
+        .filter(|(q, _)| {
+            let q = q.to_uppercase();
+            q.contains("FTS_INDEX")
+                || (q.contains("FTS_BUILT_BY_LBUG")
+                    && (q.contains("MERGE") || q.contains("SET ") || q.contains("CREATE")))
+        })
+        .collect();
     assert!(
-        conn.drain_mutations().is_empty(),
-        "the FTS rebuild must not be recorded to the WAL (ADR-0015)"
+        rebuild_recorded.is_empty(),
+        "the FTS rebuild must not be recorded to the WAL (ADR-0015): {rebuild_recorded:?}"
     );
 
     // Writes through the (rebuilt) indexes on non-ASCII rows succeed without a backstop repair.
