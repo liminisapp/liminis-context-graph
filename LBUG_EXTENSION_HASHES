@@ -31,12 +31,30 @@
 # Verified by loading both extensions and running an FTS and a vector-index query under lbug
 # 0.21.1 and 0.21.2 (Python wheels, empty home): osx_arm64 natively, linux_amd64 and linux_arm64
 # in python:3.12-slim. win_amd64 was not run locally.
+#
+# Re-pinned 2026-11-26 (issue #930) for lbug 0.23.0 (storage version 53), which carries the
+# upstream fix for the Windows CHECKPOINT corruption (#719, LadybugDB/ladybug#1447/#1593). The
+# 0.23.0 core's CMake build defines LBUG_EXTENSION_VERSION="0.23.0", so LBUG_EXTENSION_VERSION is
+# now 0.23.0 and the files below come from CDN path v0.23.0/ — the directory is no longer shared
+# with the previous core (v0.21.0/ stays what it was; the old pins are superseded here).
+#
+# Re-pinned again 2026-11-27 (issue #930): the first v0.23.0/ files (CDN Last-Modified
+# 2026-11-23) were not the release build — their vector extension failed CREATE_VECTOR_INDEX
+# against the 0.23.0 core with "mutex lock failed: Invalid argument". Upstream republished the
+# v0.23.0/ line from the release build (LadybugDB/ladybug#1707); every platform's vector and fts
+# file now has CDN Last-Modified 2026-11-25 03:12 GMT. Seven of the eight files changed;
+# osx_arm64 fts is byte-identical to the earlier pin. Hashes below are the sha256 of the files
+# downloaded 2026-11-27. Verified by upstream's release CLI on macOS arm64 (CREATE_VECTOR_INDEX
+# and QUERY_VECTOR_INDEX) and by the lcg suite under the 0.23.0 core on macOS arm64 (issue #930).
+# Windows row-asserting vector/FTS pairing runs are a maintainer step (see ADR-0593 addendum).
+# Upstream has overwritten version directories before (#709): re-fetch and compare before
+# releasing.
 
-osx_arm64 vector 6f878f3c0a2320a34967ff568fcf6bbe9065666e95035f0eddfe28bbc73b53f4
-osx_arm64 fts 777d9b606514d3c45c6196e7a44300b583af6513a34178bf1a7d030f4c888f03
-linux_amd64 vector 571726cc2ea0d202df1909ae5a3b0528c9dea3ea8d40be6c16b310ec14aa8821
-linux_amd64 fts 399c8d883fbe836c4b60bbe9440180cbc0c7fe27ef350a4e1570dccdb93695a7
-linux_arm64 vector 583101f5bf2d0e5d40de2ee8966018a3bdf0fb8ad8951ef51ef46cd59169445f
-linux_arm64 fts 59669d011d485667b7b884f40aa408da0b8f117819eb83ccfa4d935556f16ba5
-win_amd64 vector 73edbde85174b20baa8539be9a50923453eef713553b68d466cf082bd3de9a1c
-win_amd64 fts caa3e2a0ee17a7103702aa6a916cb5f1ab881efb5386b217fb153df4ac12850b
+osx_arm64 vector a069cdccc1846a6942a1827d4798332c5063999ae3236c008f98233a4db913d5
+osx_arm64 fts 167d2989ac9365756650a4fefd637955850332fec9b7fde538b4f03a2451896f
+linux_amd64 vector 98bd6fba57c042295f41560c9a6b551db463e4287d881b7cc6f06f2311b5803b
+linux_amd64 fts a877c7c48f8402f0f1120c9d03b1590de5f06eb42ef1fd2a154dd00f3d964b2d
+linux_arm64 vector 5620551a09f5941a62fdfece02a42dca5c4c190962e25a6e5592dcfb384432a9
+linux_arm64 fts 57ba0de90e522c9ad14781f60ff036b69d9389925015009cb25cd5e4139eb0cd
+win_amd64 vector 066bd5b9703f3a1733eff6f377e1e884303166c97cd0e12bd4d8b19472025c9e
+win_amd64 fts f6e06e6bcc32345a286a8cee014a868a3d01bf802579bd4bc744c1eba544c33b

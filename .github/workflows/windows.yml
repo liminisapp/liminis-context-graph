@@ -17,6 +17,10 @@ name: Windows
 #   win_amd64 extensions loaded fine, then crashed the process on CREATE_VECTOR_INDEX /
 #   CREATE_FTS_INDEX over populated data, and the original e2e never exercised that path.
 #
+# - (issue #930) the #719 regression: STRING and INT8/UINT8 columns that are constant but for a few
+#   outliers survive CHECKPOINT and reopen exactly (lbug <= 0.21.2 collapsed such chunks to
+#   CONSTANT on MSVC). Only this one filtered lcg-core test target runs, not the whole suite.
+#
 # lcg-core's suite also passes on Windows (verified on a real machine for #581) but is not run
 # here yet: it roughly doubles the job time, and it has no Windows-specific code paths.
 
@@ -131,6 +135,12 @@ jobs:
 
       - name: lcg-service unit tests (incl. named-pipe transport)
         run: cargo test -p lcg-service --bin liminis-context-graph
+
+      # Issue #719 / #930: the Windows-only CHECKPOINT corruption. A plain lbug round trip, no
+      # extensions: write nearly-constant STRING and INT8/UINT8 columns under a path with a space
+      # and non-ASCII characters, CHECKPOINT, reopen, and require exact read-back.
+      - name: "#719 regression: CHECKPOINT keeps STRING and INT8/UINT8 data (lcg-core)"
+        run: cargo test -p lcg-core --test windows_checkpoint_719
 
       # Run the e2e with a PATH *built from an allowlist*, not filtered from the inherited one. The
       # inherited runner PATH is actively hostile to this test: several unrelated tools on it ship

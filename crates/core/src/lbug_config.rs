@@ -155,9 +155,29 @@ impl LbugTuning {
         self.buffer_pool_bytes.is_some() || self.max_threads.is_some()
     }
 
-    /// Build the lbug `SystemConfig`; unset knobs keep lbug's defaults.
+    /// Build the lbug `SystemConfig`; unset knobs keep lbug's defaults, with the exceptions below
+    /// (issue #930, ADR-0930).
+    ///
+    /// lbug 0.23.0 changed `SystemConfig` so that every field is optional and an unset field defers
+    /// to the **engine** default rather than the crate's old baked-in value. Four of those old
+    /// values are load-bearing for lcg, so they are pinned explicitly to what lcg ran under through
+    /// 0.21.2:
+    ///
+    /// - `enable_multi_writes(false)` — 0.23.0's engine default is multi-writer (#1435). lcg
+    ///   serialises writes itself (the `RwLock` + WAL-drain model, ADR-0015), so multi-writer adds
+    ///   risk and no benefit.
+    /// - `throw_on_wal_replay_failure(true)` — without it a WAL with a corrupted record is replayed
+    ///   only up to the damage and the open *succeeds*, silently dropping the rest (measured: 99
+    ///   of 200 rows survived a flipped byte). lcg's degraded mode and WAL recovery (ADR-0009,
+    ///   ADR-0025, ADR-0026) depend on the open *failing* so the operator is told.
+    /// - `enable_checksums(true)` — the WAL checksums are what make a flipped byte detectable.
+    /// - `auto_checkpoint(true)` — the WAL must keep being folded into the database file.
     pub fn system_config(&self) -> lbug::SystemConfig {
-        let mut cfg = lbug::SystemConfig::default();
+        let mut cfg = lbug::SystemConfig::default()
+            .enable_multi_writes(false)
+            .throw_on_wal_replay_failure(true)
+            .enable_checksums(true)
+            .auto_checkpoint(true);
         if let Some(n) = self.buffer_pool_bytes {
             cfg = cfg.buffer_pool_size(n);
         }
@@ -208,6 +228,29 @@ impl LbugTuning {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0930: the config must keep lbug single-writer. With multi-writes off, a second
+    /// write transaction opened while another is live is refused; if the engine default
+    /// (`true`) leaked through, both `BEGIN`s would succeed.
+    #[test]
+    fn system_config_pins_single_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = lbug::Database::new(
+            dir.path().join("db"),
+            LbugTuning::default().system_config().max_num_threads(1),
+        )
+        .unwrap();
+        let conn1 = lbug::Connection::new(&db).unwrap();
+        conn1.query("BEGIN TRANSACTION").unwrap();
+        conn1
+            .query("CREATE NODE TABLE t(a INT64, PRIMARY KEY(a))")
+            .unwrap();
+        let conn2 = lbug::Connection::new(&db).unwrap();
+        assert!(
+            conn2.query("BEGIN TRANSACTION").is_err(),
+            "second concurrent write transaction must be refused (enable_multi_writes=false)"
+        );
+    }
 
     #[test]
     fn open_failure_hint_only_when_pool_set() {

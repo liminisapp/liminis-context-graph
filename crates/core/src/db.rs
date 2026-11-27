@@ -748,7 +748,7 @@ impl<'db> Conn<'db> {
             json_params_to_values(params).into_iter().unzip();
         let bound: Vec<(&str, Value)> = keys.iter().map(|k| k.as_str()).zip(vals).collect();
         let result = self.inner.execute(prepared, bound)?;
-        let rows: Vec<Vec<Value>> = result.collect();
+        let rows: Vec<Vec<Value>> = collect_rows(result)?;
         Ok(rows
             .first()
             .and_then(|row| row.first())
@@ -772,7 +772,7 @@ impl<'db> Conn<'db> {
             json_params_to_values(&params).into_iter().unzip();
         let bound: Vec<(&str, Value)> = keys.iter().map(|k| k.as_str()).zip(vals).collect();
         let result = self.inner.execute(&mut prepared, bound)?;
-        Ok(result.collect())
+        collect_rows(result)
     }
 
     /// Public pass-through for raw Cypher statements with no result rows.
@@ -786,7 +786,8 @@ impl<'db> Conn<'db> {
         sql: &str,
     ) -> Result<impl Iterator<Item = Vec<lbug::Value>> + '_, Error> {
         let result = self.inner.query(sql)?;
-        Ok(result)
+        // Materialized eagerly so callers keep a plain `Vec<Value>` item (issue #930).
+        Ok(collect_rows(result)?.into_iter())
     }
 
     /// Runs a raw Cypher SELECT and returns rows as string columns (T012 pass-through).
@@ -806,7 +807,7 @@ impl<'db> Conn<'db> {
             }
         };
         let mut rows = Vec::new();
-        for row in result {
+        for row in collect_rows(result)? {
             rows.push(row.iter().map(value_as_string).collect());
         }
         self.executed_mutations
@@ -5632,7 +5633,7 @@ impl<'db> Conn<'db> {
         }
         let sql = format!("MATCH (n:{label}) RETURN count(*)");
         let result = self.inner.query(&sql)?;
-        for row in result {
+        for row in collect_rows(result)? {
             match &row[0] {
                 lbug::Value::Int64(n) => return Ok(*n as u64),
                 lbug::Value::UInt64(n) => return Ok(*n),
@@ -5682,7 +5683,7 @@ impl<'db> Conn<'db> {
         let result = self
             .inner
             .query("MATCH ()-[r:MENTIONS]->() RETURN count(*)")?;
-        for row in result {
+        for row in collect_rows(result)? {
             match &row[0] {
                 lbug::Value::Int64(n) => return Ok(*n as u64),
                 lbug::Value::UInt64(n) => return Ok(*n),
@@ -5699,7 +5700,7 @@ impl<'db> Conn<'db> {
         let result = self.inner.query(
             "MATCH (ep:Episodic) RETURN ep.created_at ORDER BY ep.created_at DESC LIMIT 1",
         )?;
-        Ok(result
+        Ok(collect_rows(result)?
             .into_iter()
             .next()
             .and_then(|row| value_as_optional_timestamp_str(&row[0])))
@@ -5911,7 +5912,7 @@ impl<'db> Conn<'db> {
         let legacy = self
             .inner
             .query("MATCH (w:WalPosition {id: 'singleton'}) RETURN w.applied_seq")?;
-        let Some(seq) = legacy
+        let Some(seq) = collect_rows(legacy)?
             .into_iter()
             .next()
             .and_then(|row| value_as_optional_u64(&row[0]))
@@ -5929,11 +5930,11 @@ impl<'db> Conn<'db> {
 
     /// Returns the earliest episode creation time as an ISO 8601 string, or None if empty.
     pub fn get_earliest_episode_time(&self) -> Result<Option<String>, Error> {
-        let mut result = self
+        let result = self
             .inner
             .query("MATCH (ep:Episodic) RETURN ep.created_at ORDER BY ep.created_at ASC LIMIT 1")
             .map_err(|e| Error::QueryFailed(format!("get_earliest_episode_time failed: {e}")))?;
-        if let Some(row) = result.next() {
+        if let Some(row) = collect_rows(result)?.into_iter().next() {
             match &row[0] {
                 lbug::Value::Null(_) => return Ok(None),
                 lbug::Value::Timestamp(dt) => {
@@ -6714,6 +6715,16 @@ impl<'db> Conn<'db> {
 }
 
 // ── bound-parameter mapping ─────────────────────────────────────────────────────
+
+/// Materializes a raw lbug `QueryResult` into rows, surfacing per-row conversion failures as
+/// errors (issue #930). lbug 0.23.0 changed `QueryResult`'s item from `Vec<Value>` to
+/// `Result<Vec<Value>, ConversionError>`; a row that cannot be converted (decimal / interval /
+/// type mismatch) used to panic inside the crate and is now an ordinary `Error::Lbug`.
+pub(crate) fn collect_rows(result: lbug::QueryResult<'_>) -> Result<Vec<Vec<Value>>, Error> {
+    result
+        .map(|row| row.map_err(|e| Error::Lbug(lbug::Error::from(e))))
+        .collect()
+}
 
 /// Maps a JSON params object to lbug bound `(name, Value)` pairs for prepared-statement
 /// execution. Type-agnostic by design: lbug coerces each bound value to its destination

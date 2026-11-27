@@ -158,3 +158,25 @@ compatible by schedule. Pins were regenerated from origin (cache-busted fetch an
 They were verified against a 0.21.0 core: macOS arm64 full lcg suite, and Windows 11 vector 45/45
 and fts 10/10 row-asserting runs. 0.21.0 keeps storage version 47, so there's no migration from 0.20.x.
 The mechanism in this ADR is unchanged. A future republish of `v0.21.0` fails the build the same way.
+
+## Addendum (2026-11-27): lbug 0.23.0, and a republish caught by a failing test
+
+Issue #930 moves the core to lbug 0.23.0 (storage version 53, the first release with the Windows
+CHECKPOINT fix, #719). Its extensions live at their own `v0.23.0` path, so `LBUG_EXTENSION_VERSION`
+is `0.23.0` and all eight pins were regenerated.
+
+The first fetch (2026-11-26, CDN Last-Modified 2026-11-23) predated the 2026-11-25 release and was
+not the release build: against the 0.23.0 core the vector extension failed
+`CALL CREATE_VECTOR_INDEX` with `mutex lock failed: Invalid argument` (fts was fine), which also
+broke opening a storage-47 database that has persisted HNSW indexes. The hashes alone could not
+catch this — the bytes were the ones served at the time. Upstream republished `v0.23.0/` from the
+release build (LadybugDB/ladybug#1707; Last-Modified 2026-11-25 03:12 GMT on every platform), and the
+pins were replaced: seven of eight changed, `osx_arm64 fts` is byte-identical. The pin file's
+header carries the history.
+
+Lesson, consistent with this ADR's premise: a newly published version path deserves the same
+loop-test before it is pinned as a republished one. The v47 migration test
+(`storage_v47_migration.rs`) now exercises vector-index load and search on every platform CI runs.
+Windows row-asserting vector (45) and fts (10) pairing runs, as done for #619, are a maintainer
+step; upstream has overwritten version directories before (#709), so re-fetch and compare before
+releasing.
