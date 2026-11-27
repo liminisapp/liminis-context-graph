@@ -6716,14 +6716,6 @@ impl<'db> Conn<'db> {
 
 // ── bound-parameter mapping ─────────────────────────────────────────────────────
 
-/// Maps a JSON params object to lbug bound `(name, Value)` pairs for prepared-statement
-/// execution. Type-agnostic by design: lbug coerces each bound value to its destination
-/// column type, so we never need to know the schema here. (Empirically verified against
-/// lbug 0.17: an RFC-3339 `String` binds into a `TIMESTAMP` column; a numeric list binds
-/// into a `FLOAT[N]` column; a string list binds into a `STRING[]` column.)
-///
-/// A non-object params value (e.g. `Null`, as recorded by `raw_query` for DDL) yields no
-/// bound params.
 /// Materializes a raw lbug `QueryResult` into rows, surfacing per-row conversion failures as
 /// errors (issue #930). lbug 0.23.0 changed `QueryResult`'s item from `Vec<Value>` to
 /// `Result<Vec<Value>, ConversionError>`; a row that cannot be converted (decimal / interval /
@@ -6734,6 +6726,14 @@ pub(crate) fn collect_rows(result: lbug::QueryResult<'_>) -> Result<Vec<Vec<Valu
         .collect()
 }
 
+/// Maps a JSON params object to lbug bound `(name, Value)` pairs for prepared-statement
+/// execution. Type-agnostic by design: lbug coerces each bound value to its destination
+/// column type, so we never need to know the schema here. (Empirically verified against
+/// lbug 0.17: an RFC-3339 `String` binds into a `TIMESTAMP` column; a numeric list binds
+/// into a `FLOAT[N]` column; a string list binds into a `STRING[]` column.)
+///
+/// A non-object params value (e.g. `Null`, as recorded by `raw_query` for DDL) yields no
+/// bound params.
 fn json_params_to_values(params: &serde_json::Value) -> Vec<(String, Value)> {
     let serde_json::Value::Object(map) = params else {
         return Vec::new();
