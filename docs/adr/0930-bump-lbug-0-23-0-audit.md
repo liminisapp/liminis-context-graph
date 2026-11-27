@@ -86,6 +86,12 @@ through 0.21.2 (each documented at the call site):
 - A WAL whose *header* is unreadable is dropped silently on open: lbug does not expose a setting
   for it. lcg's own application WAL is the durable record (ADR-0015), and `knowledge_recover` /
   `knowledge_rebuild_from_wal` remain the repair path if the tail of lbug's WAL is lost this way.
+  **Nobody is told when this happens:** the open succeeds, so there is no degraded mode, no error
+  and no log line from lcg; the loss shows only as missing recent data until an operator compares
+  the graph against lcg's application WAL and runs the repair. The case needs a garbage WAL header
+  (a torn first write or a damaged file), not a damaged record body, which still fails the open.
+  Detecting it (comparing lbug's applied sequence with lcg's WAL at startup) is left as a
+  follow-up and is not part of this bump.
 - Storage 47 → 53 is **one-way**. The changelog fragment says so.
 - Databases already damaged on Windows under 0.21.2 are not repaired.
 - A database already migrated by a 0.22.x build (storage 49) is not a supported lcg state.

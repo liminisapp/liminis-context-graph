@@ -120,13 +120,14 @@ async fn test_degraded_mode_from_corrupt_wal() {
         Err(e) => e.to_string(),
         Ok(_) => panic!("Expected error but got Ok"),
     };
-    // The error should indicate WAL corruption
+    // The error must carry one of the wordings `crates/service/src/main.rs` classifies as
+    // recoverable (`is_recoverable`); a looser match would also accept unrelated errors that
+    // merely mention a `.wal` path. Keep this list in step with that classifier.
     assert!(
         err_msg.contains("Corrupted wal file")
-            || err_msg.contains("corrupt")
-            || err_msg.contains("WAL")
-            || err_msg.contains("wal"),
-        "Expected WAL corruption error, got: {err_msg}"
+            || err_msg.contains("the WAL file is corrupted")
+            || err_msg.contains("Corrupted WAL record"),
+        "Expected a recoverable WAL-corruption error, got: {err_msg}"
     );
 
     // Simulate what main.rs does: classify as recoverable, create degraded AppState
