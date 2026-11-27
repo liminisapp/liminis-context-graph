@@ -24,5 +24,8 @@
 - **lbug is pinned to `=0.23.0`, the bundled extensions to `v0.23.0/` (#930).** lcg keeps lbug's
   single-writer mode explicitly: 0.23.0 made multi-writer the engine default
   (LadybugDB/ladybug#1435), and lcg serialises its own writes, so `enable_multi_writes` is pinned to
-  `false` (ADR-0930). Raw-row conversion failures that used to panic inside the lbug crate now
+  `false` (ADR-0930). It likewise pins `throw_on_wal_replay_failure`, `enable_checksums` and
+  `auto_checkpoint` to `true`: left to the 0.23.0 engine default, a damaged lbug WAL opened
+  successfully and silently replayed only up to the damage, instead of entering degraded mode.
+  Startup also recognises lbug's new `Corrupted WAL record` wording as recoverable. Raw-row conversion failures that used to panic inside the lbug crate now
   surface as ordinary database errors.

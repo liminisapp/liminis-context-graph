@@ -953,8 +953,12 @@ async fn bootstrap_app_state(
                 // verification failed, the WAL file is corrupted.", wal_replayer.cpp — the
                 // shape produced by a torn/garbage WAL tail, e.g. a crash mid-write). Both are
                 // the same recoverable condition ADR-0009's self-recovery sequence handles.
+                // lbug 0.23.0 (issue #930) adds a third wording for a damaged record body
+                // ("Corrupted WAL record: vector num_values … exceeds capacity …"), raised when
+                // the checksum does not catch it first.
                 let is_recoverable = msg.contains("Corrupted wal file")
                     || msg.contains("the WAL file is corrupted")
+                    || msg.contains("Corrupted WAL record")
                     || msg.contains("Permission denied")
                     || msg.contains("No such file or directory");
 

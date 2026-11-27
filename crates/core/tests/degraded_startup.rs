@@ -84,8 +84,31 @@ async fn test_degraded_mode_from_corrupt_wal() {
     let db_path = dir.path().join("test.db").to_str().unwrap().to_string();
     let wal_path = format!("{}.wal", db_path);
 
-    // Write garbage bytes to the WAL file to simulate corruption
-    std::fs::write(&wal_path, b"CORRUPT_DATA_NOT_A_WAL_FILE").unwrap();
+    // Build a *real* lbug WAL (uncheckpointed rows) in a scratch database and flip one byte in the
+    // middle of it. Issue #930: lbug 0.23.0 silently discards a WAL whose header is garbage (a
+    // 27-byte junk file no longer fails the open, as it did under 0.21.2), so the old "write
+    // garbage bytes" simulation no longer exercises the corrupt-WAL path. A damaged record body is
+    // the case that matters, and it fails the open only because lcg pins
+    // `throw_on_wal_replay_failure(true)` + `enable_checksums(true)` (ADR-0930).
+    {
+        let src = TempDir::new().unwrap();
+        let src_db = src.path().join("src.db").to_str().unwrap().to_string();
+        let db = Db::open(&src_db).unwrap();
+        let conn = db.connect().unwrap();
+        conn.init_schema(4).unwrap();
+        for i in 0..200 {
+            conn.run_cypher(&format!(
+                "CREATE (:Entity {{uuid: 'u{i}', name: 'n{i}', group_id: 'g'}})"
+            ))
+            .unwrap();
+        }
+        // Copy while the source is still open, so the WAL has not been checkpointed away.
+        std::fs::copy(&src_db, &db_path).unwrap();
+        let mut wal = std::fs::read(format!("{src_db}.wal")).unwrap();
+        let mid = wal.len() / 2;
+        wal[mid] ^= 0xFF;
+        std::fs::write(&wal_path, &wal).unwrap();
+    }
 
     // Attempt to open the DB — lbug should reject the corrupt WAL
     let open_result = Db::open(&db_path);

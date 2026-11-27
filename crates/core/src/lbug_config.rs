@@ -155,16 +155,29 @@ impl LbugTuning {
         self.buffer_pool_bytes.is_some() || self.max_threads.is_some()
     }
 
-    /// Build the lbug `SystemConfig`; unset knobs keep lbug's defaults, with one exception:
-    /// `enable_multi_writes` is pinned to `false` (issue #930, ADR-0930).
+    /// Build the lbug `SystemConfig`; unset knobs keep lbug's defaults, with the exceptions below
+    /// (issue #930, ADR-0930).
     ///
-    /// lbug 0.23.0 made multi-writer the engine default (#1435, and the crate's
-    /// `SystemConfig::default()` now defers to the engine instead of the old explicit `false`).
-    /// lcg serialises writes itself (the `RwLock` + WAL-drain model, ADR-0015), so multi-writer
-    /// adds risk and no benefit; pinning keeps the single-writer semantics every earlier lcg
-    /// release ran under.
+    /// lbug 0.23.0 changed `SystemConfig` so that every field is optional and an unset field defers
+    /// to the **engine** default rather than the crate's old baked-in value. Four of those old
+    /// values are load-bearing for lcg, so they are pinned explicitly to what lcg ran under through
+    /// 0.21.2:
+    ///
+    /// - `enable_multi_writes(false)` — 0.23.0's engine default is multi-writer (#1435). lcg
+    ///   serialises writes itself (the `RwLock` + WAL-drain model, ADR-0015), so multi-writer adds
+    ///   risk and no benefit.
+    /// - `throw_on_wal_replay_failure(true)` — without it a WAL with a corrupted record is replayed
+    ///   only up to the damage and the open *succeeds*, silently dropping the rest (measured: 99
+    ///   of 200 rows survived a flipped byte). lcg's degraded mode and WAL recovery (ADR-0009,
+    ///   ADR-0025, ADR-0026) depend on the open *failing* so the operator is told.
+    /// - `enable_checksums(true)` — the WAL checksums are what make a flipped byte detectable.
+    /// - `auto_checkpoint(true)` — the WAL must keep being folded into the database file.
     pub fn system_config(&self) -> lbug::SystemConfig {
-        let mut cfg = lbug::SystemConfig::default().enable_multi_writes(false);
+        let mut cfg = lbug::SystemConfig::default()
+            .enable_multi_writes(false)
+            .throw_on_wal_replay_failure(true)
+            .enable_checksums(true)
+            .auto_checkpoint(true);
         if let Some(n) = self.buffer_pool_bytes {
             cfg = cfg.buffer_pool_size(n);
         }
